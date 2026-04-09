@@ -141,7 +141,8 @@ def build_context_writer(reader: PdfReader, end_exclusive: int) -> PdfWriter:
     return writer
 
 
-def _extract_page_texts(reader: PdfReader) -> list[str]:
+def extract_page_texts(reader: PdfReader) -> list[str]:
+    """Extract raw text per page (empty string if none)."""
     return [page.extract_text() or "" for page in reader.pages]
 
 
@@ -161,7 +162,7 @@ def process_one_pdf(
     counts are still computed.
     """
     reader = PdfReader(str(pdf_path))
-    texts = _extract_page_texts(reader)
+    texts = extract_page_texts(reader)
     total = len(reader.pages)
     cut = find_back_matter_start_page(texts, min_page_fraction=min_page_fraction)
     end_exc, reason = resolve_end_exclusive(
