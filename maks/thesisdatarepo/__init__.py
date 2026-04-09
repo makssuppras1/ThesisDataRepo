@@ -19,19 +19,18 @@ from thesisdatarepo.nlp_extract import (
 from thesisdatarepo.pdf_context import (
     FallbackPolicy,
     ProcessResult,
-    build_context_writer,
     extract_page_texts,
     find_back_matter_start_page,
     process_folder,
     process_one_pdf,
     resolve_end_exclusive,
+    write_trimmed_pdf,
 )
 
 __all__ = [
     "FallbackPolicy",
     "NlpExtractResult",
     "ProcessResult",
-    "build_context_writer",
     "configure_batch_logging",
     "extract_nlp_page_range",
     "extract_page_texts",
@@ -48,4 +47,5 @@ __all__ = [
     "process_one_pdf_nlp",
     "process_pdf_nlp_reader",
     "resolve_end_exclusive",
+    "write_trimmed_pdf",
 ]

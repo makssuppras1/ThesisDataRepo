@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pypdf import PdfReader
+import fitz
 
 from thesisdatarepo.pdf_context import (
     FallbackPolicy,
@@ -156,7 +156,7 @@ def extract_nlp_page_range(
 
 
 def process_pdf_nlp_reader(
-    reader: PdfReader,
+    doc: fitz.Document,
     source: str,
     output_txt_path: Path | None,
     *,
@@ -167,16 +167,17 @@ def process_pdf_nlp_reader(
     skip_if_empty: bool = False,
 ) -> NlpExtractResult:
     """
-    Extract normalized text from a ``PdfReader`` (local path, bytes stream, GCS, etc.).
+    Extract normalized text from a PyMuPDF ``fitz.Document`` (path, bytes stream, GCS, etc.).
 
     ``source`` is only used for logging and manifests (e.g. path or ``gs://...`` URI).
+    The caller owns ``doc`` and must :meth:`close` it after this returns.
 
     Writes UTF-8 ``.txt`` when ``write_txt`` and ``output_txt_path`` are set.
     If ``skip_if_empty`` is True and the normalized body has length 0, no file is written
     and ``skipped_empty`` is set on the result.
     """
-    texts = extract_page_texts(reader)
-    total = len(reader.pages)
+    texts = extract_page_texts(doc)
+    total = len(doc)
 
     start, end_exc, abstract_found, bm_found, end_reason, note_extra = (
         extract_nlp_page_range(
@@ -245,17 +246,20 @@ def process_one_pdf_nlp(
     skip_if_empty: bool = False,
 ) -> NlpExtractResult:
     """Load a PDF from disk and run :func:`process_pdf_nlp_reader`."""
-    reader = PdfReader(str(pdf_path))
-    return process_pdf_nlp_reader(
-        reader,
-        str(pdf_path.resolve()),
-        output_txt_path,
-        min_page_fraction_back_matter=min_page_fraction_back_matter,
-        policy=policy,
-        fallback_fraction=fallback_fraction,
-        write_txt=write_txt,
-        skip_if_empty=skip_if_empty,
-    )
+    doc = fitz.open(str(pdf_path))
+    try:
+        return process_pdf_nlp_reader(
+            doc,
+            str(pdf_path.resolve()),
+            output_txt_path,
+            min_page_fraction_back_matter=min_page_fraction_back_matter,
+            policy=policy,
+            fallback_fraction=fallback_fraction,
+            write_txt=write_txt,
+            skip_if_empty=skip_if_empty,
+        )
+    finally:
+        doc.close()
 
 
 def _nlp_result_to_row(r: NlpExtractResult) -> dict[str, str | int | bool]:

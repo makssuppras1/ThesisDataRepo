@@ -2,17 +2,26 @@
 
 from pathlib import Path
 
-import pytest
+import fitz
 
 from thesisdatarepo.pdf_context import (
     FallbackPolicy,
-    build_context_writer,
     find_back_matter_start_page,
     page_looks_like_back_matter_start,
     process_folder,
     resolve_end_exclusive,
+    write_trimmed_pdf,
 )
-from pypdf import PdfReader, PdfWriter
+
+
+def _blank_pdf(path: Path, pages: int) -> None:
+    doc = fitz.open()
+    try:
+        for _ in range(pages):
+            doc.new_page(width=612, height=792)
+        doc.save(str(path))
+    finally:
+        doc.close()
 
 
 def test_find_back_matter_references_after_min_fraction():
@@ -58,15 +67,11 @@ def test_page_looks_like_back_matter_start_bilag():
 
 def test_process_folder_writes_manifest(tmp_path: Path):
     # Minimal PDF with two pages (blank pages have little text; may trigger notes)
-    w = PdfWriter()
-    w.add_blank_page(width=612, height=792)
-    w.add_blank_page(width=612, height=792)
     src = tmp_path / "in" / "a.pdf"
     src.parent.mkdir(parents=True)
+    _blank_pdf(src, 2)
     out_dir = tmp_path / "out"
     man = tmp_path / "manifest.csv"
-    with src.open("wb") as f:
-        w.write(f)
 
     results = process_folder(
         src.parent,
@@ -79,16 +84,17 @@ def test_process_folder_writes_manifest(tmp_path: Path):
     assert (out_dir / "a.pdf").is_file()
 
 
-def test_build_context_writer_slice(tmp_path: Path):
-    w = PdfWriter()
-    for _ in range(3):
-        w.add_blank_page(width=612, height=792)
+def test_write_trimmed_pdf_slice(tmp_path: Path):
     src = tmp_path / "three.pdf"
-    with src.open("wb") as f:
-        w.write(f)
-    reader = PdfReader(str(src))
-    out = build_context_writer(reader, 2)
-    dst = tmp_path / "two.pdf"
-    with dst.open("wb") as f:
-        out.write(f)
-    assert len(PdfReader(str(dst)).pages) == 2
+    _blank_pdf(src, 3)
+    doc = fitz.open(str(src))
+    try:
+        dst = tmp_path / "two.pdf"
+        write_trimmed_pdf(doc, 2, dst)
+    finally:
+        doc.close()
+    out = fitz.open(str(dst))
+    try:
+        assert len(out) == 2
+    finally:
+        out.close()

@@ -1,4 +1,4 @@
-"""Heuristic trimming of thesis PDFs: keep pages before references / appendix (pypdf)."""
+"""Heuristic trimming of thesis PDFs: keep pages before references / appendix (PyMuPDF)."""
 
 from __future__ import annotations
 
@@ -6,12 +6,12 @@ import csv
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-from pypdf import PdfReader, PdfWriter
+import fitz
 
 logger = logging.getLogger(__name__)
 
@@ -132,18 +132,22 @@ def resolve_end_exclusive(
     return min(end, total_pages), "no_match_fallback_fraction"
 
 
-def build_context_writer(reader: PdfReader, end_exclusive: int) -> PdfWriter:
-    """Build a writer containing pages ``[0, end_exclusive)``."""
-    writer = PdfWriter()
-    n = min(end_exclusive, len(reader.pages))
-    for i in range(n):
-        writer.add_page(reader.pages[i])
-    return writer
-
-
-def extract_page_texts(reader: PdfReader) -> list[str]:
+def extract_page_texts(doc: fitz.Document) -> list[str]:
     """Extract raw text per page (empty string if none)."""
-    return [page.extract_text() or "" for page in reader.pages]
+    return [(doc[i].get_text() or "") for i in range(len(doc))]
+
+
+def write_trimmed_pdf(doc: fitz.Document, end_exclusive: int, output_path: Path) -> None:
+    """Write a new PDF containing pages ``[0, end_exclusive)`` from ``doc``."""
+    n = max(0, min(end_exclusive, len(doc)))
+    out = fitz.open()
+    try:
+        if n > 0:
+            out.insert_pdf(doc, from_page=0, to_page=n - 1)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        out.save(str(output_path))
+    finally:
+        out.close()
 
 
 def process_one_pdf(
@@ -161,41 +165,41 @@ def process_one_pdf(
     If ``output_path`` is None and ``write_pdf`` is True, no file is written but
     counts are still computed.
     """
-    reader = PdfReader(str(pdf_path))
-    texts = extract_page_texts(reader)
-    total = len(reader.pages)
-    cut = find_back_matter_start_page(texts, min_page_fraction=min_page_fraction)
-    end_exc, reason = resolve_end_exclusive(
-        total,
-        cut,
-        policy=policy,
-        fallback_fraction=fallback_fraction,
-    )
-    notes = ""
-    if cut is None and not texts:
-        notes = "no_text_extracted_maybe_scanned"
-    elif cut is None and total > 0:
-        sample_len = sum(len(t) for t in texts)
-        if sample_len < 200:
-            notes = "very_little_text_extracted_check_layout_or_ocr"
+    doc = fitz.open(str(pdf_path))
+    try:
+        texts = extract_page_texts(doc)
+        total = len(doc)
+        cut = find_back_matter_start_page(texts, min_page_fraction=min_page_fraction)
+        end_exc, reason = resolve_end_exclusive(
+            total,
+            cut,
+            policy=policy,
+            fallback_fraction=fallback_fraction,
+        )
+        notes = ""
+        if cut is None and not texts:
+            notes = "no_text_extracted_maybe_scanned"
+        elif cut is None and total > 0:
+            sample_len = sum(len(t) for t in texts)
+            if sample_len < 200:
+                notes = "very_little_text_extracted_check_layout_or_ocr"
 
-    out: Path | None = None
-    if write_pdf and output_path is not None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        writer = build_context_writer(reader, end_exc)
-        with output_path.open("wb") as f:
-            writer.write(f)
-        out = output_path
+        out: Path | None = None
+        if write_pdf and output_path is not None:
+            write_trimmed_pdf(doc, end_exc, output_path)
+            out = output_path
 
-    return ProcessResult(
-        source_path=pdf_path,
-        pages_total=total,
-        pages_kept=end_exc,
-        back_matter_start_0based=cut,
-        reason=reason,
-        notes=notes,
-        output_path=out,
-    )
+        return ProcessResult(
+            source_path=pdf_path,
+            pages_total=total,
+            pages_kept=end_exc,
+            back_matter_start_0based=cut,
+            reason=reason,
+            notes=notes,
+            output_path=out,
+        )
+    finally:
+        doc.close()
 
 
 def process_folder(
@@ -284,4 +288,3 @@ def _write_manifest_json(path: Path, results: list[ProcessResult]) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
         f.write("\n")
-

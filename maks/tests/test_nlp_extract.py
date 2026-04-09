@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import fitz
+
 from thesisdatarepo.nlp_extract import (
     extract_nlp_page_range,
     find_abstract_start_page,
@@ -10,7 +12,16 @@ from thesisdatarepo.nlp_extract import (
     process_folder_nlp,
     process_one_pdf_nlp,
 )
-from pypdf import PdfWriter
+
+
+def _blank_pdf(path: Path, pages: int = 1) -> None:
+    doc = fitz.open()
+    try:
+        for _ in range(pages):
+            doc.new_page(width=612, height=792)
+        doc.save(str(path))
+    finally:
+        doc.close()
 
 
 def test_find_abstract_first_page():
@@ -61,12 +72,9 @@ def test_normalize_nlp_text():
 
 
 def test_process_folder_nlp_writes_txt_and_manifest(tmp_path: Path):
-    w = PdfWriter()
-    w.add_blank_page(width=612, height=792)
     src = tmp_path / "in" / "doc.pdf"
     src.parent.mkdir(parents=True)
-    with src.open("wb") as f:
-        w.write(f)
+    _blank_pdf(src, 1)
     out_txt = tmp_path / "txt"
     man = tmp_path / "nlp_manifest.csv"
     jl = tmp_path / "corpus.jsonl"
@@ -79,12 +87,9 @@ def test_process_folder_nlp_writes_txt_and_manifest(tmp_path: Path):
 
 
 def test_process_folder_nlp_skips_empty_by_default(tmp_path: Path):
-    w = PdfWriter()
-    w.add_blank_page(width=612, height=792)
     src = tmp_path / "in" / "blank.pdf"
     src.parent.mkdir(parents=True)
-    with src.open("wb") as f:
-        w.write(f)
+    _blank_pdf(src, 1)
     out_txt = tmp_path / "txt"
     man = tmp_path / "manifest.csv"
     r = process_folder_nlp(src.parent, out_txt, man, skip_if_empty=True)
@@ -95,11 +100,8 @@ def test_process_folder_nlp_skips_empty_by_default(tmp_path: Path):
 
 
 def test_process_one_pdf_nlp_minimal(tmp_path: Path):
-    w = PdfWriter()
-    w.add_blank_page(width=612, height=792)
     p = tmp_path / "a.pdf"
-    with p.open("wb") as f:
-        w.write(f)
+    _blank_pdf(p, 1)
     t = tmp_path / "a.txt"
     r = process_one_pdf_nlp(p, t)
     assert r.char_count == 0
