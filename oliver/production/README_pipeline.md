@@ -1,5 +1,5 @@
 **RE-RUNNING DATA FILES SCRIPTS**
-When new data is gathered and needs to be appended, the following pipeline needs to be run:
+When new data (in GCP bucket) is gathered and needs to be appended, the following pipeline needs to be run:
 
 1. Overwrite the existing file with the new/exstended file in `data/gcp_manual_copy`
 2. run file: **`oliver/production/appending_grades.ipynb`** to append all grades to the data
