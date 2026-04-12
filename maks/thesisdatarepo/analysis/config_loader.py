@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 import tomllib
 
@@ -16,6 +16,7 @@ class AnalysisConfig:
     metadata_csv: Path
     metadata_sep: str
     output_dir: Path
+    nlp_txt_dir: Path | None
     faculty_csv: Path | None
     columns_id: str
     columns_abstract: str
@@ -60,6 +61,9 @@ def _defaults() -> dict:
             "metadata_csv": "maks/data/metadata.csv",
             "metadata_sep": ";",
             "output_dir": "maks/data/analysis_out",
+            # If set, corpus rows are kept only when ``nlp_txt_dir / f"{id}.txt"`` exists
+            # (same naming as GCS NLP output; cross-check JSONL vs on-disk exports).
+            "nlp_txt_dir": "",
             "faculty_csv": "",
         },
         "columns": {
@@ -123,6 +127,7 @@ def load_config(path: Path) -> AnalysisConfig:
     ev = raw["evolution"]
     labels_ev = (ev.get("labels_csv") or "").strip()
     fac = (p.get("faculty_csv") or "").strip()
+    nlp_txt = (p.get("nlp_txt_dir") or "").strip()
     my = ev.get("min_year")
     ev_min_year = int(my) if my is not None and str(my).strip() != "" else None
 
@@ -131,6 +136,7 @@ def load_config(path: Path) -> AnalysisConfig:
         metadata_csv=resolve_path(p["metadata_csv"], root),
         metadata_sep=str(p.get("metadata_sep", ";")),
         output_dir=resolve_path(p["output_dir"], root),
+        nlp_txt_dir=resolve_path(nlp_txt, root) if nlp_txt else None,
         faculty_csv=resolve_path(fac, root) if fac else None,
         columns_id=raw["columns"]["id"],
         columns_abstract=raw["columns"]["abstract"],

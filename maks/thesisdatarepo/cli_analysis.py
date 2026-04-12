@@ -8,7 +8,7 @@ from pathlib import Path
 
 from thesisdatarepo.analysis.config_loader import load_config
 from thesisdatarepo.analysis.evolution import run_evolution
-from thesisdatarepo.analysis.pipeline import run_pipeline
+from thesisdatarepo.analysis.pipeline import run_pipeline, run_tsne_plots_only
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,6 +35,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     ev_p.add_argument("--config", type=Path, required=True)
 
+    ts_p = sub.add_parser(
+        "tsne-plots",
+        help="Regenerate PCA + t-SNE PNGs from cached embeddings and clustering_labels.csv",
+    )
+    ts_p.add_argument("--config", type=Path, required=True)
+
     args = p.parse_args(argv)
     cfg = load_config(args.config)
 
@@ -45,6 +51,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "evolution":
         run_evolution(cfg)
+        return 0
+    if args.cmd == "tsne-plots":
+        run_tsne_plots_only(cfg)
         return 0
     return 2
 
