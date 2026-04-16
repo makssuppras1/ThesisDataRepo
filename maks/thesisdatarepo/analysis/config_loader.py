@@ -46,6 +46,8 @@ class AnalysisConfig:
     sample_size: int
     sample_seed: int
     embedding_use_cache: bool
+    # Save partial embeddings every N documents so a later run can resume (0 = disabled).
+    embedding_checkpoint_every: int
     umap_n_neighbors: int
     umap_min_dist: float
     umap_metric: str
@@ -112,6 +114,8 @@ def _defaults() -> dict:
             "sample_size": 0,
             "sample_seed": 42,
             "use_cache": False,
+            # 1 = save after each document (safest). 0 = no resume checkpoints.
+            "checkpoint_every": 1,
         },
         "umap": {
             "n_neighbors": 15,
@@ -196,6 +200,7 @@ def load_config(path: Path) -> AnalysisConfig:
         sample_size=int(raw["embedding"]["sample_size"]),
         sample_seed=int(raw["embedding"]["sample_seed"]),
         embedding_use_cache=bool(raw["embedding"].get("use_cache", False)),
+        embedding_checkpoint_every=int(raw["embedding"].get("checkpoint_every", 1)),
         umap_n_neighbors=int(raw["umap"]["n_neighbors"]),
         umap_min_dist=float(raw["umap"]["min_dist"]),
         umap_metric=str(raw["umap"]["metric"]),

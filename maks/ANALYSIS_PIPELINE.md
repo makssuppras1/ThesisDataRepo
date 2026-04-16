@@ -94,7 +94,7 @@ Turn a corpus of documents (here: DTU theses) into **semantic clusters**, **2D v
 
 1. **Load** metadata CSV → **merge** JSONL on id → optional faculty CSV → **filter** short texts per `min_text_chars` (and optional `nlp_txt_dir` file existence).
 2. **Optional `sample_size`:** random subsample for speed.
-3. **Embeddings:** compute or load cache — `abstract_embeddings_<model_slug>.npy` or `fulltext_embeddings_<model_slug>.npy`.
+3. **Embeddings:** compute or load cache — `abstract_embeddings_<model_slug>.npy` or `fulltext_embeddings_<model_slug>.npy`. If **`embedding.checkpoint_every`** ≥ 1, partial rows are written periodically to `*_checkpoint.npy` + `*_checkpoint.json` (fingerprint = model + chunk settings + ordered doc ids); re-running after a crash **continues** from the next document. **`checkpoint_every = 0`** turns checkpoints off (fastest embedding, no resume). Completed runs delete checkpoint files when the final `.npy` is written.
 4. **L2-normalize** embeddings → **UMAP(2)** and **UMAP(10)**; drop large arrays when possible.
 5. **Cluster** on UMAP-10 (or fallback: normalized embeddings).
 6. **Write** `clustering_labels.csv`, TF-IDF / crosstabs / interdisciplinary CSVs; **UMAP** scatter figures.

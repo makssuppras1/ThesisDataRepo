@@ -10,3 +10,4 @@ def test_example_toml_loads():
     assert cfg.embedding_model
     assert cfg.corpus_jsonl.name == "corpus_gcs_full.jsonl"
     assert cfg.cluster_method == "hdbscan"
+    assert cfg.embedding_checkpoint_every >= 0
