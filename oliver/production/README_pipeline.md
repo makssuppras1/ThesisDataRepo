@@ -3,7 +3,7 @@ When new data (in GCP bucket) is gathered and needs to be appended, the followin
 
 1. Overwrite the existing file with the new/exstended file in `data/gcp_manual_copy`
 2. run file: **`oliver/production/appending_grades.ipynb`** to append all grades to the data
-3. run file **`oliver/production/universal_load.ipynb`** to overwrite and store all variations of the final data file.
+3. run file **`oliver/production/universal_load.ipynb`** to overwrite and store all variations of the final data file. **OBS:** Update line 20 in cell 1 to the new file generated from `appending_grades.ipynb`.
 (will be stored in location: `data/data_analysis_files`) 
 
 NOW ALL DATA FILES HAVE BEEN UPDATED!
