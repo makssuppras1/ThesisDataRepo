@@ -10,11 +10,13 @@ This document describes the **downstream analytics** that consume thesis text pr
 |--------|-----|--------|
 | **JSONL** (`corpus_*.jsonl`) | `id` | Equals the PDF **filename stem** (local) or GCS object **stem** (e.g. `foo.pdf` → `id` = `foo`). |
 | **JSONL** | `text` | Single UTF-8 string: extracted body from Abstract through content before references (not metadata abstract alone). |
-| **Metadata CSV** | Configurable (e.g. `member_id_ss`) | Joined **onto** the corpus; metadata-only rows (ids not in the bucket JSONL) are **excluded** from analysis. |
+| **Metadata** | CSV or **Parquet** (`metadata_csv` path) | Joined **onto** the corpus. Use **`corpus_join = "pdf_file"`** when NLP `.txt` names match **PDF/blob stems** (not `member_id_ss` alone). Set **`inner_join_metadata = true`** to drop corpus rows with no metadata row. |
 
 **Source of truth:** the pipeline keeps **one row per corpus id** (left-join from JSONL). Duplicate JSONL lines for the same `id` use **last** line wins. In corpus mode, embeddings use **`text_bucket`** from the JSONL only, never a metadata `text` column.
 
 **Local `.txt` cross-check:** set `paths.nlp_txt_dir` (e.g. `maks/data/nlp_from_gcs_all`) to keep only rows whose `id` has a matching file `{id}.txt` in that folder — same naming as the GCS NLP export (blob stem = JSONL `id`). Rows in JSONL without a file on disk are dropped.
+
+**`corpus_txt_id_mode` (txt_dir only):** `full_stem` = filename without `.txt` (match `pdf_file` stem + `corpus_join = "pdf_file"`). `member_prefix` = text **before the first `_`** in the filename, matching **`member_id_ss`** / **`primary_member_id_s`** when files look like `{member_id}_{title}.txt`. Use with `corpus_join = ""` and `columns.id = "member_id_ss"`.
 
 - Metadata tables often use separator **`;`** and UTF-8; configure paths in `analysis_config.toml`.
 - Publisher/year come from metadata when ids match; ids only in the corpus still get embedded, with missing metadata fields empty where applicable.
@@ -56,7 +58,7 @@ Turn a corpus of documents (here: DTU theses) into **semantic clusters**, **2D v
 - **Default model:** `sentence-transformers/all-mpnet-base-v2` (768-dimensional). Configurable via `embedding.model` in the analysis TOML.
 - **Meaning:** Each thesis is mapped to a **dense vector** such that texts with similar *semantic* content are close in cosine distance after normalization. The model is a general-purpose English sentence encoder (MPNet backbone), not domain-finetuned on DTU theses unless you change the model name.
 - **Abstract mode:** one forward pass per document (abstract string; optional title prepended if configured).
-- **Corpus (full-text) mode with `chunked = true`:** text is split into chunks (~`chunk_size` characters, `chunk_overlap`), each chunk is embedded, then chunks are combined by a **weighted average** (defaults: first chunk ×2, last ×1.5, middle ×1), optional **title** prepended to each chunk’s text. The result is one vector per thesis, then **L2-normalized** row-wise.
+- **Corpus (full-text) mode with `chunked = true`:** default **`embedding.chunk_unit = "tokens"`** — sliding windows on the model **tokenizer**’s token ids (`chunk_max_tokens`, typically 512–768; clamped to the model’s `max_seq_length`), **`chunk_overlap_ratio`** in the 10–20% range (e.g. `0.15`), **`chunk_pooling = "mean"`** to one vector per thesis. If **`prefer_single_embedding = true`** and the full string (optional title + body) fits in one forward pass, a **single** embedding is used (preferred when feasible). Legacy **`chunk_unit = "chars"`** uses character slices (`chunk_size` / `chunk_overlap`) and optional **weighted** pooling. Result is **L2-normalized** per row.
 - **Caching:** vectors are saved as `abstract_embeddings_<model_slug>.npy` or `fulltext_embeddings_<model_slug>.npy` under `output_dir` so reruns can skip recomputation when `embedding.use_cache` is true.
 
 ---
@@ -76,7 +78,7 @@ Turn a corpus of documents (here: DTU theses) into **semantic clusters**, **2D v
 
 - **Embeddings:** `sentence-transformers` (model name configurable).
 - **Normalize:** L2-normalize embedding rows (`sklearn.preprocessing.normalize`) before UMAP and again when preparing PCA/t-SNE inputs in the plotting path.
-- **Full text (chunked):** chunk (~1600 chars, overlap 200 by default), embed chunks, weighted mean, optional title per chunk; then L2-normalize.
+- **Full text (chunked):** default tokenizer windows + overlap ratio + **mean** pool (see `[embedding]` in TOML); optional char-based chunking + weighted pool for old configs.
 - **Dimensionality:**  
   - **UMAP** → 2D for plots, **10D for clustering** (fallback: cluster in normalized embedding space if UMAP fails).  
   - **t-SNE** on **cached raw embeddings** (2D, per perplexity in config).  

@@ -12,13 +12,17 @@ from thesisdatarepo.analysis.paths_util import repo_root, resolve_path
 
 @dataclass
 class AnalysisConfig:
-    corpus_jsonl: Path
+    corpus_source: str  # jsonl | txt_dir
+    corpus_jsonl: Path | None
     metadata_csv: Path
     metadata_sep: str
     output_dir: Path
     nlp_txt_dir: Path | None
+    corpus_txt_id_mode: str  # full_stem | member_prefix (txt_dir: id = stem before first '_', matches member_id_ss)
+    inner_join_metadata: bool
     faculty_csv: Path | None
     columns_id: str
+    columns_corpus_join: str  # e.g. pdf_file → stem matches .txt id; empty → join on columns.id
     columns_abstract: str
     columns_publisher: str
     columns_year: str
@@ -27,6 +31,12 @@ class AnalysisConfig:
     embedding_source: str  # corpus | abstract
     embedding_model: str
     embedding_chunked: bool
+    # Chunking: "tokens" = model tokenizer windows (recommended); "chars" = legacy character slices.
+    chunk_unit: str
+    chunk_max_tokens: int
+    chunk_overlap_ratio: float
+    chunk_pooling: str  # mean | weighted
+    prefer_single_embedding: bool
     chunk_size: int
     chunk_overlap: int
     first_chunk_weight: float
@@ -57,6 +67,8 @@ class AnalysisConfig:
 def _defaults() -> dict:
     return {
         "paths": {
+            # jsonl: load ids/text from corpus_jsonl. txt_dir: read *.txt under nlp_txt_dir (id = filename stem).
+            "corpus_source": "jsonl",
             "corpus_jsonl": "maks/data/corpus_gcs_full.jsonl",
             "metadata_csv": "maks/data/metadata.csv",
             "metadata_sep": ";",
@@ -64,10 +76,16 @@ def _defaults() -> dict:
             # If set, corpus rows are kept only when ``nlp_txt_dir / f"{id}.txt"`` exists
             # (same naming as GCS NLP output; cross-check JSONL vs on-disk exports).
             "nlp_txt_dir": "",
+            # txt_dir only: full_stem = filename stem (match pdf_file); member_prefix = text before first '_' (match member_id_ss)
+            "corpus_txt_id_mode": "full_stem",
+            # If true, drop corpus rows with no metadata match (empty ``columns.id``).
+            "inner_join_metadata": False,
             "faculty_csv": "",
         },
         "columns": {
             "id": "member_id_ss",
+            # Metadata column whose filesystem stem matches NLP .txt names (e.g. pdf_file → stem).
+            "corpus_join": "",
             "abstract": "abstract_ts",
             "publisher": "Publisher",
             "year": "year",
@@ -78,6 +96,13 @@ def _defaults() -> dict:
             "source": "corpus",
             "model": "sentence-transformers/all-mpnet-base-v2",
             "chunked": True,
+            # Evidence-style full-text: tokenizer windows, 10–20% overlap, mean pool (see embedding.py).
+            "chunk_unit": "tokens",
+            "chunk_max_tokens": 512,
+            "chunk_overlap_ratio": 0.15,
+            "chunk_pooling": "mean",
+            "prefer_single_embedding": True,
+            # Legacy character chunking if chunk_unit = "chars"
             "chunk_size": 1600,
             "chunk_overlap": 200,
             "first_chunk_weight": 2.0,
@@ -128,17 +153,25 @@ def load_config(path: Path) -> AnalysisConfig:
     labels_ev = (ev.get("labels_csv") or "").strip()
     fac = (p.get("faculty_csv") or "").strip()
     nlp_txt = (p.get("nlp_txt_dir") or "").strip()
+    inner_meta = bool(p.get("inner_join_metadata", False))
+    txt_id_mode = str(p.get("corpus_txt_id_mode", "full_stem")).lower().strip()
+    cj = (p.get("corpus_jsonl") or "").strip()
     my = ev.get("min_year")
     ev_min_year = int(my) if my is not None and str(my).strip() != "" else None
+    corpus_src = str(p.get("corpus_source", "jsonl")).lower().strip()
 
     return AnalysisConfig(
-        corpus_jsonl=resolve_path(p["corpus_jsonl"], root),
+        corpus_source=corpus_src,
+        corpus_jsonl=resolve_path(cj, root) if cj else None,
         metadata_csv=resolve_path(p["metadata_csv"], root),
         metadata_sep=str(p.get("metadata_sep", ";")),
         output_dir=resolve_path(p["output_dir"], root),
         nlp_txt_dir=resolve_path(nlp_txt, root) if nlp_txt else None,
+        corpus_txt_id_mode=txt_id_mode,
+        inner_join_metadata=inner_meta,
         faculty_csv=resolve_path(fac, root) if fac else None,
         columns_id=raw["columns"]["id"],
+        columns_corpus_join=(raw["columns"].get("corpus_join") or "").strip(),
         columns_abstract=raw["columns"]["abstract"],
         columns_publisher=raw["columns"]["publisher"],
         columns_year=raw["columns"]["year"],
@@ -147,6 +180,13 @@ def load_config(path: Path) -> AnalysisConfig:
         embedding_source=raw["embedding"]["source"],
         embedding_model=raw["embedding"]["model"],
         embedding_chunked=bool(raw["embedding"]["chunked"]),
+        chunk_unit=str(raw["embedding"].get("chunk_unit", "tokens")).lower().strip(),
+        chunk_max_tokens=int(raw["embedding"].get("chunk_max_tokens", 512)),
+        chunk_overlap_ratio=float(raw["embedding"].get("chunk_overlap_ratio", 0.15)),
+        chunk_pooling=str(raw["embedding"].get("chunk_pooling", "mean")).lower().strip(),
+        prefer_single_embedding=bool(
+            raw["embedding"].get("prefer_single_embedding", True)
+        ),
         chunk_size=int(raw["embedding"]["chunk_size"]),
         chunk_overlap=int(raw["embedding"]["chunk_overlap"]),
         first_chunk_weight=float(raw["embedding"]["first_chunk_weight"]),

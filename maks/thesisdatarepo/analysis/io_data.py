@@ -36,6 +36,89 @@ def load_corpus_jsonl(path: Path) -> pd.DataFrame:
     return df
 
 
+def _txt_path_to_corpus_id(stem: str, mode: str) -> str:
+    """
+    ``full_stem``: whole filename without .txt (matches GCS blob / pdf_file stem).
+    ``member_prefix``: segment before the first ``_`` — same as ``member_id_ss`` /
+    ``primary_member_id_s`` when exports are named ``{id}_{title}.txt``.
+    """
+    mode = (mode or "full_stem").lower().strip()
+    if mode == "member_prefix":
+        if "_" in stem:
+            return stem.split("_", 1)[0].strip()
+        return stem.strip()
+    if mode != "full_stem":
+        raise ValueError(f"Unknown corpus_txt_id_mode: {mode!r} (use full_stem or member_prefix)")
+    return stem
+
+
+def load_corpus_from_txt_dir(txt_dir: Path, *, id_mode: str = "full_stem") -> pd.DataFrame:
+    """One row per ``*.txt`` file; ``id`` is derived from the filename per ``id_mode``."""
+    if not txt_dir.is_dir():
+        raise FileNotFoundError(f"NLP text directory not found: {txt_dir}")
+    rows: list[dict[str, str]] = []
+    for f in sorted(txt_dir.glob("*.txt")):
+        try:
+            body = f.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            logger.warning("Skip unreadable %s: %s", f, e)
+            continue
+        cid = _txt_path_to_corpus_id(f.stem, id_mode)
+        rows.append({"id": cid, "text": body})
+    if not rows:
+        return pd.DataFrame(columns=["id", "text"])
+    n_files = len(rows)
+    df = pd.DataFrame(rows)
+    df = df.drop_duplicates(subset=["id"], keep="last").reset_index(drop=True)
+    logger.info(
+        "Loaded %s unique id(s) from %s .txt files in %s (id_mode=%s)",
+        len(df),
+        n_files,
+        txt_dir,
+        id_mode,
+    )
+    return df
+
+
+def load_metadata_table(cfg: AnalysisConfig) -> pd.DataFrame:
+    """CSV (``metadata_sep``) or Parquet."""
+    path = cfg.metadata_csv
+    suf = path.suffix.lower()
+    if suf in (".parquet", ".pq"):
+        return pd.read_parquet(path)
+    return pd.read_csv(
+        path,
+        sep=cfg.metadata_sep,
+        encoding="utf-8",
+        dtype=str,
+        low_memory=False,
+    )
+
+
+def _stem_for_join(val: object) -> str:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    s = str(val).strip()
+    if not s:
+        return ""
+    return Path(s).stem
+
+
+def metadata_join_keys(meta: pd.DataFrame, cfg: AnalysisConfig) -> pd.Series:
+    """Series aligned with ``meta`` for merging to corpus ``id``."""
+    cj = (cfg.columns_corpus_join or "").strip()
+    if cj:
+        if cj not in meta.columns:
+            raise KeyError(
+                f"Metadata has no corpus_join column {cj!r}. Columns: {list(meta.columns)}"
+            )
+        return meta[cj].map(_stem_for_join)
+    col = cfg.columns_id
+    if col not in meta.columns:
+        raise KeyError(f"Metadata column {col!r} not found.")
+    return meta[col].astype(str).str.strip()
+
+
 def filter_corpus_to_nlp_txt_dir(corpus: pd.DataFrame, txt_dir: Path) -> pd.DataFrame:
     """
     Keep only rows whose ``id`` matches a file ``txt_dir / f"{id}.txt"``.
@@ -66,26 +149,37 @@ def filter_corpus_to_nlp_txt_dir(corpus: pd.DataFrame, txt_dir: Path) -> pd.Data
     return out
 
 
+def load_corpus_for_config(cfg: AnalysisConfig) -> pd.DataFrame:
+    """Load corpus from JSONL or from ``nlp_txt_dir`` per ``corpus_source``."""
+    src = (cfg.corpus_source or "jsonl").lower().strip()
+    if src == "txt_dir":
+        if cfg.nlp_txt_dir is None:
+            raise ValueError("corpus_source=txt_dir requires paths.nlp_txt_dir")
+        return load_corpus_from_txt_dir(
+            cfg.nlp_txt_dir,
+            id_mode=cfg.corpus_txt_id_mode,
+        )
+    if src != "jsonl":
+        raise ValueError(f"Unknown corpus_source: {src!r} (use jsonl or txt_dir)")
+    if cfg.corpus_jsonl is None:
+        raise ValueError("corpus_source=jsonl requires paths.corpus_jsonl")
+    return load_corpus_jsonl(cfg.corpus_jsonl)
+
+
 def load_merged_frame(cfg: AnalysisConfig) -> pd.DataFrame:
     """
-    **Bucket / corpus is the source of truth:** only rows with extracted text in the
-    JSONL (GCS NLP output) are analyzed. Metadata rows without a matching corpus id are
-    dropped. Corpus text is stored as ``text_bucket`` so it is never confused with a
-    metadata ``text`` column.
+    **Corpus is the source of truth:** only rows with extracted text are analyzed.
+    Corpus text is stored as ``text_bucket``. Metadata is left-joined using
+    ``corpus_join`` (e.g. ``pdf_file`` stem) or ``columns.id`` when ``corpus_join`` is empty.
     """
-    corpus = load_corpus_jsonl(cfg.corpus_jsonl)
-    if cfg.nlp_txt_dir is not None:
+    corpus = load_corpus_for_config(cfg)
+    # JSONL mode: optional filter so rows match on-disk .txt files
+    if cfg.corpus_source == "jsonl" and cfg.nlp_txt_dir is not None:
         corpus = filter_corpus_to_nlp_txt_dir(corpus, cfg.nlp_txt_dir)
     if corpus.empty:
-        logger.warning("Corpus JSONL is empty at %s", cfg.corpus_jsonl)
+        logger.warning("Corpus is empty after loading")
 
-    meta = pd.read_csv(
-        cfg.metadata_csv,
-        sep=cfg.metadata_sep,
-        encoding="utf-8",
-        dtype=str,
-        low_memory=False,
-    )
+    meta = load_metadata_table(cfg)
     id_col = cfg.columns_id
     if id_col not in meta.columns:
         raise KeyError(
@@ -94,39 +188,51 @@ def load_merged_frame(cfg: AnalysisConfig) -> pd.DataFrame:
 
     meta[id_col] = meta[id_col].astype(str).str.strip()
     n_meta_before = len(meta)
-    meta = meta.drop_duplicates(subset=[id_col], keep="first").reset_index(drop=True)
+    join_keys = metadata_join_keys(meta, cfg)
+    meta = meta.copy()
+    meta["_join_corpus_id"] = join_keys
+    meta = meta.drop_duplicates(subset=["_join_corpus_id"], keep="first").reset_index(drop=True)
     n_meta_deduped = n_meta_before - len(meta)
 
     corpus["id"] = corpus["id"].astype(str).str.strip()
     corp_ids = set(corpus["id"])
-    meta_ids = set(meta[id_col])
+    meta_join_set = set(meta["_join_corpus_id"].dropna().astype(str).str.strip()) - {""}
 
-    # Rename before merge so metadata cannot overwrite bucket text.
     corp = corpus.rename(columns={"text": "text_bucket"})
 
-    # Left join from corpus: one row per bucket document; metadata optional per id.
     merged = corp.merge(
         meta,
         left_on="id",
-        right_on=id_col,
+        right_on="_join_corpus_id",
         how="left",
         suffixes=("", "_meta_dup"),
     )
-    # Join key from metadata may be NaN when a bucket id has no metadata row
-    if id_col in merged.columns:
-        merged[id_col] = merged[id_col].fillna(merged["id"]).astype(str)
-    else:
-        merged[id_col] = merged["id"].astype(str)
+    merged.drop(columns=["_join_corpus_id"], inplace=True, errors="ignore")
 
-    orphan_meta_ids = meta_ids - corp_ids
+    if id_col in merged.columns:
+        merged[id_col] = merged[id_col].fillna("").astype(str)
+    else:
+        merged[id_col] = ""
+
+    if cfg.inner_join_metadata:
+        before = len(merged)
+        has_meta = merged[id_col].astype(str).str.strip().ne("")
+        merged = merged.loc[has_meta].reset_index(drop=True)
+        logger.info(
+            "inner_join_metadata: kept %s / %s rows (dropped corpus without metadata match)",
+            len(merged),
+            before,
+        )
+
+    orphan_meta = meta_join_set - corp_ids
     logger.info(
-        "Bucket corpus: %s unique ids (JSONL). Metadata: %s rows (%s unique ids); "
-        "metadata duplicate rows dropped: %s; metadata ids with no bucket text (excluded): %s",
+        "Corpus: %s ids. Metadata: %s rows (%s unique join keys); duplicate metadata rows dropped: %s; "
+        "metadata join keys with no corpus text (excluded): %s",
         len(corpus),
         n_meta_before,
-        len(meta_ids),
+        len(meta_join_set),
         n_meta_deduped,
-        len(orphan_meta_ids),
+        len(orphan_meta),
     )
 
     if cfg.faculty_csv and cfg.faculty_csv.is_file():

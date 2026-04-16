@@ -29,6 +29,7 @@ from thesisdatarepo.analysis.plotting import (
     cluster_bar,
     publisher_topic_heatmap,
     scatter_2d,
+    scatter_2d_department_with_cluster_blobs,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,14 @@ def plot_pca_tsne_figures(
     hue_cluster = pd.Series(labels).astype(str)
     pca2 = run_pca_2d(emb_disk, cfg.tsne_random_state)
     scatter_2d(pca2, hue_cluster, "PCA 2D (clusters)", fig_dir / "pca2d_clusters.png")
+    if fac_col in df.columns:
+        scatter_2d_department_with_cluster_blobs(
+            pca2,
+            df[fac_col],
+            labels,
+            "PCA 2D",
+            fig_dir / "pca2d_department_cluster_blobs.png",
+        )
 
     n = len(emb_disk)
     if n < 5:
@@ -89,10 +98,11 @@ def plot_pca_tsne_figures(
                 fig_dir / f"{tag}_publisher.png",
             )
         if fac_col in df.columns:
-            scatter_2d(
+            scatter_2d_department_with_cluster_blobs(
                 t2,
                 df[fac_col].fillna("unknown"),
-                f"t-SNE 2D (perplexity≈{use_p:.0f}, faculty)",
+                labels,
+                f"t-SNE 2D (perplexity≈{use_p:.0f})",
                 fig_dir / f"{tag}_faculty.png",
             )
 
@@ -246,7 +256,13 @@ def run_pipeline(cfg: AnalysisConfig) -> None:
     if pub_col in df.columns:
         scatter_2d(u2, df[pub_col].fillna("unknown"), "UMAP 2D (publisher)", fig_dir / "umap2d_publisher.png")
     if fac_col in df.columns:
-        scatter_2d(u2, df[fac_col].fillna("unknown"), "UMAP 2D (faculty)", fig_dir / "umap2d_faculty.png")
+        scatter_2d_department_with_cluster_blobs(
+            u2,
+            df[fac_col].fillna("unknown"),
+            labels,
+            "UMAP 2D",
+            fig_dir / "umap2d_faculty.png",
+        )
 
     del emb
     del u10
