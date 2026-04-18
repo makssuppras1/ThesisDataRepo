@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import colorsys
+import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -10,6 +12,34 @@ import pandas as pd
 import seaborn as sns
 from matplotlib.colors import to_rgba
 from matplotlib.patches import Ellipse
+
+
+# 1/φ: consecutive indices land ~222° apart on the hue wheel (no smooth rainbow).
+_PHI_INV = 2.0 / (1.0 + math.sqrt(5.0))
+
+# Wide lightness / saturation grids, uncorrelated with hue index, so adjacent
+# legend rows do not look like one gradient.
+_LS_LEVELS = (0.32, 0.66, 0.40, 0.58, 0.36, 0.62, 0.48, 0.54, 0.34, 0.70, 0.44, 0.60)
+_SS_LEVELS = (1.0, 0.68, 0.92, 0.72, 0.85, 0.64, 0.95, 0.76, 0.88, 0.70)
+
+
+def _distinct_category_palette(n: int) -> list[tuple[float, float, float]]:
+    """
+    RGB tuples in [0, 1] for n categorical labels.
+    Golden-ratio hue stepping (avoids linear hue ramps); L/S chosen from wide
+    disjoint grids with coprime strides so neighbouring categories read clearly apart.
+    """
+    n = max(int(n), 1)
+    if n == 1:
+        return [colorsys.hls_to_rgb(0.02, 0.50, 0.96)]
+    out: list[tuple[float, float, float]] = []
+    for i in range(n):
+        h = (i * _PHI_INV) % 1.0
+        l = _LS_LEVELS[(i * 11) % len(_LS_LEVELS)]
+        s = min(0.995, _SS_LEVELS[(i * 7) % len(_SS_LEVELS)])
+        r, g, b = colorsys.hls_to_rgb(h, l, s)
+        out.append((float(r), float(g), float(b)))
+    return out
 
 
 def scatter_2d(
@@ -165,16 +195,16 @@ def scatter_2d_department_with_cluster_blobs(
 
     codes, uniques = pd.factorize(dept, sort=True)
     n_u = len(uniques)
-    palette = sns.color_palette("husl", n_colors=max(n_u, 1))
-    colors = [palette[int(c) % len(palette)] for c in codes]
+    palette = _distinct_category_palette(n_u)
+    colors = [palette[int(c) % n_u] for c in codes]
     ax.scatter(
         xy[:, 0],
         xy[:, 1],
         c=colors,
-        s=s,
-        alpha=point_alpha,
-        linewidths=0.15,
-        edgecolors="white",
+        s=s + 2.0,
+        alpha=min(0.92, point_alpha + 0.06),
+        linewidths=0.55,
+        edgecolors=(0.06, 0.06, 0.06, 0.72),
         zorder=3,
     )
     ax.set_title(title + " (points = department, soft clouds = cluster)")
@@ -187,9 +217,11 @@ def scatter_2d_department_with_cluster_blobs(
                 [0],
                 marker="o",
                 linestyle="",
-                color=palette[i % len(palette)],
+                color=palette[i % n_u],
                 label=str(uniques[i])[:48],
-                markersize=6,
+                markersize=7,
+                markeredgecolor=(0.15, 0.15, 0.15),
+                markeredgewidth=0.4,
             )
             for i in range(n_u)
         ]
@@ -197,7 +229,7 @@ def scatter_2d_department_with_cluster_blobs(
             handles=handles,
             bbox_to_anchor=(1.02, 1),
             loc="upper left",
-            fontsize=6.5,
+            fontsize=7,
             frameon=True,
             title="Department",
         )

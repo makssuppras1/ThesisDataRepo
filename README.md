@@ -13,6 +13,8 @@ uv pip install -e .
 
 **Run CLIs** with `uv run …` (uses the project `.venv` automatically). Alternatively, activate the venv first: `source .venv/bin/activate`, then you can call `thesis-cluster` and `thesis-gcs-nlp` directly.
 
+**`ModuleNotFoundError: No module named 'thesisdatarepo'`** (Python 3.11+ on macOS): editable installs rely on `.pth` files under `.venv/lib/python*/site-packages/`. If macOS marks them **hidden** (`UF_HIDDEN`), CPython skips them and imports fail. From the repo root run **`./scripts/unhide_venv_pth.sh`** (or: `for f in .venv/lib/python3.*/site-packages/*.pth; do chflags nohidden "$f" 2>/dev/null; done`). iCloud/Drive sync can re-apply the flag; run the script again if the error returns.
+
 ## CLI
 
 ### GCS → NLP text
