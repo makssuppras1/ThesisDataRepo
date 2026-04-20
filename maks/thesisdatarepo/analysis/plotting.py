@@ -42,6 +42,16 @@ def _distinct_category_palette(n: int) -> list[tuple[float, float, float]]:
     return out
 
 
+def make_department_color_map(department: pd.Series) -> dict[str, tuple[float, float, float]]:
+    """
+    Stable ``department value -> RGB`` for every figure: sorted unique labels
+    each get a fixed slot in :func:`_distinct_category_palette`.
+    """
+    names = sorted(pd.Series(department).fillna("unknown").astype(str).unique())
+    pal = _distinct_category_palette(len(names))
+    return {n: pal[i] for i, n in enumerate(names)}
+
+
 def scatter_2d(
     xy: np.ndarray,
     hue: pd.Series | np.ndarray,
@@ -151,10 +161,15 @@ def scatter_2d_department_with_cluster_blobs(
     s: float = 14.0,
     point_alpha: float = 0.78,
     cloud_alpha_scale: float = 1.0,
+    department_color_map: dict[str, tuple[float, float, float]] | None = None,
+    legend_title: str = "Department",
 ) -> None:
     """
     Points colored by department; behind them, soft clouds per cluster from the cluster
     mean and 2×2 covariance (Gaussian ellipses in several transparent layers — no crisp hull).
+
+    Pass ``department_color_map`` from :func:`make_department_color_map` so every figure
+    uses the same colours and the same full legend (sorted by department name).
     """
     out.parent.mkdir(parents=True, exist_ok=True)
     xy = np.asarray(xy, dtype=np.float64)
@@ -193,10 +208,19 @@ def scatter_2d_department_with_cluster_blobs(
             xy_span=span,
         )
 
-    codes, uniques = pd.factorize(dept, sort=True)
-    n_u = len(uniques)
-    palette = _distinct_category_palette(n_u)
-    colors = [palette[int(c) % n_u] for c in codes]
+    unknown_rgb = (0.55, 0.55, 0.55)
+    if department_color_map is not None:
+        colors = [department_color_map.get(d, unknown_rgb) for d in dept]
+        legend_names = sorted(department_color_map.keys())
+        palette = [department_color_map[n] for n in legend_names]
+        n_u = len(legend_names)
+    else:
+        codes, uniques = pd.factorize(dept, sort=True)
+        n_u = len(uniques)
+        palette = _distinct_category_palette(n_u)
+        colors = [palette[int(c) % n_u] for c in codes]
+        legend_names = [str(uniques[i]) for i in range(n_u)]
+
     ax.scatter(
         xy[:, 0],
         xy[:, 1],
@@ -210,16 +234,19 @@ def scatter_2d_department_with_cluster_blobs(
     ax.set_title(title + " (points = department, soft clouds = cluster)")
     ax.set_xlabel("dim 1")
     ax.set_ylabel("dim 2")
-    if n_u <= 32:
+
+    show_legend = department_color_map is not None or n_u <= 32
+    if show_legend:
+        leg_fs = 5.5 if n_u > 40 else (6.0 if n_u > 24 else 7.0)
         handles = [
             plt.Line2D(
                 [0],
                 [0],
                 marker="o",
                 linestyle="",
-                color=palette[i % n_u],
-                label=str(uniques[i])[:48],
-                markersize=7,
+                color=palette[i],
+                label=str(legend_names[i])[:52],
+                markersize=6 if n_u > 40 else 7,
                 markeredgecolor=(0.15, 0.15, 0.15),
                 markeredgewidth=0.4,
             )
@@ -229,9 +256,9 @@ def scatter_2d_department_with_cluster_blobs(
             handles=handles,
             bbox_to_anchor=(1.02, 1),
             loc="upper left",
-            fontsize=7,
+            fontsize=leg_fs,
             frameon=True,
-            title="Department",
+            title=legend_title,
         )
     fig.tight_layout()
     fig.savefig(out, dpi=dpi, bbox_inches="tight")

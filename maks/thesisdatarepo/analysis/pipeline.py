@@ -27,6 +27,7 @@ from thesisdatarepo.analysis.io_data import build_embedding_texts, load_merged_f
 from thesisdatarepo.analysis.keywords_topics import cluster_top_terms
 from thesisdatarepo.analysis.plotting import (
     cluster_bar,
+    make_department_color_map,
     publisher_topic_heatmap,
     scatter_2d,
     scatter_2d_department_with_cluster_blobs,
@@ -51,6 +52,8 @@ def plot_pca_tsne_figures(
     df: pd.DataFrame,
     emb_disk: np.ndarray,
     labels: np.ndarray,
+    *,
+    department_color_map: dict[str, tuple[float, float, float]] | None = None,
 ) -> None:
     """PCA + t-SNE scatter PNGs (clusters, publisher, faculty) and ``tsne*_coords.npy``."""
     pub_col = cfg.columns_publisher
@@ -59,16 +62,22 @@ def plot_pca_tsne_figures(
     fig_dir.mkdir(parents=True, exist_ok=True)
     emb_disk = normalize(np.asarray(emb_disk, dtype=np.float64), norm="l2", axis=1)
 
+    dept_legend = (fac_col.strip() or "Department") if fac_col else "Department"
+    if fac_col in df.columns and department_color_map is None:
+        department_color_map = make_department_color_map(df[fac_col].fillna("unknown"))
+
     hue_cluster = pd.Series(labels).astype(str)
     pca2 = run_pca_2d(emb_disk, cfg.tsne_random_state)
     scatter_2d(pca2, hue_cluster, "PCA 2D (clusters)", fig_dir / "pca2d_clusters.png")
     if fac_col in df.columns:
         scatter_2d_department_with_cluster_blobs(
             pca2,
-            df[fac_col],
+            df[fac_col].fillna("unknown"),
             labels,
             "PCA 2D",
             fig_dir / "pca2d_department_cluster_blobs.png",
+            department_color_map=department_color_map,
+            legend_title=dept_legend,
         )
 
     n = len(emb_disk)
@@ -104,6 +113,8 @@ def plot_pca_tsne_figures(
                 labels,
                 f"t-SNE 2D (perplexity≈{use_p:.0f})",
                 fig_dir / f"{tag}_faculty.png",
+                department_color_map=department_color_map,
+                legend_title=dept_legend,
             )
 
 
@@ -255,19 +266,24 @@ def run_pipeline(cfg: AnalysisConfig) -> None:
     scatter_2d(u2, hue_cluster, "UMAP 2D (clusters)", fig_dir / "umap2d_clusters.png")
     if pub_col in df.columns:
         scatter_2d(u2, df[pub_col].fillna("unknown"), "UMAP 2D (publisher)", fig_dir / "umap2d_publisher.png")
+    dept_colors: dict[str, tuple[float, float, float]] | None = None
+    dept_legend = (fac_col.strip() or "Department") if fac_col else "Department"
     if fac_col in df.columns:
+        dept_colors = make_department_color_map(df[fac_col].fillna("unknown"))
         scatter_2d_department_with_cluster_blobs(
             u2,
             df[fac_col].fillna("unknown"),
             labels,
             "UMAP 2D",
             fig_dir / "umap2d_faculty.png",
+            department_color_map=dept_colors,
+            legend_title=dept_legend,
         )
 
     del emb
     del u10
     logger.info("Reloading embeddings from disk for t-SNE / PCA")
     emb_disk = load_embeddings(npy_path)
-    plot_pca_tsne_figures(cfg, df, emb_disk, labels)
+    plot_pca_tsne_figures(cfg, df, emb_disk, labels, department_color_map=dept_colors)
 
     logger.info("Stage-2 pipeline finished. Outputs under %s", cfg.output_dir)
