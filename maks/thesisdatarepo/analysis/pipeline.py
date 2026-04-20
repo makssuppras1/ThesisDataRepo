@@ -63,12 +63,19 @@ def plot_pca_tsne_figures(
     emb_disk = normalize(np.asarray(emb_disk, dtype=np.float64), norm="l2", axis=1)
 
     dept_legend = (fac_col.strip() or "Department") if fac_col else "Department"
+    pub_legend = (pub_col.strip() or "Publisher") if pub_col else "Publisher"
     if fac_col in df.columns and department_color_map is None:
         department_color_map = make_department_color_map(df[fac_col].fillna("unknown"))
 
     hue_cluster = pd.Series(labels).astype(str)
     pca2 = run_pca_2d(emb_disk, cfg.tsne_random_state)
-    scatter_2d(pca2, hue_cluster, "PCA 2D (clusters)", fig_dir / "pca2d_clusters.png")
+    scatter_2d(
+        pca2,
+        hue_cluster,
+        "PCA 2D (clusters)",
+        fig_dir / "pca2d_clusters.png",
+        legend_title="cluster_id",
+    )
     if fac_col in df.columns:
         scatter_2d_department_with_cluster_blobs(
             pca2,
@@ -98,6 +105,7 @@ def plot_pca_tsne_figures(
             hue_cluster,
             f"t-SNE 2D (perplexity≈{use_p:.0f}, clusters)",
             fig_dir / f"{tag}_clusters.png",
+            legend_title="cluster_id",
         )
         if pub_col in df.columns:
             scatter_2d(
@@ -105,6 +113,7 @@ def plot_pca_tsne_figures(
                 df[pub_col].fillna("unknown"),
                 f"t-SNE 2D (perplexity≈{use_p:.0f}, publisher)",
                 fig_dir / f"{tag}_publisher.png",
+                legend_title=pub_legend,
             )
         if fac_col in df.columns:
             scatter_2d_department_with_cluster_blobs(
@@ -263,9 +272,22 @@ def run_pipeline(cfg: AnalysisConfig) -> None:
     cluster_bar(ser, fig_dir / "cluster_sizes.png")
 
     hue_cluster = pd.Series(labels).astype(str)
-    scatter_2d(u2, hue_cluster, "UMAP 2D (clusters)", fig_dir / "umap2d_clusters.png")
+    pub_legend = (pub_col.strip() or "Publisher") if pub_col else "Publisher"
+    scatter_2d(
+        u2,
+        hue_cluster,
+        "UMAP 2D (clusters)",
+        fig_dir / "umap2d_clusters.png",
+        legend_title="cluster_id",
+    )
     if pub_col in df.columns:
-        scatter_2d(u2, df[pub_col].fillna("unknown"), "UMAP 2D (publisher)", fig_dir / "umap2d_publisher.png")
+        scatter_2d(
+            u2,
+            df[pub_col].fillna("unknown"),
+            "UMAP 2D (publisher)",
+            fig_dir / "umap2d_publisher.png",
+            legend_title=pub_legend,
+        )
     dept_colors: dict[str, tuple[float, float, float]] | None = None
     dept_legend = (fac_col.strip() or "Department") if fac_col else "Department"
     if fac_col in df.columns:

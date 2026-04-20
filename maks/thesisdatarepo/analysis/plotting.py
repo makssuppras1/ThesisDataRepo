@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib.colors import to_rgba
-from matplotlib.patches import Ellipse
+from matplotlib.patches import Ellipse, Patch
 
 
 # 1/φ: consecutive indices land ~222° apart on the hue wheel (no smooth rainbow).
@@ -42,14 +42,22 @@ def _distinct_category_palette(n: int) -> list[tuple[float, float, float]]:
     return out
 
 
+def make_categorical_color_map(labels: pd.Series | np.ndarray) -> dict[str, tuple[float, float, float]]:
+    """Sorted string category -> RGB using :func:`_distinct_category_palette`."""
+    s = pd.Series(labels).astype(str)
+    names = sorted(s.unique())
+    if not names:
+        return {}
+    pal = _distinct_category_palette(len(names))
+    return {n: pal[i] for i, n in enumerate(names)}
+
+
 def make_department_color_map(department: pd.Series) -> dict[str, tuple[float, float, float]]:
     """
     Stable ``department value -> RGB`` for every figure: sorted unique labels
     each get a fixed slot in :func:`_distinct_category_palette`.
     """
-    names = sorted(pd.Series(department).fillna("unknown").astype(str).unique())
-    pal = _distinct_category_palette(len(names))
-    return {n: pal[i] for i, n in enumerate(names)}
+    return make_categorical_color_map(pd.Series(department).fillna("unknown"))
 
 
 def scatter_2d(
@@ -61,16 +69,56 @@ def scatter_2d(
     dpi: int = 150,
     s: float = 12.0,
     alpha: float = 0.7,
+    legend_title: str = "Category",
 ) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(9, 7))
-    u = pd.factorize(pd.Series(hue).astype(str))[0]
-    ax.scatter(xy[:, 0], xy[:, 1], c=u, cmap="tab20", s=s, alpha=alpha, linewidths=0)
+    ser = pd.Series(hue).astype(str)
+    cmap_dict = make_categorical_color_map(ser)
+    names_sorted = sorted(cmap_dict.keys())
+    colors = [cmap_dict[h] for h in ser]
+    ax.scatter(
+        xy[:, 0],
+        xy[:, 1],
+        c=colors,
+        s=s,
+        alpha=alpha,
+        linewidths=0.2,
+        edgecolors=(0.08, 0.08, 0.08, 0.45),
+    )
     ax.set_title(title)
     ax.set_xlabel("dim 1")
     ax.set_ylabel("dim 2")
+    n_u = len(names_sorted)
+    if n_u > 0:
+        palette = [cmap_dict[n] for n in names_sorted]
+        leg_fs = 5.0 if n_u > 48 else (5.5 if n_u > 32 else (6.5 if n_u > 16 else 7.5))
+        ncols = 3 if n_u > 30 else (2 if n_u > 14 else 1)
+        handles = [
+            plt.Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="",
+                color=palette[i],
+                label=str(names_sorted[i])[:44],
+                markersize=6,
+                markeredgecolor=(0.12, 0.12, 0.12),
+                markeredgewidth=0.35,
+            )
+            for i in range(n_u)
+        ]
+        ax.legend(
+            handles=handles,
+            bbox_to_anchor=(1.02, 1),
+            loc="upper left",
+            fontsize=leg_fs,
+            frameon=True,
+            title=legend_title,
+            ncol=ncols,
+        )
     fig.tight_layout()
-    fig.savefig(out, dpi=dpi)
+    fig.savefig(out, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -235,31 +283,85 @@ def scatter_2d_department_with_cluster_blobs(
     ax.set_xlabel("dim 1")
     ax.set_ylabel("dim 2")
 
-    show_legend = department_color_map is not None or n_u <= 32
-    if show_legend:
-        leg_fs = 5.5 if n_u > 40 else (6.0 if n_u > 24 else 7.0)
-        handles = [
+    leg_fs = 5.5 if n_u > 40 else (6.0 if n_u > 24 else 7.0)
+    dept_ncols = 2 if n_u > 28 else 1
+    dept_handles = [
+        plt.Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="",
+            color=palette[i],
+            label=str(legend_names[i])[:52],
+            markersize=6 if n_u > 40 else 7,
+            markeredgecolor=(0.15, 0.15, 0.15),
+            markeredgewidth=0.4,
+        )
+        for i in range(n_u)
+    ]
+    leg_dept = ax.legend(
+        handles=dept_handles,
+        bbox_to_anchor=(1.02, 1.0),
+        loc="upper left",
+        fontsize=leg_fs,
+        frameon=True,
+        title=legend_title,
+        ncol=dept_ncols,
+    )
+    ax.add_artist(leg_dept)
+
+    ucl = sorted(int(x) for x in np.unique(cl))
+    cl_handles: list[plt.Line2D] = []
+    for cid in ucl:
+        if cid < 0:
+            rgb = (0.62, 0.62, 0.62)
+            lab = "noise (−1)"
+        else:
+            rgba = cmap_bg((cid % 20) / 20.0)
+            rgb = tuple(float(x) for x in rgba[:3])
+            lab = f"cluster {cid}"
+        cl_handles.append(
             plt.Line2D(
                 [0],
                 [0],
-                marker="o",
+                marker="s",
                 linestyle="",
-                color=palette[i],
-                label=str(legend_names[i])[:52],
-                markersize=6 if n_u > 40 else 7,
-                markeredgecolor=(0.15, 0.15, 0.15),
-                markeredgewidth=0.4,
+                color=rgb,
+                label=lab,
+                markersize=6,
+                markeredgecolor=(0.2, 0.2, 0.2),
+                markeredgewidth=0.35,
             )
-            for i in range(n_u)
-        ]
-        ax.legend(
-            handles=handles,
-            bbox_to_anchor=(1.02, 1),
-            loc="upper left",
-            fontsize=leg_fs,
-            frameon=True,
-            title=legend_title,
         )
+    max_cl_leg = 28
+    if len(cl_handles) > max_cl_leg:
+        n_extra = len(cl_handles) - max_cl_leg + 1
+        cl_handles = cl_handles[: max_cl_leg - 1]
+        cl_handles.append(
+            plt.Line2D(
+                [0],
+                [0],
+                marker="",
+                linestyle="",
+                color="0.45",
+                label=f"+ {n_extra} more …",
+                markersize=0,
+            )
+        )
+    n_cl = len(cl_handles)
+    cl_fs = 5.0 if n_cl > 22 else 6.0
+    cl_ncols = 3 if n_cl > 15 else (2 if n_cl > 7 else 1)
+    ax.legend(
+        handles=cl_handles,
+        loc="upper right",
+        bbox_to_anchor=(0.99, 0.99),
+        fontsize=cl_fs,
+        frameon=True,
+        framealpha=0.92,
+        title="Cluster (cloud)",
+        ncol=cl_ncols,
+    )
+
     fig.tight_layout()
     fig.savefig(out, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
@@ -267,20 +369,53 @@ def scatter_2d_department_with_cluster_blobs(
 
 def cluster_bar(counts: pd.Series, out: Path, *, dpi: int = 150) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(10, 5))
-    counts.sort_index().plot(kind="bar", ax=ax)
+    fig, ax = plt.subplots(figsize=(11, 5))
+    s = counts.sort_index()
+    idx = s.index.astype(str)
+    vals = s.values.astype(float)
+    n = len(vals)
+    cmap = plt.get_cmap("tab20")
+    colors = [cmap(i % 20 / 20.0) for i in range(n)]
+    x = np.arange(n)
+    ax.bar(x, vals, color=colors, edgecolor="0.25", linewidth=0.35)
+    ax.set_xticks(x)
+    ax.set_xticklabels(idx, rotation=45, ha="right", fontsize=8)
     ax.set_title("Documents per cluster")
     ax.set_xlabel("cluster_id")
+    ax.set_ylabel("count")
+    handles = [
+        Patch(facecolor=colors[i], edgecolor="0.25", label=str(idx[i])[:32])
+        for i in range(n)
+    ]
+    leg_ncol = 4 if n > 20 else (3 if n > 10 else 2 if n > 5 else 1)
+    leg_fs = 5.5 if n > 24 else 7.0
+    ax.legend(
+        handles=handles,
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+        fontsize=leg_fs,
+        frameon=True,
+        title="cluster_id",
+        ncol=leg_ncol,
+    )
     fig.tight_layout()
-    fig.savefig(out, dpi=dpi)
+    fig.savefig(out, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
 
 def publisher_topic_heatmap(ct: pd.DataFrame, out: Path, *, dpi: int = 150) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(max(10, ct.shape[1] * 0.4), max(6, ct.shape[0] * 0.25)))
-    sns.heatmap(ct, ax=ax, cmap="viridis", annot=False)
+    sns.heatmap(
+        ct,
+        ax=ax,
+        cmap="viridis",
+        annot=False,
+        cbar_kws={"label": "Documents (count)"},
+    )
     ax.set_title("Publisher × cluster (counts)")
+    ax.set_xlabel("cluster_id")
+    ax.set_ylabel("publisher")
     fig.tight_layout()
-    fig.savefig(out, dpi=dpi)
+    fig.savefig(out, dpi=dpi, bbox_inches="tight")
     plt.close(fig)

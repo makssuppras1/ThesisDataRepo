@@ -58,11 +58,21 @@ def run_evolution(cfg: AnalysisConfig) -> None:
     fig_dir.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(11, 6))
     for col in shares.columns:
-        ax.plot(shares.index, shares[col], marker="o", ms=3, label=f"c{col}")
+        ax.plot(shares.index, shares[col], marker="o", ms=3, label=f"cluster {col}")
     ax.set_xlabel("year")
     ax.set_ylabel("share within year")
     ax.set_title("Cluster prevalence over time (share within year)")
-    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize="small", ncol=1)
+    n_leg = len(shares.columns)
+    leg_ncol = min(5, max(1, (n_leg + 11) // 12))
+    leg_fs = 6 if n_leg > 24 else 7 if n_leg > 12 else "small"
+    ax.legend(
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+        fontsize=leg_fs,
+        ncol=leg_ncol,
+        frameon=True,
+        title="cluster_id",
+    )
     fig.tight_layout()
     out_png = fig_dir / "cluster_emerging_declining.png"
     fig.savefig(out_png, dpi=150, bbox_inches="tight")
