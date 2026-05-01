@@ -1,0 +1,2336 @@
+==PAGE:1==
+M.Sc. Thesis
+Master of Science in Engineering
+Symbolic Fixedpoint Computation for Stateful Security Protocols
+Beregning af symbolske fikspunkter for tilstands-afhængige protokoller
+Harmen Martijn Bastiaan (s151301)
+Kongens Lyngby 2017
+==PAGE:2==
+DTU Compute
+Department of Applied Mathematics and Computer Science
+Technical University of Denmark
+Matematiktorvet
+Building 303B
+2800 Kongens Lyngby, Denmark
+Phone +45 4525 3031
+compute@compute.dtu.dk
+www.compute.dtu.dk
+==PAGE:3==
+Summary
+A very popular and successful abstract-interpretation approach to security protocols is
+based on encoding an over-approximation using Horn clauses, generated automatically
+from a more high-level protocol notation like Pi-Calculus. Using a resolution based
+theorem prover like SPASS or ProVerif one can then often quite efficiently check
+whether a particular attack-fact is derivable from these Horn clauses. A limitation
+built into this abstraction is the monotonicity, i.e., what is true cannot become false
+later. This prevents, for example, any kind of revocation protocol. The AIF tool is an
+approach to overcome this limitation by considering a different set-based abstraction
+to model a little state information, while remaining true to the original Horn clause
+approach. Resolution-based approaches to Horn clauses is not always the best choice.
+For many purposes we would like to have a characterization of the least fixedpoint of
+facts that can be derived: this can serve both for humans as a readable proof (when
+the representation is compact enough) and for automated proof validation e.g. with
+the theorem prover Isabelle.
+This thesis explores an efficient way of computing the fixed point representations,
+while proposing a method of reducing the number of facts in them. We show that these
+reduced fixed points are 60-75% smaller, making them considerably more readable
+for humans. We have shown that we can always restore the full fixed points from the
+reduced ones. Additionally, we offer an implementation which is up to two orders of
+magnitude faster and slightly more memory efficient than previous implementations.
+i
+==PAGE:4==
+==PAGE:5==
+Preface
+This thesis was prepared at the department of Applied Mathematics and Computer
+Science at the Technical University of Denmark in fulfillment of the requirements for
+acquiring a Master of Science degree in Computer Science and Engineering with a
+specialization in Computer Security.
+Kongens Lyngby, June 24, 2017
+Harmen Martijn Bastiaan (s151301)
+iii
+==PAGE:6==
+==PAGE:7==
+Acknowledgements
+I would like to thank Sebastian for being a great supervisor. He always made sure
+our meetings were kind spirited and something to look forward to, even in face of my
+own stubbornness. His advice and seemingly endless stream of cleverness helped me
+to write a much better thesis than I otherwise would have managed. I would also like
+to thank my friends, my girlfriend Linda and my cat Herr Olsen for keeping me sane
+during stressful times. Special thanks to Antariksh for spending many weekends at
+DTU with me.
+v
+==PAGE:8==
+x
+“You really should put a nice quote in your thesis!”
+- Antariksh Dicholkar
+==PAGE:9==
+Contents
+Summary
+i
+Preface
+iii
+Acknowledgements
+v
+Contents
+vii
+1
+Introduction
+1
+2
+Preliminaries
+3
+2.1
+Running example . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4
+2.2
+Translation to Horn clauses . . . . . . . . . . . . . . . . . . . . . . . .
+6
+2.3
+Unification theory
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+2.4
+Horn clauses
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+2.5
+Reachability . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+2.6
+Contexts . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+10
+2.7
+Fixed point . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+3
+Related Work
+17
+4
+Problem & Approach
+19
+4.1
+Reduced fixed point computation . . . . . . . . . . . . . . . . . . . . .
+22
+4.2
+Verification . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+32
+5
+Measurements
+37
+5.1
+Methodology
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+37
+5.2
+Results . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+38
+6
+Conclusion and future work
+43
+A Measurements
+45
+Bibliography
+49
+vii
+==PAGE:10==
+==PAGE:11==
+1 Introduction
+Every day billions of messages are exchanged by a large number of people over phys-
+ically unsecured or uncontrolled public networks. Cryptography has allowed these
+messages to be exchanged securely, even though the medium may act hostile towards
+its users. Although cryptography is a vital tool, its ability to safeguard secrecy, au-
+thenticity, and data integrity is strongly dependent on proper usage within protocols.
+With this in mind research has not only been spent on cryptography itself, but also
+on the verification of its usage using formal methods.
+Formal models allow researchers and protocol developers to express protocols in a
+precise manner, leveraging the ability to use automated verification tools. The most
+well known and used formal model was introduced by Dolev-Yao in 1983[10]. This
+algebraic model abstracts cryptographic primitives such that only its ideal properties
+are assumed. In this model an attacker is not able to perform real-world attacks such
+as guessing keys or exploiting side-channel attacks. Instead, he is allowed to initiate,
+observe, replay, and intercept messages on the network.
+Model checkers are introduced to check against certain attack goals, for protocols
+written in this algebraic fashion. These automated tools often allow their users to
+specify a symbol which should stay secret during one or more protocol runs, i.e. the
+symbol should be unreachable for a Dolev-Yao intruder. Because users specify attack
+goals, automated checkers make an excellent tool for showing that a protocol is broken,
+but not necessarily secure. In practice this does not present a problem, as different
+(new) protocols often share the same families of exploits despite their presence in
+literature. Users should therefore be able to know which attacks to test against.
+A typical protocol allows the exchange of arbitrary messages and an arbitrary
+number of sessions, implying a great if not infinite state space to check. To limit
+the size of this state space, researchers have been introducing approximations and
+abstractions. A very successful abstraction is based on the ability to over-approximate
+a protocol by representing it as a set of Horn clauses[4], often generated from a high-
+level formal modelling language. It assumes that all information needed to participate
+in a single session is bound to it or immutable and shared among a number of sessions.
+This is true for a lot of protocols, hence the success of the approach. Unfortunately,
+it is not true for all. For example, a server might keep a list of valid certificates
+for its clients. Upon user request or after a deadline has been reached, the server
+might decide to revoke the user certificate. Based on the validity of a certificate a
+1
+==PAGE:12==
+2
+1. INTRODUCTION
+resource might be available or not, thus changing a state between sessions. Many
+protocols have similar behavior, unrepresentable by Horn clauses at a first glance.
+Indeed, anything derived at some point cannot become false later, according to the
+monotonic behaviour of these clauses. Any resources available at some point will
+therefore also be available in another.
+AIF[12] was the first tool to tackle this problem, while retaining the ability to
+represent protocols as Horn clauses. It allows its users to specify a fixed number of
+sets, each of which may contain a certain value or not. To prevent another state space
+explosion, every two values which are members of the same sets (and not of others) are
+considered to belong to the same equivalence class. AIF then lets transitions in the
+protocol be guarded by such memberships. These set memberships can be encoded
+as subterms, allowing the user to express concepts such as the public key of Alice is
+considered valid by her and server S. To determine whether a protocol is secure, the
+user specifies an attack goal. For example, it might consider whenever an intruder
+knows the private key of a valid key of Alice an attack. To determine whether the
+protocol allows for this attack a set of all reachable facts is computed using the Horn
+clause and checked for the attack fact.
+Unfortunately, introducing set membership values has resulted in very large sets
+of reachable facts. In the worst case, for N different sets 2N facts are present in
+the set of reachable facts for each term with a single set membership as a subterm.
+Even worse, for every term with M set memberships as a subterm 2M facts might be
+present. The large number of facts make the set of reachable states hard to read and
+interpret by humans and possibly hard to parse by machines. However, the structure
+of AIF Horn clauses is such that certain facts in the set of reachable facts imply others.
+For users reading the set it is easy to see which facts must follow from others given a
+single one, if provided with a single and comparatively very small implication graph.
+This thesis explores these sets of reachable sets and proposes methods to reduce
+them such that easily derivable facts are removed. It will also propose a number of
+performance improvements, based on the structure of AIF Horn clauses. In summary,
+this thesis aims to make AIF an easier to use and more attractive product. We will
+first explore concepts relevant for understanding the thesis and sketch an overview
+of related work.
+We will then explain the problem in more detail and propose a
+computation method for eliminating redundant facts. We will conclude by providing
+performance analysis on some practical protocols.
+==PAGE:13==
+2 Preliminaries
+It has been demonstrated that verification of security protocols can greatly benefit
+from an over-approximating approach, considering a set of Horn-clauses instead of
+a set of reachable states[4][16]. The approach eliminates an unbounded state space
+growth by eliminating the need to check for multiple protocol sessions. Unfortunately,
+this limits the number of expressible protocols to ones which only share immutable
+data across different sessions, such as known agents or protocol constants. All other
+data must expire within a single protocol run.
+While this approach is valid for a large number of protocols, it does hinder pro-
+tocols which rely on some global state being mutable. Examples include building
+security protocols, where users may be allowed or denied access to some room based
+on the expiration status of their electronic token. While scanning a token might allow
+access for one session, it is perfectly valid to deny it for some other. For example, to-
+ken holders might leave the company or shift roles within it, thereby losing or gaining
+access. This behavior is not directly translatable to Horn clauses, as the latter behave
+monotonically: anything derived true at some point cannot become false later.
+AIF[12] was the first to tackle this problem by allowing the specification of a fixed
+number of sets in a protocol. Each set stores one type of value and all values are
+considered equal if they belong to the same sets, but not to some others. In other
+words, all values are partitioned in 2N number of equivalence classes where N is the
+number of sets present in the protocol. Each transition can be guarded by any of
+these equivalence classes, effectively introducing a global state while still keeping the
+advantages of the initial approach.
+To develop an intuition for the idea of AIF, we will introduce a simple example
+modelling a very simple security system. At the same time, we will sketch how this
+state transition is translated into Horn clauses. Furthermore, we will introduce the
+language and concepts used throughout this thesis.
+3
+==PAGE:14==
+4
+2. PRELIMINARIES
+2.1
+Running example
+We will use the same example as [12], as it is concise yet illustrative. In this explana-
+tion we will limit ourselves to the existence of three actors: an honest user, an honest
+server and a (dishonest) intruder. Only three actors are considered for simplicity,
+although the protocol can expand to any number of users, as long as the number of
+users remains finite.
+Each user is imagined to have a keyring with keypairs it considers valid. Each
+keypair consists of a public key k and a private key inv(k). It is however sufficient to
+represent this as a user only storing the public key k, as it uniquely identifies its private
+counterpart as well. This abstraction is helpful, as it allows us to only have one type
+of value stored in all databases specified (later on) in the protocol. We denote a key’s
+membership of a user’s keyring as k ∈ring(a), where a represents a single honest
+user. The server stores two sets for each user: a set of keys it considers valid and a
+set which it considers revoked. Similar to the keyring, we denote k ∈db(s, a, valid)
+for a valid key k registered at server s for user a. A revoked key would be denoted
+as k ∈db(s, a, revoked).
+Both ring and db are merely identifiers and could have
+been chosen to be anything else. The last user, the intruder, is given presence by
+iknows(X) denoting that the intruder knows X.
+The first rule allows a user to register a public key with the server out-of-band:
+=[PK]=> PK ∈ring(a) · PK ∈db(s, a, valid) · iknows(PK)
+Due to the absence of any conditions on the left side of the arrow this transition
+can be taken in any state. =[PK]=> indicates that PK must be a fresh value. A fresh
+value in this case refers to the value’s absence in any sets not explicitly mentioned
+on the right hand side. In this example, consider that the right hand side does not
+mention whether PK is in db(s, a, revoked) or not. Requiring a fresh value indicates
+that this key should not be a member. Lastly, iknows(PK) indicates that the intruder
+learns the public key PK.
+The second rule allows a user to register a new key, using an old (valid) key:
+PK ∈ring(a)
+iknows(PK)
+=[NPK]=>
+Figure 2.1: State representation of a key in the example protocol.
+A valid
+(non-revoked) key stored in the keyring of a would be translated to
+val(1, 1, 0).
+==PAGE:15==
+2.1. RUNNING EXAMPLE
+5
+NPK ∈ring(a)
+iknows(signinv(P K)(a, NPK))
+Any condition not repeated on the left hand side of the rule causes the condition
+to be removed. In this case, PK ̸∈ring(a) can be freely added to the right hand
+side, without changing the semantics. This removal is only valid for set memberships,
+all other facts are persistent. In this case, adding iknows(PK) to the right hand
+side would not change the semantics for example. The last rule describes the server
+receiving this update, removing the old key from the database of valid keys and
+putting it in the set of revoked keys:
+iknows(signinv(P K)(a, NPK))
+PK ∈db(s, a, valid)
+NPK ̸∈db(s, a, valid)
+NPK ̸∈db(s, a, revoked)
+=>
+PK ∈db(s, a, revoked)
+NPK ∈db(s, a, valid)
+iknows(inv(PK))
+The transition is guarded by quite a few set memberships. Two keys are considered:
+PK and NPK. Both are simply variables, denoting a key such that all mentioned
+requirements hold. For the old key PK it should be registered in the database of valid
+keys. The new key NPK should neither be valid nor revoked. After the transition,
+PK is no longer in the set of valid keys and will be put into the set of valid revoked
+keys. (Counter intuitively, we could specify a key to be in both the set of valid and
+revoked keys.) We let the intruder learn the private key of the old (now revoked!)
+key PK.
+The last rule encodes what we consider an attack on the protocol, as AIF has no
+concept of semantics. In this case, we consider an attacker controlling the private key
+of a user while it is still valid as an attack:
+PK ̸∈db(s, a, revoked) · iknows(inv(PK)) => attack.PK ̸∈db(s, a, revoked)
+Although not strictly necessary, we repeat the set membership condition on the
+right hand side so we do not interfere with the state.
+==PAGE:16==
+6
+2. PRELIMINARIES
+2.2
+Translation to Horn clauses
+We will provide an intuition for the translation to Horn clauses, based on the example
+provided earlier. AIF considers any fact bar set memberships persistent. Persistence
+entails that if some fact is true in some state S1, then it is also valid in state S2
+provided that S2 is reachable from S1. Any persistent fact in AIF is easily translatable
+to Horn clauses, as facts in Horn clauses follow similar semantics. Set memberships
+however are non-persistent facts, meaning that some value might be a member in
+some set and some state S1, but not in state S2.
+The tricky part is therefore compiling set-memberships or non-persistent facts.
+AIF solves this by defining an equality relation for all values belonging to the same sets.
+This allows the translation to encode a combination of memberships as a single fact.
+Such a fact is a function called val/N where N is a number of booleans corresponding
+to the number of sets we wish to encode. In the example we consider three sets: a
+set holding all keys stored in ring(a), all keys considered valid by s, and all keys
+considered revoked by s. The membership of a key k can be described by a triple
+of booleans (k ∈ring(a), k ∈db(s, a, valid), k ∈db(s, a, revoked)) (see figure 2.1). A
+revoked, non-valid key, not stored in the keyring of a would be encoded as (0, 0, 1).
+In AIF this is denoted by the function val/N, where N is the number of sets implied
+by the protocol.
+In our example, AIF would define val/3 and encode the earlier
+mentioned set membership as val(0, 0, 1).
+As we have seen, val represents a key in a certain state and can be used as a
+subterm. If we want to express that an intruder knows a valid, non-revoked key not
+in the keyring of user a we would therefore denote iknows(val(0, 1, 0)). If we can
+derive this term and the key would change membership to a new membership k′ for
+any reason, then we must also be able to derive iknows(k′). For example, the key
+might be moved from the previously mentioned state where it only is in the revoked
+set. Because the key itself does not change (only the metadata) the intruder must
+also know iknows(val(0, 0, 1)).
+This intuition is formalized by the introduction of two types of Horn clauses: a
+term implication clause and a context clause. Both directly follow from the other Horn
+clauses. The former follows from any clause (conceptually) changing set membership.
+That is, for any rule with some requirements ϕ where a set membership k is a subterm
+of some term in ϕ and a consequence with some set membership k′ in the consequences.
+For any such Horn clause, a term implication clause is added having the form ϕ →
+k ↠k′ where k ↠k′ is a term implication fact1. The latter is added for any term
+in any clause having a val as a subterm, f[·]. For any such term a context clause is
+added, having the form (k ↠k′) ∧f[k] →f[k′].
+Consider a simple rule moving a key from the set of valid keys to a set of keys.
+This is not an actual rule in our example protocol, but is merely defined for this
+example translation:
+1The ASCII notation of k ↠k′ is timplies(k, k′)
+==PAGE:17==
+2.2. TRANSLATION TO HORN CLAUSES
+7
+iknows(PK) · PK ∈db(s, a, valid) => PK ∈db(s, a, revoked) · iknows(PK)
+We first analyze the set memberships of PK. On the left hand side, the only
+set membership mentioned is PK ∈db(s, a, valid). No other set memberships are
+mentioned, so they may assume any value.
+PK on the left hand side therefore
+translates to val(X1, 1, X2), where X1 and X2 are variables typed boolean.
+On
+the right hand side we note that PK ∈db(s, a, revoked). PK ∈db(s, a, valid) is
+not repeated, which has the same semantics as including PK ̸∈db(s, a, valid). PK
+therefore translates to val(X1, 0, 1).
+From this point, the translation consists of three steps. The AIF rule is trans-
+lated directly to a Horn clause using the analysis in the previous paragraph so only
+persistent facts remain:
+iknows(val(X1, 1, X2)) →iknows(val(X1, 0, 1))
+Then, a term implication clause is added. It denotes that if we can derive a fact
+corresponding to the left hand side of the Horn clause just defined, the key can be
+moved from the set of valid keys to the set of revoked keys.
+iknows(val(X1, 1, X2)) →(val(X1, 1, X2) ↠val(X1, 0, 1))
+The last thing to add is a context clause. For this single rule, only iknows contains
+a subterm referring to a set membership:
+X ↠Y ∧iknows(X) →iknows(Y )
+==PAGE:18==
+8
+2. PRELIMINARIES
+2.3
+Unification theory
+Throughout this thesis we will use unification and substitutions extensively.
+We
+will adopt the notation of Baader and Snyder[2] and slightly extend it.
+We will
+first quickly summarize the theory. Unification considers the problem of substituting
+variables in two terms in such a way that the two terms are equal after substitution.
+More concretely, if we want to unify f = t(A, x) and g = t(c, x) we should replace the
+variable A by t. This mapping is called a substitution and is written as σ = [A 7→t].
+Applying the substitution to the term f is written as fσ. As a result, fσ = g. Solving
+the unification problem is equal to finding a substitution σ such that fσ = gσ.
+By convention we write variables with uppercase symbols, while constants are
+written with lowercase symbols. We write every substitution as:
+σ = [X1 7→Y1, X2 7→Y2, · · · , Xn 7→Yn]
+The domain of σ is {X1, X2, · · · , Xn}, while its range is {Y1, Y2, · · · , Yn}. This is
+written as Dom(σ) and Ran(σ) respectively. The domain can only consist of variables,
+while the range consists of variables and ground terms. Substitutions are not only
+applicable to terms, but also to other substitutions. Given two substitutions σ, τ the
+semantics are such that (fσ)τ = f(στ) for any term f.
+We extend these definitions slightly by introducing some new concepts. A sub-
+stitution σ is minimal with respect to f if V ars(f) = Dom(σ). A substitution is
+complete with respect to f if V ars(f) ⊆Dom(σ). We also consider γ the unification
+symbol. If there is no valid substitution σ for two terms f and g such that fσ = gσ,
+we say the unification is undefined and write this as γ(f, g) = ⊥. Of course, if there is
+such a substitution then γ(f, g) = σ. A substitution is ground if it maps to constants
+only.
+==PAGE:19==
+2.4. HORN CLAUSES
+9
+2.4
+Horn clauses
+Variables in the clauses are universally quantified with the clause itself as a scope. A
+Horn clause has the form p1 ∧p2 · · · pn →q, to be interpreted as: if p1 ∧p2 · · · pn hold,
+then q also holds under a grounding substitutions. We call p1 ∧p2 · · · pn requirements
+and q a consequence. We may use syntactic sugar p1 ∧p2 · · · pn →q1 ∧q2 · · · qn to
+denote the set of Horn clauses {p1 ∧p2 · · · pn →q|q ∈{q1, q2, · · · , qn}}.
+The following definitions define the language used throughout the rest of the thesis.
+Definition 1. A fact of the form timplies(val(X1, · · · , Xn), val(Y1, · · · , Yn)) where
+all variables are unique and boolean is called a term implication fact. A nicer way of
+writing this is val(X1, · · · , Xn) ↠val(Y1, · · · , Yn).
+Definition 2. A context clause is a Horn clause of the form X ↠Y ∧C[X] →C[Y ],
+where C is a context.
+This thesis considers the set of Horn clauses generated by an AIF compilation pro-
+cess. The following assumptions hold for all cases considered in [12] and all examples
+in the accompanying software:
+Assumption 1. occurs, attack, val and timplies are reserved keywords.
+Assumption 2. Variables only occur as a subterm of val and timplies.
+2.5
+Reachability
+In graph theory a vertex t is said to be reachable from s if there is a path (i.e.,
+sequence of adjacent edges) from s to t. We write this as s
+∗→t. Paths might be
+empty, therefore if s = t then s
+∗→t. Their usage is not limited to a single element,
+but can be applied to multiple elements. For example, for tuples:
+(a, b)
+⊙
+→(x, y) ⇐⇒a
+⊙
+→x ∧b
+⊙
+→y
+And in general for N components:
+⃗s
+⊙
+→⃗t ⇐⇒⃗s1
+⊙
+→⃗t1 ∧⃗s2
+⊙
+→⃗t2 ∧· · · ∧⃗sN
+⊙
+→⃗tN
+If N = 1 then
+⊙
+→is equal to
+∗→. However, we will only use
+∗→if we are explicitly
+talking about singular reachability.
+==PAGE:20==
+10
+2. PRELIMINARIES
+2.6
+Contexts
+A context is a fact f such that it contains “holes”. These holes might be filled up
+with concrete values. In this thesis holes always refer to set membership values. An
+example of a context is:
+f[·] = iknows(pair(·, a))
+Its implicit, semantically equivalent notation is:
+f = iknows(pair(·, a))
+In both cases, a hole might be replaced by a concrete value by bracket notation:
+f[b] = iknows(pair(b, a))
+A context might have more than one hole, denoted by typical tuple notation. To
+refer to a context with two holes we write:
+g[(·, ·)] = iknows(pair(·, ·))
+In this case, holes are replaced from left to right. That is:
+g[(a, b)] = iknows(pair(a, b))
+For a context with one or more holes we write (of course, such a context remains
+abstract):
+h[· · · ]
+For this thesis we introduce the concept of maximum contexts.
+A maximum
+context does not contain any concrete set membership values. For example:
+j[·] = iknows(pair(val(1, 0), ·))
+is not considered a maximum context, because it contains the subterm val(1, 0).
+In contrast:
+j[(·, ·)] = iknows(pair(·, ·))
+is a maximum context.
+==PAGE:21==
+2.7. FIXED POINT
+11
+2.7
+Fixed point
+To determine if a protocol is secure, AIF allows the user to specify an attack state. The
+reachability of this attack state determines if the protocol is secure. In terms of our
+Horn clauses this entails one is interested in whether or not the symbol corresponding
+to the attack state is derivable. For this purpose we define the concept of a fixed point:
+Definition 3. Given a finite set R of Horn clauses, let FR be the least set such
+that for every (p1, · · · , pn →q) ∈R and for every grounding substitution σ if
+{p1σ, p2σ, · · · pnσ} ⊆FR then qσ ∈FR. Such an FR is called a fixed point.
+To simplify subsequent proofs, we will first simplify the Horn clauses in such a
+way that the only relevant types for the of this thesis are booleans.
+Lemma 2.7.1. Context clauses can be rewritten such that only boolean variables
+occur in it.
+Proof. Context clauses are Horn clauses of the form X ↠Y ∧C[X] →C[Y ]. The only
+matching facts are term implication facts of the form val(X1, · · · , Xn) ↠val(Y1, · · · , Yn).
+We can therefore replace X with val(X1, · · · , Xn) and Y with val(Y1, · · · , Yn).
+Lemma 2.7.2. All variables are boolean in a set of Horn clauses R.
+Proof. Variables only occur as a subterm of val and timplies (assumption 2). We can
+rewrite every fact timplies term to having only variables under val (lemma 2.7.1). Be-
+cause every val term represents some set membership (assumption 1), every subterm
+is either a 0 or 1 (boolean) or a variable.
+Lemma 2.7.3. The fixed point FR is finite.
+Proof. Any f ∈FR must have been a consequence of some R under some substitution
+σ. This substitution can only map to booleans (lemma 2.7.2). A consequence q can
+therefore only result in a maximum of 2V ars(q) facts. The maximum size of the fixed
+point FR is therefore:
+∑
+(ϕ→q)∈R
+2V ars(q)
+R is finite (definition 3), therefore the sum is too.
+==PAGE:22==
+12
+2. PRELIMINARIES
+2.7.1
+Computation
+As FR is known to be finite, it is possible to compute it using a bottom-up approach.
+Bottom-up approaches infer consequences using a constantly updating set of facts
+known to be derivable. This process stops when no new consequences can be inferred.
+Note that the resulting set of consequences is therefore the least set closed under the
+set of Horn clauses: any combination of facts cannot be used to infer any consequences
+not already in the set.
+We will first specify a function for merging two substitutions and continue to prove
+some properties of this function used later on in the computation. The function takes
+two substitutions and returns another. The returned substitution should behave the
+same with respect to the domains of the former two.
+Γ(σ, σ′) =
+
+
+
+
+
+⊥,
+σ = ⊥or σ′ = ⊥
+⊥,
+∃v s.t. v ∈Dom(σ′) ∩Dom(σ) ∧vσ ̸= vσ′
+σσ′,
+otherwise
+(2.1)
+In this function ⊥represents an undefined substitution. A substitution is a map-
+ping structure mapping variables to either variables or ground terms.
+Lemma 2.7.4. Let σ and σ′ be substitutions ranging over ground terms. If Γ(σ, σ′) ̸=
+⊥, then yσ = yΓ(σ, σ′) for every y ∈Dom(σ) and yσ′ = yΓ(σ, σ′) for every y ∈
+Dom(σ′).
+Proof. In order for the merge operation to succeed, it must have arrived at the third
+case of Γ. The proof then consists of the proofs for the two claims:
+1. yσ = yΓ(σ, σ′) for every y ∈Dom(σ). We can rewrite the claim as yσ = y(σσ′),
+as it must be a succeeding merge. In order to invalidate this claim we must
+prove that yσ ̸= y(σσ′) for some y ∈Dom(σ). If this claim was correct, then
+there must have been some yσ ∈Dom(σ′). σ is a substitution ranging over
+ground terms, so Ran(σ) ∩Dom(σ′) = ∅. Therefore yσ ̸∈Dom(σ′), and thus
+yσ = yΓ(σ, σ′).
+2. yσ′ = yΓ(σ, σ′) for every y ∈Dom(σ). We can rewrite the claim as yσ′ = y(σσ′),
+as it must be a succeeding merge. In order to invalidate this claim we must prove
+that yσ ̸= y(σσ′) for y ∈Dom(σ′). If this were true, then y ∈Dom(σ) and
+yσ ̸= yσ′. This cannot happen as in the third case of Γ it must be true that
+∀v ∈Dom(σ′) ∩Dom(σ) →vσ = vσ′ (negation of the second case of Γ).
+In order to compute the fixed point, we first consider solving a single Horn clause
+(p1, p2, · · · , pn →q) ∈R given a set of facts previously derived to be correct C. This
+step involves solving for each term p1 · · · pn locally. That is, we do not consider the
+==PAGE:23==
+2.7. FIXED POINT
+13
+global scope of the Horn clause yet. We can obtain such a set of partial substitutions
+by unifying every term with every fact in C. γ might fail to unify, in which case no
+result for this unify operation is present in the resulting set. If it does succeed, only
+one solution exists due to unification with ground terms.
+We proceed to define a function π′, deriving all derivable consequences based on
+a set of previously derived facts and a single Horn clause. It gathers all substitutions
+for all terms and merges them lazily according to the semantics of Γ.
+π′(C, p1 · · · pn →q, σ) =
+{
+{qσ}
+n = 0
+∪{π′(C, p2 · · · pn →q, Γ(γ(c, p1), σ))|c ∈C}
+otherwise
+A slightly different and more common, but equivalent, variation of this function
+replaces all variables in the Horn clause continuously:
+π′
+∗(C, p1 · · · pn →q) =
+{
+{q}
+n = 0
+∪{π′(C, (p2 · · · pn →q)γ(c, p1))|c ∈C}
+otherwise
+We find that the first representation allows significant performance improvements,
+so we only consider that version.
+Lemma 2.7.5. π′ is complete and sound. It can derive any fact which is from a set
+of previously derived clauses and cannot derive anything else.
+Proof. Given a set of derived facts C and a Horn clause p1 · · · pn →q. We assume
+the initial invocation of π′ is supplied an empty substitution.
+1. For completeness, we shall prove that if there is a substitution σ such that
+p1σ · · · pnσ ∈C and qσ ∈C, then qσ ∈π′(C, p1 · · · pn →q, []). We assume σ is
+minimal, i.e. Dom(σ) = V ars(p1 · · · pn·q). (If it is not, we can freely reduce it to
+a minimal substitution.) For each term p1 · · · pn a minimal substitution σi exists
+such that Dom(σi) = V ars(pi) and piσi = piσ. Each minimal substitution must
+have been the result of the unification γ(piσ, pi) and therefore be found in the
+i−th recursive step of π′ as piσ ∈C. For any two substitutions σk and σl it must
+be true that ∀v ∈Dom(σk) ∩Dom(σl) →vσk = vσl, as piσi = piσ. Merging
+any two σk and σl using Γ must therefore be successful.
+Furthermore, the
+behavior of Γ(σn, Γ(σn−1, · · · )) over a term pi must be the same as σi (lemma
+2.7.4), therefore Γ(σn, Γ(σn−1, · · · )) = σ as it satisfies all terms p1 · · · pn and
+V ars(q) ⊆V ars(p1 · · · pn) as any variable mentioned in a consequence must be
+mentioned in the requirements as well.
+2. For soundness, we shall prove that any derivation of π′ is a correct one. We
+consider every invocation of π′ as a step in the derivation process. We assume
+that at step k + 1 for some k, the substitution σ satisfies p1σ · · · pkσ ∈C and
+==PAGE:24==
+14
+2. PRELIMINARIES
+is a substitution ranging over constants. If step k + 1 invokes the first case,
+we are done as V ars(p1 · · · pn) ⊆V ars(q). σ must therefore be a grounding
+substitution for q as well. If the second case is invoked, then we will forge a
+new grounding substitution Γ(γ(c, pk+1), σ) for every c ∈C. This action suc-
+ceeds as long as c and pk+1 are unifiable (resulting in a grounding substitution).
+Furthermore, the result of Γ retains the behavior of σ and γ(c, pk+1) over each
+of its domains (lemma 2.7.4). The result is therefore a grounding substitution
+valid for p1 · · · pkpk+1. π′ is trivially sound for Horn clauses of length zero. The
+derivation must therefore be correct for any Horn clause length n.
+To solve multiple Horn clauses, we define a function π simply mapping over all
+given clauses. All consequences are, if applicable, derived by π′ and the derived facts
+are consequently merged into one set.
+πR(C) =
+∪
+{π′(C, r, [])|r ∈R} ∪C
+π represents a single iteration in our AIF specialized bottom-up Horn clause solver.
+Finally, we define a function iterating until the set of Horn clauses and derived facts
+is closed under itself.
+ΠR(C) =
+{
+C,
+πR(C) = C
+ΠR(πR(C)),
+otherwise
+To compute the smallest set of facts closed under a set of Horn clauses R, one can
+simply invoke this function with an empty set (no prior knowledge). We assume this
+fixed point is finite and thus the function will terminate. We will close this section
+by proving that this is indeed the case.
+Lemma 2.7.6. FR = ΠR(∅)
+Proof. Definition 3 defines FR inductively. For any fact f ∈FR it is therefore true
+that it was first derived after some number of derivation steps. We will make this
+explicit by labeling each fact as f k if a fact f was discovered after k steps. Labeling
+is applied at each derivation step. Given a Horn clause p1 · · · pn →q and a grounding
+substitution σ, we label q as (p1σ)l1 · · · (pnσ)ln →(qσ)max(l1···ln). We then label the
+collection of facts derived after k steps as Fk
+R. Similarly, we denote the collection of
+facts derived after k recursive steps of ΠR as Πk
+R.
+We will first prove that Fn
+R = Πn
+R(∅) using structural induction. For n = 0 both
+sets will contain no facts, as the first argument of ΠR is ∅and FR is defined as the
+least set. For any n = n+1, we simply consider that π′ is complete and sound (lemma
+2.7.5). Applying it to every Horn clause in R (see π) must therefore yield every fact
+derivable in one step, therefore Fn+1
+R
+= Πn+1
+R
+.
+Because FR is finite we can express it as the finite set {f l1
+1 , f l2
+2 · · · f ln
+n } where
+n = |FR|. Let m = max(l1, l2 · · · ln). Therefore Fm
+R = FR. π′ will not be able to
+==PAGE:25==
+2.7. FIXED POINT
+15
+derive any more facts (as it is complete), therefore Πm
+R (∅) = ΠR(∅). We therefore
+conclude FR = ΠR(∅).
+2.7.2
+Tabulation
+A direct implementation of the given equations in software causes the solver to spend
+an enormous amount of time in the unification operation. For every iteration of Π
+the unification operation is executed between |C||R| and |C||R|N times, where N is
+the length of the longest Horn clause in R. This unification is often executed with the
+same arguments. We can therefore store the results of the computation in memory
+and prevent needless computation. We propose a mapping structure which represents
+the unification of all derived facts with all left hand side clause facts:
+Definition 4. T is a mapping structure such that for every Horn clause (p1 · · · pn →
+q) ∈R and every f ∈C, it is true that γ(pm, f) ∈pmT where m ∈[1 · · · n] and
+γ(pm, f) ̸= ⊥.
+Given this definition we can rewrite π′ in such a way that it utilizes the mapping
+and massively reduces the number of unification invocations:
+π′
+tab(T, p1 · · · pn →q, σ) =
+{
+{qσ}
+n = 0
+∪{π′(T, p2 · · · pn →q, Γ(σc, σ))|σc ∈p1T}
+otherwise
+Of course, we need to slightly change the function invoking π′
+tab as well:
+πtab
+R (C, T) =
+∪
+{π′(T, r, [])|r ∈R} ∪C
+After a single invocation πtab
+R
+the mapping structure needs to be updated to ac-
+commodate the newly derived facts. This is a fairly straightforward operation: for
+every clause in R and every newly derived fact we add the unification to the relevant
+set in T. We start by defining a function which adds the appropriate substitution to
+the mapping given a clause fact and a derived fact:
+add f T lhsfact = adjust (insert γ(f, lhsfact)) lhsfact T
+The second step is collecting all facts on the left hand side of any Horn clause we
+have to consider:
+lhsfacts = [pm|(p1, · · · , pn →q) ∈R, m ∈[1..n]]
+The last step maps over all clause facts and newly derived facts.
+It calls the
+function add which we defined earlier2:
+2We interpret foldr as the equally named function in Haskell
+==PAGE:26==
+16
+2. PRELIMINARIES
+T∗= foldr (t f →foldr (add f) t lhsfacts) T new
+A last observation we make is that a clause can only derive new facts when at least
+one new fact matches one of the requirements. During the execution of the update
+procedure we could therefore mark any clauses which new facts match at least one
+fact on the left hand side of a clause.
+==PAGE:27==
+3 Related Work
+In 1989 Burrows, Abadi and Needham introduced a method for analyzing the authen-
+tication of actors in distributed computing system[9] dubbed BAN. BAN logic had
+been successfully used to discover weaknesses in existing protocols, but quickly fell
+out of favor due to it proving insecure protocols as secure[6].
+After that, approaches based on propositional logic became very popular[1][3]
+thanks to their ability to be used in conjunction with SAT solvers, which are widely
+available and heavily optimized. One prominent checker is FDR[15], based on the
+formal language for describing distributed systems communicating sequential pro-
+cesses[11]. These checkers usually consider the complete state space of a protocol
+and try to find some attack state in order to prove a protocol is insecure.
+While successful in their ability to indicate security flaws, protocol checkers often
+suffered from state space explosion. Even modest expansions to a protocol might
+increase the number of reachable states considerably. Due to this, protocol checkers
+computing all states require a lot of computation power for relatively modest protocols.
+Researchers aimed to reduce the number of states by considering a different approach:
+instead of really considering states they began to over-approximate by expressing
+their methods in terms of derivable, state independent facts. Based on this concept,
+Blanchet introduced a protocol checker based on Prolog rules in 2001[5], Weidenbach
+in 1999[16], and Bozga et al. in 2003[7]. Of course, the listed number of approaches
+is by no means complete. Because each fact is state independent in these problems,
+protocols could be reduced to a set of Horn clauses. In turn, this meant a strong
+backing of existing tools such as the SPASS theorem prover.
+Although over-approximations did not suffer from state space explosion, their
+approximations were unable to express data changing across different protocol runs
+(i.e., a state). In 2010, Mödersheim proposed an extension, AIF, to existing methods
+by adding set membership values[12]. Protocol transitions could now add and remove
+values from sets, while retaining the ability to be represented as Horn clauses. In
+2016, an extension on top of that one was proposed dubbed AIF-ω adding the ability
+to represent families of sets.
+17
+==PAGE:28==
+==PAGE:29==
+4 Problem & Approach
+In practice, introducing term implication clauses has resulted in very large fixed points.
+To see why, consider again the example protocol from the previous chapter. Even for
+this simple example, nine different term implication clauses have been added in order
+for the system to be sound. Consider two of those clauses:
+X ↠Y ∧iknows(X) →iknows(Y )
+X ↠Y ∧iknows(inv(X)) →iknows(inv(Y ))
+These rules were generated by the AIF compilation process due to one or more pro-
+tocol rules using a set membership as a subterm for either iknows(·) or iknows(inv(·)).
+A rule mentioning a single key membership might therefore result in many different
+facts in the fixed point. In general, any term of the form C[val(B1, B2, · · · Bn)] will
+generate a context clause X ↠Y ∧C[X] →C[Y ]. This observation also works the
+other way around, as context clauses cannot be generated in another way.
+We can consider a (fictive) fixed point and deduce some clauses which were present
+in the original set of Horn clauses generating the fixed point:
+iknows(val(1, 1, 0))
+iknows(val(0, 1, 0))
+iknows(val(1, 0, 0))
+iknows(inv(val(0, 1, 0)))
+iknows(inv(val(1, 0, 0)))
+val(1, 1, 0) ↠val(0, 1, 0)
+val(0, 1, 0) ↠val(1, 0, 0)
+We notice that both iknows(·) and iknows(inv(·)) are contexts holding set mem-
+bership values.
+The set of Horn clauses must therefore have contained the Horn
+clauses we introduced earlier this chapter:
+19
+==PAGE:30==
+20
+4. PROBLEM & APPROACH
+X ↠Y ∧iknows(X) →iknows(Y )
+(4.1)
+X ↠Y ∧iknows(inv(X)) →iknows(inv(Y ))
+(4.2)
+Now notice that if given a specific subset of the fixed point, we can deduce the
+original one.
+iknows(val(1, 1, 0))
+(4.3)
+iknows(inv(val(0, 1, 0)))
+(4.4)
+val(1, 1, 0) ↠val(0, 1, 0)
+(4.5)
+val(0, 1, 0) ↠val(1, 0, 0)
+(4.6)
+To do this, we can repeatedly use the Horn clauses to derive new facts according
+to the semantics of the fixed point (definition 3):
+1. Using clause 4.1 and σ = [X 7→val(1, 1, 0), Y 7→val(0, 1, 0)], we find that
+we have already derived val(1, 1, 0) ↠val(0, 1, 0) [4.5] and iknows(val(1, 1, 0))
+[4.3]. The requirements are satisfied and we can derive iknows(val(0, 1, 0)).
+2. Using clause 4.1 and σ = [X 7→val(0, 1, 0), Y 7→val(1, 0, 0)], we find that we
+have already derived [4.6] and iknows(val(0, 1, 0)) [1]. The requirements are
+satisfied and we can derive iknows(val(1, 0, 0)).
+3. Using clause 4.2 and σ = [X 7→val(0, 1, 0), Y 7→val(1, 0, 0)], we find that we
+have already derived val(0, 1, 0) ↠val(1, 0, 0) [4.6] and iknows(inv(val(0, 1, 0)))
+[4.4]. The requirements are satisfied and we can derive iknows(inv(val(1, 0, 0))).
+As a result, we have been able to derive three facts. Adding these to the subset
+of the fixed point results in the original fixed point. Furthermore, derivation [1] and
+[2] are linked inasmuch that they operate on the same Horn clause, and that [2]
+uses the derivation result of [1]. More specifically, whenever we have derived two
+(or more) term implications k ↠l and l ↠m, and find a substitution such that
+k ↠l ∧C[k] →C[l] then we can also derive C[m]. We say that term implications
+have a transitive property. We can interpret this transitive property as a directed
+graph, as follows:
+Definition 5. A life cycle GFR = (V, E) is a directed graph such that (k, k′) ∈E if
+and only if k ↠k′ ∈FR.
+We can generalize the example by stating that given f = C[k], k, k′ ∈V (GFR)
+where C is a context, if f ∈FR and k
+⊙
+→k′ then C[k′] ∈FR. In other words, given
+some term C with the subterm k it is true that if that term is in the fixed point, so
+is the same term but with k′ as a subterm under the condition that there is a path
+from k to k′ in the life cycle.
+==PAGE:31==
+21
+1,0,0
+1,1,0
+0,0,0
+0,1,0
+1,0,0
+Figure 4.1: Key life cycle as formalized by term implications in the example protocol
+Given these inductions, we conclude that we can remove certain facts from the
+fixed point without losing any information. Indeed, removing a fact implied by an-
+other resembles lossless compression inasmuch that we can restore the original fixed
+point from a set of facts implied by others still in the “reduced” fixed point. At this
+point we would like to emphasize that this property is not a property of Horn clauses
+in general, but rather of those generated by the AIF compilation process.
+Definition 6. Given a set of Horn clauses R, a fixed point FR, a set F ⊆FR, a life
+cycle GFR = (V, E), and a non term implication context C, a fact C[k′] ∈F is said
+to be redundant if there exists some k ̸= k′, k
+⊙
+→k′ for which C[k] ∈F.
+Definition 7. A reduced fixed point Fred
+R
+⊂FR is a set such that FR = Fred
+R
+∪
+{C[k′]|k
+⊙
+→k′, C[k] ∈Fred
+R }.
+Definition 8. A minimal reduced fixed point is a reduced fixed point Fred
+R
+such that
+it does not contain any redundant facts.
+These definitions do not remove any term implication facts on purpose.
+This
+makes sure that it is possible to reconstruct the life cycle graph based on the reduced
+fixed point.
+In other words, it ensures GFR = GFred
+R
+.
+In turn, it is possible to
+reconstruct GFR from GFred
+R
+as the latter is the set such that all missing facts are
+reconstructable using the life cycle graph.
+==PAGE:32==
+22
+4. PROBLEM & APPROACH
+4.1
+Reduced fixed point computation
+Computing a minimal reduced fixed point is a matter of removing implied facts until
+no facts can be removed. That is, let us consider an algorithm that removes a fact
+f[l] from F where k, l ∈V , k ̸= l, k
+⊙
+→l and f[k] ∈F where F is a set initially set to
+FR until no facts can be removed according to this rule. If no cycles exist in GFR a
+unique solution exists. To see why, consider that we can interpret a cycleless life cycle
+as a partial ordering. The set of most general set memberships is therefore uniquely
+defined for each context f[·], and thus so is the minimal reduced fixed point. For a
+life cycle including cycles, we realize that we can define an equivalence relation for
+set memberships on a cycle. After all, a context f[k] with k being a member of the
+cycle, must necessarily include all other f[l] where l is a member of the cycle.
+Although not directly tied to performance optimization, we can use the same ideas
+to eliminate some of the computation steps executed by Π. We realize that most of
+the computational time is spent in the γ, the unifying operator. For a given iteration
+of Π we execute it between |R||C| and |R||C|p times where p indicates the sum of
+the lengths of all requirements of all Horn clauses. A large chunk is spent on the
+computation of context clauses, even though we know a lot about the structure of
+the Horn clauses beforehand. Let us consider a context clause:
+X ↠Y ∧C[X] →C[Y ]
+If we track a life cycle during the computation, we realize this clause can only
+derive new facts whenever the life cycle changes or upon the discovery of a new fact.
+Other than non-context clauses it is sufficient to check a new fact independently of
+others, as long as a life cycle updates the number of derived facts correctly as well.
+Whenever we update the life cycle we might be able to derive a large number of new
+facts in one go due to its transitive nature, reducing the number of iterations of Π
+considerably. Without filling in the details yet, we have established an abstract form
+of the new algorithm. A single iteration πred should given a set of facts C and a set
+of Horn clauses R:
+1. Establish a set of context clauses Rctx and all other clauses Rothers.
+2. Compute all newly derivable facts C∗, using the same methods as explained in
+the preliminaries, using all non context clauses Rothers.
+3. Update life cycle graph based on term implication facts in C∗. Yield all newly
+derivable facts.
+4. Yield all newly derivable facts based on any fact in C∗matching with any
+context clause.
+To store this information, we introduce a mapping structure. This structure allows
+us to efficiently compute both the reduced fixed point and the normal fixed point as
+long as the invariants are kept.
+==PAGE:33==
+4.1. REDUCED FIXED POINT COMPUTATION
+23
+Definition 9. A reduced context map PC,G (implicit notation P) is a mapping struc-
+ture defined relative to a set of derived facts C and a life cycle G, which domain ranges
+over context terms (“contexts with one or more holes”) and which range ranges over
+a set of set memberships, such that two invariants are kept:
+1. Given an f ∈Dom(P), if k ∈fP, k ̸= l, k
+⊙
+→l implies l ̸∈fP.
+2. f[l] ∈C if and only if a k exists such that f ∈Dom(P), k
+⊙
+→l and k ∈fP
+where f is a maximum context (see section 2.6).
+Conceptually, PC,G is a compact representation of all facts having a set member-
+ship as a subterm. The invariants keep the mapping compact and the life cycle and
+derived facts “in sync”. That is, the first invariant ensures that all facts which can
+be derived by analyzing the life cycle G and a set membership in some value of P are
+not explicitly mentioned, similar to the reduced fixed point. The second invariant
+ensures that C and P are in sync.
+4.1.1 πred: Step 1 and 2: Traditional derivation
+We will first introduce a concept of new facts in the derivation equations. We modify
+π′ such that it only returns fact not already present in C. Of course, the old behavior
+can be retained by simply unifying C with the resulting set of the execution of π′
+red.
+π′
+red(C, p1 · · · pn →q, σ) =
+
+
+
+
+
+∪{π′(C, p2 · · · pn →q, Γ(γ(c, p1), σ))|c ∈C},
+n > 0
+{qσ},
+qσ ̸∈C
+∅,
+otherwise
+Furthermore, the first two steps involve separating the context clauses from the
+non context clauses and deriving new facts using the traditional approach for the
+latter. Due to the sheer number of variables, we will switch to pseudocode, although
+we will try to keep it as close to previous notation as possible.
+1 proc πred(R, C, G, Grev, P)
+2
+-- Split rules into context rules and all others
+3
+Rctx
+= {k ↠k′ ∧p →q|k ↠k′ ∧p →q ∈R}
+4
+Rother = R \ Rctx
+5
+6
+-- Derive new facts from non-context clauses
+7
+new = ∪{π′(C, r, ∅)|r ∈Rother}
+8
+9
+[..]
+Note that this retains the behavior of the old derivation process. That includes
+being sound and complete with respect to the set of non context clauses and C. The
+variable new now holds all the newly derived facts.
+==PAGE:34==
+24
+4. PROBLEM & APPROACH
+4.1.2 πred: Step 3: Life cycle update
+The edges of a life cycle represent the term implication facts derived so far. Thus,
+updating it requires determining which newly derived facts are actually term impli-
+cations. Checking whether or not a fact is a term implication is easy to do, as it uses
+a reserved keyword. We can therefore split the newly derived facts in linear time:
+1 proc πred(R, C, G, Grev, P)
+2
+[..]
+3
+new_timplies = {k ↠k′|k ↠k′ ∈new}
+4
+new_others
+= new \ new_timplies
+The rest of this section will propose a number of algorithms for keeping the in-
+variants of the reduced context map upon discovering a new term implication fact.
+We will first look a simple, general algorithm. After that, we propose several possible
+performance improvements. We will test the performance of these improvements (and
+baseline) in the last section of this thesis.
+4.1.2.1
+Contexts with N ≥1 holes, a general algorithm
+After discovering a term implication fact, we need to update the life cycle graph in
+such a way that this newly discovered fact is included. After inserting the edge into
+the life cycle, we need to update the mapping such that it remains reduced. Because
+Dom(P) only contains maximum contexts, we know that the implied facts for every
+context do not overlap. Thus, we can reduce the set of set membership values locally
+with respect to a single context.
+1 proc πred(R, C, G, Grev, P)
+2
+[..]
+3
+(G∗,G∗
+rev,P∗,C∗,E∗) = foldr π′′
+red (G,Grev,P,C) new_timplies
+Reducing a set of set memberships is a matter of pairwise comparing each set
+membership and testing for redundancy. We need to be slightly careful with loops;
+if we discover k
+⊙
+→l and l
+⊙
+→k (where k ̸= l) we might decide to delete both k and
+l from the set. This behavior is wrong if no memberships remain that imply either k
+or l.
+1 -- Most general version of π′′
+red: simply compare members
+2 -- pairwise, remove all redundant ones iteratively.
+3 proc π′′
+red (k ↠k′) (G, Grev, P, C)
+4
+-- Update life cycle graph
+5
+G∗= insert (k ↠k′) G
+6
+G∗
+rev = insert (k′ ↠k) G
+7
+8
+-- Term implication facts are normal facts, so insert it
+9
+C = C ∪{k ↠k′}
+10
+11
+for (f[· · · ] ∈Dom(P)){
+12
+todo
+= f[· · · ]P
+==PAGE:35==
+4.1. REDUCED FIXED POINT COMPUTATION
+25
+13
+members = f[· · · ]P
+14
+15
+while (a = todo.pop()){
+16
+-- Remove redundant set membership values from mapping and from
+17
+-- todo list to prevent illegal removals due to cycles
+18
+redundant = {b|a
+⊙
+→b, a ̸= b, b ∈members}
+19
+members
+= members \ redundant
+20
+todo
+= todo \ redundant
+21
+}
+22
+23
+24
+-- Update mapping to contain reduced members
+25
+f[· · · ]P = members
+26
+27
+-- Term implications might be able to derive new facts, yield those
+28
+C = C ∪{f[b]|a
+⊙
+→b, a ∈members}
+29
+}
+30
+31
+return (G, Grev, P, C)
+After executing this function P satisfies both invariants again, assuming they were
+true at the start of the execution (proof will follow). This is a good result, but we
+notice that we must perform a lot of reachability queries in order to compute the
+result. In order to perform those efficiently (in constant time), we should store the
+transitive closure of the life cycle, instead of a simple direct neighbor mapping. This
+leaves a lot to desire, as the memory requirements of such a structure can be quite
+steep. In the following sections we will look for any improvements we can make.
+4.1.2.2
+Context with a single hole
+For this section we will use graphical representations, which structure will first be
+explained.
+This image depicts that so far we have derived J ↠K, M ↠L and L ↠N
+in previous iterations. The dotted line indicates that we have just derived the fact
+K ↠L, but have not updated the life cycle we store yet. If a node is highlighted we
+indicate that we have derived a fact f[K]. Of course, multiple instances of f might
+exist. The letters J, K, . . . refer to a specific set membership. Figure 4.1 show a life
+cycle where these constants have been replaced by real values. For example, in a real
+run f[K] might refer to iknows(val(1, 1, 0)).
+==PAGE:36==
+26
+4. PROBLEM & APPROACH
+For every term implication fact we found, we need to update the life cycle accord-
+ingly while making sure to not violate the invariants. Let us consider a very simple
+example for a single fact f[K] and a newly found term implication fact K ↠L:
+In this situation, we can safely update the life cycle without violating the first
+invariant of definition 9, as K is more general than L.
+The second invariant is
+violated however, as f[L] is not yet in C. We would therefore need to add this fact
+to the set of derived facts (see step 4). Let us consider another example. This time
+we have previously derived f[K] and f[L]:
+In this case, the second invariant is not violated. We have already derived f[L],
+so the newly found term implication does not allow us to derive any new facts. The
+first invariant is now violated though, as K
+∗→L, K ̸= L and both K, L ∈fP! We
+must therefore remove L from the set fP. Let us try to generalize this using a more
+complex example:
+Again we conclude that K is more general than M, so we should modify P in
+such a way that K is present, but M is not. Implicitly, we have been doing a reverse
+reachability test from L to find K. That is, we were looking for a path such that
+x
+∗→L where x ̸= L, in this case x = K. When we find such an instance, we know we
+can remove any y such that M
+∗→y where y ̸= M. Keep in mind that this strategy
+is applied to a single context f[·] only. In order to synchronize the whole mapping P
+we need to repeat this procedure for any context. We can simplify this procedure by
+applying some tricks, illustrated by the following example:
+Here we have already derived f[J], f[O] and g[K], g[M].
+We can apply the
+previously explained procedure and conclude that M and O are now implied for their
+respective contexts. We can do this a little bit smarter by realizing we only have to
+calculate reachabilities once. We have marked two sets, the requirements defined as
+{x|x
+∗→L} and the consequences defined as {y|M
+∗→y}. We realize that if a context
+==PAGE:37==
+4.1. REDUCED FIXED POINT COMPUTATION
+27
+has any set memberships in the requirements, all set memberships in the consequences
+can be removed. We have therefore reduced this step to two reachability procedures
+and simple set operations. For a single set of set memberships m for a given context,
+we can apply the following function:
+µ(m, reqs, consqs) =
+{
+m,
+m ∩reqs = ∅
+m \ consqs,
+otherwise
+Furthermore, we can simply yield all {f[y]|y ∈consqs} for a given context f to
+conform to the second invariant. This might yield duplicate set memberships, but it
+is computationally easy to filter these (as opposed to an exact reachability test).
+It is easy to see that these steps are correct if the set of requirements and conse-
+quences is disjoint. Whenever we discover term implications such that A
+∗→B and
+B
+∗→A (where A ̸= B), this assumption does not hold however. It is perfectly pos-
+sible for a protocol to define such cycles. We therefore need to consider those cases
+too. Let us look at an example:
+The intersection between the requirements and consequences encompasses the
+cycle exactly. This poses a problem if we would apply µ, as now both N and O would
+be removed! Clearly, this violates the second invariant as f[O], f[N] ∈C, but we
+cannot derive it from the life cycle and reduced context map anymore. In this case
+we only want to remove O, but not N. Simply retaining any set membership on the
+cycle but removing all others is not a correct approach either whenever the whole
+cycle is implied by another set membership:
+==PAGE:38==
+28
+4. PROBLEM & APPROACH
+In this case, we do simply want to remove all consequences. The requirement
+for removing all consequences is therefore simply: is there another set membership
+outside of the cycle implying it?. We distinguish two cases: if the cycle is implied by
+a set membership outside of the cycle, we simply remove all consequences as usual.
+If it is not, we remove all consequences except for a single set membership on cycle.
+This translates to:
+µcycle(m, reqs, consqs) =
+
+
+
+
+
+
+
+
+
+m,
+m ∩reqs = ∅
+m \ consqs,
+(m ∩reqs) \ (consqs ∩reqs) ̸= ∅
+(m \ consqs) ∪,
+otherwise
+(m ∩consqs ∩reqs)
+This strategy is valid for any structure where a number of set memberships all
+imply the same set of set memberships including itself (which might also include
+“double cycles”). That is, if we discovered the fact L ↠O in the previous example
+after having discovered L ↠M, then {K, L, N, M, O} is a set for which each member
+implies exactly the same set memberships. Ideally, we would like the resulting reduced
+fixed point to consistently show one specific set membership. To do this, we simply
+store a mapping indicating which cycle a specific set membership belongs to.
+4.1.2.3
+Context with N holes
+In the last section we talked about facts containing exactly one set membership value
+as a subterm, or a “term with one hole”. This should give us a good intuition for what
+happens when we try to expand it to two (and later N) set membership subterms.
+Similar to the original computation, we are interested in summarizing a fixed point
+by removing redundant facts.
+A fact is redundant if it is implied by some other.
+For contexts with a single hole this is rather straightforward: C[k′] is redundant if
+k
+∗→k′ and we know C[k]. We can make a similar definition explicit for contexts
+with two holes by considering what an instance of a term with two holes implies.
+Given such a C[k, l] we consider the usual rules for implications by considering on of
+the two holes static. That is, we know that C[k, l] at least implies {C[k′, l]|k
+∗→k′}.
+==PAGE:39==
+4.1. REDUCED FIXED POINT COMPUTATION
+29
+Similarly, C[k, l] implies {C[k, l′]|l
+∗→l′}.
+For any of the implied facts, the same
+trick can be applied so for a context with two holes we conclude that it implies
+{C[k′, l′]|k
+∗→k′, l
+∗→l′}. We note that this corresponds to applying the reachability
+operator to tuples (
+⊙
+→), as defined in the preliminaries.
+For every context with two set membership subterms we need to figure out if
+(a, b)
+⊙
+→(x, y) where (a, b), (x, y) ∈fP and (a, b) ̸= (x, y). If this condition holds, we
+can remove (x, y) from the mapping for context f. Again, we would like to minimize
+the actual number of reachability queries we do, so we can make a few observations for
+a every (a, b) ∈fP. Consider that for scope = reqs ∪consqs, cycle = reqs ∩consqs:
+1. If a ̸∈scope ∧b ̸∈scope: can neither be implied or imply other new set mem-
+bership tuples. We do not have to consider this tuple at all.
+2. If {a, b} ⊆(consqs \ cycle): can not imply new set memberships tuples (or
+invariants of P were violated!), but might be removed by another tuple.
+3. If a ∈reqs ∧b ∈reqs: implies any tuple which matched predicate (2), so we
+can remove those.
+4. If none of these conditions match, we need to do pairwise comparison with the
+other tuples in fP. Consider (x, y) ∈fP where (a, b) ̸= (x, y). If we want to
+determine (a, b)
+⊙
+→(x, y) we need to establish if a
+⊙
+→x and b
+⊙
+→y. Consider
+such a a and x:
+a) If a ∈reqs ∧x ∈consqs: a
+⊙
+→x.
+b) If a ∈(consqs \ cycle) ∧x ∈reqs: a ̸
+⊙
+→x.
+c) If a ∈cycle ∧x ∈cycle: a
+⊙
+→x.
+d) Otherwise: do reachability test.
+These steps generalize to contexts with N subterms. The algorithm has an actual
+implementation in AIF. Step 4 remains the same for the general algorithm, but applied
+to tuples of size N. The other steps generalize to the following for a given tuple
+(m1, m2, · · · , mn):
+1. If all i ∈1..n, mi ̸∈scope, then we do not have to consider this tuple at all.
+2. If all i ∈1..n, mi ∈(consqs \ cycle): cannot imply new set memberships tuple,
+but might be removed by another tuple.
+3. If all i ∈1..n, mi ∈reqs: implies any tuples matching (2).
+==PAGE:40==
+30
+4. PROBLEM & APPROACH
+4.1.2.4
+Algorithmic complexity
+The optimization steps assume that testing for reachability is non-trivial operation in
+terms of computational complexity. If we are only considering contexts with a single
+hole the optimization has clear computational benefits for only a small increase in
+algorithmic complexity. For facts with two or more set memberships as subterms this
+case is not that clear. If the majority of cases fall through all the way to the last case
+(4.4), it might even be a lot slower as it will do many reachability tests anyway.
+Clearly, we could precompute reachabilities by calculating the transitive closure of
+the life cycle every time we find a new edge. Transitive closures allow a constant time
+lookup for every reachability query, at the expensive of spatial complexity. While a
+nearest neighbor representation only needs O(|V | + |E|) storage, a transitive closure
+needs O(|V |2). We will test both implementations in the last section of this thesis.
+4.1.3 πred: Step 4: Considering new facts
+Any new facts derived during step 1 and 2 might change the reduced context map. We
+would like to add these facts to the currently derived set of facts (C), but this might
+invalidate the invariants of the context map. For every new fact we have found in step
+1 and 2 we should therefore check whether it matches a context clause and if so, we
+should update the reduced context mapping. This process is fairly straightforward,
+as we know that if a fact is not in the set of currently derived facts it cannot have
+been implied by anything in the reduced context map. If it therefore matches any
+context clause, we can simply determine its context and remove any set memberships
+implied by it.
+1 proc πred(R, C, G, Grev, P)
+2
+[..]
+3
+(C∗∗, P∗∗) = foldr (π′′′
+red Rctx G∗) (C∗, P∗) Rctx
+1 proc π′′′
+red Rctx G f (C P) = (C∗∪{f}, P∗)
+2
+where
+3
+(C∗, P∗) = foldr (π′′′′
+red G f) (C, P) Rctx
+1 proc π′′′′
+red G f (X ↠Y ∧p →q) (C, P)
+2
+-- If it is in the set of currently derived facts,
+3
+-- it is already implied by P
+4
+if f ∈C:
+5
+return (C, P)
+6
+7
+-- Check for substitution , stop if none exist.
+8
+σ = γ(p, f)
+9
+if σ = ⊥then
+10
+return (C, P)
+11
+12
+-- Extract maximum context and set membership(s)
+13
+(fc[· · · ], k) = max_context(f)
+==PAGE:41==
+4.1. REDUCED FIXED POINT COMPUTATION
+31
+14
+15
+-- Derive all keys implied by k (including itself)
+16
+ks = {k′|k
+⊙
+→k′}
+17
+C∗= C ∪{fc[k′]|k′ ∈ks}
+18
+19
+-- Update P accordingly
+20
+old_ks = findWithDefault ∅t P
+21
+P∗= insert t ((old_ks \ ks) ∪{k}) P
+22
+23
+24
+return (C∗, P∗)
+4.1.4 Πred: computation
+As indicated before, the structure of PC,R greatly resembles the definition of the
+reduced fixed point. This is, of course, no coincidence for we can use it to determine
+which facts are redundant. Let us first realize that we can rewrite FR in terms of πred
+(proof will be given in the next sections):
+Π∗
+R(C, G, Grev, P) =
+{
+C,
+πred(R, C, G, Grev, P) = C
+Π∗
+R(πred(R, C, G, Grev, P)),
+otherwise
+FR = Π∗
+R(∅, ⊥, ⊥, ⊥)
+This does not reduce the fixed point yet, but does offer a substantial computational
+improvement over the computation method outlined in the preliminaries. To produce
+a reduced fixed point we need to figure out which facts are redundant.
+reduce(C, G, P) = C \ {f[k′]|k ̸= k′, k
+⊙
+→k′, k ∈f[· · · ]P, f[· · · ] ∈Dom(P)}
+As a last step, we add the reduction step to the base case of Πred
+R :
+Πred
+R (C, G, Grev, P) =
+{
+reduce(C, G, P),
+πred(R, C, G, Grev, P) = C
+Πred
+R (πred(R, C, G, Grev, P)),
+otherwise
+Just like the original fixed point computation, the function needs to be called with
+empty data structures so it results in an actual fixed point (proof will follow):
+Fred
+R
+= Πred
+R (∅, ⊥, ⊥, ⊥)
+==PAGE:42==
+32
+4. PROBLEM & APPROACH
+4.2
+Verification
+The algorithms introduced in section 4.1.1, 4.1.2, and 4.1.3 describe a single iteration
+in the fixed point computation. Even though they keep a reduced context map, they
+still keep a full set of currently derived facts. We will use these properties to prove that
+the newly proposed algorithms derive the same facts as the fixed point computations
+described in the preliminaries.
+4.2.1
+General algorithm
+For the general algorithm we will show that the invariants of the reduced concept
+map hold after every invocation of πred, and that these invariants imply it can only
+derive facts in FR and is closed under the context clauses. Using these properties, we
+will show that the set of derived facts over many iterations is equal to the set of facts
+derived by the fixed point computation in the preliminaries.
+Lemma 4.2.1. (First invariant of P.) Given an f[· · · ] ∈Dom(P), if k ∈f[· · · ]P,
+k
+⊙
+→l, k ̸= l then l ̸∈f[· · · ]P after each iteration of Πred.
+Proof. This invariant is clearly correct for an empty map. We therefore only have to
+verify that any change to the map or life cycle will retain the invariant. The mapping
+is updated in two cases:
+1. π′′
+red: Lines 15-21 of π′′
+red ensure that this invariant holds for every member of
+the set. If a member is not considered by the body of the while loop, it must
+have been removed from the set (therefore being redundant).
+2. π′′′′
+red: Two cases might exist when entering this function: the given fact f is
+already (implicitly) in the context map. In that case, it must be in C as well
+and we quit.
+The only remaining case is that it matches a context clause
+and is not yet implied by P and is inserted into P. Lines 20-21 remove any
+membership implied by the membership of the new fact. Since the membership
+was not implied before, this is enough to keep the invariant.
+The life cycle is only updated on line 5 of π′′
+red. Any (newly) implied fact is added
+to C at line 28.
+Lemma 4.2.2. (Second invariant of P.) f[l] ∈C if and only if a k exists such that
+f[· · · ] ∈Dom(P), k
+⊙
+→l and k ∈fP where f is a maximum context.
+Proof. Consider the two statements of the bi-implication.
+1. For any k and l such that f[· · · ] ∈Dom(P), k
+⊙
+→l and k ∈fP it is true that
+f[l] ∈C where f is a maximum context. f[· · · ] must be a maximal context
+for the only line where a context is added to the domain of P is line 21 of
+==PAGE:43==
+4.2. VERIFICATION
+33
+π′′′′. Besides that, we need to investigate all situations where P or the life cycle
+changes to see if this remains true (note that it is trivially true for an empty
+instance of P and no facts are ever removed from C). P changes in the following
+situations:
+a) Lines 15-21 of π′′
+red: all implied facts are added on line 27 of the same
+function.
+b) Lines 20-21 of π′′′′
+red: all implied facts are added on line 28 of the same
+function.
+Furthermore, whenever the life cycle changes any newly implied fact should be
+added to C. The life cycle is only changed on line 5 of π′′
+red. The reduction
+steps on lines 15-21 merely compress the reduced context map, so we know that
+any newly implied facts will be added to C at line 28.
+2. If f[l] ∈C then there exists a k such that f[· · · ] ∈Dom(P), k
+⊙
+→l and k ∈fP
+where f is a maximum context. We need to investigate if whenever C changes
+these facts are implied by P:
+a) Line 17 of π′′′′
+red: this fact will clearly be implied after adding it to the
+reduced context map, which happens directly after this.
+b) Line 3 of π′′′
+red: Three different situations exist for fact f:
+i. This fact was already in C, in which case this action is idempotence.
+ii. π′′′′ added it to C in which case the reduced context map implies it.
+iii. If neither applies, this fact has no set membership as a subterm. It is
+therefore not relevant for P.
+c) Line 9 of π′′
+red: term implication facts are not stored in P.
+d) Line 28 of π′′
+red: the added facts are calculated based on implications in P.
+Furthermore, whenever P changes it should still imply at least the same facts:
+a) Lines 15-21 of π′′
+red: the reduction steps merely reduce the representation
+of the context map, as it iterates over any set memberships and removes
+implied ones. At the same time, cycle issues are prevented by updating
+the todo list accordingly.
+b) Lines 20-21 of π′′′′
+red: set memberships implied by k are removed from the
+context map, while k is inserted. The same facts are therefore represented
+still.
+All modifications to P and C make sure the invariants still hold. We therefore
+conclude that C and P are “synchronized” after each execution of πred.
+==PAGE:44==
+34
+4. PROBLEM & APPROACH
+Lemma 4.2.3. C is closed under Rctx after each iteration of Π∗
+red.
+Proof. If C was not closed under the context clauses, there is a f ∈C, k ↠k′ ∈C, a
+p1 ∧p2 →q ∈Rctx and a minimal σ such that f = p2σ[X 7→k] and g = qσ[Y 7→k′] ̸∈
+C. k ↠k′ is unconditionally added to the life cycle at the very start of an execution
+of πred, so k
+⊙
+→k′. f has a maximum context f[· · · ] and sequence of set memberships
+a. The second invariant of P requires that if this is true, then if g[a] ∈C and a
+⊙
+→b
+then g[b] ∈C. Because k ∈a and k′ ∈b for one or more specific components of both
+it is true that g ∈C. This leads to a contradiction.
+Lemma 4.2.4. Πn
+R(∅) ⊆Π∗n
+R (∅, ⊥, ⊥, ⊥, ⊥) for any n.
+Proof. For any iteration, the set of derived facts is closed under Rctx (lemma 4.2.3).
+Any other clause will be derived using the traditional method. Every fact derived
+this way is guaranteed to end up in the set of derived facts, because each fact is either
+a term implication fact (added in π′′
+red) or not (added in π′′′
+red). The lemma must
+therefore hold.
+Lemma 4.2.5. ΠR(∅) = Π∗
+R(∅, ⊥, ⊥, ⊥, ⊥)
+Proof. We already know that lemma 4.2.4 holds, thus we only need to prove that
+Π∗
+red cannot derive any facts which are not in Π(∅). The only facts ever derived by
+our new algorithms are based on a reachability query within the life cycle graph. As
+argued in the start of this chapter this represents repeated application of the context
+clauses. The life cycle only contains edges derived by the normal derivation process.
+It is therefore not possible to derive any fact not in Π(∅).
+Lemma 4.2.6. Let R be a set of Horn clauses and Fred
+R
+= Πred
+R (∅, ⊥, ⊥, ⊥, ⊥). Then
+Fred
+R
+is a minimal reduced fixed point.
+Proof. Let FR be the full fixed point. Term implication facts are added uncondition-
+ally to both the full and reduced fixed point. The life cycle graph that we can recover
+from both FR and Fred
+R
+is therefore the same. In the function reduce only facts im-
+plied by the contexts and set memberships in are removed, but not the facts explicitly
+represented (as k ̸= k′). Contexts cannot overlap as they are maximal. The removed
+facts are therefore recoverable. Fred
+R
+is therefore a reduced fixed point. Fred
+R
+is also
+a minimal reduced fixed point due to the first invariant of the reduced context map.
+Any two explicitly stored set memberships for a specific context in the reduced con-
+text map cannot imply each other. Again, because the contexts stored are maximal,
+two different contexts with their corresponding set memberships cannot represent the
+same facts and thus cannot imply each other. Fred
+R
+is therefore minimal.
+==PAGE:45==
+4.2. VERIFICATION
+35
+4.2.2
+Context with a single hole
+Instead of comparing all possible tuples for reachability, the single hole approach
+considers the structure of the life cycle graph before and after adding an edge. It uses
+that information to quickly determine which set memberships can be removed from
+the reduced context mapping. We will show that the removed facts are equal to the
+facts removed by the general algorithm.
+Proof. We consider a newly added term implication fact A ↠B, A ̸= B. We consider
+a few properties of the single hole optimization:
+• It never removes any fact which is not in r = {x|x
+⊙
+→A} or c = {x|B
+⊙
+→x}.
+This is true for the general algorithm as well. Consider a removal for a y ̸∈r ∪c.
+Then for some x ̸= y it must be true that x
+⊙
+→y. If x ∈r ∪c, then y must
+be in r ∪c. If x ̸∈r ∪c, then P was not reduced. Clearly, both result in a
+contradiction.
+• From there we consider two cases:
+1. r ∩c = ∅: None of the memberships in r will be removed. If this were the
+case then there would exist some y ∈r and some x ̸= y for which x
+⊙
+→y. x
+cannot be in r, as this would violate the invariants of P. x must therefore
+not be in r, but no such path exists by the definition of r. Any of the
+memberships in r have a path to any of the set memberships in c, thus
+any set membership in c will be removed. The optimization replicates this
+behavior.
+2. r∩c ̸= ∅: a specific context can only have zero or one member on the cycle
+r ∩c (if it did not, the reduced context mapping violated the invariants).
+The general algorithm will remove all members of c, given that there is
+a member in r (because all in c are reachable from all in r), with one
+exception: if the only member in r is a member on a cycle all members of
+c will be removed except that one member (notice a ̸= b on line 18 of the
+general algorithm). The optimization selects on this condition by testing
+for any members in r which are not on the cycle, thus removing the same
+members.
+==PAGE:46==
+36
+4. PROBLEM & APPROACH
+4.2.3
+Context with N holes
+For this optimization the structure stays fairly similar to the general (unoptimized)
+algorithm. The optimization makes sure that the loop π′′
+red can quickly determine
+which cases it can skip. We will show that these optimizations are sound.
+Proof. We consider a newly added term implication fact A ↠B, A ̸= B and the
+sets r = {x|x
+⊙
+→A} and c = {x|B
+⊙
+→x}. We look at the properties of a single set
+memberships tuple t.
+1. If none of the components of t are in scope, then it can only imply facts which
+are out of scope as well (by definition of r). If any other tuple implies t, none
+of the pairwise component’s reachability path can contain {A, B} as a subpath.
+If it did, the components must lie in scope. If it did not contain {A, B} as
+a subpath, then one of the tuples is redundant before adding A ↠B thus
+violating the invariants.
+2. If all components of t lie in consqs \ cycle, then it can only imply tuples which
+components lie in t. If any such other tuples exist, those tuples are redundant
+even before adding A ↠B and the invariants would be violated.
+3. If all components of t lie in reqs, then every component has a path to A. A
+has a path to B. B has a path to all members in consqs. Thus, t does indeed
+imply all tuples whose components are all in consqs.
+4. From here, we will be looking at a single set membership a and b, just like the
+optimization:
+a) By definition, any member a ∈r can reach A by some sequence of mem-
+bers {a, r1, · · · , rn, A}, where r1, · · · , rn ∈r. Also by definition, any mem-
+ber in b ∈c is reachable from B by some path {B, c1, · · · , cm, b} where
+c1, · · · , cm ∈c. Because A can reach B by the newly discovered term im-
+plication fact, a path exists from a to b: {a, r1, · · · , rn, A, B, c1, · · · , cm, b}.
+b) If there was a path from a to b, while a ∈(consqs \ cycle) and b ∈reqs,
+then this path must contain the subpath {B, A} if r and c do not overlap.
+However, then b ∈consqs which contradicts that r and c do not overlap.
+If r and c do overlap, cycle contains exactly those members. However, a
+cannot lie on the cycle (by definition), thus a path from a to b would again
+imply that b ∈consqs.
+c) By definition, any member on a cycle is reachable from any other member
+on the cycle.
+==PAGE:47==
+5 Measurements
+Previous chapters have established a theoretical framework for computing (reduced)
+fixed points, and offered various performance improvements. The preliminaries offered
+a method of storing unification calculations and reduced the number of clauses which
+need to be checked during a single iteration. The main chapter of this thesis looked
+into the specific structure of the Horn clauses generated by AIF, and offered a way of
+representing these in an efficient way. We will offer an implementation as an extension
+of the existing AIF Framework and subject it to various real-world protocols already
+specified in AIF.
+5.1
+Methodology
+Measurements are taken on a machine containing an Intel Core i5-4590, using two
+times 4 GiB 1600 MHz of system memory, running Ubuntu 16.04.2 i686. All software
+is written in Haskell and was compiled using GHC 7.10.3, leveraging -O2. Reported
+times are based on wall clock times as measured by the default time command. Maxi-
+mum memory usage is measured by regularly checking the memory in use as reported
+by the kernel, again using the semantics of the default time command. For really
+short running times, both methods might be inaccurate. In addition to these statis-
+tics, we have also taken note of the size of the reduced fixed point versus the size of
+its full counterpart.
+All optimizations are able to be switched on or off at a source code level. The state
+of a “switch” depends on a single globally scoped, constant variable allowing GHC
+to eliminate any unreachable code paths automatically. In total, five separate opti-
+mizations have been implemented. In the following sections we will use abbreviations
+whenever they are mentioned:
+• Tabulation (TAB): precomputes unifications with rule facts and eliminates
+(where possible) clause checking according to the preliminaries.
+• Reduction (RED): stores a reduced context mapping representing set member-
+ship values in an efficient manner. Is automatically turned on whenever any of
+the optimizations below are.
+37
+==PAGE:48==
+38
+5. MEASUREMENTS
+• Special case singular (SC1): eliminates the number of reachability queries by
+considering the (new) structure of a life cycle graph after adding an edge (term
+implication fact).
+• Special case multiple (SCN): similar to SC1, but operates on set memberships
+of any length.
+• Transitive closure (TC): stores the life cycle graph as a transitive closure
+Measurements have been taken from protocols previously implemented in AIF.
+The four protocols which have been tested are:
+• Chinese Wall: a simple protocol based on the Chinese Wall Security Model[8].
+• SEVECOM1: a protocol for secure vehicle communication, implemented and
+verified by AIF earlier[14].
+• ZebsKeyserverSingle: running example as specified in the preliminaries.
+• ZebsKeyserver: an extended version of zebsKeyserverSingle.
+To illustrate performance differences for large protocols zebsKeyserver have been
+tested with a various number of principals.
+That is, by default the only honest
+principal in the protocol is a. We have extended this to include b, c, · · · . For every
+number of principals a different measurement was taken.
+5.2
+Results
+The most important result from this thesis is that the reduced fixed points are in-
+deed much smaller than their full counterparts. Table 5.1 summarizes this for the
+aforementioned protocols.
+The most significant reductions have been achieved on
+zebsKeyserver and chineseWall. Both of these protocols rely on terms having two set
+membership value subterms, causing a quadratic number of implied terms. These
+implied terms do not show up in the reduced fixed point, hence the large compression
+ratio. Table 5.2 shows the sizes and compression ratios when running zebsKeyserver
+Name
+Full
+Reduced
+Ratio
+SEVECOM1
+221
+87
+0.39
+chineseWall
+118
+30
+0.25
+zebsKeyserver
+108
+27
+0.25
+zebsKeyserverSingle
+34
+13
+0.38
+Table 5.1: Size of fixed points measured by the number of facts contained in them
+==PAGE:49==
+5.2. RESULTS
+39
+Principals
+Full
+Reduced
+Factor
+a
+108
+27
+0.25
+a,b
+292
+58
+0.20
+a,b,c
+616
+107
+0.17
+a,b,c,d
+1122
+180
+0.16
+a,b,c,d,e
+1852
+283
+0.15
+Table 5.2: Size of fixed points measured by the number of facts in them, for
+zebsKeyserver and different number of principals
+with a different number of principals. The compression ratio does not decrease by a
+lot, but still manages to get smaller when adding more principals.
+For the performance analysis we have run zebsKeyserver with a single up to nine
+honest principals in the system. The raw measurements have been attached to this
+thesis as appendix A. Both the reduced and tabulated approach considerably improve
+the time to fixed point (see figure 5.1, 5.2).
+For small fixed points, the reduced
+approach is slightly quicker, but the tabulated approach wins for larger ones.
+In
+terms of memory usage, the reduced approach is the clear winner.
+Caching the
+unification result for every term implication and fact with set membership value as
+a subterm proves to need quite some memory (see figure 5.3). Enabling the reduced
+context map optimization allows us to enable all others as well. Combining all those
+gives us the best performance, no other combination beats it indicating that each
+optimization contributes at least a little bit.
+Concerns about the transitive closure becoming too big (as opposed to direct-
+neighbor storage) seem to be void. In fact, storing the transitive closure actually
+improved memory usage by a significant amount. A possible explanation for this
+behavior is the fact that reachability queries for non-transitive closures need memory
+on their own. As Haskell is a garbage collected language, these might linger in memory
+for a little while. A reachability for a transitive closure does not need to allocate any
+new memory however.
+The improvement with the smallest impact is SC1, which has only yielded sub-
+second improvements over all measurements. Although close to a measurement error,
+we believe its slight improvement is still real due to it consistently showing up. Its
+related optimization SCN booked greater success: enabling it approximately halved
+the execution time for reasonably large fixed points.
+==PAGE:50==
+40
+5. MEASUREMENTS
+2
+4
+6
+8
+10−2
+10−1
+100
+101
+102
+103
+Number of constants in H
+Time to fixed point (seconds)
+Base
+Reduced
+Tabulated
+ALL
+Figure 5.1: Time measurements for zebsKeyserver when run with a varying num-
+ber of principals in the set of honest users H
+2
+4
+6
+8
+0
+10
+20
+30
+40
+50
+Number of constants in H
+Time to fixed point (seconds)
+Reduced
+Tabulated
+ALL
+Figure 5.2: Time measurements for zebsKeyserver (without base) when run with
+a varying number of principals in the set of honest users H
+==PAGE:51==
+5.2. RESULTS
+41
+0
+2
+4
+6
+8
+0
+20
+40
+60
+80
+100
+120
+Number of constants in H
+Maximum memory (MB)
+Base
+Reduced
+Tabulated
+ALL
+Figure 5.3: Memory measurements for zebsKeyserver when run with a varying
+number of principals in the set of honest users H
+==PAGE:52==
+==PAGE:53==
+6 Conclusion and future work
+In this thesis we have explored a method for reducing the number of facts we need
+to show in the set of derivable facts (fixed point) when considering Horn clauses
+generated by AIF. We have shown that it is always possible to restore a full fixed
+point based on the reduced fixed point our algorithm produces. We have proposed an
+algorithm that in theory takes a modest amount of additional memory and provides
+a notable performance improvement by exploiting the AIF specific structure of the
+Horn clauses.
+By rewriting the equations we have established another substantial performance
+improvement, not directly related to the structure of the Horn clauses. In practice, we
+have seen an order of magnitude of performance improvement purely by exploiting
+the structure of the given Horn clauses. The most optimistic case we have tested
+reduced the computation time from 17 minutes to 12 seconds, while unexpectedly
+also slightly reducing memory requirements.
+In the future we would like to see compatibility with AIF-ω[13], which would allow
+us to use reduced fixed points in combination with countably infinite sets of constants.
+Furthermore, we would like to see more experiments with alternative data types for
+the algorithms this thesis proposed. Lastly, additional performance benefits might be
+gained by considering the reduced context map in the function π, which maps over
+non-context clauses.
+43
+==PAGE:54==
+==PAGE:55==
+A Measurements
+principals
+optimizations
+runtime (s)
+memory (kB)
+1
+0.056412
+4964
+2
+0.655299
+5904
+3
+3.315914
+7092
+4
+13.20898
+8832
+5
+38.029577
+13052
+6
+95.386299
+17916
+7
+221.499324
+26268
+8
+449.175256
+36364
+9
+853.048634
+50612
+1
+TAB
+0.023085
+4760
+2
+TAB
+0.107718
+6316
+3
+TAB
+0.339321
+8040
+4
+TAB
+0.895082
+13852
+5
+TAB
+1.980521
+22224
+6
+TAB
+3.924401
+36408
+7
+TAB
+7.281959
+57144
+8
+TAB
+12.753287
+86452
+9
+TAB
+20.892683
+121312
+1
+RED
+0.015369
+4836
+2
+RED
+0.070109
+5588
+3
+RED
+0.249674
+6548
+4
+RED
+0.790792
+7984
+5
+RED
+2.055107
+10696
+6
+RED
+4.842826
+16024
+7
+RED
+10.67107
+21148
+8
+RED
+21.332364
+29120
+9
+RED
+41.676374
+43616
+1
+RED+TAB
+0.011647
+4844
+2
+RED+TAB
+0.052768
+5556
+3
+RED+TAB
+0.19848
+7088
+4
+RED+TAB
+0.657819
+8328
+5
+RED+TAB
+1.743776
+11740
+45
+==PAGE:56==
+46
+APPENDIX A. MEASUREMENTS
+6
+RED+TAB
+4.181516
+18080
+7
+RED+TAB
+9.446088
+26520
+8
+RED+TAB
+19.396448
+34224
+9
+RED+TAB
+38.664742
+52680
+1
+RED+TAB+SC1
+0.011628
+4600
+2
+RED+TAB+SC1
+0.050968
+5448
+3
+RED+TAB+SC1
+0.194083
+7132
+4
+RED+TAB+SC1
+0.630969
+8420
+5
+RED+TAB+SC1
+1.690201
+11752
+6
+RED+TAB+SC1
+4.15111
+18088
+7
+RED+TAB+SC1
+9.617383
+26392
+8
+RED+TAB+SC1
+19.299429
+36408
+9
+RED+TAB+SC1
+38.299337
+52672
+1
+RED+TAB+SC1+SCN
+0.011242
+4824
+2
+RED+TAB+SC1+SCN
+0.043512
+5212
+3
+RED+TAB+SC1+SCN
+0.147973
+6740
+4
+RED+TAB+SC1+SCN
+0.418563
+8832
+5
+RED+TAB+SC1+SCN
+0.990901
+11844
+6
+RED+TAB+SC1+SCN
+2.115606
+18004
+7
+RED+TAB+SC1+SCN
+4.157542
+23072
+8
+RED+TAB+SC1+SCN
+7.530419
+30232
+9
+RED+TAB+SC1+SCN
+13.091126
+55784
+1
+TC+RED
+0.015712
+4672
+2
+TC+RED
+0.069642
+5532
+3
+TC+RED
+0.238415
+7040
+4
+TC+RED
+0.700191
+8064
+5
+TC+RED
+1.726053
+10696
+6
+TC+RED
+3.819348
+15988
+7
+TC+RED
+7.91779
+22224
+8
+TC+RED
+15.090311
+27168
+9
+TC+RED
+26.804952
+43508
+1
+TC+RED+TAB
+0.012193
+4608
+2
+TC+RED+TAB
+0.049805
+5460
+3
+TC+RED+TAB
+0.181085
+7048
+4
+TC+RED+TAB
+0.53213
+9028
+5
+TC+RED+TAB
+1.349787
+12668
+6
+TC+RED+TAB
+3.087066
+18088
+7
+TC+RED+TAB
+6.48091
+27064
+8
+TC+RED+TAB
+12.881315
+34284
+9
+TC+RED+TAB
+23.227983
+52616
+1
+TC+RED+TAB+SC1
+0.012447
+4812
+2
+TC+RED+TAB+SC1
+0.050635
+5392
+3
+TC+RED+TAB+SC1
+0.184206
+7204
+4
+TC+RED+TAB+SC1
+0.52886
+8060
+==PAGE:57==
+47
+5
+TC+RED+TAB+SC1
+1.342024
+11996
+6
+TC+RED+TAB+SC1
+3.042479
+18076
+7
+TC+RED+TAB+SC1
+6.465027
+25164
+8
+TC+RED+TAB+SC1
+12.786517
+33192
+9
+TC+RED+TAB+SC1
+23.213256
+52596
+1
+TC+RED+TAB+SC1+SCN
+0.011973
+4648
+2
+TC+RED+TAB+SC1+SCN
+0.045404
+5292
+3
+TC+RED+TAB+SC1+SCN
+0.150131
+6588
+4
+TC+RED+TAB+SC1+SCN
+0.424772
+8236
+5
+TC+RED+TAB+SC1+SCN
+0.994199
+11328
+6
+TC+RED+TAB+SC1+SCN
+2.06317
+16160
+7
+TC+RED+TAB+SC1+SCN
+4.020367
+22276
+8
+TC+RED+TAB+SC1+SCN
+7.227952
+31532
+9
+TC+RED+TAB+SC1+SCN
+12.349424
+43796
+==PAGE:58==
+==PAGE:59==
+Bibliography
+[1]
+Alessandro Armando and Luca Compagna. “SAT-based model-checking for se-
+curity protocols analysis”. In: International Journal of Information Security 7.1
+(2008), pages 3–32. issn: 1615-5270. doi: 10.1007/s10207-007-0041-y. url:
+http://dx.doi.org/10.1007/s10207-007-0041-y.
+[2]
+Franz Baader. “Unification theory”. In: Word Equations and Related Topics: 1st
+International Workshop, IWWERT ’90 Tübingen, Germany, October 1990 Pro-
+ceedings. Edited by K. U. Schulz. Berlin, Heidelberg: Springer Berlin Heidelberg,
+1992, pages 151–170. isbn: 978-3-540-46737-3. doi: 10.1007/3-540-55124-7_5.
+url: http://dx.doi.org/10.1007/3-540-55124-7_5.
+[3]
+David Basin, Sebastian Mödersheim, and Luca Viganò. “OFMC: A symbolic
+model checker for security protocols”. In: International Journal of Information
+Security 4.3 (2005), pages 181–208. issn: 1615-5270. doi: 10.1007/s10207-
+004-0055-7. url: http://dx.doi.org/10.1007/s10207-004-0055-7.
+[4]
+Bruno Blanchet et al. “An Efficient Cryptographic Protocol Verifier Based on
+Prolog Rules.” In:
+[5]
+Bruno Blanchet. “An Efficient Cryptographic Protocol Verifier Based on Pro-
+log Rules”. In: Proceedings of the 14th IEEE Workshop on Computer Security
+Foundations. CSFW ’01. Washington, DC, USA: IEEE Computer Society, 2001,
+pages 82–. url: http://dl.acm.org/citation.cfm?id=872752.873511.
+[6]
+Colin Boyd and Wenbo Mao. “On a Limitation of BAN Logic”. In: Workshop
+on the Theory and Application of Cryptographic Techniques on Advances in
+Cryptology. EUROCRYPT ’93. Lofthus, Norway: Springer-Verlag New York,
+Inc., 1994, pages 240–247. isbn: 3-540-57600-2. url: http://dl.acm.org/
+citation.cfm?id=188307.188350.
+[7]
+Liana Bozga, Yassine Lakhnech, and Michaël Périn. “HERMES: An Automatic
+Tool for Verification of Secrecy in Security Protocols”. In: Computer Aided Ver-
+ification: 15th International Conference, CAV 2003, Boulder, CO, USA, July
+8-12, 2003. Proceedings. Edited by Warren A. Hunt and Fabio Somenzi. Berlin,
+Heidelberg: Springer Berlin Heidelberg, 2003, pages 219–222. isbn: 978-3-540-
+45069-6. doi: 10.1007/978-3-540-45069-6_23. url: http://dx.doi.org/
+10.1007/978-3-540-45069-6_23.
+49
+==PAGE:60==
+50
+BIBLIOGRAPHY
+[8]
+David FC Brewer and Michael J Nash. “The chinese wall security policy”. In:
+Security and Privacy, 1989. Proceedings., 1989 IEEE Symposium on. IEEE.
+1989, pages 206–214.
+[9]
+Michael Burrows, Martin Abadi, and Roger M Needham. “A logic of authenti-
+cation”. In: Proceedings of the Royal Society of London A: Mathematical, Phys-
+ical and Engineering Sciences. Volume 426. 1871. The Royal Society. 1989,
+pages 233–271.
+[10]
+Danny Dolev and Andrew Yao. “On the security of public key protocols”. In:
+IEEE Transactions on information theory 29.2 (1983), pages 198–208.
+[11]
+C. A. R. Hoare. “Communicating Sequential Processes”. In: Commun. ACM
+21.8 (August 1978), pages 666–677. issn: 0001-0782. doi: 10.1145/359576.
+359585. url: http://doi.acm.org/10.1145/359576.359585.
+[12]
+Sebastian Alexander Mödersheim. “Abstraction by Set-membership: Verifying
+Security Protocols and Web Services with Databases”. In: Proceedings of the
+17th ACM Conference on Computer and Communications Security. CCS ’10.
+Chicago, Illinois, USA: ACM, 2010, pages 351–360. isbn: 978-1-4503-0245-6.
+doi: 10.1145/1866307.1866348. url: http://doi.acm.org/10.1145/
+1866307.1866348.
+[13]
+Sebastian Mödersheim and Alessandro Bruni. “AIF-omega: Set-Based Protocol
+Abstraction with Countable Families”. In: Principles of Security and Trust: 5th
+International Conference, POST 2016, Held as Part of the European Joint
+Conferences on Theory and Practice of Software, ETAPS 2016, Eindhoven,
+The Netherlands, April 2–8, 2016, Proceedings. Edited by Frank Piessens and
+Luca Viganò. Berlin, Heidelberg: Springer Berlin Heidelberg, 2016, pages 233–
+253. isbn: 978-3-662-49635-0. doi: 10.1007/978-3-662-49635-0_12. url:
+http://dx.doi.org/10.1007/978-3-662-49635-0_12.
+[14]
+Sebastian Mödersheim and Paolo Modesti. “Verifying sevecom using set-based
+abstraction”. In: Wireless Communications and Mobile Computing Conference
+(IWCMC), 2011 7th International. IEEE. 2011, pages 1164–1169.
+[15]
+A. W. Roscoe, editor. A Classical Mind: Essays in Honour of C. A. R. Hoare.
+Hertfordshire, UK, UK: Prentice Hall International (UK) Ltd., 1994. isbn: 0-
+13-294844-3.
+[16]
+Christoph Weidenbach. “Towards an Automatic Analysis of Security Protocols
+in First-Order Logic”. In: Automated Deduction — CADE-16: 16th International
+Conference on Automated Deduction Trento, Italy, July 7–10, 1999 Proceedings.
+Berlin, Heidelberg: Springer Berlin Heidelberg, 1999, pages 314–328. isbn: 978-
+3-540-48660-2. doi: 10.1007/3-540-48660-7_29. url: http://dx.doi.org/
+10.1007/3-540-48660-7_29.

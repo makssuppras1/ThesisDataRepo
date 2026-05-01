@@ -55,15 +55,13 @@ def plot_pca_tsne_figures(
     *,
     department_color_map: dict[str, tuple[float, float, float]] | None = None,
 ) -> None:
-    """PCA + t-SNE scatter PNGs (clusters, publisher, faculty) and ``tsne*_coords.npy``."""
-    pub_col = cfg.columns_publisher
+    """PCA + t-SNE scatter PNGs (clusters, department, department+cluster blobs) and ``tsne*_coords.npy``."""
     fac_col = cfg.columns_faculty
     fig_dir = cfg.output_dir / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
     emb_disk = normalize(np.asarray(emb_disk, dtype=np.float64), norm="l2", axis=1)
 
     dept_legend = (fac_col.strip() or "Department") if fac_col else "Department"
-    pub_legend = (pub_col.strip() or "Publisher") if pub_col else "Publisher"
     if fac_col in df.columns and department_color_map is None:
         department_color_map = make_department_color_map(df[fac_col].fillna("unknown"))
 
@@ -107,15 +105,14 @@ def plot_pca_tsne_figures(
             fig_dir / f"{tag}_clusters.png",
             legend_title="cluster_id",
         )
-        if pub_col in df.columns:
+        if fac_col in df.columns:
             scatter_2d(
                 t2,
-                df[pub_col].fillna("unknown"),
-                f"t-SNE 2D (perplexity≈{use_p:.0f}, publisher)",
-                fig_dir / f"{tag}_publisher.png",
-                legend_title=pub_legend,
+                df[fac_col].fillna("unknown"),
+                f"t-SNE 2D (perplexity≈{use_p:.0f}, department)",
+                fig_dir / f"{tag}_department.png",
+                legend_title=dept_legend,
             )
-        if fac_col in df.columns:
             scatter_2d_department_with_cluster_blobs(
                 t2,
                 df[fac_col].fillna("unknown"),

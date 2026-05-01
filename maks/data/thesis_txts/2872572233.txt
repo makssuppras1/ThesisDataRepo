@@ -1,0 +1,2370 @@
+==PAGE:1==
+An Extensible Lean Code Formatter
+En Udvidelig Lean Kode Formaterer
+Master Thesis
+DTU Compute
+Department of Applied Mathematics and Computer Science
+==PAGE:2==
+==PAGE:3==
+An Extensible Lean Code Formatter
+En Udvidelig Lean Kode Formaterer
+Master Thesis
+June, 2025
+By
+Frithjof Prochnow Sletten
+Copyright:
+Reproduction of this publication in whole or in part must include the cus­
+tomary bibliographic citation, including author attribution, report title, etc.
+Cover photo:
+Vibeke Hempler, 2012
+Published by:
+DTU, Department of Applied Mathematics and Computer Science,
+Brovej, Building 118, 2800 Kgs. Lyngby Denmark
+==PAGE:4==
+Abstract
+As programming languages increasingly adopt automatic code formatters to standardise
+style and lower the barrier to entry for contributors, the Lean programming language re­
+mains without a robust formatting solution. Formatting Lean code is uniquely challenging
+due to its runtime­extensible syntax and context­sensitive constructs, such as do­notation,
+which require nuanced handling. In this thesis, we introduce an extensible formatting sys­
+tem for Lean built on top of the Pretty Expressive pretty printer. Central to our approach is
+the concept of bridges, which enable formatting rules to negotiate layout constraints with
+one another. This allows for declarative, composable formatting logic while supporting
+new syntax extensions. To ensure performance, we develop a pruning algorithm that dis­
+cards invalid formatting combinations early. Our implementation demonstrates a proof of
+concept by formatting 95% of the Lean Batteries library, which contains over 33,000 lines
+of code, in just 1.7 seconds, showing that our approach is both extensible and reasonably
+efficient given the complexity of Lean.
+ii
+An Extensible Lean Code Formatter
+==PAGE:5==
+Contents
+Abstract . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ii
+1
+Introduction
+1
+2
+Pretty Printing
+4
+2.1
+Formatting
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4
+2.2
+Pretty Expressive . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+3
+Formatting with Bridge Constraints
+11
+3.1
+Syntax extentions
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+3.2
+Bridges
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+3.3
+The Any Solution Problem . . . . . . . . . . . . . . . . . . . . . . . . . . . . 17
+3.4
+Measure . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+3.5
+MeasureSet . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+3.6
+Resolving . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 30
+4
+Implementation In Lean
+32
+4.1
+Debug friendly Architechture
+. . . . . . . . . . . . . . . . . . . . . . . . . . 32
+4.2
+Performant Architecture . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 33
+4.3
+Formatting rules
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 33
+4.4
+Tooling . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 41
+4.5
+Performance in Lean . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 45
+5
+Evaluation
+50
+5.1
+Language coverage
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 50
+5.2
+Format repository performance . . . . . . . . . . . . . . . . . . . . . . . . . 52
+5.3
+Comparison to Pretty Expressive . . . . . . . . . . . . . . . . . . . . . . . . 54
+6
+Conclusion
+55
+6.1
+Future work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 55
+Bibliography
+57
+An Extensible Lean Code Formatter
+iii
+==PAGE:6==
+iv
+An Extensible Lean Code Formatter
+==PAGE:7==
+1
+Introduction
+Many programming languages like Go, Python and JavaScript have recently adopted
+automatic formatters to ensure that projects have a standard code style. These format­
+ters lower the barrier to entry for new contributors and make it easier to navigate larger
+projects. Unfortunately, there is currently no adequate code formatter for Lean. Lean is an
+extensible programming language, primarily used for proving theorems. Formatting Lean
+code is a challenging problem due to its vast and runtime­extensible syntax. Therefore,
+it must be possible to extend the formatter with new rules, and ideally, formatting rules
+should account for new syntax that may be added to the language in the future. This
+is complicated by some syntax having special requirements, such as do­notation, which
+should be placed on the previous line to avoid double indentation, as shown in Listing 1.1.
+This is further complicated by the fact that function applications that end with do­notation
+should be formatted the same way. However, other keywords, such as ”let”, should not
+be allowed to be placed on the preceding line. This is further complicated by the fact
+that ”:=” and ”do” want to increase indentation by two when used individually. However,
+when used together on the same line, only the last syntax on the line should increase
+indentation.
+1
+def add (a b : Nat) : IO Nat := do -- "do" is placed on the preceding line
+2
+return a + b
+3
+def add (a b : Nat) : Nat := Id.run do -- "Id.run do" is placed on the preceding line
+4
+return a + b
+5
+def add (a b : Nat) : Nat :=
+6
+let result := a + b -- "let" should be on its own line
+7
+result
+Listing 1.1: Example of some syntax being placed on the preceding line
+While naively hard­coding these constraints by examining the next syntax is a possibility, it
+would prevent future syntax from being formatted the same way without changing the ex­
+isting formatters. At times, it would also require looking more than a single syntax ahead,
+for example, whether function applications should stay on the previous line depends on
+the content. This approach would grow unsustainable as more syntax is added. There­
+fore, we prefer treating these options as patterns that can be used by formatting rules
+An Extensible Lean Code Formatter
+1
+==PAGE:8==
+to communicate with each other. This communication also addresses issues related to
+comments, as we can now communicate that a newline must follow the formatting rule.
+Furthermore, it can be written in a declarative style, making it easier to reason about.
+While there are a plethora of pretty printers available, we are aware of none that currently
+support this kind of pattern.
+In this thesis, we construct an algorithm that allows documents to influence one another.
+We call this concept bridges, since it bridges the gap between two formatting rules and
+lets them negotiate the spacing between them. This negotiation can fail, since not all
+combinations of documents are valid. Therefore, we have devised an algorithm to limit
+our search to valid document combinations by pruning away combinations that cannot
+lead to a solution early. We extend the Pretty Expressive formatter[1] due to its highly
+flexible and easy­to­extend syntax, while delivering fairly good performance.
+To demonstrate that these extensions are efficient and can be utilised to produce an exten­
+sible Lean formatter, we show that the Batteries library [2], which contains approximately
+33,000 lines of code, can be formatted in 1.7 seconds. Excluding the time it takes to find
+the CST.
+After a walkthrough of the necessary background, the rest of the thesis follows our con­
+tributions.
+• In section 3, we extend Pretty Expressive to pass context between documents with
+minimal performance overhead. This extension makes it easy to support comments
+and enables handling interactions between different formatting rules.
+• In section 4, we create an implementation in Lean, build a suite of tools that enable
+adding formatting rules for new user­defined syntax, and tools for debugging them.
+• In Section 4.5, we show how to make pretty expressive 2­4 times faster using data­
+oriented optimisations.
+• In Section 5.1, we demonstrate that the formatter can format 95% of the Lean bat­
+teries library using 314 formatting rules.
+• In Section 5.3, we show that bridges have a negligible impact on performance, and
+that data­oriented techniques can be used to make up the difference.
+2
+An Extensible Lean Code Formatter
+==PAGE:9==
+Finally, we conclude that our formatter is a promising approach for formatting Lean, as
+discussed in Section 6. Discuss the future work required to utilise the formatter in real­
+world projects.
+An Extensible Lean Code Formatter
+3
+==PAGE:10==
+2
+Pretty Printing
+2.1
+Formatting
+In the following section, we will introduce influential formatters in the wild. Since this
+formatter is primarily based on PrettyExpressive [1], we will follow the naming scheme of
+PrettyExpressive to facilitate more straightforward comparison of features among different
+printers.
+2.1.1
+Hughes printer
+The inspiration for many future pretty printers was introduced by Hughes in 1995[3]. The
+core idea was to automatically select the best layout for a document using a greedy algo­
+rithm. Documents are constructed using the primitives
+text s write string s containing a single line
+nest i Increase the indentation by i, which is used in <$>
+dl <$> dr Concatenate two documents vertically
+dl <+> dr Concatenate two documents horizontally, the entire right document
+dl <|> dr provide the choice between 2 alternative layouts.
+Documents are constructed using <+> for horizontally aligned concatenating documents
+and <$> for vertically aligned concatenation. As an example, consider this document.
+text ”Hello ” <+> (text ”aligned” <$>
+text ”concatenation”)
+Which would be rendered in the following way:
+Hello aligned
+concatenation
+The main way of providing different formatting layouts was through a sep function that
+takes a list of possible layouts that would either be combined using <+> or <$>.
+4
+An Extensible Lean Code Formatter
+==PAGE:11==
+2.1.2
+Wadler printer
+Wadler[4] simplified this design and allowed unaligned concatenation <>. He defined the
+pretty printing language using the following constructs
+text s write string s containing a single line
+nest i Increase the indentation by i, which is used in nl
+nl Create a newline and indent according to the current indentation
+dl<>dr Concatenate two documents
+This allows us to write documents in the following way. Where nest i increases the in­
+dentation by i, which means every time we have a new line nl
+text ”Hello ” <> (text ”unaliged” <>
+nest 2 ( nl <> text ”concatenation”))
+They would be rendered in the following way:
+Hello unaliged
+concatenation
+To define alternative layouts, Wadler provides the group function, which considers two
+layouts. One where we flatten the content by replacing all newlines with spaces, and one
+where the layout is left untouched. This is somewhat limiting because in some languages
+like Lean it is possible to define optional ”;” after a let binding, which only has to be there
+if we want to write more on the same line. However, it is very safe, since the user cannot
+produce invalid layouts.
+2.1.3
+Derek printer
+Derek introduced another influential pretty printer [5]. This printer trades expressiveness
+for performance. In fact, the pretty printing step never needs to look at more than a single
+line. It can therefore format the text in O(n) time and requires only O(m) space, where n
+is the size of the document and m is the maximum length of a line. The printer achieves
+this by providing groups of text that ideally should not be broken, followed by either the
+option to start a new line or always start a new line. This design assumes that another
+process runs in parallel and can accurately determine where newlines should be placed.
+This printer is also limited in that it can only output whitespace differences.
+An Extensible Lean Code Formatter
+5
+==PAGE:12==
+2.1.4
+Inko Formatter
+An alternate formatter loosely inspired by Wadler, was created by Yorick Peterse to format
+Inko[6]. His approach builds a tree primarily using the two types a Node and Group. A Node
+contains text that must be grouped together, and a group collects an array of Nodes that
+must either be placed on the same line or all Nodes will be placed on their own lines.
+This system allows nesting groups that will break independently, which means that just
+because the outer group is split into multiple lines, it does not necessarily affect the inner
+groups. To allow altering the code formatted in response to how the code is wrapped
+they introduce an IfWrap node, that takes 3 arguments: A reference to the Group that
+may wrap, a layout when the Group has been wrapped and another layout if the group
+has not been wrapped. IfWrap allows adding trailing commas to lists or surrounding a
+section in parentheses.
+2.1.5
+Bernardy Printer
+Bernardy’s primary goal is to produce visually appealing output at the expense of speed
+[7]. It points out that due to the greedy nature of the Hughes printer, there are instances
+where it fails to produce optimal results. Bernardy introduces the Pareto frontier to pretty
+printing, which is used to compare partial solutions, called measures, to determine if one
+of them is strictly better than the other. The goal of a measure is to represent a possible
+layout using the minimal amount of work, while still accurately reflecting its characteristics.
+Bernardys’ measures consist of maxWidth, height, and lastWidth. If we have two options
+and one of them is strictly better than the other, then there is no reason to keep the inferior
+one. These optimisations make it fairly fast.
+2.2
+Pretty Expressive
+Pretty expressive[1] is primarily based on the Bernardy printer and aims to address the fol­
+lowing concerns. The Bernardy printer fails if the width exceeds the specified limit. Pretty
+Expressive will fall back to choosing any option quickly through a property it calls ’tainted’.
+Furthermore, Pretty Expressive supports a wider variety of styles, whereas the Bernardy
+printer is limited to aligned concatenation. Pretty Expressive defines a document D to
+consist of the following elements. This is the definition of a pretty printing language(PPL)
+that we base our implementation on.
+6
+An Extensible Lean Code Formatter
+==PAGE:13==
+dl <> dr
+Concatenate two documents
+dl <|> dr
+Choice between two documents
+text t
+Renders a piece of text at position
+nl
+Newline and indent according to the current indentation.
+When flattened, render as text " " instead
+flatten
+Render the document d in a single line
+nest i d
+Increase indentation by i for all newlines in d
+align d
+Set indentation equal to the current column in d
+Next, we will go through the properties that make Pretty Expressive fast.
+2.2.1
+Cost factory
+The main contribution of Pretty Expressive is to make the cost customizable to fit the
+user’s needs. This is achieved by introducing a cost function F that abstracts away the
+calculation of the cost, which operates on a user­definable cost type τ. The factory pro­
+vides functions nlF and textF c l, where c is the start position of the text and l is the length
+of the text. Furthermore, costs can be compared and combined with ≤F and +F.
+In this thesis, we will adhere to the default implementation of the cost factory, which aims
+to minimise overflow. In the following equations, w is the page width, which in Lean is
+typically 100.
+τ = N×N
+(w, h) ≤F (w′, h′) =
+
+
+
+
+
+h ≤h′
+if w = w′
+w ≤w′
+(w, h)+F(w′, h′) = (w+w′, h+h′)
+nlF = (0, 1)
+textF(c, l) =
+
+
+
+
+
+(b(2a + b), 0)
+if c + l > w
+(0, 0)
+otherwise
+where
+a = max(w, c) −w
+b = c + l −max(w, c)
+An Extensible Lean Code Formatter
+7
+==PAGE:14==
+2.2.2
+Measure
+Figure 2.1: A measure shown with the default cost in Pretty expressive
+Similar to Bernardy, Pretty Expressive uses measures to build up its solution. However,
+due to the introduction of the cost factory, a measure primarily consists of the cost and
+the last line, as shown in Figure 2.1. Furthermore, it contains a choice­less document that
+can be used to construct the output if the measure is found to be optimal.
+2.2.3
+Pareto Frontier
+Figure 2.2: The Pareto frontier only considers options if they have
+Pretty expressive uses a Pareto frontier, similar to Bernardy, to eliminate inferior mea­
+sures based on cost and last as seen in figure 2.2. It guarantees that no 2 measures
+in the set have the same cost and last. This optimizations is useful, because when we
+concatenate 2 documents we must render the right document from all considered left po­
+sitions. Therefore reducing how many measures are in the left set significantly speeds up
+the algorithm.
+8
+An Extensible Lean Code Formatter
+==PAGE:15==
+2.2.4
+DAG and Cache
+(a) Tree
+(b) DAG
+Figure 2.3: We can dramatically reduce the number of unique nodes in a tree by repre­
+senting the tree as a DAG, which enables caching shared computations.
+Similar to the Bernardy printer, Pretty Expressive chooses to see the possible documents
+as a directed acyclic graph(DAG). This allows caching and reusing partial results. To see
+why this is important, consider a document with 100 statements. Each statement can be
+placed on the same line with a semicolon or put on a new line(See figure 2.3). Since
+every choice has two possibilities, there would be a total of 2100 possible layouts. Many
+of these layouts contain repeated sub­elements that can be cached.
+An Extensible Lean Code Formatter
+9
+==PAGE:16==
+2.2.5
+Tainted
+1
+def unreasonablyLongFunctionName
+2
+(a b : Nat) : Nat :=
+3
+a + b
+Listing 2.1: Example of a function that is beyond the computation width 30 and the page
+width 25
+Pretty Expressive lets the user define a computation width W, after which the printer will
+give up and choose any solution. This computation width is separate from the page width,
+which is used to determine how wide the page preferably should be. Typically, the page
+limit is set to 80 characters, and the computation width is defined as 100 characters. This
+means that even if the code must overflow slightly, the printer will choose to minimise the
+amount of overflow. This taintedness is used to guarantee the O(nW4) runtime. However,
+this also implicitly creates invariant 1.
+Invariant 1. If the document d has a valid solution, then at any point during the resolution
+of d, all considered measures must lead to a valid solution.
+10
+An Extensible Lean Code Formatter
+==PAGE:17==
+3
+Formatting with Bridge Constraints
+The problem our extension aims to solve is conditionally concatenating two documents.
+The end of the first document must match the start of the second document as shown in
+figure 3.1.
+Figure 3.1: Concatenate two sets of documents, where the end of the first document must
+match the start of the next.
+Solving this problem yields several desirable properties when working with composable
+formatting rules.
+• It allows passing context between formatting rules, which means we can condition­
+ally format based on different formatting patterns. This is important for supporting
+do, by, structs, and more in Lean.
+• It makes dealing with end­of­line comments easier, since a formatting rule can tell
+the next formatting rule that it must start on the next line.
+• Because the formatting rules can agree on the spacing between them, we do not
+end up with doubled whitespace
+In this section, we will define bridges and how they can be used to solve the do­notation
+problem. Afterwards, we will look at how bridges interact with flatten, and why this must
+be treated with care. A bigger problem for bridges was that they break invariant 1, which
+is required by tainted to find a solution quickly. Therefore, in Section 3.3, we will define
+how to restrict the search space only to valid solutions. Finally, we will update the Pretty
+Expressive algorithm to support only examining valid solutions.
+An Extensible Lean Code Formatter
+11
+==PAGE:18==
+3.1
+Syntax extentions
+We extend the Pretty Expressive syntax defined in section 2.2. Our primary additions to
+the syntax are provide and require. Their purpose is to pass context between documents.
+provide b Give the next element the option to choose from one of the bridges in b.
+require b The previous document must have ended with a bridge that overlaps with b,
+otherwise the document fails.
+Furthermore, we add bubbleComment and cost. However, we won’t focus on their im­
+plementation, as they can be easily added and will be explained separately from the al­
+gorithm for simplicity.
+bubbleComment c Move a comment after the previous newline. This is used if comments
+are in an illegal place or if the comment exceeds the width of the page.
+cost c Disincentivize the formatter from doing an action. This cost is weighted
+equally to newlines. Amongst other things, it can be used to tell the
+formatter that we should avoid newlines in the middle of parentheses.
+3.2
+Bridges
+The primary motivation for bridges is to support Lean extensible Syntax without requiring
+parent formatting rules to handle all child syntax cases specifically. We encountered a
+series of problems where formatting rules need to be aware of their parent and child
+formatting rules. The two primary problems we solve are comments, see section 4.3.7
+and do­notation problems 3.2.2
+Functionally, bridges are a set that also supports < and = operations. This is achieved
+by using a binary mask.
+12
+An Extensible Lean Code Formatter
+==PAGE:19==
+B :={bf, bnl, bhnl, bs, bn, bi}
+B ::= b ⊆B
+B < B
+int(B) < int(B)
+B = B
+int(B) = int(B)
+b∅:= 0 bf := 1 bnl := 2 bhnl := 4 bs := 8 bn := 16 bi := 32
+When formatting documents, we must ensure that the ending bridge b′ of the previous
+document connects with the start bridge of the following document. The bridge b′ starts
+out as bf, meaning it will transform to any value. To alter the bridge b” that must come
+after a given document, we use provide b.
+b′′ = b ∩p b′
+provide b can be used to introduce new bridges such as bi, if the current bridge is bf. Oth­
+erwise, it will find the intersection between b and b’. require b expands the combination
+of the existing bridge b′ to all possible options (bridgeSpaces(b ∩r b′)).
+∩p : B →B →B bl ∩p br =
+
+
+
+
+
+
+
+
+
+
+
+
+
+br
+if bl = bf
+bl
+if br = bf
+bl ∩bl
+otherwise
+∩r : B →B →B bl ∩r br =
+
+
+
+
+
+
+
+
+
+
+
+
+
+br
+if bl = bf ∧br ⊆{bhnl, bnl, bs, bn}
+bl
+if br = bf ∧bl ⊆{bhnl, bnl, bs, bn}
+bl ∩bl
+otherwise
+3.2.1
+Bridge transformation
+One of our goals is to remove double­spacing issues. Bridges can accomplish this be­
+cause concatenation is defined as an overlap between the options. Meaning that if we
+An Extensible Lean Code Formatter
+13
+==PAGE:20==
+specify the same bridge twice, it is equivalent to specifying it once.
+provide bs <> provide bs ≡provide bs
+For bridges to carry this meaning, they must replace the whitespace that would otherwise
+have been defined, meaning we do not want the library to contain whitespace written as
+text ” ” and nl. Therefore, we define the standard bridges as follows.
+• bs: expands to text ” ”
+• bnl: expands to nl and flattens to bs
+• bhnl: expands to nl and flattens to b∅
+• bn: expands to text ””
+• bf: The default bridge, it will expand to any of the bs, bnl, bhnl, bn automatically
+• bi: Is used to indicate that a value wants to be placed on the same line. This is used
+to support do/by notation
+• b∅: There are no options; this bridge is equivalent to fail
+This expansion can summarised as a transformation from a single bridge B to a document
+D.
+bridgeSpace : B →D bridgeSpace b =
+
+
+
+
+
+
+
+
+
+
+
+
+
+text ” ”
+if b = bs
+nl
+if b = bnl ∨b = bhnl
+text ””
+otherwise
+Which allows us to define the transformation from a set of bridges ⃗B to a document D.
+Note that the case of |b| = 0 is unreachable due to how we limit search in section 3.3.
+bridgeSpaces : ⃗B →De
+bridgeSpaces b =
+
+
+
+
+
+
+
+
+
+
+
+
+
+(bridgeSpace b1) <|> bridgeSpaces (b \ b1)
+if b1 ∈b ∧|b| > 1
+bridgeSpace b1
+if b1 ∈b ∧|b| = 1
+fail
+otherwise
+14
+An Extensible Lean Code Formatter
+==PAGE:21==
+3.2.2
+Bridge patterns
+Bridges were introduced to solve communication issues between independent syntax el­
+ements via patterns. A common pattern when formatting lean is the do edgecase. When
+we look at the functions main and mainDo in listing 3.1, we see that they have different
+requirements for where the next character is placed after the ”:=” token. We call this pat­
+tern immediate value. For the formatter to allow this pattern, it must be provided by the
+assignValue syntax (”:=”) and required by the do notation syntax (”do”). In the case of
+immediate value, the parent syntax surrenders control of the formatting to the child syn­
+tax. This means it will not increase nesting or adjust spacing between parent and child
+elements.
+1
+def main : Nat :=
+2
+2
+3
+4
+def mainDo : IO Nat := do
+5
+return 2
+Listing 3.1: do/by pattern
+We decided to introduce patterns instead of just looking ahead and add special handling
+for do/by/structs/... due to the extensible nature of Lean. When implementing look­ahead
+or look­behind, we are always restricted when introducing new syntax, because if we were
+to add a new syntax that is supposed to behave similarly to these, we would have to modify
+an existing formatter. By using formatting patterns that both parties agree to, we can add
+new syntax, such as if statements, and allow them to use do/by notation. The downside
+to this approach is that it is slower to introduce new patterns. However, we believe that
+with time, necessary patterns will emerge.
+3.2.3
+Operators
+We want to make it easy to use bridges for all whitespace in Lean, because this enables
+us to reason about when we can place comments. Therefore, we introduce the following
+operators as shorthand for adding bridges.
+An Extensible Lean Code Formatter
+15
+==PAGE:22==
+dl <_> dr = dl <> provide bs <> dr
+dl <$$> dr = dl <> provide (bnl ∪bhnl) <> dr
+dl <$$$> dr = dl <> provide (bhnl) <> dr
+dl <**> dr = dl <> provide (bs ∪bnl ∪bhnl) <> dr
+b <! d = require b <> d
+d !> b = provide b d
+3.2.4
+Flatten
+Flatten traditionally converts all newlines to spaces, and hard newlines become impossi­
+ble. Which means we define the flatten operation for bridges as follows.
+flattenBridge B →B
+flattenBridge b =
+
+
+
+
+
+flattenBridge(b \ {bnl} ∪{bs})
+bnl ∈b
+b \ {bhnl}
+otherwise
+However, because bridges are the connecting element between 2 documents, there is
+a delay when we perform the flatten operation. Let us look at the following example to
+motivate the interaction between bridges and flatten.
+1
+-- the document being formatted
+2
+nest 2 (text "def main :=" <**>
+3
+flatten(text "1" <$$> text "+" <$$> text "2" <_> text "-- comment" <$$$> text "" ))
+4
+5
+-- Ideally rendered as (with a page width of 22)
+6
+def main :=
+7
+1 + 2 -- comment
+Listing 3.2: Bridges at the edge of flatten, should be treated as if they are outside of flatten
+The problem here is that bridges are the binding element between 2 documents. This
+introduces a couple of issues.
+1. A bridge’s value is uncertain until it meets a text or require. Therefore, even though
+the <**> operator is defined before flatten, it could be argued that it should be flat­
+tened as well. Due to the expansion happening at text ”1”.
+2. If we were to define comments at the end of flattened sections then it cannot flatten
+the final <$$$> and the entire document would fail.
+16
+An Extensible Lean Code Formatter
+==PAGE:23==
+3. The following document would fail text ”hello” <$$> flatten(text ”” <$$> text ”world”),
+because the latter newline would be flattened to a space, but the first would not be
+aware of this change.
+Therefore, we choose to treat bridges at the edge of a flatten section as outside of flatten.
+We will describe how this is implemented in section 3.3.4
+3.3
+The Any Solution Problem
+Figure 3.2: Constraints calculate input bridge →output bridges mappings for every node
+in the tree. This allows pruning the dashed arrows by only looking at their constraints,
+since we know they cannot lead to a solution.
+To ensure our algorithm is compatible with PrettyExpressive, it must be capable of quickly
+selecting a valid solution when the computation width is exceeded. However, bridges in­
+troduce dependencies between documents, which means only a subset of possible com­
+binations are valid. If we fail to restrict the search space to these valid combinations, we
+risk reaching a point where no valid solution can be selected. To avoid this, we define a
+set of constraints that identify unsolvable paths early, allowing us to prune them before
+attempting to solve the problem. It is helpful to think of this problem as a Jigsaw puz­
+zle where, based on the colour alone, we can quickly see that a solution will not lead
+anywhere (See figure 3.2)
+In the following section, we will introduce the following abbreviations ({bs},{bhnl}) to de­
+scribe a document that requires the starting bridge bs and is followed by bhnl. A minimal
+An Extensible Lean Code Formatter
+17
+==PAGE:24==
+example of a document this abbreviation represents is as follows.
+require bs <> provide bhnl
+Before finding the specific solution, let us discuss the performance requirements. We want
+to avoid traversing the tree every time we need to determine if a document is valid, be­
+cause this question must be answered for every concatenation and every choice. There­
+fore, we will only consider solutions that can be calculated and cached once for every
+node in the tree. This enables us to answer these questions by only examining a docu­
+ment and its direct descendants. However, for notation purposes, we will write them as
+recursive definitions.
+3.3.1
+A false start
+<> ({bf},{bf})
+(bf, bs)({bf},{bs})
+<> ({bs,bhnl},{bf})
+<|> ({bs,bhnl},{bs,bhnl})
+(bs, bhnl)({bs},{bhnl})
+(bhnl, bs)({bhnl},{bs})
+(bs, bf)({bs},{bf})
+Figure 3.3: If we were to simplify dependencies to 1 dimension, it would incorrectly find
+paths that do not exist.
+We will begin by examining a dependency approximation that is too simple to motivate
+the need for constraints with more dimensions. This approximation only records the sets
+of possible bridges before and after the document. And then handle dl <|>dr by finding
+the union of the approximations of dl and dr. dl <>dr is calculated by checking if there is
+any overlap between the right bridge of dl and the left bridge of dr, and if that is the case,
+then combine their outer bridges.
+(bs, bhnl) <|>(bhnl, bs) ⇒({bs, bhnl}, {bs, bhnl})
+(ll, lr) <>(rl, rr) ⇒
+
+
+
+
+
+(ll, rr)
+lr ∩rl ̸= ∅
+(∅, ∅)
+otherwise
+18
+An Extensible Lean Code Formatter
+==PAGE:25==
+<> ∅
+(bf, bs){(bs, {bf})}
+<> {(bhnl, {bf})}
+<|> {(bs, {bhnl}), (bhnl, {bs})}
+(bs, bhnl){(bs, {bhnl})}
+(bhnl, bs){(bhnl, {bs})}
+(bs, bf){(bs, {bf})}
+Figure 3.4: When using the constraints C, we can accurately capture the dependencies
+between neighbouring documents, and correctly identify that there is no solution to this
+document
+This approximation is not strong enough. When we examine the document in figure 3.3,
+we have a case where we have an inner document that can either be (bs, bhnl) or (bhnl, bs).
+This inner document is placed between 2 documents that would require it to start and end
+with a bs. Clearly, there is no solution in this situation, but the current approximation would
+be unable to handle this nuance. The core problem is that the approximation involves
+a many­to­many relationship, where it is not possible to determine what removing any
+individual bridge would affect.
+3.3.2
+Constraints
+Based on the false start, we will define constraints C as a mapping from a single bridge
+bl to a set of bridges br. Meaning, given the bridge bl, it is possible to reach all bridges
+in br. C is sorted based on bl for performance reasons. However, we will treat C as a set
+for simplicity. Using these constraints, we correctly identify that there is no solution to the
+problem depicted in figure 3.4.
+C := {(bl, br)|bl ∈B ∧br ⊆B}
+To construct constraintdl <>dr, we begin by iterating over each input bridge to dl and retrieve
+its associated set of reachable bridges via the constraint mapping C. For each of these
+reachable bridges, we check which bridges we can reach through dr. This process allows
+us to derive a refined constraint relation that captures how bridge connectivity is preserved
+An Extensible Lean Code Formatter
+19
+==PAGE:26==
+when composing dl with dr.
+constraint <> (L, R) =
+
+
+
+
+
+
+
+
+
+
+ll,
+[
+(rl,rr)∈R
+rl∈lr
+rr
+
+
+
+
+
+(ll, lr) ∈L, ∃(rl, rr) ∈R : rl ∈lr
+
+
+
+
+
+
+
+We start by defining constraints for text and nl1.
+Which accepts any of the bridges
+bs, bhnl, bn, bn, bf and outputs bf. We choose to accept a variety of bridges to reduce the
+verbosity when writing formatting rules, since we do not have to accept them with require bf .
+constraintnl = constrainttext s = {(b, {bf})|b ∈{bf, bs, bnl, bhnl, bn}}
+Next, we will define constraints provide, since it is the primary way of removing bridges
+from consideration. provide b constrains the bridge to the smallest overlap to the overlap
+between the input bridge bi and b, unless the bi = bf, in which case the bridge can become
+anything. Which we will model with the following set
+constraintprovide b = {(bf, b)} ∪{(b′, b′)|b′ ∈b}
+To demonstrate that the sets accurately model provide, let us examine what happens
+when we concatenate provide {bs, bnl} and provide {bs, bnl}. This is equivalent to pro­
+viding the intersection between two sets.
+provide {bs, bnl} <> provide {bs, bhnl} ≡provide bs
+To see that the concatenated constraints are equivalent to the shortened form, we write
+up their constraints.
+constraint provide {bs, bhnl} = {(bs, {bs}), (bhnl, {bhnl}), (bf, {bs, bhnl})}
+constraint provide {bs, bnl} = {(bs, {bs}), (bnl, {bnl}), (bf, {bs, bhnl})}
+constraint provide {bs} = {(bs, {bs}), (bf, {bs})}
+By applying constraint concatenation systematically, we observe that both bhnl and bnl are
+eliminated, leaving only bs. This demonstrates that the constraint behaves as intended,
+correctly modelling provide.
+1It was considered defining special logic for nl, that would prevent double newlines or space followed by
+a newline. However, we decided against it because the only reason to use nl is to achieve double spacing.
+20
+An Extensible Lean Code Formatter
+==PAGE:27==
+When we require a standard bridge, we also allow bf to handle situations where there are
+no previous requirements for the bridge. The right side is bf, since require consumes the
+bridge.
+constraintrequire b =
+
+
+
+
+
+{(b′, {bf})|b′ ∈b} ∪{(bf, bf)}
+if b ⊆{bs, bhnl, bnl, bn}
+{(b′, {bf})|b′ ∈b}
+otherwise
+Meta Leaf­Nodes, such as cost and bubbleComment, do not affect the bridges and
+should pass through existing bridges. They map all bridges to themselves. An argument
+could be made that these meta nodes should wrap a document. However, due to the
+existence of text s where |s| = 0, it was not possible to avoid nodes that do not affect the
+bridge. We choose to treat empty text specially because a lot of Syntax in Lean might not
+be there sometimes. And if not handled, it introduces double spacing.
+constrainttext ”” = constraintcost = constraintbubbleComment = {(b, b)|b ∈B}
+Next, let us define the choice operator <|>. When we have a choice between 2 differ­
+ent documents with the constraints L and R, the new constraints must represent that the
+constraints of both child documents are reachable. We combine the right bridges if both
+sets contain the same left bridge. If only one of the sets includes the left bridge, then that
+set dictates the right bridges for that left bridge. To achieve an O(|L| + |R|) running time,
+C is always ordered based on the left bridge, which allows us to check whether both sets
+contain the same left bridge without searching the entire list each time. This is similar to
+merge sort.
+constraint <|> (L, R) =
+
+(b, vL) | (b, vL) ∈L ∧∀(b′, _) ∈R, b′ ̸= b
+	
+∪
+
+(b, vR) | (b, vR) ∈R ∧∀(b′, _) ∈L, b′ ̸= b.
+	
+∪
+{(b, vL ∪vR) | (b, vL) ∈L ∧(b, vR) ∈R}
+3.3.3
+Restricting the search to valid solutions
+To determine valid solutions, we maintain two sets of bridges: one representing bridges
+that can precede bl, and the other those that can follow br, the current document. When
+rendering the documents, both sets are initialised to the flexible bridge bl = br = bf,
+meaning we accept any start and any ending to the document. Given the constraints
+we can now answer the question: Given there is a solution to dl <>dr, the constraint C
+An Extensible Lean Code Formatter
+21
+==PAGE:28==
+belonging to dr, and we must return one of bridges in br, which right bridges is dl restricted
+to if we want to be guaranteed to find a solution? To answer this question, we union all
+left bridges rl where the corresponding right bridges rr overlap with the expected bridge
+br. This limits the dl measures with an ending bridge that dr can connect to a bridge in br
+restrictBridges(C, br) :=
+[
+(rl,rr)∈C
+rr∩br̸=∅
+rl
+The other question we need to ask is: Given there is a solution to dl <|>dr , the constraints
+L R corresponding to dl and dr, and we are given the left bridge bl, and the right bridge
+br. do dl and dr also contain a solution? To answer this question, we define the predicate
+hasSolution:
+hasSolution(S, bl, br) := ∃(l, r) ∈S : (l ∈bl) ∧(r ∩br ̸= ∅)
+Which expresses that there exists a constraint where l is the left bridge and r is the right
+bridge. And therefore, a solution exists. We can then use this predicate to define whether
+dl and dr have a solution.
+leftHasSolution := hasSolution(L, bl, br)
+rightHasSolution := hasSolution(R, bl, br)
+If only one of leftHasSolution or rightHasSolution holds, we must eliminate the other
+from further consideration. This is a necessary step because otherwise, we would violate
+the invariant 1 required by tainted. By induction, we are guaranteed that there will always
+be a solution if the original document had a solution.
+3.3.4
+Flatten
+<> {(bf, {bf})}
+(bf, bnl ∪bhnl){(bf, {bnl,bhnl})}
+<> {(bhnl, {bf})}
+<|> {(bs, {bnl}), (bhnl, {bs})}
+(bs, bnl){(bs, {bnl})}
+(bhnl, bs){(bhnl, {bs})}
+(bs, bf){(bs, {bf})}
+Figure 3.5: Document which paths will change by flatten
+22
+An Extensible Lean Code Formatter
+==PAGE:29==
+A problem with what we have discussed so far is that flatten breaks the assumption that
+we only communicate through bridges (See figure 3.5 & 3.6). And this can break and
+create new paths. To address this issue, we calculate a second path used in the case
+of flatten, where we flatten all provide and require statements using flattenBridges
+defined in section 3.2.4
+<> {(bf, {bf})}
+(bf, bs ∪bhnl){(bf, {bs})}
+<> {(bs, {bf})}
+<|> {(bs, {bs})}
+(bs, bnl){(bs, {bs})}
+(bhnl, bs){∅}
+(bs, bf){(bs, {bf})}
+Figure 3.6: When flattened, the document is still legal, but due to different reasons
+Delayed flatten
+flattenF⊥
+<> F↓
+<> F→
+provide bnl F⊥
+<> F⊤
+text ”(”F⊤
+text ”1”F⊤
+<> F←
+text ”)”F⊤
+provide bnl F⊥
+Figure 3.7: Example of flattening being delayed until a non­empty node is encountered
+To support the delayed flatten as described in section 3.2.4, we must introduce more
+states. Since flatten is not applied immediately, but instead waits until the first non­empty
+leaf node. We end up with the five states F. We have the unflattened state F⊥, the flattened
+State F⊤, the eventually flattened state F↓, the left flattened state F←, and finally the right
+flattened state F→. To determine how to switch between these states, we must be able to
+An Extensible Lean Code Formatter
+23
+==PAGE:30==
+determine whether a document is empty.
+F ∈{F⊤, F↓, F←, F→, F⊥}
+Let empty be a function
+D →B which determines whether a document is empty. A
+document d is empty if d ∈{provide b, text ””, cost c, bubbleComment s} or if all of the
+child nodes are empty. This property requires that empty must return the same value for
+the child documents dl and dr for all choices dl <|>dr . This constrains the documents
+that the user is allowed to construct. However, in most cases, partially empty choices
+can be rewritten to non­empty choices by expanding the choice to include its neighbours.
+To ensure constant­time (O(1)) access, the result of empty is cached during document
+construction, since this allows it to be calculated based on its direct descendants.
+Invariant 2. For all documents dl <|> dr then empty dl = empty dr
+For each of the five F states, we cache constraints C. Similar to empty, this value is
+created during document creation since it only depends on its immediate children. This
+again guarantees O(1) access time after it has been created. However, the creation scales
+exponentially O(|B|2) with the number of bridges, due to the calculation of constraint <> .
+constraint D →F →C
+Next, we define how the approximations are calculated for transitional elements between
+flattened states. The intuition for concatenation is that we keep delaying until we find
+non­empty documents.
+constraint flatten d F⊥= constraint dr F↓
+constraint dl <>dr F⊥= constraint <> (constraint dl F⊥, constraint dr F⊥)
+constraint dl <>dr F↓= constraint <> (constraint dl F↓, constraint dr F↓)
+24
+An Extensible Lean Code Formatter
+==PAGE:31==
+constraint dl <>dr F↓=
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+constraint <> (constraint dl F→, constraint dr F←)
+if ¬ empty(dl) ∧¬empty(dr)
+constraint <> (constraint dl F⊥, constraint dr F↓)
+if empty(dl) ∧¬empty(dr)
+constraint <> (constraint dl F↓, constraint dr F⊥)
+if ¬empty(dl) ∧empty(dr)
+constraint <> (constraint dl F⊥, constraint dr F⊥)
+otherwise
+constraint dl <>dr F←=
+
+
+
+
+
+constraint <> (constraint dl F⊤, constraint dr F←)
+if ¬empty(dr)
+constraint <> (constraint dl F←, constraint dr F⊥)
+otherwise
+constraint dl <>dr F→=
+
+
+
+
+
+constraint <> (constraint dl F→, constraint dr F⊤)
+if ¬empty(dl)
+constraint <> (constraint dl F⊥, constraint dr F→)
+otherwise
+To traverse these transitions, we define the helper function flattenSides as can be seen
+in figure 3.7.
+flattenSides :F →D →D →(F, F)
+flattenSides (f, dl, dl) =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(F⊤, F⊤)
+if f = F⊤
+(F→, F←)
+if f = F↓∧¬empty dl ∧¬empty dr
+(F↓, F⊥)
+if f = F↓∧¬empty dl ∧empty dr
+(F⊥, F↓)
+if f = F↓∧empty dl ∧¬empty dr
+(F⊤, F←)
+if f = F←∧¬empty dr
+(F←, F⊥)
+if f = F←∧empty dr
+(F→, F⊤)
+if f = F→∧¬empty dl
+(F⊥, F→)
+if f = F→∧empty dl
+(f, f)
+otherwise
+An Extensible Lean Code Formatter
+25
+==PAGE:32==
+3.4
+Measure
+Figure 3.8: Measure adapted to support bridges.
+When adapting Measure to support bridges, we encounter the problem that we need to
+break the assumption that every Measure contains the same contents. Because bridges
+must connect to other documents, the measure must remember the last bridge chosen
+so it can restrict the following options. Furthermore, to highlight that these measures are
+enough to produce the rendered document, we change their definitions slightly compared
+to Pretty Expressive. A measure contains a choiceless document ˆD with the change that
+nl remembers the indentation i. This change means that the choiceless document no
+longer requires align and nest.
+Choiceless document ¯d ∈¯D = nl i
+| text s
+| ¯D <> ¯D
+A measure can be viewed as a tuple containing the fields last l, cost C, choiceless docu­
+ment ¯D, and right bridge b.
+Measure m ∈M = ⟨l, C, ¯d, b⟩M
+last : M →N last(⟨l, C, ¯d, b⟩M) = l
+doc : M →¯D doc(⟨l, C, ¯d, b⟩M) = ¯d
+cost : M →τ cost(⟨l, C, ¯d, b⟩M) = C
+rightB : M →B rightB(⟨l, C, ¯d, b⟩M) = b
+◦: M →M →M ⟨ll, Cl, ¯dl, bl⟩M ◦⟨lr, Cr, ¯dr, br⟩M = ⟨lr, Cl +F Cr, ¯dl <> ¯dr, br⟩M
+⪯: M →M →B ⟨ll, Cl, ¯dl, bl⟩M ≺⟨lr, Cr, ¯dr, br⟩M = ll ≤lr ∧Cl ≤Cr ∧bl = br
+We can construct a measure using the function ⇓M. And measures ar concatenated using
+26
+An Extensible Lean Code Formatter
+==PAGE:33==
+the ◦function.
+⟨text s, c, i, b ⟩⇓M ⟨c + |s|, textF(c, |s|), text s, b⟩M TextM
+⟨nl , c, i, b⟩⇓M ⟨i, nlF, nl i, bf⟩M LineM
+We construct choiceless documents while creating the measures. This avoids unneces­
+sary string concatenation during measure construction, which is crucial because the vast
+majority of measures will be pruned away. And makes it easy to implement the render
+function ⇓R to display the optimal measure once it has been found.
+⟨l, C, text s, b⟩M ⇓R s RenderText
+⟨l, C, nl i, b⟩M ⇓R ” ” · i RenderLine
+¯dl ⇓R sl
+¯dr ⇓R sr
+⟨l, C, ¯dl <> ¯dr, b⟩M ⇓R sl + sr
+RenderConcat
+An Extensible Lean Code Formatter
+27
+==PAGE:34==
+3.5
+MeasureSet
+Figure 3.9: The Pareto frontier is adapted to account for bridges. We have one frontier
+for each bridge.
+In this section, we will adapt the Pretty expressive resolver to accommodate constraints
+[1]. The core of the resolving algorithm
+Although the measure set operations are mostly the same as in Pretty Expressive, we
+remove taint and lift to simplify the equations. Practically, this means that we only taint
+measures when we see text outside the We define measureset as follows, where m is
+a Measure and ˆm is a promise that can be forced to measure. In our implementation,
+measures m are primarily sorted based on rightB(m), and afterwards based on last(m).
+We guarantee that no two measures are equal. This means that they have a different
+cost, last, or rightB
+∀i ̸= j.¬(mi ⪯mj ∨mj ⪯mi)
+Measure Set S ∈S ::= Tainted( ˆm)
+| Set([m1, ...+, mn]])
+dedup removes duplicate measures from consideration to ensure the variant holds. This is
+necessary because concatenating different measures with the same cost. When merging
+MeasureSets with ⊎, we prefer NonTainted values. However, if both sets are tainted,
+we prefer the left set. For efficiency, merging is done in a similar fashion to mergeSort.
+Therefore, it is important that MeasureSets are primarily sorted by rightB and afterwards
+28
+An Extensible Lean Code Formatter
+==PAGE:35==
+based on last.
+dedup : −→
+M →−→
+M dedup([m0, m1, m2, ..., mn]) = dedup([m1, m2, ..., mn])
+if m1 ⪯m0
+dedup([m0, m1, m2, ..., mn]) = [m0]@dedup([m1, m2, ..., mn])
+if m1 ̸⪯m0
+dedup([m]) = [m]
+⊎: S →S →S Tainted(m) ⊎Tainted(m′) = Tainted(m)
+Set([m1, ...+, mn]) ⊎Tainted(m) = Set([m1, ...+, mn])
+Tainted(m) ⊎Set([m1, ...+, mn]) = Set([m1, ...+, mn])
+Set([m1, ...+, mn]) ⊎Set([m′
+1, ...+, m′
+n′]) = Set([m1, ...+, mn] ⊎[m′
+1, ...+, m′
+n])
+⊎: −→
+M →−→
+M →−→
+M [] ⊎[m1, ...+, mn] = [m1, ...+, mn]
+[m1, ...+, mn] ⊎[] = [m1, ...+, mn]
+[m0, m1, ..., mn] ⊎[m′
+0, m′
+1, ..., m′
+n′] =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[m0]@([m1, ..., mn] ⊎[m′
+0, m′
+1, ..., m′
+n′])
+if rightB(m0) > rightB(m′
+0)
+[m′
+0]@([m1, ..., mn] ⊎[m′
+0, m′
+1, ..., m′
+n′])
+if rightB(m0) < rightB(m′
+0)
+[m0, m1, ..., mn] ⊎[m′
+1, ..., m′
+n′]
+if m0 ⪯m′
+0
+[m0, m1, ...mn] ⊎[m′
+1, ..., m′
+n′]
+if m′
+0 ⪯m0
+[m0]@([m1, ..., mn] ⊎[m′
+0, m′
+1, ..., m′
+n′])
+if last(m0) > last(m′
+0)
+[m′
+0]@([m0, m1, ..., mn] ⊎[m′
+1, ..., m′
+n′])
+otherwise
+An Extensible Lean Code Formatter
+29
+==PAGE:36==
+3.6
+Resolving
+To simplify our implementation of the resolver function ⇓RS, we only taint a solution when
+it reaches text that overflows. This is a slight change from Pretty Expressive, which taints
+the solution when nesting or alignment increases the indentation beyond the computation
+width.
+Note that we do not have to handle failure caused by bridges having no overlap, because
+if there is a solution, then restrictBridges and hasSolution will ensure that they are
+never encountered. To simplify equations, we skip cost and bubbleComment, since their
+implementations are trivial.
+⟨text ””, i, bl ∩p b⟩⇓M m
+⟨provide b, c, i, bl, br, f⟩⇓RS Set([m]) ResolveProvide
+⟨bridgeSpaces (bl ∩r b), c, i, {bf}, {bf}, f⟩⇓RS ms
+⟨require b, c, i, bl, br, f⟩⇓RS ms
+ResolveRequire
+d ∈{text s, nl}
+bl ̸= bf
+⟨bridgeSpaces bl <> d, c, i, {bf}, br, f⟩⇓RS ms
+⟨d, c, i, bl, br, f⟩⇓RS ms
+unresolvedBridges
+text is the only place where we introduce tainted if the text would have exceeded the
+computation width W. Before resolving text and nl, we convert bridges to documents
+using bridgeSpaces.
+c + |s| ≤W
+⟨text, c, i, {bf}⟩⇓M m
+⟨text s, c, i, bf, br, f⟩⇓RS Set([m]) TextRSSet
+c + |s| > W
+⟨text, c, i, {bf}⟩⇓M m
+⟨text s, c, i, bf, br, f⟩⇓RS Tainted(m) TextRSTnt
+⟨nl, c, i, {bf}⟩⇓M m
+⟨nl , c, i, {bf}, br, f⟩⇓RS Set([m]) LineRSSet
+nest n increases the indentation by 2 and align sets indentation to match the current
+column.
+⟨d, c, i + n, bl, br, f⟩⇓RS S
+⟨nest n d, c, i, bl, br, f⟩⇓RS S NestRS
+⟨d, c, c, bl, br, f⟩⇓RS S
+⟨align d, c, i, bl, br, f⟩⇓RS S AlignRS
+As stated previously, when resolving a choice, we must ensure that we do not explore
+any illegal solutions. Therefore, we use the constraints to prune away these paths before
+they are explored.
+hasSolution(constraint(dl, f), bl, br)
+hasSolution(constraint(dr, f), bl, br)
+⟨dl, c, i, bl, br, f⟩⇓RS ml
+⟨dr, c, i, bl, br, f⟩⇓RS mr
+⟨dl <|> dr, c, i, bl, br, f⟩⇓RS ml ⊎mr
+ResolveChoiceBoth
+30
+An Extensible Lean Code Formatter
+==PAGE:37==
+hasSolution(constraint(dl, f), bl, br)
+¬hasSolution(constraint(dr, f), bl, br)
+⟨dl, c, i, bl, br, f⟩⇓RS ml
+⟨dl <|> dr, c, i, bl, br, f⟩⇓RS ml
+ResolveChoiceLeft
+¬hasSolution(constraint(dl, f), bl, br)
+hasSolution(constraint(dr, f), bl, br)
+⟨dr, c, i, bl, br, f⟩⇓RS mr
+⟨dl <|> dr, c, i, bl, br, f⟩⇓RS mr
+ResolveChoiceRight
+Next, we handle concatenation, restricting our examination to only valid solutions by nar­
+rowing the right bridge of dl to produce bridges b∗
+r that dr can produce valid layouts for.
+(fl, fr) = flattenSides(f, isEmpty(dl), isEmpty(dr))
+b∗
+r = restrictBridges(constraint(dr, fr), br)
+⟨dl, c, i, bl, b∗
+r, fl⟩⇓RS Set([m1, ...+, mn])
+⟨m1, dr, i, br, fr⟩⇓RSC S1 . . . ⟨mn, dr, i, br, fr⟩⇓RSC Sn
+⟨dl <> dr, c, i, bl, br, f⟩⇓RS S1 ⊎· · · ⊎Sn
+ConcatRS
+If the left side is tainted, then we delay the evaluation of the right side until there are no
+other options. We delay this evaluation because there is a high chance its value will never
+be needed. This is due to only one tainted path being evaluated. If we encounter multiple
+tainted values, then all but one of them will be discarded without comparing the layout, as
+can be seen in the merge operation ⊎.
+(fl, fr) = flattenSides(f, isEmpty(dl), isEmpty(dr))
+b∗
+r = restrictBridges(constraint(dr, fr), br)
+⟨dl, c, i, bl, b∗
+r, fl⟩⇓RS Tainted(ma)
+⟨dr, last(ma), i, rightB(ma), br, fr⟩⇓RS S
+taint(S) = Tainted(mb)
+⟨dl <> dr, c, i, bl, br, f⟩⇓RS Tainted(ma ◦mb)
+ConcatRTnt
+Finally, we define the resolver concat function ⇓RSC, which is responsible for resolving dr
+based on a single measurement from dr. It calls dedup to prune all duplicate measure­
+ments and maintain the Pareto frontier invariant.
+⟨dr, last(ml), i, rightB(ml), br, f⟩⇓RS Set([m1, ...+, mn])
+⟨ml, dr, i, br, f⟩⇓RSC Set(dedup([ml ◦m1, ...+, ml ◦mn])) RSCSet
+⟨dr, last(ml), i, rightB(ml), br, f⟩⇓RS Tainted(mr)
+⟨ml, dr, i, br, f⟩⇓RSC Tainted(ml ◦mr)
+RSCTnt
+An Extensible Lean Code Formatter
+31
+==PAGE:38==
+4
+Implementation In Lean
+In this section, we will describe the implementation of our formatter. Starting with how
+we design the formatter to work as a command­line tool to format an entire directory, as
+well as allowing it to be integrated into the LSP to enable formatting of individual com­
+mands. Next, we describe the design of formatting rules and how they can be used to
+format custom syntax. Lastly, we examine the performance of the formatter, which can
+be theoretically improved using data­oriented design. And how it is practically limited by
+the Lean interpreter, due to the time taken to find the CST.
+4.1
+Debug friendly Architechture
+Figure 4.1: Overview of our formatter
+We want to support different ways of formatting. Therefore, at the core, the program
+always formats a single top­level lean command. This allows the language to format a
+single command. We can format an entire file by formatting all commands individually.
+The formatter consists of composable rules that transform the Lean CST to Documents,
+either defined by our library or extended in user space. The documents are then converted
+to text using the pretty printing library. To ensure we do not destroy user code. We verify
+that the new code produces the same CST as the original code before replacing it.
+32
+An Extensible Lean Code Formatter
+==PAGE:39==
+4.2
+Performant Architecture
+Figure 4.2: Architecture optimised for format file performance.
+While formatting a file using the Language server is considered outside the scope of this
+thesis, due to the work required with the Language server. We support formatting top­
+level commands using the language server. The problem with the language server is that
+it runs our code in an interpreted mode, which is roughly 100 times slower than compiled
+Lean. The trade­offs we make here result in a 4­ to 6­fold increase in speed in tests, with
+room for further improvement(See section 5.2.1).
+When making these trade­offs, our priority is minimising time spent in the interpreter.
+Therefore, the goal is to utilise the CST that is readily available in the Language Server
+and integrate it with a compiled version of Lean that has the appropriate formatting rules.
+To enable this, each project must compile its formatting rules, so they are available for use.
+This means that we are giving up being able to define formatting rules locally using #fmt
+in favour of performance. However, we provide options for using #fmt while debugging.
+Formatting rules are likely to see a low rate of change and do not depend on the project
+itself. Therefore, they can be isolated in .style.lean files. By isolating formatting rules
+into separate files, we avoid having to recompile them every time the accompanying
+file changes. By creating separate files, we gain the option to create a new executable
+ProjectFormat that gathers the project’s formatting rules and provides an interface that
+takes a CST and Lean Options as input and produces a formatted file as output.
+4.3
+Formatting rules
+Since there is a lot of syntax to format in Lean 4, we want to optimise for making it easy
+to write formatting rules efficiently. For example, there are around 650 different kinds of
+syntax used in the batteries library[2]. Therefore, we will start by defining the target syntax
+that we want the users to write. For simplicity, we will define a new operator <+/> that is
+An Extensible Lean Code Formatter
+33
+==PAGE:40==
+always placed on its line. Afterwards, we will discuss how to make it efficient.
+1
+namespace CustomSyntax
+2
+-- define the <+/> syntax
+3
+infixr:110 " <+/> " => fun l r => l + r / r
+4
+5
+-- define the formatter for the <+/> syntax
+6
+#fmt CustomSyntax«.term_<+/>»_ fun
+7
+| #[l, plusDivideAtom, right] =>
+8
+return l <> provide bhnl <> plusDivideAtom <> provide bhnl <> right
+9
+| _ => failure
+10
+11
+-- Example of <+/> being formatted
+12
+def addDivide (x y : Nat) : Nat :=
+13
+2
+14
+<+/>
+15
+3
+Listing 4.1: An example formatting rule
+The definition consists of 3 parts, the fmt macro, which registers the formatter with the
+name CustomSyntax.«term_<+/>_»1. Finally, we define a function which takes an array
+of syntax as input.
+By returning a function as our final parameter, we can reuse functions for common im­
+plementations. An example of this is almost all binary operators, since they are typically
+formatted the same way.
+There are three reasons that we take an array as input instead of using lean syntax pat­
+terns. The first is that comments are attached to the atoms, such as our <+/> operator.
+Therefore, we need them to be part of the result so we can accurately place comments.
+The second is that by reusing the input in our output, it is difficult to accidentally make
+mistakes, such as converting a + to a - operator. Finally, some syntax definitions have
+null arrays of variable length as children, and by always consistently working with arrays,
+the code feels more consistent.
+To avoid the user manually calling formatSyntax on all given syntax, we add stx to the
+document. All syntax will be automatically expanded before the Document is formatted.
+1We choose to use the full name of the syntax to make the formatting rule easily searchable
+34
+An Extensible Lean Code Formatter
+==PAGE:41==
+To ease debugging, we add rule r, where r is the name of the formatting rule, to the
+document. This lets us see which rule produced an unexpected result. This becomes
+useful in tooling later, where we display the entire document as a graph.(See figure 4.5)
+4.3.1
+Nested syntax
+The DAG (Directed Acyclic Graph) structure is essential for the performance of the format­
+ters, so it must be difficult to accidentally violate. By reusing previously computed results,
+we reduce the time required to generate the document from exponential to linear. Without
+this reuse, performance could degrade exponentially. If a piece of syntax appears in both
+branches of a choice, the formatter would need to process all of its children repeatedly
+and re­evaluate any nested choices each time.
+Therefore, we repurpose the syntax position of the as a unique ID. The first time the user
+formats the syntax, it is added to a cache. The next time we see the same syntax, we can
+reuse the cached version. To make this work we temporarily add Lean syntax to the doc­
+ument, but this syntax is automatically formatted before formatting begins. This approach
+was seen as preferable to relying on users remembering to assign IDs to documents,
+which would be required due to the inability to alter global variables, as is the approach
+taken in other implementations of Pretty Expressive.
+4.3.2
+The indentation problem
+When creating formatting rules, we must be careful about when we increase indentation.
+For example, consider a function definition that we will simplify to a header, where the
+indentation is increased by 4, and the body, where the indentation is increased by 2. The
+problem is when do we increase the indentation by 2? Naively, we would always increase
+the indentation
+1
+namespace CustomSyntax
+2
+#fmt Lean.Parser.Command.definition fun
+3
+-- in this example we simplify header so it contains "def add (x y : Nat) : Nat"
+4
+-- value contains ":=\n x + 3"
+5
+| #[header, value] =>
+6
+return nest 4 header <> " " <> nest 2 value
+7
+| _ => failure
+8
+9
+-- expected output
+10
+def add (x y : Nat) : Nat :=
+11
+2 + 3
+12
+-- actual output
+An Extensible Lean Code Formatter
+35
+==PAGE:42==
+13
+def add (x y : Nat) : Nat :=
+14
+2 + 3
+Listing 4.2: Naive function definition
+However, this results in double indentation. This is because in other contexts, the ”:=”
+operator is used to assign a value to a variable. We could define a workaround just for
+”:=”. However, we would reencounter the same issue with ”do”, ”by”, arrays, structs and
+more. Therefore, to handle this issue, we define two paths and check whether the next
+syntax wants to stay on the same line using bi. We choose that all but the last element in
+the chain does not increase indentation. This choice gives structs and arrays the freedom
+to place their closing bracket on the same indentation as their opening bracket, if they so
+choose.
+1
+namespace CustomSyntax
+2
+#fmt Lean.Parser.Command.definition fun
+3
+-- in this example we simplify header contains "def addDivide (x y : Nat) : Nat"
+4
+-- value contains ":=\n x + 3"
+5
+| #[header, value] =>
+6
+let immediatePath := nest 4 header <> provide bi <> value
+7
+let normal := nest 4 header <> " " <> nest 2 value
+8
+return immediatePath <|> normal
+9
+| _ => failure
+10
+11
+#fmt Lean.Parser.Command.declValSimple fun
+12
+-- in this example we simplify the syntax to assignAtom = ":="
+13
+-- value contains "x + 3"
+14
+| #[assignAtom, value] =>
+15
+let immediatePath := require bi <> assignAtom <> provide bi <> value
+16
+let normal := assignAtom <$$> nest 2 content
+17
+return immediatePath <|> normal
+18
+| _ => failure
+19
+20
+-- output
+21
+def add (x y : Nat) : Nat :=
+22
+2 + 3
+23
+-- This also scales to do notation
+24
+def add (x y : Nat) : Nat := do
+25
+return 2 + 3
+Listing 4.3: Simplified chainable delayed nesting
+36
+An Extensible Lean Code Formatter
+==PAGE:43==
+4.3.3
+Conventions for formatting rules
+Since numerous independent Syntax rules perform formatting, they must adhere to a
+common set of conventions to produce a coherent result. These are the rules we are
+currently using.
+• Parent rules are responsible for the spacing between child rules. By only having
+the parent define the spacing between child elements, we reduce the risk of dis­
+agreement. Furthermore, children typically can’t reason about what should precede
+them. Since even syntax such as let, which one would presume to always start on
+a newline, has counterexamples where it can be placed after a semicolon.
+• Always use bridges to connect syntax elements. Because otherwise, we can’t rea­
+son about whether we are allowed to place comments.
+• Never write atoms as strings. Instead, use the original syntax. Otherwise, we lose
+the comments attached to the original syntax.
+• All formatting rules that increase indentation must check if they are followed by bi.
+If they are followed by bi, then the next element will handle indentation.
+4.3.4
+#fmt and #coreFmt
+In Debug mode, our formatter supports two methods for defining formatting rules. #fmt
+is used in user space, and #coreFmt is used when defining rules in the library. We need
+both because #coreFmt defines rules that are accessible from an IO context, which is
+necessary when compiling our program. To achieve this, we use initialize to add func­
+tions to a global map. The problem with initialize is that it only runs when imported
+or during compilation. This limitation exists to avoid state issues that could occur in inter­
+preted mode, such as the same function being added multiple times. As a result, coreFmt
+cannot be used directly in an interpreted context immediately after definition.
+1
+namespace CustomSyntax
+2
+#coreFmt Lean.Parser.Command.definition fun
+3
+| arr => return text
+"some text"
+4
+-- output ignores the new formatting rule
+5
+def add (x y : Nat) : Nat :=
+6
+2 + 3
+Listing 4.4: coreFmt is ignored
+An Extensible Lean Code Formatter
+37
+==PAGE:44==
+To fill this gap, we use #fmt to enable faster debugging. #fmt uses KeyedDeclsAttribute,
+which means that it stores its values in options that are only available in a Meta context,
+which is only available during interpretation.
+4.3.5
+Overloading formatting rules
+For flexibility, we allow overloading formatters. This should be viewed as a discouraged
+escape hatch, but it allows for hardcoding the interaction between two elements. The
+formatter will go through all defined formatting rules and use the first one that does not
+fail. A simplistic use case for this would be if we wanted to hardcode the interaction
+between + and our <+/> operator
+1
+#fmt «term_+»_ fun
+2
+| #[l, plusAtom, r] => do
+3
+if r.getKind == `CustomSyntax«.term_<+/>»_ then
+4
+return l <> provide bhnl <> plusAtom <> provide bhnl <> r
+5
+else
+6
+failure
+7
+| _ => failure
+8
+9
+-- Which will change how + is formatted, if it is before the <+/> operator
+10
+def add (x y : Nat) : Nat :=
+11
+1
+12
++
+13
+2
+14
+<+/>
+15
+3
+Listing 4.5: formatting rule
+4.3.6
+Cost
+An issue when writing formatting rules is that there are preferred layouts that do not align
+with the priority of reducing the number of lines. For example, it is often preferable to keep
+parentheses on the same line. However, since it must be possible to split parentheses
+into multiple lines, we can’t force them to flatten. Just using group group is not strong
+enough because there might be other possibilities that achieve the same newline count,
+but the parentheses are on different lines.
+preferFlatten d = ( cost 1 <> d <|>flatten(d) )
+38
+An Extensible Lean Code Formatter
+==PAGE:45==
+4.3.7
+Comments
+As pointed out by Hughes [8], there is a difference between pretty printing internal data
+structures and formatting code. Formatting code introduces the additional complication
+of supporting comments and preserving the original layout of the code. While comments
+have typically been excluded when describing pretty printers in literature, we will include
+them here because we want to provide a decent implementation for automatically plac­
+ing comments, without each syntax transformer having to handle comments. This choice
+is motivated by the expandable nature of lean. As an example, there are around 650
+different kinds of syntax used in the batteries library[2]. In our opinion, it would be unrea­
+sonable to handle comments for every one of these individually, and ideally, it should be
+done automatically.
+The approach we will take is to prefer leaving the comment where it is. However, if it must
+be moved, then move it before the previous line, maintaining the same indentation. In
+theory, this could be done without new syntax by editing the document that came before
+the comment. However, imagine the following document.
+text ”a” <> ( nl <|>text ” ” ) <> text ”b” <> ( nl <|>text ” ” ) <> text ”–comment”
+There are two possible newlines before the comment, and we don’t know which one will
+be chosen as the newline. In theory, we could transform the document into something
+akin to:
+text ”–comment” <> nl <> text ”a” <> text ” ” <> text ”b” <> text ” ”
+<|> text ”a” <> nl <> text ”–comment” <> nl <> text ”b” <> text ” ”
+<|> text ”a” <> nl <> text ”b” <> nl <> text ”–comment” <> nl
+<|> text ”a” <> text ” ” <> text ”b” <> nl <> text ”–comment” <> nl
+However, this expands the size of the document and destroys the DAG structure. There­
+fore, it is easier to delay moving comments until we have a choiceless document. To delay
+the operation, we add bubbleComments to the syntax. During the resolve operation ⇓RS,
+it will add bubbleComments to the measure. During the render operation ⇓R, it will find
+the last newline and place the comment after it, while matching the indentation.
+Using bubbleComment, we can automatically provide a reasonable alternative for com­
+ments by providing a fallback option if it is not possible to keep them where they are, since
+An Extensible Lean Code Formatter
+39
+==PAGE:46==
+we would prefer to keep comments where they are, and we also add a cost for moving
+the comments. This is necessary since bubbleComments itself does not alter the cost,
+and without this, the comments would always be moved.
+(bubbleComment c <> cost lines) <|> (c <> provide bhnl)
+4.3.8
+Optimized Constraints
+A problem with constraints is that they increase the time complexity of the resolving phase
+from O(nW4) to O(bnW4), where b is the number of bridges, n is the DAG size and W
+is the computation width. Because restricting requires going through all constraints of
+the child documents as described in section 3.3.3, and there are at most |B| constraints.
+For cases where bridges are not needed, we can increase this performance by defining
+common cases that can be represented with at most two numbers, see listing 4.6. In
+documents without provide and require, all documents can be described as the uniform
+bf bf. Uniform constraints can be calculated in linear time. Therefore, we restore the
+O(nW4) time complexity for bridge­less documents. Documents that contain bridges can
+gain momentary benefits from this optimisation. However, they must fall back to complex
+for most documents.
+1
+inductive Constraint where
+2
+/--
+3
+all bridges on the left side lead to all bridges on the right side.
+4
+-/
+5
+| uniform (left : Bridge) (right : Bridge)
+6
+/--
+7
+`cost` & `bubbleComment` & `text ""` do not affect bridges
+8
+-/
+9
+| passthrough
+10
+/--
+11
+There are no options
+12
+-/
+13
+| impossible
+14
+/--
+15
+Delay a provide statement until it is needed.
+16
+-/
+17
+| provide (b : Bridge)
+18
+| complex (c : Array (Bridge × Bridge))
+Listing 4.6: Optimized constraints
+40
+An Extensible Lean Code Formatter
+==PAGE:47==
+4.3.9
+Parallel computation and memory leaks
+Formatting the codebase in parallel is motivated by 2 reasons. Primarily, we have a mem­
+ory leak problem caused by interpreting the lean code we are formatting. In large code
+bases this eventually causes segmentation faults due to high memory usage. Secondly,
+it enables faster running time since formatting each file is an independent task.
+To solve these challenges, we run each file independently in its own process. This solves
+the memory leak issue by moving it to a process that will terminate after the file has been
+processed. Since we are dealing with the complexity of starting and communicating with
+child processes, we can run them concurrently to increase performance.
+Even without the memory leaks, it was never an option to use threads because running
+initialisation code is not thread safe2
+4.4
+Tooling
+4.4.1
+Lean integration
+Figure 4.3: Format individual top­level commands with language server integration
+To enable faster debugging, we provide the following configuration options, which can be
+changed through the set_option function, a feature provided by Lean to set configuration
+values. These will then apply when formatting using the lean langua
+• pageWidth: Limit the page width, defaults to 100 in accordance with library style
+guidelines [9]
+• computationWidth: Allow the users to specify the computationWidth W, defaults to
+120.
+We also provide the following debugging options.
+An Extensible Lean Code Formatter
+41
+==PAGE:48==
+• warnCSTmismatch: Warn the user if formatting caused the CST to change. This is
+on by default.
+• debugSyntax: View the CST of the formatted syntax
+• debugSyntaxAfter: View the CST of the formatted syntax after it has been formatted.
+• debugMissingFormatters: View all syntax rules that do not have an associated for­
+matter.
+• debugErrors: View all formatters that failed to provide an output.
+• debugDoc: For small documents, we can display them as a tree using text.
+• debugAsHtml: For larger documents, we generate a website to view the tree as
+seen in figure 4.5.
+• debugMode: Uses the interpreter to format commands. This allows using #fmt to
+define local formatting rules.
+42
+An Extensible Lean Code Formatter
+==PAGE:49==
+4.4.2
+No solution problem
+The most significant issue with bridges is that they allow for the production of documents
+with no solution in subtle ways, due to neighbouring formatters having no overlap. We
+try to prevent these kinds of issues by having formatting rules for most bridges and by
+stopping bad formatting by providing the option for a better layout. However, there is no
+way to prevent these kinds of issues, whether it be due to a trivial user error or a complex
+scenario that has not been accounted for. In these cases, we need a way to find out why
+there is no solution. Usually, there is a sub­document that can’t be solved. Therefore, our
+goal is to identify that sub­document and display it clearly and understandably.
+Unfortunately, the tree representation grows exponentially, as every <|> likely doubles
+the number of ways to format the child documents. To address this, we aim to present a
+single approach to formatting the tree, allowing the user to toggle between options every
+time a choice is available. Therefore, we provide an option to generate a website that
+displays the current document with the option.
+set_option pf.debugAsHtml true
+As an example, let us format
+def add (x y : Nat) := x<+/>y
+Where the formatting rule for <+/> contains the error provide bs<>require bhnl. Which
+will always fail due to the lack of overlap between bs and bhnl. As can be seen from
+Figure 4.4, even though the problem is quite small, there are a large number of nodes.
+Therefore, we mark all nodes that cannot be solved with a red outline. By following this
+path to a branch, we can diagnose the problem by examining only the nodes in Figure
+4.5. The rule node tells us which formatting rule failed, and from here we must recognise
+the problem. While we demonstrate an easy problem, the same techniques can be used
+to identify a group of formatting rules that, when combined, cannot generate a solution.
+An Extensible Lean Code Formatter
+43
+==PAGE:50==
+Figure 4.4: The graph lets us quickly see which sub­document can not be formatted, by
+following the nodes with a red outline. All blue nodes represent a choice and can be
+toggled view an alternate formatting option.
+44
+An Extensible Lean Code Formatter
+==PAGE:51==
+Figure 4.5: In this case, there is no solution, because we have a provide bs followed by
+a require bhnl. Since there is no overlap between these two, the document can not be
+formatted. The rule node tells us which formatting rule is responsible for creating the
+error.
+4.5
+Performance in Lean
+Performance in Lean is somewhat complicated since the user is not meant to think about
+it. The most important point here is that interpreted Lean is approximately 100 times
+slower than compiled Lean, as shown in table 4.1. And techniques we could use to move
+code to compiled Lean. Therefore, it is crucial to migrate as much code as possible to
+compiled Lean, which informs the architecture decisions outlined in Section 4.2. For the
+rest of this section, we discuss compiled lean and its performance characteristics.
+4.5.1
+Compiled Lean
+When formatting large documents using pretty­expressive, the limiting factor becomes
+memory and cache misses. Therefore, we will briefly cover the memory model of lean,
+An Extensible Lean Code Formatter
+45
+==PAGE:52==
+highlighting its strengths and weaknesses. While Lean syntax is highly customizable, its
+control over memory is somewhat limited. To illustrate this point, we demonstrate that a
+C++ implementation can be written that is approximately 2­4 times faster than the Lean
+implementation. Therefore, the Lean implementation spends a lot of its time managing
+memory.
+Immutability
+Everything in lean is immutable by default. This is great for safe, reusable and predictable
+code. However, this makes caching tricky, as it requires a separate cache object to be
+threaded through the program and updated at the appropriate times. If it weren’t possible
+to circumvent this immutability, it would be close to impossible to write an efficient cache.
+Luckily, there are two options to circumvent immutability. In an IO context, it is possible to
+create references that can be updated, which we use to discover which formatting rules
+are present in the system3. The second option is linear access.
+Linear access allows lean to mutate arrays if there is exactly one reference to the array[10],
+which means that for large objects like caches, we can avoid copying the entire array and
+instead update the index that has changed. Furthermore, we should prefer arrays, due to
+their good cache locality.
+Cache locality
+As a refresher, Cache locality can be split up into Temporal locality and Spatial locality.
+Temporal locality refers to the principle that memory will likely be used again shortly in
+the future. Since we are performing a depth­first search over alternative ways to display
+branches of the tree, we likely have information about the branches still in the branch.
+Spatial locality refers to keeping related items physically close in memory. This is im­
+portant because when the CPU fetches information from memory, it typically fetches 64
+bytes at a time. Therefore, if data is located next to each other in memory, then we only
+have to wait for fetching the first item, and when we access the following item, it is already
+there. As an example, an array of numbers has excellent spatial locality as long as you
+go through them sequentially.
+4.5.2
+Cache locality for a tree
+If we had control over the memory, and we were only optimising for spatial locality, we
+would have something close to the following structure. The important difference is that
+3IO could also have been used to attach the cache to documents, however this would mean that the
+formatter can only be used in an IO context, which limits its usecases
+46
+An Extensible Lean Code Formatter
+==PAGE:53==
+the array is an array of structs, rather than an array of pointers to the structures, and
+Doc can be inlined into the struct. The cache map can’t be inlined due to its dynamic
+size. However, it is likely still useful to have the cache map pointer after the first load.
+This would likely help because every time we load a document, we are likely to ask the
+following questions.
+1. What is the type of the document, and what is its accompanying data?
+2. Do we already have an item in the cache?
+3. What are the constraints for this document?
+Further testing would be required to determine if it is worth it to store some of this in­
+formation separately. Since reducing the size of the struct makes it less likely that we
+evict something else from the cache.
+If nothing else, it would likely make sense for
+cacheWeight4 since it is only used during the construction of the documents.
+1
+inductive Doc
+2
+| text (s : String)
+3
+| concat (leftId : UInt32) (rightId : UInt32)
+4
+-- rest. . .
+5
+6
+structure DocMeta
+7
+id : UInt32
+8
+doc : Doc
+9
+cache : Map
+10
+-- constraints
+11
+-- . . .
+12
+13
+-- easy access to shared instance
+14
+global documents : Array DocMeta := []
+15
+-- Store cacheWeight in a parallel array because it is only needed during the
+16
+-- construction of documents, by storing them separately we make it more likely
+17
+-- that the information we care about is there during rendering
+18
+global cacheWeight : Array int := []
+Listing 4.7: Outline for a better spatial memory layout
+4cacheWeight is used to space out which elements are cached, to avoid caching everything
+An Extensible Lean Code Formatter
+47
+==PAGE:54==
+Compiled
+Interpreted
+Linear
+Shuffled
+Linear
+Shuffled
+Scalar
+0.6s
+0.6s
+99s
+99s
+Tuple
+0.87s
+1.6s
+103s
+115s
+Table 4.1: Time to sum an array of 400.000 elements 1000 times, demonstrating that
+tuples are referenced via pointer. And that lean gives us spatial locality for free in common
+cases. Surprisingly, this also holds to a lesser extent for the interpreter.
+Object allocation
+Lean uses mimalloc to manage its memory allocation. Mimalloc divides the heap into
+pages that contain elements of the same size­class [11]. What separates mimalloc from
+other allocators is that it defines multiple free lists per size class. This means that each
+free list has spatial locality instead of being spread out over the entire heap. When this
+change was implemented in Lean 3, performance increased by 25% in some benchmarks
+with large data structures.
+Therefore, whenever possible, we should allocate related objects simultaneously.
+To
+demonstrate the effectiveness of this optimisation in isolation, let us consider summing an
+array of structs and an array of numbers. Since the array of structs is created in the same
+order as they are stored in the list, it is similar to creating two parallel arrays. Where the
+first array is referencing the second one, although the second array might be scattered
+across multiple pages. When we traverse the first array, we get the advantage of loading
+the second array in a reasonable order.
+To demonstrate the worst case, if we do not fill the array with values immediately, let us
+shuffle the array containing the structs. As shown in Table 4.1, this nearly doubles the
+time required to sum the array. All of the extra time taken for this problem is due to cache
+misses. We mention this scenario because when memoising, we only add content to the
+array when it is needed, leading to an array of pointers that likely point to different places
+in memory. Note that we only shuffle once, and that other tests show that bad access
+patterns can cause around 16 times longer access times [12].
+48
+An Extensible Lean Code Formatter
+==PAGE:55==
+4.5.3
+Performance in c++
+The easiest way to achieve better performance is by doing less. It turns out that our C++
+implementation executes approximately one­fifth of the instructions and approximately
+one­fourth of the cache misses that the Lean implementation does. When performing the
+sexp­full­16 benchmark in section 5.3. The primary way this is achieved is by ensuring
+memory safety without the use of reference counting. One way to accomplish this is by
+using memory arenas that can allocate a large number of objects in a single system call.
+When they are no longer needed, the entire content can be wiped out by deallocating the
+arena. The second optimisation we do is to reduce the number of pointers by inlining val­
+ues in our structures. Other than that, we have the privilege of knowing that our types are
+numbers and therefore do not need to check whether numbers are pointers or numbers.
+This should be a free check for the CPU. However, when examining the generated lean
+code, it appears frequently and likely contributes to the high instruction count.
+We should note that instruction count alone is not a problem, as long as the instructions
+are independent of each other. This would allow the CPU to perform more instructions pr
+cycle. This could also be the reason that, on average, Lean performs 2.41 instructions
+per cycle and C++ performs 1.72 instructions per cycle.
+Reusing Arrays
+Since the implementation uses a lot of arrays to create and store temporary MeasureSets,
+we created a pool of arrays. By reusing arrays, we increase the likelihood that the array
+is already in the cache, making it faster to use again. Furthermore, we waste less time
+creating and cleaning up arrays. The downside is that we must manage when the arrays
+are returned ourselves. We always borrow and return them within the same function’s
+lifetime. This means that for the resolve function ⇓RS to return a MeasureSet, it must be
+given an array by its caller that it can use to return the values.
+Array of structs
+From table 4.1 we observe that while it can be fast to follow a pointer to find the value, it
+is quicker if the array contains the value. Especially if it is likely that we are not traversing
+the array sequentially, we therefore structure our data as described in Section 4.5.2.
+An Extensible Lean Code Formatter
+49
+==PAGE:56==
+5
+Evaluation
+In this section, we will answer the following questions
+• Is it feasible to use this approach on real projects?
+• Do the extensions to pretty expressive have the same performance as pretty ex­
+pressive?
+• What is the performance penalty of using bridges?
+All tests are performed on an i9­13900K with 32GB of memory. Note that when performing
+multicore tests, some tests may be executed on efficiency cores and therefore result in
+slower times. Our tests are based on the lean batteries library at commit
+80520e5834d0d9a2446cb88ea3d2a38a94d2e143.
+1. Our formatter is available at: https://github.com/frit007/lean-formatter
+2. Our test setup is available at: https://github.com/frit007/pretty-expressive-tests
+5.1
+Language coverage
+We defined 314 formatting rules, which are enough to format to preserve the CST of 3664
+out of 3853 commands in the batteries library. Unfortunately, we ran out of time, as most
+of the remaining commands use different syntax. As seen in Figure 5.1, we have covered
+most of the standard syntax. However, Lean has a lot of specialised syntax, which means
+that covering the remaining syntax would take a lot of time.
+So far, there has not been any syntax that could not be formatted according to our pre­
+ferred style. It is challenging to determine whether we can cover all cases solely using
+bridges, given that we can create arbitrary Syntax in Lean. However, a known limitation
+of using patterns is that they only work for a consistent style. For example, we would have
+a hard time if syntax only sometimes wished to participate in a particular pattern, because
+we would have to introduce a new bridge to handle that case, which would require all of
+these cases to share a common thread. While we would prefer to avoid it, we still have
+50
+An Extensible Lean Code Formatter
+==PAGE:57==
+Figure 5.1: The vertical axis is the number of times that a certain syntax occurs. Green
+means we have a formatting rule for the corresponding syntax. For visibility, we have
+increased the height of all syntax that are used less than 50 times. The last 100 syntax
+patterns are used fewer than 10 times.
+the option to special­case hard cases if needed, since formatting rules can run arbitrary
+Lean code.
+A case that would require special attention would be match statements where all =>
+align(See listing 5.1), we would have to introduce special logic that handles the entire
+match statement and prematurely flattens and formats all conditions to determine the
+longest string and correspondingly pads all other conditions. Although theoretically, if
+bridges were free, they could be used to communicate the required minimum width be­
+tween the elements, since match statements follow each other. However, since perfor­
+mance scales with the number of bridges, this is clearly not worth it.
+1
+match x with
+2
+| shortCondition
+=> 1
+3
+| longerCondition
+=> 2
+4
+| veryLongCondition => 3
+Listing 5.1: Aligned match statement
+An Extensible Lean Code Formatter
+51
+==PAGE:58==
+5.2
+Format repository performance
+workers
+Wall time
+Parsing
+Reparsing
+Create documents
+Formatting
+16
+11.5 ± 0.5s
+113 ± 3s
+28 ± 2s
+1.1 ± 0.1s
+1.4 ± 0.1s
+1
+96 ± 2s
+68 ± 1s
+18 ± 1s
+0.77 ± 0.02s
+0.94 ± 0.02s
+Table 5.1: Time taken to format the Lean batteries library
+We format the entire Batteries library to assess its performance. From Table 5.1, we
+see that it takes approximately 11.5 seconds to format 33,464 lines of code when using
+16 threads. And 96 seconds when using a single thread, which also reveals that we
+use around 8 seconds to start 248 child programs, since we start one program for every
+file. However, increasing the number of files pr executable decreases performance. The
+bottleneck for this test is the need to parse the code before it can be formatted. Based on
+figure 5.2, we observe that performance roughly correlates with DAG size n. This makes
+sense since the runtime for formatting is O(bnW4), where b is the number of bridges and
+W is the computation width. In contrast, the document creation has a runtime of O(b2n),
+due to the cost of creating constraints.
+Figure 5.2: DAG Size vs Create/Format Time
+52
+An Extensible Lean Code Formatter
+==PAGE:59==
+5.2.1
+Format file performance
+Although our formatter does not support formatting an entire file at once through the Lan­
+guage server, it is a critical use case. It is also slightly different from the format folder
+example, because we here assume that the file is open and therefore the CST is avail­
+able. Based on the previous test, we would expect excellent performance for this scenario,
+as it involves only formatting. However, as discussed earlier, we are limited by the LSP
+being run by an interpreter instead of being compiled. To demonstrate why it is worth
+it to serialise and send the CST to a compiled program instead of formatting it with an
+interpreter, let us look at how long it takes to format the file Data/RBMap/Lemmas.lean
+containing 1230 lines and 267 commands from the batteries library. We will compare it
+with Data/HashMap/WF.lea, containing 400 lines and 37 commands. To simulate format­
+ting a file, we format all commands individually. As can be seen from Table 5.2, formatting
+without the interpreter is significantly faster. However, based on the high minimum time,
+we can see that it is bottlenecked by starting a new program every time it has to format
+short commands. When formatting an entire file at the same time, we can minimise this
+limitation by using one program to format all 267 commands, thereby dramatically reduc­
+ing the time taken. Based on table 5.1, where we format 4000 commands in 3 seconds,
+we would expect to be able to format a file in less than one second. However, due to the
+communication overhead, we are unlikely to reach that. The overhead caused by parsing
+the syntax again can be minimised by only doing it when the formatted string is not equal
+to the previous string.
+Lemmas
+WF
+Debug mode
+Optimized
+Debug mode
+Optimized
+Total time
+72 s
+19.4s
+20 s
+3s
+Total parse time
+2.128s
+2.128s
+0.72s
+0.72s
+Min (excluding parsing)
+0.03s
+0.05s
+0.03s
+0.05s
+Mean (excluding parsing)
+0.26s
+0.07s
+0.54s
+0.06s
+Max (excluding parsing)
+1.52s
+0.1s
+2.44s
+0.1s
+Table 5.2: The Lemmas file has 1230 lines and 267 commands. The WF file has 400
+lines and 37 commands.
+An Extensible Lean Code Formatter
+53
+==PAGE:60==
+5.3
+Comparison to Pretty Expressive
+To evaluate whether our extension to Pretty Expressive introduces unnecessary over­
+head, we compare it to the original Ocaml implementation and a Lean implementation.
+Furthermore, to demonstrate that all these implementations could benefit from data­oriented
+design, we compare them with a C++ implementation of Pretty Expressive, which is op­
+timised for reusing cachelines. As can be seen from table 5.3, bridges introduce some
+overhead, especially for smaller cases like FillSep 5k. However, for more complex prob­
+lems, the difference is usually less than 20%. Suppose this performance loss becomes a
+critical issue. In that case, our C++ implementation suggests that a data­oriented rewrite
+could yield a 2–3 times speedup, which should be possible since Lean is partially written
+in C++.
+W = 100
+W = 1000
+Ocaml
+Lean
+Lean+
+C++
+Ocaml
+Lean
+Lean+
+C++
+FillSep 5k
+0.008 s
+0.009 s
+0.017 s
+0.006 s
+0.009 s
+0.009 s
+0.016 s
+0.006 s
+FillSep 50k
+0.151 s
+0.110
+0.183 s
+0.063 s
+0.152 s
+0.110 s
+0.183 s
+0.066 s
+SExpFull15
+3.009 s
+3.165 s
+3.630 s
+1.192 s
+5.463 s
+6.346 s
+7.187 s
+2.457 s
+SExpFull16
+5.047 s
+5.544 s
+6.187 s
+2.095 s
+10.416 s
+12.366 s
+13.720 s
+4.855 s
+RandFit1k
+0.095 s
+0.089 s
+0.011 s
+0.028 s
+0.215 s
+0.209 s
+0.244 s
+0.061 s
+RandFit10k
+1.022 s
+0.925 s
+1.087 s
+0.291 s
+4.278 s
+4.414 s
+5.086 s
+1.258 s
+RandOver1k
+0.065 s
+0.059 s
+0.070 s
+0.019 s
+0.949 s
+1.036 s
+1.131 s
+0.285 s
+RandOver10k
+0.420 s
+0.384 s
+0.465 s
+0.129 s
+12.375 s
+14.551 s
+15.009 s
+3.931 s
+JSON1k
+0.001 s
+0.002 s
+0.002 s
+0.000 s
+0.001 s
+0.004 s
+0.002 s
+0.001 s
+JSON10k
+0.012 s
+0.018 s
+0.022 s
+0.004 s
+0.022 s
+0.030 s
+0.029 s
+0.006 s
+Table 5.3: We compare our implementations of Pretty Expressive to the original imple­
+mentation in Ocaml. Where Lean+ is the bridge extension to Pretty Expressive.
+54
+An Extensible Lean Code Formatter
+==PAGE:61==
+6
+Conclusion
+Formatting Lean code is challenging due to its extensible syntax and context­sensitive
+constructs. We introduced an extensible formatting algorithm that utilises the concept of
+bridges to enable formatting rules to communicate the spacing between them. This solves
+problems with do­notation, such as determining where it should be placed on the same line
+and avoiding duplicate indentation in a composable manner. This composability enables
+new syntax to interact with existing syntax and behave like do­notation, or integrate with
+do­notation as needed. Our Lean implementation, based on Pretty Expressive, can format
+the Lean batteries in under 2 seconds. When excluding the time taken to find the CST.
+Furthermore, it is likely that once we have the option to get the CST for every command
+in an open document, then formatting a file can be done in under a second. However, this
+does not help use cases such as formatting an entire folder through the command line,
+since it would be required to find the CST every time. We managed to format 95% of the
+Lean batteries library, which we see as an indication that it is possible to format the entire
+Lean language with more time.
+6.1
+Future work
+The biggest performance hindrance is the lean interpreter. When formatting the Batteries
+library through the command line, approximately 2% of the time is spent on formatting.
+The rest is spent finding the CST and validating that it was formatted correctly. Therefore,
+it would be advantageous to optimise it, although that is likely a challenging task given the
+complexity of Lean. Due to this complexity, it is also unlikely to create a separate parser,
+since it would have to be compatible with Lean itself. This problem might be solved when
+and if Jit is implemented in Lean4.
+Although the performant architecture introduced in section 4.2 improved performance in
+our case, it may not be needed if we can integrate the formatter into the Lean Language
+server, since we should be in a compiled environment at that point. However, it may still
+be faster to have compiled formatting rules, especially for libraries that introduce a lot of
+new syntax. If the formatter cannot become part of the Lean Language server, then the
+current architecture is likely the best chance the formatter has to become viable. It is
+An Extensible Lean Code Formatter
+55
+==PAGE:62==
+likely to see considerable performance improvements when all commands are formatted
+simultaneously, as this avoids the overhead of starting several executables.
+The debugging website should be improved. One feature that would make it easier to
+use would be the ability to search for a solution with constraints on a node in the tree.
+Currently, the user must manually toggle the choices to configure the document to produce
+specific outputs, such as newlines. Adding this would also enable the website to serve as
+a learning tool, allowing users to understand how formatting works and why the formatter
+prefers a particular style. Furthermore, it should be optimised to be lazy so that it can
+handle large functions.
+There is also a lot more work to be done regarding formatting rules. After the batteries
+library has been covered, the next step would be the Lean math library.
+56
+An Extensible Lean Code Formatter
+==PAGE:63==
+Bibliography
+[1]
+Sorawee Porncharoenwase, Justin Pombrio, and Emina Torlak. “A Pretty Expres­
+sive Printer”. In: Proc. ACM Program. Lang. 7.OOPSLA2 (Oct. 2023). DOI: 10.1145/
+3622837. URL: https://doi.org/10.1145/3622837.
+[2]
+leanprover­community. Batteries. https://github.com/leanprover-community/batteries.
+2025.
+[3]
+John Hughes and Chalmers Hogskola. “The Design of a Pretty­printing Library”. In:
+(June 1995).
+[4]
+Philip Wadler and Joyce Kilmer. “A prettier printer”. In: 2002. URL: https://api.
+semanticscholar.org/CorpusID:63096807.
+[5]
+Dereck C. Oppen. “Prettyprinting”. In: ACM Transactions on Programming Lan­
+guages and Systems 2.4 (Oct. 1980), pp. 465–483. ISSN: 1558­4593. DOI: 10.
+1145/357114.357115. URL: http://dx.doi.org/10.1145/357114.357115.
+[6]
+How to write a code formatter — yorickpeterse.com. https://yorickpeterse.com/
+articles/how-to-write-a-code-formatter/. [Accessed 05­03­2025].
+[7]
+Jean­Philippe Bernardy. “A pretty but not greedy printer (functional pearl)”. en. In:
+Proc. ACM Program. Lang. 1.ICFP (Aug. 2017), pp. 1–21.
+[8]
+John Hughes. “The design of a pretty­printing library”. In: Advanced Functional Pro­
+gramming. Springer Berlin Heidelberg, 1995, pp. 53–96. ISBN: 9783540492702.
+DOI: 10.1007/3-540-59451-5_3. URL: http://dx.doi.org/10.1007/3-540-59451-5_3.
+[9]
+Library Style Guidelines — leanprover­community.github.io. https : / / leanprover -
+community.github.io/contribute/style.html. [Accessed 22­06­2025].
+[10]
+Arrays — lean­lang.org. https://lean-lang.org/doc/reference/latest/Basic-Types/
+Arrays/. [Accessed 10­06­2025].
+[11]
+Daan Leijen, Ben Zorn, and Leonardo de Moura. Mimalloc: Free List Sharding in
+Action. Tech. rep. MSR­TR­2019­18. Microsoft, June 2019. URL: https://www.
+microsoft.com/en-us/research/publication/mimalloc-free-list-sharding-in-action/.
+[12]
+Graham Bleaney. Validation of Memory­Allocation Benchmarks. https://www.open-
+std.org/jtc1/sc22/wg21/docs/papers/2016/p0213r0.pdf. [Accessed 05­03­2025].
+An Extensible Lean Code Formatter
+57

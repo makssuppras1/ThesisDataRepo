@@ -1,0 +1,1395 @@
+==PAGE:1==
+M.Sc. Thesis
+Master of Science in Engineering
+Real-time networking
+A time-predictable TTEthernet node
+Maja Lund (s134877)
+Kongens Lyngby 2018
+==PAGE:2==
+==PAGE:3==
+Abstract
+This thesis concerns the implementation of a deterministic network protocol, TTEth-
+ernet, on the time-predictable processor of Patmos. Implementation was done through
+extension of the existing Ethernet controller on the processor, and tested on a small
+TTEthernet system with one switch. Results showed that the implementation was
+able to interact with the system as a synchronization client, by synchronizing its local
+clock to the system clock in a stable manner. Further testing showed the controllers
+ability to send time triggered messages with a bounded latency and a small jitter of
+approximately 4.5us. All in all, this has enabled Patmos to communicate with other
+nodes in a deterministic way, and thus extending the possible uses of Patmos.
+==PAGE:4==
+ii
+==PAGE:5==
+Preface
+This master thesis was prepared at the department of Applied Mathematics and
+Computer Science at the Technical University of Denmark in fulfillment of the re-
+quirements for acquiring a M.Sc. in Computer Science and Engineering.
+I would like to thank my supervisors Martin Schoeberl and Jens Sparsø for help
+and guidance throughout the project. Furthermore I would like to thank Paul Pop
+for his help during the initial phase of the project. Finally I want to thank Martin
+Obel Thomsen for moral and academic support.
+Kongens Lyngby, July 20, 2018
+Maja Lund (s134877)
+==PAGE:6==
+iv
+==PAGE:7==
+Contents
+Abstract
+i
+Preface
+iii
+Contents
+v
+List of Acronyms
+vii
+1
+Introduction
+1
+2
+Related work
+3
+2.1
+Real time network protocols . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2.2
+TTEthernet implementations and analysis . . . . . . . . . . . . . . . .
+3
+3
+Background
+5
+3.1
+Clock drift . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+3.2
+Patmos Ethernet controller
+. . . . . . . . . . . . . . . . . . . . . . . .
+6
+3.3
+TTEthernet . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+4
+Materials and Methods
+13
+4.1
+Software . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+13
+4.2
+Hardware . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+5
+Implementation
+19
+5.1
+Overall implementation
+. . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+5.2
+Initialization
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+5.3
+Receiving and clock synchronization
+. . . . . . . . . . . . . . . . . . .
+22
+5.4
+Sending . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+24
+5.5
+Modifications to enable WCET analysis . . . . . . . . . . . . . . . . .
+25
+5.6
+Implementation without polling . . . . . . . . . . . . . . . . . . . . . .
+26
+5.7
+User program example . . . . . . . . . . . . . . . . . . . . . . . . . . .
+27
+5.8
+Theoretical limits of implementation . . . . . . . . . . . . . . . . . . .
+28
+6
+Results
+31
+6.1
+Clock synchronization
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+31
+==PAGE:8==
+vi
+Contents
+6.2
+Latency and Jitter . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+35
+6.3
+Worst Case Execution Time . . . . . . . . . . . . . . . . . . . . . . . .
+37
+7
+Discussion
+41
+7.1
+Future extensions . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+41
+8
+Conclusion
+43
+A Code overview
+45
+Bibliography
+47
+==PAGE:9==
+List of Acronyms
+CAN Control Area Network.
+CT critical traffic.
+MII Media-Independant Interface.
+OCP Open Core Protocol.
+PCF protocol control frame.
+ppm parts per million.
+RGMII Reduced Giga-bit Media-Independant Interface.
+RX/TX receive/transmit.
+SD switch delay.
+TSN Time Sensitive Networking.
+TT time triggered.
+TTCAN Time Triggered CAN.
+VL virtual link.
+WB WishBone.
+WCET worst case execution time.
+==PAGE:10==
+viii
+==PAGE:11==
+CHAPTER 1
+Introduction
+Real time systems are hardware and software systems which need to meet certain
+timing constraints in order to be correct. In other words, the correctness of a com-
+putation depends on both the logical correctness, and if the result is produced at
+the correct time. An example could be an airbag system. If the system correctly
+identified that an airbag should inflate, and inflated in the correct manner except a
+couple of seconds too late, it wouldn’t be considered a functional airbag system.
+Some real time systems consist of several separate units which need to commu-
+nicate. Although Ethernet networks have been a successful and flexible solution for
+many application areas, they are not suitable for real time systems where missing
+a deadline could lead to big consequences. This is because the end-to-end latency
+depends on unpredictable factors such as network load, which makes an Ethernet
+network unable to guarantee with 100% certainty that a message will arrive before
+its deadline. TTEthernet is an extension of Ethernet which promises known max-
+imum end-to-end latency and small bounded jitter in order to solve this problem.
+[1]
+Patmos is a time-predictable processor intended for use in embedded real time
+systems. It allows for static estimates of worst case execution times (WCETs), and
+supports standard Ethernet, but no form of deterministic network. [2] This thesis
+seeks to enable the Patmos processor to communicate through a deterministic network
+protocol. It will be done by extending the existing Ethernet controller in software, to
+allow for TTEthernet compatibility. The performance of the controller will be tested,
+and compared to implementations on other platforms.
+The thesis is organized in the following way. Chapter 2 presents research related
+to this thesis. Chapter 3 introduces background information that this thesis relies
+on. Chapter 4 presents materials used during testing and implementation. Chapter
+5 describes the implementation in detail.
+Chapter 6 presents results of tests and
+experiments which are discussed in chapter 7.
+The last chapter will provide the
+conclusion. The appendix provides an overview of code and configuration files, which
+are handed in separately. The code is furthermore available as a fork of Patmos on
+[3].
+==PAGE:12==
+2
+==PAGE:13==
+CHAPTER 2
+Related work
+2.1
+Real time network protocols
+Deterministic networks are an integral part of many distributed real time systems. A
+widely used solution is the Control Area Network (CAN) bus, which is a serial bus able
+to send small prioritizes messages with bounded latency [4]. It was extended with time
+triggered capabilities in Time Triggered CAN (TTCAN), restricting nodes to only
+transmit messages in certain time-slots, and thus increasing the determinism of the
+bus [5]. The main limitations of both CAN and TTCAN are a maximum bandwidth
+of 1Mbit/s, and limited cable length which depends on the bandwidth of the bus
+[4]. FlexRay is a time triggered protocol which was designed to be faster and more
+reliable than CAN. It operates with a predefined communication cycle, which consists
+of a static segment reserved for deterministic traffic, and a dynamic segment for other
+traffic. The maximum bandwidth is 10Mbit/s, but the cost is typically higher than
+for CAN [6]. As the demand for higher bandwidth increases, the industry has started
+looking towards Ethernet based real time protocols. Several different standards and
+protocols such as EtherCAT, Ethernet Powerlink, and TTEthernet were developed,
+some of which have been compared in [7]. One of the newer developments is Time
+Sensitive Networking (TSN), which is an upcoming standardization by the IEEE 802.1
+working group, for time-sensitive data transmission over Ethernet networks [8]. TSN
+is similar to other time triggered approaches in that determinism is guaranteed by
+transmitting high priority messages in predefined time-slots, but provides complete
+backward compatibility with standard Ethernet solutions.
+2.2
+TTEthernet implementations and analysis
+A software based TTEthernet end system has previously been developed for AU-
+TOSAR, which is a standardized software architecture for control units in cars [9].
+The implemented AUTOSAR system acts as synchronization client (explained in sec-
+tion 3.3), and uses existing Ethernet controller hardware capabilities to time stamp
+incoming clock synchronization frames. Precise end-to-end latency of the system is
+unclear due to a non-deterministic receive function, but a jitter of approximately 32us
+was observed.
+Latency and jitter through a single TTEthernet switch have been measured in [10].
+==PAGE:14==
+4
+2 Related work
+The relation between delays in the TTEthernet switch and latency were investigated,
+as well as latency of time triggered messages during high levels of network load. The
+measured jitter for the system was dependant on message size, and was observed as
+10us for frames smaller than 128 bytes, and 30us for larger frames.
+==PAGE:15==
+CHAPTER 3
+Background
+3.1
+Clock drift
+Every node in a distributed system has its own local clock built on an oscillator. These
+clocks are not perfect, and might have small variations in frequency. This means that
+even if all clocks in a distributed system was perfectly synchronized to begin with,
+they would eventually drift apart [11]. It’s called clock drift, and is illustrated on
+Figure 3.1 on the left. The difference in value between two clocks at a certain point
+in time is called clock skew. An example is the dotted line on the figure. Oscillators
+usually advertise a maximum clock drift in parts per million (ppm). For example,
+an oscillator with 20ppm would indicates that after a million ns, the maximum clock
+skew from the initial value is 20ns.
+Figure 3.1: Example of a fast and slow clock drifting away from a perfect clock over
+time. The dotted line is the clock skew at time t.
+==PAGE:16==
+6
+3 Background
+3.2
+Patmos Ethernet controller
+Figure 3.2: Overview of the Patmos Ethernet controller, adapted from [12]. It is
+connected to Patmos through OCP signals, and to a physical PHY chip
+through MII.
+The existing Ethernet controller in Patmos [12] is based on the EthMac block from
+OpenCore [13, 14]. The architecture can be seen in Figure 3.2. To enable the con-
+nection to Patmos, the Open Core Protocol (OCP) signals used by Patmos are con-
+verted to the WishBone (WB) signals used by the IP block. This is done through the
+Demux/Bridge for configuration signals and through the receive/transmit (RX/TX)
+buffer otherwise. The EthMac block connects to a PHY chip through the Media-
+Independant Interface (MII). Configuration of the EthMac block and access to the
+RX/TX buffers are available from Patmos through specific addresses in local mem-
+ory dedicated to the IO device. Receiving and transmitting from the EthMac block
+happens with the use of so called buffer descriptors. They are stored in the EthMac
+block, and contain an address to an associated buffer in the RX/TX buffer, as well as
+the length and status of the buffer. Buffer descriptors work a bit like linked lists (one
+for receiving one for transmitting). Each descriptor passes control to the next in line
+when it is unavailable. The last buffer descriptor links back to the first, creating a
+ring. This is illustrated in figure 3.3. The EthMac block receives frames when there
+is at least one empty receive buffer available, otherwise they are lost. After reception
+the receive status is written to the associated buffer descriptor, and an interrupt is
+generated if enabled. The buffer will stay unavailable until the buffer descriptor is
+again marked empty. Interrupts from the EthMac core do not trigger interrupts in
+Patmos, but makes it possible to see if a new frame has been received by polling the
+interrupt source register. Frames are transmitted from a transmit buffer as soon as
+the associated buffer descriptor is marked as ready. After successful or unsuccessful
+transmission the buffer descriptor is automatically reset to not ready. The controller
+includes a C library (ethlib) with functions for using and configuring the controller.
+==PAGE:17==
+3.3 TTEthernet
+7
+Figure 3.3: Example of possible setup of receive buffer descriptors. Each contains
+information regarding a buffer at a specific address in the RX/TX buffer.
+3.3
+TTEthernet
+TTEthernet is a deterministic extension of Ethernet, which operates at the Data
+Link layer of the OSI model. A TTEthernet system generally consists of a set of
+nodes communicating through one or more switches. It allows regular Ethernet traf-
+fic (best-effort traffic), and introduces two classes of critical traffic (CT) with various
+deterministic properties. This section will go over the basics of TTEthernet. Addi-
+tional information can be found in [1], which is the primary source for this section.
+3.3.1
+Virtual links
+CT is sent and received using the concept of virtual links (VLs). A VL is a relation
+between a sender and one or more receivers, and is identified by a unique ID. Switches
+need to know the VL definitions, and nodes need to know definitions of VLs they can
+send on. CT follows the standard format for Ethernet frames, but is distinguished
+from best-effort traffic by having a predefined constant in the first 4 bytes of the
+destination MAC address (the CT marker). The remaining two bytes are used to
+identify which virtual link the frame is sent on. This is illustrated in Figure 3.4.
+Since the switches know about the VLs, they know which ports to forward the frame
+to.
+Figure 3.4: Ethernet II frame. Critical traffic identifies a destination using a CT
+marker and VL ID instead of a MAC address.
+==PAGE:18==
+8
+3 Background
+3.3.2
+Rate-constrained traffic
+The first class of CT is rate-constrained traffic.
+It extends the VL definitions to
+include a maximum frame size and a minimum delay between two frames. A switch
+receiving frames on the link will drop any frames that violate the limits. This doesn’t
+ensure any specific timing or jitter, but ensures that the network is not overloaded. In
+systems with both rate-constrained traffic and best-effort traffic, the rate-constrained
+traffic has higher priority.
+3.3.3
+Time triggered traffic
+The other CT class is time triggered (TT) traffic. For TT traffic, a VL definition
+includes a receive window in which the switch will accept messages from the sender,
+and send windows where the switch will pass them on to the receivers. Packages re-
+ceived outside of the defined window will be ignored by the switch, which guarantees a
+certain end-to-end latency and minimal jitter. The latency will largely depend on the
+delay between receive and send window in the switch, which we will call switch delay
+(SD). Assuming sending always starts at the beginning of the send window, the pos-
+sible minimum and maximum delays of an outgoing message are illustrated in figure
+3.5. The actual delay would be somewhere in between. The latency will furthermore
+Figure 3.5: Switch delay.
+depend on the transmission time, defined as frame size divided by bandwidth, and
+the propagation delay, defined as cable distance divided by propagation speed. For
+a system with short wires the propagation delay is in the range of nanoseconds. The
+expected minimum and maximum latency for a VL in a given TTEthernet system
+can thus be calculated using Equation 3.1, where 64 and 1518 are the minimum and
+maximum possible Ethernet II frame sizes.
+Lmin = SDmin(s) +
+64 bytes · 8 bit
+byte
+bandwidth( bit
+s ) + dcable(m)
+scable( m
+s )
+Lmax = SDmax(s) +
+1518 bytes · 8 bit
+byte
+bandwidth( bit
+s )
++ dcable(m)
+scable( m
+s )
+(3.1)
+==PAGE:19==
+3.3 TTEthernet
+9
+In systems with multiple traffic types, TT traffic is always the highest priority, since
+delays in sending might violate the timing guarantees.
+3.3.4
+Integration and cluster cycle
+All nodes and switches need a global notion of time in order to send packages at the
+correct points in time. This is achieved through periodic clock synchronization. The
+time between each synchronization is called an integration cycle, and has a period
+which is typically in the range of 1 to 10 milliseconds. The schedule for TT traffic
+is periodic as well, and repeats every cluster cycle, which is defined as an integer
+multiple of integration cycles. An example of some TT traffic in a system with an
+integration period of 10ms and two integration cycles per cluster cycle can be seen
+in Figure 3.6. TT traffic is often defined by its period, and the offset from the start
+of the cluster cycle. For example, TTE3 in the figure has a period of 20ms and an
+offset of 10ms.
+Figure 3.6: Example of integration and cluster cycles.
+3.3.5
+Protocol Control Frames
+Clock synchronization is achieved through the exchange of protocol control frames
+(PCFs). These are small TT frames with their own type definition (0x891D), and a
+specific data layout which can be seen in Figure 3.7. The integration cycle field is
+used to differentiate PCFs sent at different points in the cluster cycle. This ensures
+that a node can begin synchronization at any point in the cluster cycle. Membership
+contains information about how many nodes have been involved in the synchroniza-
+tion. Synchronization priority can be used to settle disputes in networks with multiple
+switches. A synchronization domain consists of all nodes and switches that synchro-
+nize to the same global time. There are three types of PCF. Integration frame(0x2),
+cold-start frame(0x4), and cold-start acknowledge frame(0x8), although the last two
+are used exclusively during start-up. The last field, transparent clock, keeps track of
+==PAGE:20==
+10
+3 Background
+Figure 3.7: Data layout of protocol control frame, adapted from [1].
+the actual transmission time for a frame. The transparent clock is initially set to the
+send delay of the device originally sending the PCF. Any device relaying the frame
+will add their send and receive delay to the transparent clock, and the final device
+will add receive delay as well.
+3.3.6
+Permanence
+PCFs are not considered for synchronization until they become permanent, which
+is calculated as the transparent clock subtracted from the maximum possible trans-
+mission delay of any frame in the system (max_delay). Assuming the transparent
+clock accurately depicts the transmission time, this is equivalent to the frame being
+permanent max_delay after it is sent. Seen in Figure 3.8.
+Figure 3.8: Illustration of permanence.
+3.3.7
+Clock synchronization
+Three roles are involved in the exchange of PCFs. Synchronization masters, synchro-
+nization clients, and compression masters. Typically the switches act as compression
+masters, and nodes are either synchronization masters or clients. Nodes are allowed
+==PAGE:21==
+3.3 TTEthernet
+11
+to not be involved in the synchronization domain at all, but it restricts them to only
+communicate with Best-effort traffic.
+Each node in the synchronization domain keeps track of when they believe the
+integration cycle has started, which is when synchronization masters send out in-
+tegration frames. Compression masters use the permanence times of these frames
+to decide on the correct clock, and send integration frames to all synchronization
+masters and clients.
+A returning integration frame is expected to be permanent
+2·max_delay+comp_delay after the beginning of the integration cycle. Comp_delay
+is the time it takes a compression master to evaluate the frames. An acceptance win-
+dow around this expected permanence point defines whether or not the node should
+accept the PCF as correct. The acceptance window has a width of twice the expected
+precision of the system, defined as the maximum difference between two correct local
+clocks. If the PCF is accepted, the difference between the expected and actual per-
+manence time is used to correct the clock. Correction is typically delayed until it is
+ensured that the corrected clock won’t fall back within the acceptance window. Seen
+in Figure 3.9. If the system has more than one compression master, the synchroniza-
+tion masters and clients will receive multiple PCFs in the acceptance window. In this
+case, the clock correction will use a fault tolerant average of the differences between
+expected and actual permanence time.
+Figure 3.9: Overview of clock synchronization, adapted from [1].
+==PAGE:22==
+12
+==PAGE:23==
+CHAPTER 4
+Materials and
+Methods
+4.1
+Software
+4.1.1
+Wireshark
+Wireshark is a freely available network protocol analyzer. It is open source, and runs
+on most platforms.[15] It can capture all Ethernet traffic received on a device, and
+display it. Filters for the TTEthernet protocol are included, which makes it easy to
+identify and inspect TT traffic. The program was used to monitor the TTEthernet
+system during testing, to ensure that messages arrived as expected.
+4.1.2
+TTE tools
+TTE tools are a TTTech development suite for configuring TTEthernet systems.
+They include a GUI editor based on Eclipse.[16] The typical process for generating
+Figure 4.1: Typical process using TTE tools.
+configuration files for all devices in a TTEthernet system can be seen in Figure 4.1.
+First step is to create a Network description file (XML). It contains information
+about: senders, receivers, physical links, virtual links, synchronization domain, and
+similar network information. TTE Plan can then use this file to generate a Network
+configuration file (XML). This is essentially the schedule for the entire network. If a
+specific schedule is desired, the Network configuration file can be edited manually as
+well. From the network description and network configuration TTE build generates
+device specific binary images.
+==PAGE:24==
+14
+4 Materials and Methods
+4.2
+Hardware
+4.2.1
+TTEthernet Chronos switch
+A TTEthernet Chronos switch was used during the project. It has 24 ports, 6 of which
+support Gigabit Ethernet, while the remaining 18 support fast Ethernet (10/100
+Mbit/s). Configuration of the switch is done by converting and uploading a device
+specific binary image generated from TTE tools. A script was provided with the
+switch for this task, but was initially faulty. The build revision number used by the
+script did not match the build revision number found in the event log of the switch,
+which made any uploaded configurations unable to be activated. This was rectified in
+order to use the switch in this project. A second switch was stuck in an error state,
+and never successfully configured, which limited test configurations to networks with
+a single switch.
+Figure 4.2: TTEthernet Chronos Switch.
+4.2.2
+Ubuntu end nodes
+Four Dell precision T1700 PCs running Ubuntu were used as end nodes for the TTEth-
+ernet system. Each are equipped with a TTE PCIe Network card, which is specifically
+designed for distributed control systems. The network card has 2 SFP ports which
+support connections with 100/1000 Mbit/s.
+The PC’s include a TTEthernet driver and API, as well as various test programs,
+all of which require a device specific binary image, generated from TTE tools.
+==PAGE:25==
+4.2 Hardware
+15
+4.2.3
+Altera DE2-115 board
+The default FPGA board for the Patmos processor is the Altera DE2-115, which
+can be seen in Figure 4.3. It was the target board for the existing Patmos Ethernet
+controller, and thus an obvious choice for this project. It is equipped with an Altera
+Cyclone IV FPGA, and a wide variety of available components. Table 4.1 will present
+some of these and their relevance for this thesis. [17]
+Table 4.1: Relevant Altera DE2-115 components.
+Component
+Connection to project
+Built-in USB Blaster
+Used for configuring the FPGA
+50Mhz oscillator
+Supplies the Patmos clock
+2 Gigabit Ethernet PHY chips
+Connects the board to the TTEthernet system
+RS-232 transceiver and 9-pin connector
+Used by Patmos to transmit text output
+Figure 4.3: Altera DE2-115 board.
+4.2.3.1
+Patmos configuration
+The Patmos platform can be configured for different boards and with different IO
+components. This is done by synthesizing the platform with a different configuration
+file than the default. Since the Patmos Ethernet controller is not included in the
+default configuration, ”altde2-all” was chosen instead. It is similar to the default
+configuration, except it disables dual issue instructions, and includes the Ethernet
+controller and a second UART. The configuration was modified slightly to include an
+interrupt signal which was added to the Ethernet controller during the project.
+==PAGE:26==
+16
+4 Materials and Methods
+4.2.3.2
+Physical board configuration
+The Altera board supports two different standards for communication between the
+FPGA and PHY chip. MII or Reduced Giga-bit Media-Independant Interface (RGMII),
+where RGMII is the default. Since the Patmos Ethernet controller only supports MII,
+the board needs to be configured for MII by physically moving a jumper. Correct
+jumper placement for configuring the Ethernet0 port to MII can be seen in Figure
+4.4.
+Figure 4.4: Jumper placement on the Altera DE2-115 board.
+4.2.4
+General platform
+Figure 4.5: Illustration of components and VLs in the system. Red nodes are syn-
+chronization masters, purple nodes are synchronization clients.
+Throughout most of the implementation and testing, the star network configura-
+tion seen in Figure 4.5 was used. It is based on a demo configuration which came
+with the TTEthernet system, and consists of a TTE switch, four Ubuntu end nodes
+==PAGE:27==
+4.2 Hardware
+17
+(AS,AC,VS and VC), a Windows computer(Monitor) and the Altera board. Three of
+the Ubuntu end nodes (AS,AC and VC) act as synchronization masters, the fourth
+Ubuntu node (VS) and both board and monitor are synchronization clients. The
+monitor does not contain any TTEthernet hardware, and is mostly used to run TTE
+tools, configure the switch, and monitor all VLs with Wireshark. While the schedule
+of VLs have been varied slightly, the links shown in Figure 4.5 have remained mostly
+constant throughout implementation and testing. The network has been tested at
+different integration periods and cluster cycles, although mostly with an integration
+period of 10ms and a cluster cycle of 20ms. The maximum possible transmission
+delay of any frame in the system was calculated by TTE tools and configured as
+135,600ns. The compression delay was configured as 50,000ns in the system, but the
+configuration of the board incorrectly used 10,500ns for this value while collecting the
+results in section 6. This doesn’t affect the results in any way, because the board is
+a synchronization client. Precision was calculated by TTE tools, and configured as
+10,375ns
+==PAGE:28==
+18
+==PAGE:29==
+CHAPTER 5
+Implementation
+The implemented TTEthernet controller makes use of the existing Ethernet controller
+described in section 3.2. No changes were made to the existing Ethernet controller
+in order to physically send and receive TT traffic, but it was configured differently.
+To avoid filtering out traffic on mac-addresses, the EthMac core was configured in
+promiscuous mode. Additionally, it was configured as full-duplex, to avoid sending
+and receiving blocking each other. The functionality of the implemented controller
+lies mostly in a C library (tte.c) which makes use of, and builds on parts of the existing
+Patmos ethlib. This is illustrated in figure 5.1. Two slightly different versions of the
+controller were implemented. One where received messages are discovered through
+polling, like in the existing Ethernet controller, and another where EthMac interrupts
+trigger actual Patmos interrupts whenever a frame is received. The following sections
+will describe the implementation based on the version with polling, and section 5.6
+will describe how the version without polling differs.
+Figure 5.1: Overview of most relevant C files.
+==PAGE:30==
+20
+5 Implementation
+5.1
+Overall implementation
+To cut down on complexity, the controller is able to act only as synchronization client,
+and assumes that it is connected to a single switch. The controller consists of three
+main parts: initialization, receiving, and sending, which will be described further in
+the following three sections. An overview of the intended flow of programs using the
+controller can be seen in Figure 5.2. The controller is initially initialized with static
+information regarding the system, VLs and the schedule. After initialization, the
+Ethernet controller is continuously polled to see if any new messages have arrived.
+This is necessary in order to ensure that the receive time of integration frames is
+recorded as precisely as possible to avoid incorrect clock synchronization. The re-
+ceived message should then be passed through the tte receive function, which will
+synchronize the local clock in case of an integration frame, and otherwise return a
+value indicating the message type. The rest of the body depends on the intention of
+the program, and the program flow returns to receiving the message. Outgoing TT
+messages can be scheduled anywhere in the program body, and will be sent accord-
+ing to the system schedule through timer interrupts. An example of a general user
+program following this structure can be seen in section 5.7. To avoid big fluctuations
+in clock synchronization, the system schedule and the WCET of the program body
+should follow the limits described in section 5.8.
+Figure 5.2: Intended flow of user programs. The controller is first initialized with
+all constants of the system. Remaining functionality happens in a loop
+where the program continually waits until a frame is received, calls the
+tte receive function, and then reacts to the reply.
+==PAGE:31==
+5.2 Initialization
+21
+5.2
+Initialization
+Several parts of the controller needs initialization before a program loop can com-
+mence, an overview can be seen in Figure 5.3. The controller needs to be initialized
+with the constants of the particular system it is running. Namely the integration
+cycle, the cluster cycle, how many VLs the node can send on, maximum transmission
+delay, the compression delay of the switch, and the system precision. Furthermore,
+the permitted send time for each VL needs to be known, so each VL gets initialized
+with an id, offset and period. There is no need to store any information about VLs
+the controller can receive TT traffic on. The switch will ensure that only relevant and
+correctly timed TT messages are passed on to the controller, and the messages can be
+received like any other. The next step is to generate the send schedule and register the
+timer interrupt function. The timer will begin when the first PCF has been received
+by the tte receive function. The last step is to clear the receive bit in the interrupt
+source register of the EthMac controller, and set up receive buffers. Multiple buffers
+are needed to ensure that messages aren’t lost while the latest message is used, but
+the precise number depends on the system and schedule. Receive buffers are set up
+by writing to the receive buffer descriptors. Each buffer descriptor needs an address
+in the RX/TX buffer, and should be configured to generate interrupts. Active buffers
+should be marked empty, and the last buffer in the line should be marked as such.
+Figure 5.3: Overview of initialization. First the controller and all system constants
+are initialized. Then id, period and offset of each VL is stored. This
+is followed by generating the schedule and registering timer interrupts.
+Finally receive buffers are set up so execution can commence.
+5.2.1
+Generating send schedule
+We know the amount of VLs, their period and offset. From this, the possible send
+times for each VL can be computed by repeatedly adding the period to the offset.
+These need to be combined into a single schedule. This can be done with a small
+algorithm, which will be explained through the example in figure 5.4. To make it
+easier for the timer interrupt function to schedule the next interrupt, each entry in
+the schedule is stored as the time until next interrupt. To avoid decimal numbers,
+time is stored in tenths of ms. The first event for each VL is at their offset, so the
+very first event in the schedule can be found by finding the smallest offset. This
+starting offset is stored in a global variable ”startTick”, and the VL it belongs to is
+stored in the first place in the schedule. For all VLs a temporary variable named
+==PAGE:32==
+22
+5 Implementation
+Figure 5.4: Example of schedule generation. Two VLs with the offset and period
+shown in the top left will generate the schedule in the bottom right
+when the cluster cycle is 8ms. The top right shows the next send time
+of each VL at different steps in the algorithm.
+current is set to the offset of the VL. The VL which had the starting offset adds its
+period to this value. This is the VL.current values when i is 0 on the figure. The
+schedule time when i is 0 is calculated as the minimum current value (here 26) with
+the last current value (here 10) subtracted from it. The VL with the smallest current
+value is stored in the next place in the schedule (when i is 1), and its current value is
+incremented by its period. These steps are repeated until the smallest current value
+is larger than the cluster-cycle (8ms on the figure). It may seem strange that the VL
+is stored one place further in the schedule than the time. This is because the chosen
+order is easier when the values need to be read. For example, the first time a timer
+interrupt happens (i=0) VL 1 will be allowed to send, and the next interrupt will be
+scheduled for 1.6ms later.
+5.3
+Receiving and clock synchronization
+As previously mentioned, receiving any message is done by continuously polling the
+interrupt source register until it sets the bit signifying that a frame has been received
+in a receive buffer.
+This is done with a function called ”tte_wait_for_message”,
+which is also responsible for recording the receive time by reading the current cycle
+count. In order to avoid a problem which is further described in section 6.1.1, the
+current cycle count is repeatedly read during polling.
+After a message has been received and the receive time is stored, the next buffer
+should be marked as empty, and the interrupt source register cleared.
+This can
+be done by calling tte_clear_free_rx_buffer. Afterwards the tte receive function
+==PAGE:33==
+5.3 Receiving and clock synchronization
+23
+described below should be called, with the address of the received frame and the
+recorded receive time.
+5.3.1
+TTE receive function
+Figure 5.5: Overview of clock synchronization. The permanence point is calculated
+based on receive time and transparent clock. The start time is initialized
+if relevant, and used to calculate the scheduled receive point. If the
+permanence point is outside the acceptance window synchronization has
+failed. Otherwise the start time is synchronized, and timer interrupts
+are started if relevant.
+The tte receive function initially checks the type of the message. If it’s a PCF and
+an integration frame it will be used to synchronize the clock, otherwise the function
+returns. Clock synchronization is mostly done according to the description in section
+3.3.7, but an overview of the function can be seen in figure 5.5. Transparent clock and
+integration cycle is read from the appropriate fields in the PCF. The receive point is
+given in clock cycles, but the transparent clock is given in a more precise format. Since
+the controller is unable to correct the local clock with anything more precise than a
+clock cycle, the transparent clock is converted to clock cycles. The permanence point
+in time is calculated by adding the maximum delay, and subtracting the transparent
+clock. For keeping track of when the controller expects synchronization masters to
+have sent the PCFs, a variable called start_time is used. It is initially zero, but
+on receiving the very first PCF, it is set to permanence time −(2 · max_delay +
+comp_delay). Start_time is used to calculate the scheduled receive point, which is
+==PAGE:34==
+24
+5 Implementation
+used to calculate the acceptance window.
+If the permanence point is outside the
+acceptance window, the start_time is reset to zero, and the function returns zero.
+This way the user program can immediately see that an error has occurred somewhere,
+but the controller will start normally if it once again receives correctly timed PCFs.
+Otherwise, if the permanence point is within the acceptance window, the difference
+between permanence point and scheduled receive point is added to the start_time,
+effectively synchronizing the local clock. The controller does not need to wait until
+after the acceptance window to synchronize, because the implementation only assumes
+one switch in the network, and thus only one PCF per integration cycle. This makes
+it irrelevant whether or not the local clock goes back within the acceptance window.
+If it is the first integration frame in the cluster cycle, a timer is armed for the first
+entry in the send schedule. The first interrupt is scheduled for start_time plus the
+startTick converted to cycles. Lastly, the integration period is added to start_time,
+making it the expected send point of the next integration frame, and the function
+returns 1.
+5.4
+Sending
+As previously mentioned, time triggered messages must be sent according to a pre-
+defined schedule. This requires some kind of queuing mechanism, as the program
+should not be expected to calculate the exact send times itself.
+The ethlib send
+function expects outgoing frames to be stored somewhere in the RX/TX buffer, and
+requires the specific address and size of the frame. The send queues therefore holds
+addresses and sizes of frames scheduled to be sent. One send queue is created per
+VL during initialization, and is allowed to hold the maximum amount of frames that
+the VL is able to send in one cluster cycle, calculated as clustercycle
+V Lperiod . This limits the
+maximum delay of a scheduled frame to one cluster cycle. Each queue operates in
+a FIFO manner, keeping track of the head and tail through two variables. It is up
+to the program to create frames in the RX/TX buffer according to its intended use,
+but a function ”tte_prepare_header” is provided to help create the header of a tte
+message. Frames are scheduled through a specific function, ”tte_schedule_send”,
+which takes the address and size of the frame, and which VL it should be scheduled
+for. The function then checks the queue of the VL, and returns 0 if it’s full, and 1
+if the frame was successfully scheduled. It is up to the program to ensure that the
+address space is not overwritten before the frame has been sent.
+5.4.1
+Schedule interrupts
+A schedule interrupt is illustrated in figure 5.6. As previously mentioned, the first
+interrupt each cluster cycle is scheduled by the tte receive function upon process-
+ing the first PCF. All remaining interrupts are scheduled by the previous interrupt,
+which means the last interrupt in the cluster cycle does not schedule any interrupt.
+Interrupts are scheduled by adding the time until next interrupt (from the schedule)
+==PAGE:35==
+5.5 Modifications to enable WCET analysis
+25
+Figure 5.6: Schedule interrupt. First the time for the next interrupt and the VL
+scheduled to send are found. If it’s the last interrupt in the cluster cycle
+no interrupts are scheduled. If the next interrupt is a PCF, the timer
+time is set to start time. If there’s data on the queue of the scheduled
+VL it is sent.
+to a variable which holds the timer time in cycles for the current interrupt. The timer
+time should be as synchronized with the local clock as possible, so an additional VL
+representing the expected send times of PCFs is automatically added to the system
+during initialization. It is an active part of the schedule with its own VL id, but is
+scheduled by setting the timer time to start_time instead of the usual calculation.
+Without it, the timer time would only be synchronized with the local clock once every
+cluster cycle, which could cause issues in systems with long cluster cycles. Interrupts
+are generated for each possible send point for each VL regardless of whether or not
+any frames are scheduled. Each interrupt will check the queue of the scheduled VL,
+and use the ethlib send function to send the first frame in the queue, if it isn’t empty.
+5.5
+Modifications to enable WCET analysis
+To enable the solution to run the WCET analysis tool from the Patmos platform, some
+small modifications were made. The function which converts the transparent clock
+from the format used in PCFs to clock cycles initially performed division on a unsigned
+long. According to the analysis tool, the division function contained an unbounded
+loop.
+To make the original function analyzable, the division was replaced by an
+==PAGE:36==
+26
+5 Implementation
+almost equivalent series of multiplication and bit-shifting.
+Additionally, pragmas
+containining loopbounds were added to all loops in the code, in order to aid the
+analysis tool.
+5.6
+Implementation without polling
+The EthMac core supports the generation of interrupts on various events. The inter-
+rupt output signal from the EthMac was originally ignored in the Patmos Ethernet
+controller. By relaying this output signal to the top level of the Ethernet controller,
+it was possible to configure it as an actual interrupt signal in Patmos. This can be
+seen in Figure 5.7. Since the EthMac core already needs to be configured to gener-
+ate interrupts on receiving a frame, it gives an alternative to the continuous polling
+otherwise needed by applications using the TTEthernet controller. User programs
+using this version of the implementation no longer need to follow the program flow
+depicted in figure 5.2. Instead the tte-receive function can be called by an interrupt
+handler. To enable this, the desired receive interrupt handler must be written in the
+user program and passed to the controller with a pointer during initialization (specif-
+ically, the ”tte_start_ticking” function). To ensure that interrupts from receiving a
+message has priority over the interrupts generated by the timer for sending, a new
+configuration of Patmos was created for the interrupt implementation. It is almost
+identical to the configuration described in section 4.2.3.1, except all interrupt num-
+bers are increased by 1 so the Ethernet controller can have interrupt number 0. Both
+versions of the implementation are tested in section 6.
+Figure 5.7: The new signal for interrupt enabling runs from the EthMac block to
+Patmos, bypassing the bridge.
+==PAGE:37==
+5.7 User program example
+27
+5.7
+User program example
+This section will provide a simple example of a general user program using the imple-
+mented controller. The example can be seen in Listing 5.1. It shows the initialization
+of a controller and 2 VLs. Integration period, cluster cycle and period and offset of
+VLs are specified in 10ths of ms, while max_delay, compression delay and precision
+are specified in clock cycles.
+When all VLs have been specified, ”tte_start_ticking” is called, which generates
+the system schedule and sets up interrupt functions. In this example it is called with
+three zeroes, first zero means the send times should not be logged, and the next two
+zeroes signify that there is no interrupt function for receiving messages. Setting up
+buffer descriptors has been left out to keep the example short, but it is assumed that
+two buffers are used, current and extra, each with a buffer descriptor, current_BD
+and extra_BD.
+The program loops begins by waiting until a message has been receive in current.
+It then marks the extra buffer empty and calls the tte receive function with the current
+buffer and the receive point. Reply can now be used to program different responses to
+different types of received messages. Line 25 uses ”tte_prepare_test_data” to build
+a TT message in address 0x2000 of the buffer. The message is made to be sent on
+VL0, has a length of 1514, and the data portion of it consists of 0xBA repeated over
+and over. The test message is scheduled to be sent on VL0 in line 26. Lastly, the
+current and extra buffers are swapped, and the loop resumes. The loop runs for 2000
+iterations, then stops the controller and terminates.
+1 int main(){
+2
+static unsigned long long receive_point;
+3
+unsigned char CT[] = {0xAB,0xAD,0xBA,0xBE};
+4
+unsigned char VL0[] = {0x0F,0xA1};
+5
+unsigned char reply;
+6
+7
+//int_period , cluster cycle, CT, 2 VLs, max_delay, comp_delay , precision
+8
+tte_initialize(100,200,CT,2,0x2A60,0xFA0,0x33E);
+9
+tte_init_VL(0, 8,40); //first VL starts at 0.8ms and has a period of 4ms
+10
+tte_init_VL(1, 10,20); //second VL starts at 1ms and has a period of 2ms
+11
+tte_start_ticking(0,0,0); //no logging, no receive interrupts
+12
+13
+eth_iowr(0x04, 0x00000004); //clear receive frame bit in int_source
+14
+//set up 2 receive buffers, current and extra
+15
+16
+for (int i =0; i<2000;){
+17
+tte_wait_for_message(&receive_point);
+18
+19
+tte_clear_free_rx_buffer(extra_BD); //start receiving in other buffer
+20
+21
+reply=tte_receive(current,receive_point);
+22
+23
+//do something with reply
+24
+25
+tte_prepare_test_data(0x2000,VL0,0xBA,1514);
+26
+tte_schedule_send(0x2000 ,1514,0);
+==PAGE:38==
+28
+5 Implementation
+27
+28
+// swap current and extra
+29
+}
+30
+tte_stop_ticking();
+31
+return 0;
+32 }
+Listing 5.1: Example of how to use the developed TTEthernet library.
+The
+controller is initialized with an integration period of 10ms, a cluster
+cycle of 20ms, a max_delay of 135,600ns, a compression delay of
+50,000ns and a precision of 10,375ns.
+5.8
+Theoretical limits of implementation
+Because of the single-threaded nature of the implementation, the controller has certain
+limits, which will be further described in the following three subsections. The first
+limit is relevant in both the implementations with and without polling. The following
+two limits are not as important in the implementation without polling, since an
+interrupt will be generated on receiving a message regardless of whether the controller
+is busy computing other things.
+5.8.1
+Earliest outgoing TT message
+The first send-tick every cluster cycle is scheduled by the PCF handle function right
+after the clock has been corrected.
+Since the start of the cycle is defined as the
+point were the PCF message is sent by synchronization masters, scheduling a VL to
+send at 0ms would cause the function to schedule a timer-tick in the past, causing
+unpredictable behaviour. The precise receive times of PCFs are not known at compile
+time, but assuming a PCF is permanent within the acceptance window, the latest
+possible receive time would be the same as the latest possible permanence time. This
+is unlikely, but technically possible if the actual delay is equal to the maximum delay.
+Since the acceptance window is twice as wide as the precision, the latest receive time
+can be calculated with Equation 5.1.
+reclatest = 2 · max_delay + comp_delay + precision
+(5.1)
+To ensure that the first outgoing TT message is never scheduled too soon, it should
+be scheduled no earlier than the latest possible receive time plus the WCET of the
+tte_receive function. This is illustrated in Figure 5.8.
+5.8.2
+Maximum execution time after TT message
+If the program has a long execution time, the reception of PCFs might be delayed,
+negatively impacting the clock synchronization. Part of this could arise from the code
+==PAGE:39==
+5.8 Theoretical limits of implementation
+29
+Figure 5.8: The earliest possible receive time is max_delay before the start of the
+acceptance window. The latest possible receive time is at the end of
+the acceptance window. The first TT message should be scheduled no
+earlier than the WCET of tte_receive after the latest possible receive
+time.
+executed after receiving a TT message. The maximum allowed execution time after
+a TT message depends on the TT message scheduled with the smallest gap to the
+next integration frame. In our one switch implementation, the send_window defined
+in the switch also dictates the latest possible receive time in the node. The earliest
+possible receive time of a PCF (assuming it is in schedule), would be if the actual
+transmission time was 0, and the frame was permanent as early as possible in the
+acceptance window. This is equivalent to max_delay before the acceptance window,
+as seen in Figure 5.8. All in all, the maximum execution time of the code executed on
+receiving a TT message can be calculated with Equation 5.2, as illustrated in Figure
+5.9.
+maxtt = start_time −ttreclatest + max_delay + comp_delay −precision
+(5.2)
+The problem can be avoided either by scheduling the closest TT message further away
+from the PCF, or by decreasing the execution time of the relevant code.
+Figure 5.9: The code executed after receiving a TT message should take no longer
+than from the latest TT receive time until the earliest receive time of
+the next PCF.
+==PAGE:40==
+30
+5 Implementation
+5.8.3
+Maximum execution time during integration cycle
+Even if code executed upon receiving TT messages follow the limits described above,
+the reception of PCFs could still be delayed if the combined execution times of ev-
+erything executed during an integration cycle exceeds the integration period. This
+limit can be expressed with Equation 5.3, where inctt is the number of received TT
+messages.
+int_period > WCETint + inctt · WCETtt + send_ticks · WCETsend
+(5.3)
+==PAGE:41==
+CHAPTER 6
+Results
+6.1
+Clock synchronization
+The clock error was measured as the difference between the scheduled receive point
+in time, and the actual permanence point in time at each received integration frame.
+The error was stored in an array, which slightly increases the size of the function, but
+shouldn’t affect the accuracy of the measurements. Figure 6.1 depicts some of these
+measurements. In this case, with an integration period of 10ms, and no additional
+sending or receiving of frames other than the integration frames. While 2000 data
+points were captured, only the first 500 are shown on the figure.
+On the results
+in Figure 6.1 the clock error ranges between 2787ns and 3225ns, and averages at
+2990ns. Assuming the entire error is caused by clock drift in the Altera board, this is
+approximately 300 ppm as seen in Equation 6.1. Typical values are between 10 and
+100ppm, so the error is higher than expected.
+3000ns
+10ms =
+300ns
+1.000.000ns = 300ppm
+(6.1)
+Figure 6.1: Clock error, regular implementation, no additional sending or receiving.
+==PAGE:42==
+32
+6 Results
+6.1.1
+Clock delay problem
+An issue discovered during testing of the implementation was that the measured
+receive points of PCFs in the controller was always multiples of 21. This caused a
+peculiar pattern in the clock error, which can be seen in Figure 6.2. It depicts the
+regular solution with an integration period of 10ms, and no additional sending and
+receiving. Here the clock error ranges between 2762ns and 3350ns, which is a slightly
+bigger gap than in figure 6.1. The issue existed in both the regular solution and the
+version with interrupts. Furthermore, sending or receiving messages greatly affected
+Figure 6.2: Clock delay problem, regular implementation, no additional sending or
+receiving.
+the clock precision in some schedules. Initially this was thought to be caused in part
+by violating the limits described in section 5.8, but it was eventually ruled out. An
+example of this in the interrupt solution can be seen in Figure 6.3. In this figure,
+the program sends 10 TT messages on one VL each cluster cycle. Additionally, every
+time a TT message is received, the program schedules another TT message on a
+second VL. The incoming TT messages had a period of 4ms. The results show a
+single spike during startup, and then no spikes until the controller starts receiving
+TT messages. They have been cut off to show the rest of the data better, but go from
+approximately -10.000 to 16.000ns. Similar spikes was observed in some schedules for
+the regular solution as well, but with smaller spikes (approximately -1.000 to 7.000ns).
+The issue is expected to be caused by cache misses for the function that reads the
+local clock cycles, or the variable storing the receive point. When the program sends
+or receives messages it might alter the processor state, and fill up the caches with
+other variables and methods. In the regular implementation it was easily remedied
+by continuously measuring the receive point while waiting for a message to arrive.
+This ensures that any cache misses are dealt with before the actual receive point gets
+==PAGE:43==
+6.1 Clock synchronization
+33
+Figure 6.3: Clock delay problem, interrupt implementation, with sending and re-
+ceiving.
+measured. The clock error while sending and receiving after the fix can be seen in
+Figure 6.4, where the clock error is between 2862ns and 3175ns. This fix can’t be
+applied to the interrupt implementation, since it doesn’t perform any polling.
+Figure 6.4: Clock error, regular implementation, with sending and receiving.
+==PAGE:44==
+34
+6 Results
+6.1.2
+Clock error at different integration periods
+To investigate the clock error further, measurements were taken with varying inte-
+gration periods. No additional sending or receiving was performed during these tests.
+The average clock error for each experiment was plotted against the integration pe-
+riod, and can be seen in Figure 6.5. If all of the clock error was caused by the drift
+of the oscillator on the Altera board, we would expect a curve with a slope of around
+3000ns per ms. The trend-lines give 7.14ns of error per ms for the regular implemen-
+tation and 6.92ns error per ms for the implementation with interrupts. Since 1 ms
+is 1 million ns, this corresponds directly to a oscillator drift of around 7ppm. This
+value doesn’t necessarily tell us the actual drift rate of the oscillator in the board,
+but rather how much it drifts away from the TTEthernet system, which might itself
+drift slightly one way or the other. These results points towards around 2.9us of the
+clock error coming from a static component. To rule out a faulty oscillator on the
+Altera board, the test was repeated on a second board, with similar results.
+Figure 6.5: Average clock error as a function of integration period.
+The results
+show a strong correlation, with approximately 7ns additional clock error
+when the integration period is increased by 1ms. Approximately 2930ns
+of error is unaffected by changing the integration period.
+6.1.3
+PCF receive times in monitor
+To investigate whether the static error comes from the TTEthernet controller or
+the test system, the monitor was used to measure the time difference between each
+==PAGE:45==
+6.2 Latency and Jitter
+35
+received integration frame with various integration periods. The measurements were
+done using Wireshark. While they are expected to vary due to differences in send
+time and precision, the average should approximately be the integration period. These
+time differences were compared to the integration period, to get an ”error” similar
+to the ones measured by the board. The result can be seen in Figure 6.6. While the
+correlation is not as strong as the measurements from the controller, the results still
+suggest that a small part of the error is due to oscillator drift, and a larger part is
+due to some static component.
+Figure 6.6: Difference between integration period and average time difference be-
+tween integration frames as a function of integration periods. The cor-
+relation is not incredibly strong, but hints at a relatively large static
+error component.
+6.2
+Latency and Jitter
+To precisely measure latency and jitter of TT messages from the implemented con-
+troller, a physical setup similar to the one described in [10] was set up. The setup
+is illustrated in figure 6.7. It makes use of the fact that the Altera board has two
+available Ethernet ports, and sets up a schedule with a VL from one port to the other.
+Both ports are considered to be their own device by the schedule, and are both syn-
+chronization clients. The configuration of Patmos described in section 4.2.3.1, only
+enables one of these ports, so a new configuration was created with two Ethernet con-
+trollers. The second controller is accessed like the first, but uses a different address
+==PAGE:46==
+36
+6 Results
+Figure 6.7: Physical setup for latency tests.
+The board now uses two Ethernet
+controllers, sending on one and receiving on the other.
+in local memory. This wasn’t supported by the original ethlib, and was accommo-
+dated by duplicating several ethlib IO functions. A single VL with a period of 10ms
+and an offset of 8.2ms was used. This simplifies the test program, since one message
+can be sent and received each integration cycle. Because of the sometimes irregular
+behaviour of the interrupt implementation, latency was only measured on the regular
+implementation. The test program follows the form described in 5.2 with the first
+controller receiving messages in the overall loop. After a successful synchronization
+message, a TT message is scheduled, and the program waits until the message is re-
+ceived by the second controller before proceeding. This enables the program to collect
+both the schedule and receive points of messages as the current clock cycle count. A
+slightly modified version of the sending interrupt function was used to measure the
+send point as current clock cycle count, making it possible to calculate latency and
+jitter. Both receive and send window in the switch was 263us wide.
+Figure 6.8 shows latency measured as the average difference in send and receive
+time over 2000 measurements for 3 different frame sizes with various minimum switch
+delays. Lmin and Lmax have been calculated using equation 3.1, disregarding prop-
+agation delay, and plotted alongside the values. It is clear that all measured values
+are inside the expected minimum and maximum values. The expected transmission
+times for frames of the measured sizes are 5.12us, 32us and 121.12us respectively,
+which means that the actual switch delay for these experiments must be approxi-
+mately 200us higher than the minimum, judging by the trend-lines. This indicates
+that the switch receives the messages approximately 63us into the receive window in
+these tests. The jitter, measured as the smallest latency subtracted from the highest,
+did not vary significantly as a function of switch delay, but stayed between 4.5us and
+4.6us throughout all experiments.
+==PAGE:47==
+6.3 Worst Case Execution Time
+37
+Figure 6.8: Latency for various frame sizes as a function of minimum switch delay.
+The correlation is very strong, and well within expected minimum and
+maximum values.
+6.3
+Worst Case Execution Time
+WCET analysis was performed on significant parts of the controller using the platin
+WCET tool. For the analysis, the board configuration was assumed to be the de-
+fault for DE2_115, although the actual configuration in this implementation has
+differed slightly.
+This shouldn’t affect the result significantly, since there are no
+differences in memory and cache configurations.
+The analysis tool should be run
+with a program that calls the analyzed functions in a way that resembles actual us-
+age as closely as possible. To demonstrate, this WCET analysis has been run on
+a program resembling the demo program used with the regular implementation in
+section 6.1.
+In order to easier verify that the program and schedule satisfies the
+limits in section 5.8, parts of the program have been moved into separate func-
+tions. Additionally, in order to analyze the timer interrupt function, it had to be
+explicitly called. The tool requires that analyzed functions have the attribute ”noin-
+line”, to prevent inlining.
+These measures might make the analysis slightly more
+pessimistic than necessary. The results can be seen in 6.1, where all functions are
+part of the implemented tte.c library, except the final two, which are part of the tested
+demo program. ”tte_clear_free_rx_buffer” and ”tte_receive” are mentioned in sec-
+tion 5.3. ”tte_receive_log” is the tte receive function with logging enabled. ”han-
+dle_integration_frame” and ”handle_integration_frame_log” are called by a tte re-
+ceive function if the message is an integration frame. ”tte_prepare_test_data” cre-
+ates a TT message where the data part repeats a specified byte until the message has
+a certain length. ”tte_schedule_send” is described in section 5.4. ”tte_clock_tick”
+==PAGE:48==
+38
+6 Results
+and ”tte_clock_tick_log” are the timer interrupt functions with and without log-
+ging, and call ”tte_send_data” when actually sending a message. tte_code_int is
+executed after each successfully received integration frame, and tte_code_tt is exe-
+cuted after each received TT message. It is clear that the addition of logging adds
+about 200cycles to the WCET.
+Table 6.1: Worst case execution time of certain functions.
+function
+cycles
+tte_clear_free_rx_buffer
+10
+tte_receive
+3028
+tte_receive_log
+3216
+handle_integration_frame
+2573
+hande_integration_frame_log
+2732
+tte_prepare_test_data
+39138
+tte_schedule_send
+244
+tte_send_data
+289
+tte_clock_tick
+1641
+tte_clock_tick_log
+1824
+tte_code_int
+392419
+tte_code_tt
+40156
+6.3.1
+Verifying theoretical limits on demo
+With this example program and schedule, it is possible to verify that it satisfies the
+theoretical limits. The earliest outgoing TT message in this example has an offset of
+0.8ms. The equations in section 5.8.1, the system constants and the WCET of the
+tte_receive function (the log version) are used to calculate the earliest allowed TT
+message in equation 6.2. Since 332.3us is approximately 0.33ms, the example follows
+this limit.
+ttout = 2 · max_delay + comp_delay + precision + WCETtte_receive
+ttout = 2 · 135.6us + 10.5us + 10.4us + 3216cycles ·
+12.5
+ns
+cycle
+1000 ns
+us
+= 332.3us
+(6.2)
+The TT message which arrives closest to a pcf in this example arrives between 18.6ms
+and 18.863ms. Using this information, equation 5.2 and the system constants, the
+maximum allowed execution time after TT messages are calculated in equation 6.3.
+The WCET of tte_code_tt in this example can be seen in table 6.1. Since it’s much
+==PAGE:49==
+6.3 Worst Case Execution Time
+39
+less than the 101,816 calculated cycles, the example program follows this limit.
+maxtt = sched_send −ttreclatest + max_delay + comp_delay −precision
+maxtt = 20, 000us −18, 863us + 135.6us + 10.5us −10.4us = 1272.7us
+maxtt = 1272.7us · 1000 ns
+us
+12.5
+ns
+cycle
+= 101, 816cycles
+(6.3)
+The example schedule has a maximum of 3 incoming TT messages in a single integra-
+tion cycle. One of the VLs can send a maximum of 3 outgoing TT messages, and the
+other a maximum of 5. An integration period of 10ms is assumed, which is equivalent
+to 800,000 cycles. This information, equation 5.3 and the WCETs in table 6.1 are
+used to verify the final limit in equation 6.4.
+int_period > WCETint + inctt · WCETtt + send_ticks · WCETsend
+800, 000cycles > 392, 419 + 3 · 40, 156 + 8 · 1824
+800, 000cycles > 527, 479cycles
+(6.4)
+==PAGE:50==
+40
+==PAGE:51==
+CHAPTER 7
+Discussion
+Two variations of the implementation were tested. An issue which could cause great
+instability in clock synchronization was found in both implementations, and a solution
+was found for the implementation with polling. This shows that the implementation
+without polling is not very suitable for real time systems, due to its non-deterministic
+behaviour.
+The controller with polling however, proved able to synchronize in a
+stable and predictable manner, even while receiving and sending TT messages. While
+the clock error was higher than expected, the minimum and maximum clock error
+were only around 0.44us apart, which means the system synchronizes its clock in a
+somewhat precise and deterministic manner. Measuring the clock error at various
+integration periods pointed towards only a small part of the error being caused by
+clock drift, and a larger part caused by some static component. Seeing a similar
+result in the monitor indicates that the static error originated somewhere in the used
+TTEthernet test system.
+The latency and jitter of TT messages sent from the controller was measured. As
+expected, the latency depends linearly on how long the switch delays the message,
+and stayed well within the calculated maximum values. This corroborates the results
+seen in [10]. The measured jitter did not depend on frame size or switch delay, but
+stayed between 4.5us and 4.6us. This is lower than the 10-30us measured in [10], and
+the 32us measured in [9], which could be due to the time predictable nature of the
+Patmos processor. It is also possible that a higher jitter in the cited articles stem from
+differences in the testing method. The results show that the implemented controller
+is capable of providing predictable latency and small bounded jitter as promised by
+the TTEthernet protocol.
+The results further demonstrate that the WCET analysis provided by the Patmos
+platform can be used to ensure that a given program and schedule won’t break the
+limits of the implemented controller.
+7.1
+Future extensions
+Looking forward, it could be interesting to extend the implementation with the ability
+to act as synchronization master as well. This would make it possible to see how a
+TTEthernet system consisting only of Patmos nodes would behave. The extension
+might require hardware support in order to precisely add the send delay of the frame
+to the transparent clock right before transmission.
+==PAGE:52==
+42
+7 Discussion
+To increase precision of the controller and possibly solve the clock delay problem
+in a better way, hardware support for recording the receive time of frames could be
+added as well. Another extension could be a version that is able to receive PCFs from
+multiple switches. This would require a slightly different approach, since it requires
+synchronization to happen at the end of an observation window, rather than after
+every received integration frame.
+Finally, it could be interesting to test the implementation on the time predictable
+multi-core platform of T-crest.
+One core would be responsible for clock synchro-
+nization and sending TT messages at the correct times, possibly removing some of
+the issues that stem from implementing a single-thread solution. Such an extension
+would require extensive changes to the existing Ethernet controller in order to allow
+multiple cores access to the buffers.
+==PAGE:53==
+CHAPTER 8
+Conclusion
+This thesis has investigated the deterministic Ethernet protocol TTEthernet, and
+whether it is a suitable addition to the time-predictable processor Patmos. The pro-
+tocol was researched, and two versions of a TTEthernet controller was implemented
+on the platform. Both controllers are limited to networks with a single switch, and
+act exclusively as synchronization clients. The version which used interrupts to signal
+the reception of incoming frames proved too unstable in its clock synchronization to
+be useful as a deterministic Ethernet controller. The solution with polling however,
+was found to synchronize to the system clock in a stable manner. End-to-end latency
+of transmitted TT messages was found to be predictable, and well within the expected
+maximums. Jitter was found to be relatively small, and did not vary significantly in
+the tested scenarios. Certain schedule and program combinations might cause prob-
+lems in the controller, but these can be predicted before system start-up by utilizing
+the WCET analysis tools in Patmos. Overall, this project has provided a solution for
+deterministic communication in the Patmos platform.
+==PAGE:54==
+44
+==PAGE:55==
+APPENDIX A
+Code overview
+Bold files were added in this project, the remaining files were modified.
+patmos
+c
+ethlib
+tte.c
+tte.h
+eth_patmos_io.c
+eth_patmos_io.h
+ethlib_tte_demo.c
+ethlib_tte_demo_interrupts.c
+ethlib_tte_demo_latency.c
+ethlib_tte_wcet.c
+hardware
+config
+altde2-all.xml
+altde2-latency.xml
+altde2-interrupt.xml
+default-no-timer.xml
+ethmac
+eth_controller_top.vhdl
+eth_controller_top2.vhdl
+cont.
+hardware (cont.)
+quartus
+altde2-latency
+patmos.qpf
+patmos.qsf
+patmos.sdc
+altde2-interrupt
+patmos.qpf
+patmos.qsf
+patmos.sdc
+src/main/scala/io
+EthMac.scala
+EthMac2.scala
+vhdl
+patmos_de2-latency.vhdl
+patmos_de2-interrupt.vhdl
+wcet
+analyse_wcet.sh
+config_de2_115.pml
+==PAGE:56==
+46
+==PAGE:57==
+Bibliography
+[1]
+Roman Obermaisser. time-triggered communication. eng. CRC press, 2012. Chap-
+ter 8 - Time-triggered Ethernet.
+[2]
+Martin Schoeberl et al. Patmos Reference Handbook. 2018. url: http : / /
+patmos.compute.dtu.dk/patmos_handbook.pdf (visited on July 18, 2018).
+[3]
+url: https://github.com/MajaLund/patmos.
+[4]
+William Buchanan. “21 - CAN bus”. eng. In: Computer Busses (2000), pages 333–
+343. doi: 10.1016/B978-034074076-7/50021-3,10.1016/B978-0-340-
+74076-7.X5000-7.
+[5]
+G Leen and D Heffernan. “TTCAN: a new time-triggered controller area net-
+work”. eng. In: Microprocessors and Microsystems 26.2 (2002), pages 77–94.
+issn: 18729436, 01419331. doi: 10.1016/S0141-9331(01)00148-X.
+[6]
+Weiying Zeng, Mohammed Khalid, and Sazzadur Chowdhury. “A Qualitative
+Comparison of FlexRay and Ethernet in Vehicle Networks”. eng. In: Conference
+Proceedings - Canadian Conference on Electrical and Computer Engineering
+(2015), pages 571–576. issn: 08407789.
+[7]
+Peter Danielis et al. “Survey on real-time communication via ethernet in in-
+dustrial automation environments”. eng. In: 19th Ieee International Conference
+on Emerging Technologies and Factory Automation, Etfa 2014 (2014). doi:
+10.1109/ETFA.2014.7005074.
+[8]
+Michael D. Johas Teener et al. “Heterogeneous Networks for Audio and Video:
+Using IEEE 802.1 Audio Video Bridging”. eng. In: Proceedings of the Ieee 101.11
+(2013), pages 2339–2354. issn: 15582256, 00189219.
+[9]
+Thomas Fruhwirth, Wilfried Steiner, and Bernhard Stangl. “TTEthernet SW-
+based end system for AUTOSAR”. eng. In: 2015 10th Ieee International Sympo-
+sium on Industrial Embedded Systems, Sies 2015 - Proceedings (2015), pages 21–
+28. doi: 10.1109/SIES.2015.7185037.
+[10]
+Florian Bartols et al. “Performance analysis of time-triggered ether-networks
+using off-the-shelf-components”. eng. In: Proceedings - 2011 14th Ieee Interna-
+tional Symposium on Object/component/service-oriented Real-time Distributed
+Computing Workshops, Isorcw 2011 (2011), pages 49–56. doi: 10.1109/ISORCW.
+2011.16.
+==PAGE:58==
+48
+Bibliography
+[11]
+George Coulouris et al. Distributed Systems: Concepts and Design. 5th. USA:
+Addison-Wesley Publishing Company, 2011. isbn: 0132143011, 9780132143011.
+[12]
+Luca Pezzarossa et al. Implementation of an Ethernet-Based Communication
+Channel for the Patmos Processor. eng. 2015.
+[13]
+Igor Mohor. Ethernet IP core specification. eng. 2002. url: http://opencores.
+org/project,ethmac (visited on February 7, 2018).
+[14]
+Igor Mohor. Ethernet IP core design document. eng. 2002. url: http : / /
+opencores.org/project,ethmac (visited on February 7, 2018).
+[15]
+url: https://www.wireshark.org/ (visited on July 18, 2018).
+[16]
+TTTech. TTETools – TTEthernet Development Tools v4.4. url: https://www.
+tttech.com/products/aerospace/development- test- vv/development-
+tools/tte-plan/ (visited on July 5, 2018).
+[17]
+Altera. DE2-115 User manual. 2012. url: https://www.altera.com/solutions/
+partners / partner - profile / terasic - inc - /board / altera - de2 - 115 -
+development-and-education-board.html (visited on July 18, 2018).

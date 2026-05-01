@@ -1,0 +1,3834 @@
+==PAGE:1==
+M.Sc. Thesis
+Master of Science in Engineering
+Processor emulation in Webassembly
+Rasmus
+Thomas
+Tjalk-Bøggild
+(s103433)
+Kongens Lyngby 2017
+==PAGE:2==
+DTU Compute
+Department of Applied Mathematics and Computer Science
+Technical University of Denmark
+Richard Petersens Plads
+Building 324
+2800 Kongens Lyngby, Denmark
+Phone +45 4525 3031
+compute@compute.dtu.dk
+www.compute.dtu.dk
+==PAGE:3==
+Summary
+This thesis concerns processor emulation in the context of the WebAssembly platform,
+particularly how to generate an equivalent WebAssembly program for a source binary
+created for another platform.
+The thesis details three overall strategies for emulation: pure interpretation, ahead-
+of-time compilation and just-in-time compilation. The thesis shows that pure inter-
+pretation is generally applicable, but also generally slower than the other approaches;
+it shows that ahead-of-time compilation is not generally applicable and details the
+reasons the reasons and circumstances for when it is not applicable. Finally it shows
+how to apply the just-in-time compilation in relation to WebAssembly and how to
+work around the restrictions of the platform.
+The thesis shows that it is possible to build an emulation platform that can emu-
+late arbitrary binaries for the source platform; even binaries containing self-modifying
+code or using control flow graphs that cannot directly be translated to the WebAssem-
+bly platform.
+The emulator platform is illustrated using two source processors, and the ability
+of the platform is illustrated by simulating a Commodore 64 systems, complete with
+video subsystem and keyboard I/O. This system is demonstrated using the original
+C64 operating system, BASIC interpreter and a simple game, that can be loaded at
+run-time.
+Finally the emulation platform is evaluated and processor emulation on the We-
+bAssembly platform is found to be implementable and with significant speed-ups
+from the hybrid methods. The evaluation also finds key features missing from the
+WebAssembly platform, that could potentially improve emulation performance signif-
+icantly; all features, that are planned for future WebAssembly releases.
+==PAGE:4==
+ii
+==PAGE:5==
+Preface
+This thesis was prepared at DTU Compute in fulfillment of the requirements for
+acquiring an M.Sc. in Engineering.
+The thesis was conducted from January 23rd 2017 to June 15th 2017 under su-
+pervision of professor Christian Probst. The thesis deals with processor emulation in
+WebAssembly and performance optimization techniques.
+Kongens Lyngby, June 15, 2017
+Rasmus Thomas Tjalk-Bøggild (s103433)
+==PAGE:6==
+iv
+==PAGE:7==
+Acknowledgements
+I would like to thank my supervisor Christian Probst for his help and guidance
+throughout this thesis. I would also like to thank my wife and daughter for their
+patience during the project period.
+==PAGE:8==
+vi
+==PAGE:9==
+Contents
+Summary
+i
+Preface
+iii
+Acknowledgements
+v
+Contents
+vii
+1
+Introduction
+1
+2
+Preliminaries and theory background
+3
+2.1
+Dictionary . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2.2
+Overview of processor emulation
+. . . . . . . . . . . . . . . . . . . . .
+5
+2.3
+General compiler structure . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+2.4
+Compilation techniques for emulation
+. . . . . . . . . . . . . . . . . .
+7
+2.5
+WebAssembly target . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+2.6
+Reducible CFG . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+13
+2.7
+6502 source environment . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+2.8
+ARM Cortex M3 source environment . . . . . . . . . . . . . . . . . . .
+16
+2.9
+Related works . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+3
+Analysis of the problem
+21
+3.1
+Source instruction implementation
+. . . . . . . . . . . . . . . . . . . .
+21
+3.2
+Translation from source to target . . . . . . . . . . . . . . . . . . . . .
+24
+3.3
+Other optimizations
+. . . . . . . . . . . . . . . . . . . . . . . . . . . .
+33
+4
+Implementation work
+37
+4.1
+WebAssembly platform . . . . . . . . . . . . . . . . . . . . . . . . . . .
+37
+4.2
+Emulation platform . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+43
+4.3
+C64 Simulator . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+52
+4.4
+Limitations of the current implementation . . . . . . . . . . . . . . . .
+52
+5
+Testing and performance analysis
+57
+5.1
+Benchmark setup . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+57
+5.2
+Results . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+59
+==PAGE:10==
+viii
+Contents
+6
+Discussion
+63
+6.1
+Suitability of WebAssembly as an emulation platform
+. . . . . . . . .
+63
+6.2
+Suitability of using hybrid techniques . . . . . . . . . . . . . . . . . . .
+67
+6.3
+Future work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+68
+7
+Conclusion
+71
+A
+Appendix A - 6502 addressing modes
+73
+B
+Appendix B - Tool output
+75
+B.1
+Emscripten
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+75
+B.2
+Binaryen . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+84
+Bibliography
+85
+==PAGE:11==
+CHAPTER 1
+Introduction
+The modern web browser has become a ubiquitous computing platform driving ev-
+erything from online banking, word processors and spreadsheets to games and social
+media. At its core is the Javascript language [ECM11], which until recently was the
+only programming language available on the web platform. Javascript is a dynamic
+language distributed in a plain text format and although massive improvements have
+been made with regards to performance and optimizations, the language was never
+designed with performance in mind and substantial engineering effort is required to
+gain the modern level of performance [HCU91]
+Additionally, Javascript has become a compilation target, to allow existing soft-
+ware to take advantage of the wide availability of web. To improve the performance of
+these programs that were compiled to Javascript, a new standard was defined, asm.js,
+which uses only a subset of Javascript and annotates all variables with types to allow
+easier and more efficient optimizations [Moz14]. This had the benefit of instant legacy
+browser support, since the programs was still Javascript, but with huge performance
+gains for the supporting browsers. However, the compiled programs were still tech-
+nically Javascript (even if specially annotated), which causes larger than necessary
+source files and a resulting overhead in verification and compile time. To get around
+this, a new standard was introduced as a dedicated compilation target: WebAssembly.
+WebAssembly promises to be a more compact and efficient format for distributing
+programs for the web [W3C17e]. To take advantage of this, however, it appears that
+every program would have to be adapted and re-compiled for this new standard.
+In this thesis we will investigate how to take advantage of the WebAssembly format
+in creating an emulation platform. Emulation allows binaries for applications built
+for other platforms to be executed, without modification, on a new platform. By
+using an emulation platform, we can extend the lifetime of applications, that could
+otherwise not be ported, either due to prohibitive costs or because the sources are
+inaccessible.
+The thesis will first examine the necessary theoretical background for emulators.
+We will start by examining the reasons for emulating and the potential benefits and
+drawbacks. We will use two source platforms as the basis for this investigation: the
+legacy processor MOS 6502 and the contemporary ARM Cortex M3 processor.
+As part of this examination we will look at the WebAssembly format in detail,
+including the instructions and control flow supported and the environment in which
+WebAssembly programs reside in the browser. In particular, we will investigate the
+==PAGE:12==
+2
+1 Introduction
+properties of control flow graphs that are possible to directly represent in WebAssem-
+bly, since the format only supports so-called well-formed control flow graphs. We
+will compare this to the concept of reducible control flow graphs and examine how
+to test for reducibility and how to work around this limitation in WebAssembly for
+non-reducible control flow graphs.
+We will then analyze the different strategies for emulation and how we could apply
+those to the WebAssembly platform. This analysis will detail how to reconstruct
+the control flow graph and how to use that to recreate an equivalent program in
+WebAssembly, using the native constructs available there. Lastly we will analyze how
+to use this recreated structure as the basis for further optimizations of the emulated
+program.
+The thesis will then describe how the emulation platform was actually imple-
+mented, with a particular focus on how to work around the current limitations of
+the WebAssembly platform. The implementation focuses on two parts: how to, cor-
+rectly, emulate each instruction of the source platform and how to implement the
+analyzed emulation strategies. The more advanced strategies must also deal correct
+with source constructs such as self-modifying code, and the implementation describes
+ways to deal with such constructs.
+The implementation is constructed to support several of the discussed emulation
+strategies. The implementation is then tested in a benchmarking framework to see
+the performance effect of the various strategies and how they compare in a number
+of scenarios.
+Finally the results are analyzed and discussed and we examine the suitability of
+using WebAssembly as a platform for processor emulation.
+==PAGE:13==
+CHAPTER 2
+Preliminaries and
+theory background
+This chapter will provide the theoretical background needed to understand the report.
+The central terms of the report will be defined in a dictionary. Furthermore it will give
+an overview of the subject of processor emulation techniques and the WebAssembly
+target.
+2.1
+Dictionary
+Emulation
+The task of executing an instruction set for one processor on a different
+processor by means of software translation. For the purpose of this thesis, this means
+emulation of instruction set and memory only.
+Simulation
+The task of simulating an entire platform using an emulator for the
+instruction set and memory, but also including peripherals (video subsystems, user
+input, network I/O, etc).
+Environment
+The processor, memory, peripherals, etc. of a given platform..
+Target / Host environment
+The environment that the emulated is executed in.
+Source / Native environment
+The environment that the emulated binary was
+originally targeting.
+Control Flow Graph (CFG)
+A directed graph with basic blocks as vertices and
+successors as edges.
+Basic block
+A collection of one or more instructions, with the property that only
+the first instruction can be the target of a jump instruction and only the last instruc-
+tion (the terminator) may be a jump instruction.
+==PAGE:14==
+4
+2 Preliminaries and theory background
+Successor
+A basic block that may be reached from the terminator
+Jump instruction
+An update the PC (either relative to the current value or to
+an absolute address). If based on a condition, sometimes called a branch instruction
+instead.
+PC
+Program counter - the register marking the location of the next instruction
+SP
+Stack pointer - the register marking the current top of the stack
+LR
+Link register - the register marking the return address for a branch
+Path
+A sequence of edges (v1, v2), (v2, v3), ..., (vn−1, vn) in the CFG, denoted P(v1, vn).
+A path can be found statically by observing the CFG.
+Trace
+A path that is observed to be executed by the program. Can only be observed
+at run-time.
+Handle
+A set of vertices such that every vertex in the CFG is reachable through a
+path starting in a vertex in the set. [NNH99, p. 419]
+Interpretation
+The emulation process of reading, parsing and executing one in-
+struction at a time. Trades slow execution for fast start-up.
+Ahead-of-time (AOT) compilation
+The emulation technique where all instruc-
+tion of the source binary are compiled to the host environment before executing any
+instructions. Trades slow start-up for fast execution.
+Just-in-time (JIT) compilation
+An emulation technique where instructions are
+compiled as they are needed. Often combined with interpretation to allow very fast
+start-ups, while also benefitting from fast execution (once instructions have been
+compiled).
+Function vs Subroutine
+In this thesis, I will use the term function to refer to
+WebAssembly functions and subroutine to refer to methods/functions/(sub)routines
+present in the source binary, to allow easier distinction between the two.
+==PAGE:15==
+2.2 Overview of processor emulation
+5
+2.2
+Overview of processor emulation
+2.2.1
+Why emulation?
+A substantial amount of software has been written for platforms that are now obsolete.
+These platforms range from mainframes that are no longer supported, to legacy PCs
+and gaming platforms. The large and widely used software packages are often ported
+and re-compiled for new platforms, but a large portion of relatively niche software
+packages will never be ported due to prohibitive costs. This does not mean that
+individual users would not benefit from porting the software, simply that for any one
+user or corporation the costs would be too high compared to the benefits. Emulating
+a platform can be a way to extend the lifetime of applications beyond the end of
+life of the platform that they originally targeted. In comparison with porting every
+useful application for a platform, creating just a single emulator program can be
+a much more manageable and economic task.
+Additionally, since most platforms
+that are beyond their end of life data are relatively less powerful than contemporary
+platforms, many emulators are able to execute the software applications at similar
+speeds (or faster) than the original platforms.
+Emulation also serves a purpose for gaining insight into platforms that may be
+difficult to monitor directly.
+For instance, for Internet of Things (IoT) or other
+embedded programming platforms, debugging is often difficult due to the limited
+access to the processors and on-board memory. In these scenarios an emulator can
+execute the intended binary on a development machine and provide complete access
+to processor and memory state - giving a much better development and debugging
+environment compared to telemetry provided via UART, Bluetooth or similar where
+a debugger cannot be attached directly.
+To illustrate these two use-cases in this report I will investigate the legacy 6502
+processor (used in the Commodore 64/128 and Atari consoles among other) and the
+contemporary ARM Cortex M3 (used in embedded platforms and IoT devices such
+as the Texas Instruments SensorTag).
+2.2.2
+Emulation vs simulation
+Emulation and simulation are often used interchanegably, but in this thesis, we will
+make the following distinction:
+Emulation focuses on parsing an instruction set from one binary and executing
+it in the host environment. The emulation process includes processor state (usually
+general purpose registers, PC, SP and a register for state flags) and memory.
+In
+the pure emulator calls to co-processors, bus calls to peripherals and calls via shared
+memory are ignored. The emulator therefore focuses narrowly on executing the binary
+and monitoring the effect on the registers and memory, but is unable to provide any
+direct I/O.
+==PAGE:16==
+6
+2 Preliminaries and theory background
+Simulation on the other hand also simulates peripherals. This can be done either
+by simulating the peripherals via the original communication means (for instance, in
+the Commodore 64 simulator, by monitoring the portion of the memory that is shared
+with the video subsystem - or by translating the user input into the appropriate writes
+and interrupts). This technique is the most general, but may not always be feasible
+or be the most efficient. For instance, if trying to simulate the Bluetooth Low Energy
+subsystem for the ARM Cotex-M3 on the TI SensorTag, it may be more feasible
+to intercept the system calls for updating the GATT profile rather than trying to
+simulate the communication at the antenna level. For other networking purposes, it
+may be more efficient to intercept calls to the TCP/IP stack rather than simulating
+the low-level network operations, since the host environment may have access to
+higher level APIs for which the system calls map easier.
+2.3
+General compiler structure
+Compilers come in many shapes and forms depending the nature of the programming
+language being translated and the type of output, but there are still some general
+elements that occur in (almost) every compiler. Overall, the job of a compiler is
+to take a program in one language and output an equivalent program in another
+language [ASU86]. The definition is purposely broad to encompass both a ”tradi-
+tional” compiler from some programming language into assembly or machine code,
+and ”transpilers” from one programming language to another, or one architecture to
+another.
+The job of a compiler can be split into three broad sections:
+• Front end: The job of the front end is to parse the source language into an inter-
+nal representation. This could be from a C source language file into an Abstract
+Syntax Tree. This is typically based on a context free grammar from which a
+lexer and a parser can be (semi) auto generated1. The front end should reject
+programs with syntax errors, but otherwise should not do any error checking.
+• Analysis and optimization: The analysis section is where all error checking takes
+place. Depending on the nature of the source language this may be semantic
+analysis, type checking, etc.
+After all analyses are completed, the program
+should be error free (in the sense that there are no errors preventing the compiler
+from generating output code, not in a ”bug free” sense). Optimizations may
+change the program from one form into an equivalent, but (preferably) more
+efficient form along some parameter (execution speed, code size, power use, etc).
+• Back end: The back end takes the error free program from the internal repre-
+sentation and produces an equivalent program in the output language.
+1Though languages like C are not actually context free, even after pre-processing, due to typedefs
+among others.
+==PAGE:17==
+2.4 Compilation techniques for emulation
+7
+2.3.1
+Phases
+Each section of the compiler can further be separated into a number of phases. The
+front end typically contains at least a lexer and a parser; the analysis will typically
+contain at least a syntax analysis, semantic analysis and one or more optimizing
+phases. Each phase is associated with an internal representation: the lexer produces
+a token stream, the parser produces an abstract syntax tree and the analyses will
+typically transform the program from a high level intermediate representation over
+one or more mid level intermediate representations to a final low level intermediate
+representation that can be transformed by the back end into the desired language.
+Exactly what is in each intermediate representation depends on the compiler and
+language - often the higher level intermediate representations will contain high level
+features of the source language and the lower level intermediate representations will
+be closer to the output language. So, if we are building a Java compiler, the higher
+level intermediate representations may still contain classes, methods and loops, where
+the lower levels will be closer to Java bytecode and thus contain GOTOs instead of
+loops and so on.
+Since most compilers take a high level programming language like Java, c++, c,
+SML, etc and output a lower level language like assembly, machine code or some form
+of byte code, we talk of these transformations as lowerings. Conversely, if we were to
+move from a representation closer to assembly to one closer to C, we would call that
+highering.
+A lowering transformation might be to take a representation containing a loop
+and outputting a representation where that loop was transformed into a guard, a
+conditional branch and an unconditional branch. Reconstructing the loop or detecting
+an array from pointer calculations and so on would be examples of higherings.
+Of particular interest with regards to intermediate representations is the LLVM
+project [LA04]. The LLVM compiler framework has a single intermediate representa-
+tion that is broad enough to be the target of a whole range of programming languages,
+yet low level and simple enough to be relatively straight forward to construct back
+ends for. This has allowed a large number of compiler optimizations to be shared
+across a several compilers. LLVM does not contain any front ends2, but does provide
+a number of back ends. This means that a new project only has to provide a front
+end that performs that initial lowering to LLVM IR to get access to all the provided
+optimizations and back ends. Or, by providing a new back end, a project can provide
+a compiler for a whole range of source languages to a new platform. This, in fact,
+was exactly what the Emscripten project did for WebAssembly [Zak11].
+2.4
+Compilation techniques for emulation
+In this thesis, we will consider three distinct approaches to emulation. Pure interpre-
+tation of the binary, where one instruction at a time is read and executed in a loop,
+2Though the companion project Clang provides a front end for C and C++
+==PAGE:18==
+8
+2 Preliminaries and theory background
+with no attempt at optimization. AOT compilation, where the entire native binary is
+translated up front and executed only afterwards. And finally JIT techniques, where
+instructions are translated on the fly.
+2.4.1
+Pure interpretation
+Pure interpretation is the simplest approach, but also potentially the slowest. The
+interpreter have one main loop and will at each iteration fetch, parse and execute and
+instruction. The interpreter does not make any assumptions about the native code
+and is able to execute all forms of code (including self-modifying code). The process
+is potentially wasteful because each instruction may be parsed many times.
+2.4.2
+AOT
+The AOT compiler attempts fetch and parse all instructions in the native binary
+before starting executing and translating them into the host counter-part. The upside
+of this is that at run-time no parsing takes place, but only the executing of the
+instruction (including updating processor state, registers and memory). For platforms
+with a good match between the native and the host environment, this may yield close
+to native performance as each instruction in the native program is emulated by its
+host counterpart. The down-side is that there is a cost up front, but also that the
+compiler must be able to distinguish between data and code in the binary.
+This
+is non-trivial in 6502 where data and code is mixed and jumps may be performed
+indirectly (to a location stored in memory). Since every instruction is translated up
+front, it also means that AOT cannot deal with self-modifying code in any elegant
+way.
+2.4.3
+Hybrid / JIT techniques
+Hybrid approach is an umbrella term for many different techniques that can optimize
+execution of the native binary while the program is executing. The techniques that
+we will be investigating in this thesis are just-in-time (re)compilation of ”hot” code
+sections. Hot in this context simply means code that is executed often. The JIT
+compilation can use information gained at run-time that is not accessible to the AOT
+compiler. This means, among other things, that the JIT compiler can distinguish
+between code and data, by tracing what parts of the memory is executed as instruc-
+tions. It also means that the JIT compiler can various assumptions about the state
+of the program and simply bail out to the interpreter if these become invalidated.
+This allows for a whole range of aggressive optimizations like reducing a subroutine
+to its most-used path and only compiling that, but hoisting the invariant checks to
+the beginning of the method. It also means that the hybrid techniques can deal with
+self-modifying code by simply invalidating the compiled code and bailing out to the
+interpreter.
+==PAGE:19==
+2.5 WebAssembly target
+9
+2.5
+WebAssembly target
+WebAssembly (wasm) is a newly developed binary format intended, as the name
+implies, to be executed in a web context. In supersedes the ASM.js [Moz14] standard
+as the target for binaries compiled for the web. Whereas ASM.js was still source
+compatible with Javascript (and therefore, transported in clear text), WebAssembly
+was designed from the ground up as a new binary format to allow smaller download
+sizes and faster execution. WebAssembly reached the 1.0 milestone in April 2017 and
+is currently supported by all major browsers [W3C17d].
+2.5.1
+Why WebAssembly as a target?
+The modern web browser acts as a host environment for a variety of different pro-
+grams, either written directly in Javascript or compiled to Javascript. With more
+than 3 billion internet uses, the vast majority of which uses a modern, Javascript-
+enabled browser, Javascript is estimated to be one of the most executed programming
+languages in the world today [ICT17][Net17].
+The initial version of WebAssembly is currently supported by all major browsers,
+Microsoft Edge, Google Chrome, Mozilla Firefox and WebKit [W3C17d] and devel-
+oped under a World Wide Web Consortium (W3C) group. It is therefore expected to
+take over the role as the primary web compilation target from Javascript and ASM.js
+and the widespread support for WebAssembly gives some indicating that it could be
+supported for a long time.
+Browsers today are implemented on a very large variety of platforms and operating
+systems ranging form desktops running Linux, Mac OS or Windows to tablets or
+mobile phones running Android, iOS or Windows.
+These operating systems also
+spans a wide range of x86, x64 and ARM processors.
+All this makes it possible
+to execute an emulator targeting WebAssembly on a very wide range of platforms.
+Additionally, the browser host environment provides sandboxing of the emulated code,
+which provides some mitigation of potential security flaws in the source application.
+Currently WebAssembly is only supported in a browser environment, but stand-
+alone implementations are in progress [W3C17c].
+2.5.2
+Characteristics of the target
+Since WebAssembly is executed across such a wide range of devices and platforms, the
+instructions do not match any one architecture, but are rather intended to be easily
+translated to the final instruction set. The WebAssembly instructions are concrete,
+but the WebAssembly specification makes a number of abstractions and conceptual
+simplifications that help to decouple it from a specific platform or operating system.
+For instance, rather than specifying a calling convention, WebAssembly supports
+functions, calls and return statements, which can easily be translated to the host
+environment’s platform and conventions.
+==PAGE:20==
+10
+2 Preliminaries and theory background
+2.5.2.1
+Machine model
+The WebAssembly machine model is a stack machine with a limited number of basic
+types (32 & 64 bit integers and floats). The memory is modelled as a linear piece
+of virtual memory, currently only addressable with 32-bit addresses (meaning a max-
+imum of approximately 4 GB of memory)3. In addition to the main memory the
+machine model allows global and local variables [W3C17e].
+The WebAssembly stack machine specifies the execution model as a regular stack
+machine, but with special support for control flow structures: functions, blocks, loops,
+ifs and breaks - what the specification names an structured stack machine [W3C17e].
+Functions work as expected with the arguments pushed to the stack before a call
+statement and the return value placed on the stack after the arguments are consumed.
+Blocks do not affect control flow directly, but rather introduce a label at the end that
+can be jumped to with one of the break statements (BR or BR_TABLE). A loop
+construct is similar to a block except that the label introduced is at the top of the
+block. This is the only construct that allows jumps to a lower PC4.
+The breaks are limited to jumping to labels introduced by a surrounding block
+or loop. This introduces the noteworthy exception to the control flow structure that
+there are no mechanism for a generalized jump or GOTO. Informally, this limits We-
+bAssembly to expressing well-formed CFGs. This means that control flow constructs
+of many high-level programming languages can be directly represented in WebAssem-
+bly, but it also means that languages that allow a generalized jump/branch/GOTO
+mechanism cannot be guaranteed to produce CFGs compatible with this restriction.
+An example of how a non- well-formed CFG could be created in the C-programming
+language using a loop with a jump from outside the loop into the middle of the loop
+is shown here.
+1
+if (skip_init) goto AFTER_INIT;
+2
+3
+while (...){
+4
+//INIT code here
+5 AFTER_INIT:
+6
+...
+7
+}
+Listing 2.1: non-Well-formed CFG.
+While neither idiomatic C or best-practice, the above example illustrate that it is
+quite possible to create programs that are not directly expressible in the WebAssem-
+bly format.
+A binary application, of course, is only restricted by the underlying
+instruction set which in most cases does not impose any restrictions on the CFG.
+This does not mean, however, that is impossible to compile a program with a
+non-well-formed CFG to WebAssembly, but it does mean that the CFG will have to
+be transformed into a form that can be expressed.
+3A 64-bit version of WebAssembly is planned
+4Disregarding function calls which obviously set the PC to a value that is either higher or lower
+than the current value
+==PAGE:21==
+2.5 WebAssembly target
+11
+We shall investigate the formal properties of these well-formed graphs in the
+section 2.6 - Reducible CFG. A general mechanism for translating non-well-formed
+graphs into equivalent well-formed graphs given and the performance consequences
+of this construct is analysed in the section 3.2 - Translation from source to target.
+2.5.2.2
+Runtime environment
+The only option for hosting WebAssembly currently available is in a browser with a
+Javascript API as the only means of interacting with the WebAssembly code [W3C17b].
+This means that the only I/O available to WebAssembly programs is via the host envi-
+ronment. A WebAssembly program can import foreign (Javascript) functions that are
+callable like regular WebAssembly functions and can export WebAssembly functions
+to the Javascript host environment, where they are callable like regular Javacript
+functions.
+The memory available to a WebAssembly program is also available to
+the host Javascript environment and can be shared across multiple WebAssembly
+modules [W3C17b].
+WebAssembly do not provide a standard library (malloc, free or the like), which
+means that the program must provide this part of the runtime environment itself. The
+main WebAssembly compiler (Emscripten) provides an implementation of libc for its
+LLVM backend. Although based on LLVM the current implementation is branched
+off the primary LLVM source and is currently only able to translate c, c++ and Rust
+source programs to WebAssembly [Ems17].
+2.5.2.3
+Compilation
+WebAssembly modules are compiled in the Javascript host environment from their bi-
+nary representation and are immutable once compiled [W3C17b]. This would appear
+to prevent JIT compilation, but since we can share memory between modules we can
+create code on the fly, compile it via the Javascript API and have it share the same
+memory as the main module and thus have it be callable from the main module.
+This requires some help on the Javascript side though, as all WebAssembly imports
+most be resolved at compile time, which prevents us from importing the newly created
+WebAssembly functions on the fly. Instead, we must have an intermediary Javascript
+function that can be imported into the main module and provide access to the newly
+created functions.
+2.5.2.4
+Binary format
+The WebAssembly format is designed to be verifiable using a single pass over the
+binary.
+To achieve this all definitions has to be declared before use; the format
+achieves this by structuring the binary into the following sections:
+• Types: This section defines function signatures
+==PAGE:22==
+12
+2 Preliminaries and theory background
+• Imports: This section defines all imports from the outside environment (func-
+tions, memory, tables or globals).
+• Functions: This section defines local functions.
+• Table: This section defines an optional table used for indirect function calls.
+This may only be defined, if it was not imported.
+• Memory: This section defined a segment of linear memory. This may only be
+defined if not imported from the outside.
+• Globals: This section defines global variables (separate from the linear memory)
+• Exports: This section defines exports from the module (functions, memory, ta-
+bles or globals)
+• Start: This section defines an optional function to run automatically after ini-
+tializing the module.
+• Elements: This section defines optional defaults for the table entry (allowing
+tables to be initilized to internal or imported functions)
+• Code: This section defines the code (opcodes) for each local function.
+• Data: This section defines data to be placed in the linear memory.
+• Optional sections: This section contains optional data (e.g. debug data) and
+may be repeated unlike the other sections.
+Everything in WebAssembly is identified by indices: signatures maps the param-
+eter types and an optional return type to a unique, but sequential, index. Imports
+maps external definitions (identified by a namespace and an identifier string) to a lo-
+cal index; functions are only identifiable from their index. The encoding uses a single
+function index space for both imported and local functions, with imported functions
+before local functions.
+This means that validation is simply a matter of:
+1. Check that the given index is in range: so a function is defined using a previously
+defined signature index; function calls only used defined functions and so on
+2. For code:
+• check that the stack contains (at least) the correct number of arguments
+when invoking a function.
+• check that when a block construct ends that it added zero or one elements
+to the stack (depending on whether the block returns a value or not)
+==PAGE:23==
+2.6 Reducible CFG
+13
+A block is encoded as a start instruction (block, if, loop) and an end instruction.
+The end instructions are shared among all block constructs and simple ends the
+immediate parent block. Labels are implicit for each block and are encoded, again,
+using just the index: in this case the index is the number of block levels relative to
+the current instruction. This allows for the validation code to simply keep track of
+the current block level and immediately check that a break instruction is in range.
+Each instruction is encoded as an opcode followed a number of operands as re-
+quired by the opcode. Since the current number of instruction types is below 256,
+each opcode is simply a byte, followed by the appropriate number of bytes to encode
+the operands.
+2.6
+Reducible CFG
+There are many definitions of reducible graphs going back to the original papers
+and definitions by Allen [All70], Cocke [Coc70], Hecht and Ullaman [HU72] and Tar-
+jan [Tar73]. They all differ slightly in their definitions and algorithms for testing
+reducibility. The defitions used here are based on the summary provided by Nielson
+& Nielson [NNH99] .
+We define a CFG formally as a collection of vertices, directed edges and a handle
+G = (V, E, H). The vertices are basic blocks and the edges denote successors to the
+basic block of the edge’s starting vertex.
+Every other vertex in the flow graph is
+reachable from one or more vertices in the Handle H.
+2.6.1
+Dominance
+A vertex v1 dominates a vertex v2 iff all paths from s to v2 includes v1. [NNH99, p.
+420]
+2.6.2
+Depth-First Spanning Tree (DFST)
+A Spanning Tree of G is a graph with the same nodes as G, but a subset of edges in G
+such that the result is a tree. The DFST is a Spanning Tree formed by a depth-first
+search of G. The DFST is not necessarily unique [NNH99, p. 422].
+2.6.3
+Structure of a reducible graph
+A CFG is said to be reducible if we can create a DFST and characterize the remaining
+edges in terms of forward edges and back edges. Specifically, given a DFST, T, for G,
+we define:
+• A forward edge as an edge, (v1, v2), where P(v1, v2) ∈T.
+• A retreating edge as an edge, (v2, v1), where P(v1, v2) ∈T.
+==PAGE:24==
+14
+2 Preliminaries and theory background
+• A back edge is a retreating edge, where v1 dominates v2.
+• A cross egde is an edge (v1, v2), where P(v1, v2) /∈T ∧P(v2, v1) /∈T.
+A graph G is said to be reducible iff, all retreating edges are back edges and cross
+egdes do not form cycles.
+In other words for a graph to be reducible, all edges that form cycles when added
+to T must be back edges.
+2.6.4
+Testing reducibility
+Testing whether a graph is reducible or not can now be done by creating a DFST and
+calculating the dominator sets. First we check that all retreating edges are in fact
+back edges - if not, the CFG is not reducible. If they are, we remove all back edges
+and check that the resulting graph is acyclic. If it is, the CFG is reducible.
+2.6.5
+Relation to well-formedness
+The property that all edges in a reducible CFG are either forward edges (or part of
+T) or back edges makes it easy to translate to the WebAssembly notion of a well-
+formed CFG: all back edges form loops, whereas all other edges are either branches
+to surrounding blocks or simply consecutive instructions that require no branches.
+IF
+IF
+WHILE
+Figure 2.1: An example of a reducible CFG showning both a forward edge (green)
+and back edge (blue).
+==PAGE:25==
+2.7 6502 source environment
+15
+The fact that there can be no branches into a loop follows directly from the
+dominator property of the back edges: if there was a branch into some vertex inside
+the loop, vi, from outside the loop, then the first vertex in the loop, v1 would not
+dominate vi and thus, (v2, v1) would not be a back edges.
+The acyclic portion of G (T and all forward edges) can be ordered with respect to
+the starting PC for each basic block in a ascending manner.
+In the WebAssembly context this means that the blocks that form the labels for
+the forward edges are either completely contained in a loop or completely outside it.
+From this property it follows that it is always possible to place blocks to form the
+reducible CFG in the following manner: at the destination of each back edge (or s
+for the case outside loops), start all the blocks that are required to place the needed
+labels inside the loop. At each required label, end a block.
+2.7
+6502 source environment
+In this section we will address the properties that are distinct for the 6502 source
+environment that must be addressed in an emulation context.
+2.7.1
+Registers
+The 6502 have 6 register in total:
+X A general purpose register with special addressing modes
+Y A general purpose register with special addressing modes
+Acc A general purpose register with special arithmetic instruction
+Status A register for maintain 7 flags, including Carry and Overflow flags from the
+arithmetic results
+PC Updated automatically after each instruction or using the various branch, jump
+and return instructions
+SP Updated using the various push / pull instructions
+Unlike later platforms the instructions on the 6502 are directly linked to a specific
+register - that is, for instance, there is no general MOV instruction that can move
+a value from a register to main memory, but rather the three STX, STA and STY
+instructions, that can move a specific register to memory.
+==PAGE:26==
+16
+2 Preliminaries and theory background
+2.7.2
+Binary encoding
+The 6502 binary encoding is very simple: each instruction is encoded as an opcode,
+that encodes the operating and the operand addressing. Based on the addressing the
+following 0 - 3 bytes contains the operand. The operands can be:
+1. implied (as in INX will increase the X register)
+2. immediate (a single byte value)
+3. a relative offset (for branching)
+4. an absolute memory address, potentially with the value of register added
+5. an indirect address (meaning that the operand is the value at the address), also
+potentially offset with the value of a register
+The details of the addressing modes can be seen in Appendix A.
+2.7.3
+Code & data pages
+While the 6502 supports both ROM and RAM, the ROM were usually used exclusively
+for OS pages and thus regular application code and data pages were placed among one
+another with no special support for pages containing code. The 6502 were limited to
+addressing a block of 64KB of memory at a time (called a memory bank) with some
+support for swapping these on the fly5. Since this addressing also contained the OS,
+the main mode of communicating with peripherals was shared memory, wide ranges
+in this addressing space was already occupied with a binary started. The resulted in
+widespread use of self-modifying code as well as having data and code spread all over
+the addressing space, making it difficult to reason statically about what parts were
+code and what parts were data.
+2.8
+ARM Cortex M3 source environment
+To contrast the 6502 source environment, we will address the properties of the ARM
+Cortex M3 processor. The ARM Cortex M3 are a set of low-energy, 32-bit processors
+based on the ARMv7-M Architecture [ARM10], which defines the instruction set
+and registers. The ARM Cortex M3 processors are most often used in embedded
+systems, since they are low cost and low energy. They are also relatively restricted in
+comparison with modern desktop CPUs, with a single core, low clock speeds (200 MHz
+for the top of the range models). The currency model is based efficient interrupts and
+thus, being single threaded, focuses on concurrent rather than parallel programming.
+5The Commodore 64 only has 64KB of memory, but the ROM was mapped on top of that, so it
+had support for temporarily disabling reads from the OS pages and using the memory available at
+those addresses. The Commodore 128 had, as the name implies, two banks of 64 KBs each
+==PAGE:27==
+2.8 ARM Cortex M3 source environment
+17
+2.8.1
+Registers
+All the ARMv7-M processors have 13 general purpose registers (R0 through R12) and
+four dedicated registers: SP, PC, LR and Status. The 13 general purpose registers
+are all equally addressable and are not linked to a specific instruction; instead each
+instruction takes one or more registers as operands. Some allow direct interaction
+with the special purpose registers, but most of the interaction with the special purpose
+registers are through dedicated instructions: branch, B, for interacting with the PC,
+PUSH/POP for interacting with the SP and so on.
+2.8.2
+Binary encoding
+The encoding uses the Thumb-2 instruction set [ARM10]. This set allows for either 16
+bit or 32 bit encodings of instructions, known as narrow or wide encodings. There are
+narrow encodings of, almost, all instructions in the set, but they are usually limited in
+some way: e.g. it might only be possible to specify an 8 bit immediate, even though
+the instruction accepts 16 bit immediates and so on.
+The binary encoding is much more complicated than the 6502: first of all, the
+parser needs to distinguish between narrow and wide encodings. The wide encodings
+uses one of three special patterns on the 5 most significant bits of the instruction.
+This allows the parser to fetch 16 bits, check the pattern, and then fetch another 16
+bits, if the encoding was wide.
+Regardless of whether a narrow or wide encoding was used, those 2 or 4 bytes
+includes information about the opcode, operands and any flags set. This encoding
+is a mixed of a fixed pattern for the instruction and flags and operands (immediates
+and registers).
+As an example consider two of the narrow encodings of the ADD
+instruction [ARM10, p A6-24]:
+Even though it is the same instruction, the encodings are quite different - the
+fixed bit pattern are not equal and the operands are encoded quite differently.
+To guide the parsing in the face of this, ARM publishes a parse hierarchy, where
+a number of related instructions are grouped by their encoding prefixes, but the
+encoding is still quite complex to parse correctly for all instructions and all encodings,
+both narrow and wide, with 262 pages of the manual dedicated to specifying the
+encodings [ARM10, pp A6-17 - A6-278].
+2.8.3
+Code & data pages
+The ARM Cortex M3 features a much stricter separation of code and data than the
+6502. In fact, in most embedded systems, the code pages of the Cortex M3 will reside
+in a ROM section with data residing in the main memory, leaving the two physically
+separated and disjoint in the address space. The ARMv7-M does not support virtual
+==PAGE:28==
+18
+2 Preliminaries and theory background
+Figure 2.2: The encoding for ADDS <Rd>,<Rn>,<Rm>.
+Figure 2.3: The encoding for ADD<c> <Rdn>,<Rm>.
+memory, so all addresses used are equal to their physical addresses. This also makes
+self-modifying code (almost) impossible6
+The binaries are typically distributed in the ELF format, which also marks code
+and data sections, making it easy to analyze the final binary.
+2.9
+Related works
+2.9.1
+Automatic generation of machine emulators
+Automatic generation of machine emulators [FGP07] investigates the use of Java as an
+implementation language and the Java Virtual Machine as a target for emulators. The
+paper places particular focus on how to reuse an emulation platform across multiple
+source platforms and how to use a single specification for each source platform to
+be used in multiple settings: pure interpretation and JIT compilation of various
+optimization levels.
+It thereby introduces two key ideas used in this thesis:
+6Some instances does have support for flashing the ROM on the fly, which are used for over-
+the-air updates of firmware in embedded systems, but this replaces the entire program and not the
+single instructions we usually associate with self-modifying code
+==PAGE:29==
+2.9 Related works
+19
+• Using a compiler as a code generator to allow a single platform specification to
+be used in multiple settings
+• Using a virtual machine as a target rather than a concrete platform to increase
+the durability of the created emulators
+2.9.2
+Binary Translation
+Static and Dynamic Binary Translation are techniques that focuses on translating
+the source binary to a target binary. It is in many instances similar to emulation
+(in particular Dynamic Binary Translation, which focuses on rewriting on the fly),
+and are sometimes used synonymously with emulation, but focuses more narrowly
+on translation from one instruction set to another, including rewriting of registers,
+patching of addresses, re-encoding of immediates, etc. The static variant is, in the
+general case, insufficient for platforms with shared code and data memory, but the
+dynamic variant can overcome this and also self-modifying code [Pro02].
+Many of the ideas proposed in relation to Dynamic Binary Translation are of inter-
+est in the context of general emulation, like trace-based optimizations [Böh+11]. Not
+all is transferable though, in particular the narrow focus on remapping the instruc-
+tions and registers from the source to the target platform, makes it less applicable
+when moving form a register machine to a stack machine.
+2.9.3
+Emulating the legacy hardware using FPGAs
+An FPGA Based Hybrid Processor Emulation Platform [Wan+10] investigates the use
+of FPGAs for processor emulation. The paper focuses particularly on using emulation
+for evaluation new or proposed hardware for system-on-chips (SoCs), but the ideas
+are equally applicable to legacy platforms, where speed of the emulation would be of
+the essence. The paper is exclusively focused on how to increase the performance of
+the emulators using the hardware optimizations available via FPGAs.
+==PAGE:30==
+20
+==PAGE:31==
+CHAPTER 3
+Analysis of the
+problem
+This chapter will describe the different choices I have made when building the em-
+ulation platform. It will suggest solutions and show examples that illustrate some
+of the challenges that have to be overcome when using WebAssembly as a target for
+processor emulation.
+3.1
+Source instruction implementation
+In order to emulate the source binary on the host platform, each instruction must be
+fetched, parsed and executed on the emulator. This section addresses the options for
+implementing these operations.
+3.1.1
+Direct implementation
+The simplest approach is to just write the parsing and execution code for each in-
+struction directly. This, however, is also the most error prone. For a relatively simple
+processor like the 6502, this is manageable as it only contains 56 distinct instructions
+and 132 distinct opcodes [MOS76]. Since all the addressing modes are shared, this
+means that only code for the 56 instructions and 13 addressing modes are required
+in addition to the machine model.
+Even for this relatively simple processor, verification is still an issue. In particular
+for this processor family, the specification is very informal, so without access to the
+original hardware I have relied on verification programs [Kla17] as well as reference
+implementations [Ski17][Mbo17]. The verification programs exercises every instruc-
+tion, addressing mode, every state flag possible by each instruction and the corner
+cases of operand, but the process is still slow and does not provide guarantees that
+the final implementation is correct.
+To illustrate how this is tested, compare the tests for TXA and TXS. These two
+instructions are, on the surface, very similar. They move a value from one register to
+==PAGE:32==
+22
+3 Analysis of the problem
+another (either from X to A or from X to SP), but with one crucial difference: TXA
+updates the zero and negative flags of the Status register, where TXS does not.
+1740
+; ...
+1741
+ldx #$ff
+1742
+set_stat $ff
+; Macro that sets the status flag vis the stack
+(LDA, PHA, PLP)
+1743
+txa
+1744
+tst_a $ff,$ff-zero
+; Macro to test the value of A and the status
+flag
+1745
+; .. additional tests for all the combinations of status flags and
+stating values of the status register
+Listing 3.1: Snippet for the TXA tests.
+1876
+; ...
+1877
+ldx #1
+;01
+1878
+set_stat $ff
+1879
+txs
+1880
+php
+; Push status to stack
+1881
+lda $101
+; Load status to A register
+1882
+cmp_flag $ff
+1883
+trap_ne
+; Macro to trap if not equal
+1884
+; ...
+Listing 3.2: Snippets for the TXS tests.
+In addition to the careful testing of that the correct status flags are affected (and
+only those) are affected by each and every instruction, the test suite also includes a
+number of tests for addressing modes:
+2074 ; indexed wraparound test (only zp should wrap)
+2075
+ldy #3+$fa
+2076 tldx4
+ldx zp1-$fa&$ff,y
+;wrap on indexed zp
+2077
+txa
+2078
+sta abst-$fa,y
+;no STX abs,y!
+2079
+dey
+2080
+cpy #$fa
+2081
+bcs tldx4
+2082
+ldy #3+$fa
+2083 tldx5
+ldx abs1-$fa,y
+;no wrap on indexed abs
+2084
+stx zpt-$fa&$ff,y
+2085
+dey
+2086
+cpy #$fa
+2087
+bcs tldx5
+2088
+ldy #3
+;testing wraparound result
+2089
+ldx #0
+2090 tstx1
+lda zpt,y
+2091
+cmp zp1,y
+2092
+trap_ne
+;store to zp data
+2093
+stx zpt,y
+;clear
+2094
+lda abst,y
+2095
+cmp abs1,y
+2096
+trap_ne
+;store to abs data
+==PAGE:33==
+3.1 Source instruction implementation
+23
+2097
+txa
+2098
+sta abst,y
+;clear
+2099
+dey
+2100
+bpl tstx1
+Listing 3.3: Indexing wrap around tests.
+The snippet highlights the difference between zero page and absolute indexing,
+when offset by a register: if a zero page, say 00FF is offset by a register with the
+value 10, then the result is the address 000F and not 01FF because of the wrap
+around. For absolute indexing offset by a register, the opposite would be the case,
+since they do not wrap around. The test suite contains tests for all the addressing
+modes and all the page boundary cases that can occur.
+The test suite also includes tests for the branching instructions, indirect jumps
+and self-modifying code (for rewriting some of the jump addresses). Because of the
+comprehensiveness of this test suite (which itself has been verified on the actual
+hardware), we can have a high degree of confidence that the emulator is correct, once
+these tests passes.
+3.1.2
+Using a hardware and instruction description language
+An alternative to the direct implementation of each emulated instruction is to use a
+special language for describing the instructions, which can be verified first and then
+translated to the desired programming language.
+ARM specifies each of their instructions using pseudo code. This ”pseudo code” is
+actually a fully specified language known as the ARM Specification Language [Rei17].
+ARM has specified, verified and published code for parsing and executing every in-
+struction in their instruction set. This code is usually embedded in the manuals, but
+were recently released in a machine readable format for some ARM platforms [Ala17].
+Since the specification has been verified by ARM, we can assume that it correctly re-
+flects the hardware implementation. It has not been proven correct though, so it may
+still contain bugs, but it is a reasonable assumption. The task, then, is to transform
+the source specification into programming language of our emulator. This is, again,
+a compilation task.
+We can still introduce errors in the compilation process, so the end result still need
+to be verified, but rather than having to go through each and every instruction and
+ensure that our direct implementation is correct, we can now test that the specification
+language compiler can correctly translate all the language constructs. This is a much
+smaller task. Also, since the specification is given in the specification language, if we
+don’t build a formal compiler, we are in fact just manually compiling code from one
+language to another, which is an error prone process.
+==PAGE:34==
+24
+3 Analysis of the problem
+3.1.3
+Code re-use
+For pure interpretation, the code to emulate each instruction should just be callable
+from the main interpretation loop. That is, if we write our emulator in C++, say,
+then each instruction should be written as a C++ method that is callable from the
+main interpreter loop.
+For compiled emulators (AOT or JIT), however, the code
+for emulating each instruction must be available as WebAssembly (binary) code in
+order to create the final WebAssembly binary. For JIT in particular, we must have
+access each instruction emulation method both in a form that we can call from the
+interpreter and in a WebAssembly form, that can be used to create the compiled
+version.
+This means, that we either have to write each instruction in directly in WebAssem-
+bly in addition to the source language version or we have to work with a compiled
+version of the emulated instructions. To avoid writing each instruction twice (and
+thereby risking yet another source of errors) it is therefore very much preferable to
+have a mechanism in place that allows code re-use across these two domains.
+Since the WebAssembly binary format still contains functions explicitly, it is very
+possible to work with the compiled output.
+The primary requirement is that we
+ensure that each function is exported from the resulting WebAssembly module, as
+this is the only way to give a name to the functions and thereby know which function
+should be used to emulate each function (otherwise, each function is only identified
+by an index). WebAssembly further gives us two options for reusing the code: the
+exported functions can be imported into a JIT compiled WebAssembly module and
+used directly - or the WebAssembly module can be parsed and the individual opcodes
+for each instruction can be patched into the compiled WebAssembly module.
+By piggy-backing on the primary WebAssembly compiler we can thereby re-use
+the code for each instruction - and thus we only have to ensure the correctness of one
+version of each instruction.
+3.2
+Translation from source to target
+The overall goal of the compiler (whether AOT or JIT) is to recreate an equivalent
+program of the source binary on the target platform. Where a ”normal” compilation
+process entails lowering from a high-level programming language through a number
+of intermediate representations to the final binary format, this compiler must reverse
+a few of those steps and attempt a ”highering” into a WebAssembly structures from
+the low level instructions.
+The best case scenario is that equivalent structures are present in the source binary
+and are successfully detected allowing us to build a WebAssembly program that uses
+only the native control flow constructs to emulate the control flow in the source binary.
+This is ”The good” case described below.
+In the absence of (detected) equivalent structures the output code must still func-
+tion correctly - the output program must then incorporate structures to simulate
+==PAGE:35==
+3.2 Translation from source to target
+25
+arbitrary jumps on a platform that does not support them. This not impossible, but
+it is ”the bad” case described below.
+Finally we have the cases where the source program modifies itself. Since the
+target platform very much does not support self-modifying code, this is ”the ugly”
+case described below, since the output program must still function correctly even in
+the face of these constructs.
+3.2.1
+Reconstructing the CFG
+The first step in compiling a target program from the source binary is to re-create
+the CFG. In principle, this is a simple process:
+1. Start at the root instruction and add it to a new basic block
+2. Keep adding instructions until a branch is encountered and mark this as the
+terminator
+3. Add edges from the basic block to the next instruction (if the branch is condi-
+tional) and any branch targets, where the target basic blocks are:
+• Newly created and added to the graph, if the target does not exist in the
+CFG. In this case, instructions are added to the new basic block similarly
+to how the root basic block was created.
+• Split to set the target as the first instruction in a basic block, if the target
+was already in a basic block. In this case, processing for the basic block
+stops.
+This high-level process relies on two crucial pieces of information: what are the
+instructions and what are the potential targets for the branch instructions. Neither
+is trivial in practice for a platform like the 6502 and branch targets are not always
+statically known, regardless of platform as we shall see.
+3.2.1.1
+Code vs data
+The encoding scheme on the 6502 makes it difficult to reliably detect whether a piece
+of memory is an instruction or an arbitrary piece of data: the 132 distinct opcodes
+makes it very likely that an arbitrary byte will coincide with some instruction and
+addressing encoding and the operands will always appear to be valid values as the
+entire range is used. The initial PC value is always known, however, so some starting
+point will be known.
+This can be contrasted with the ARM Cortex M3 platform, where the binaries
+are usually distributed in the ELF format, which contains meta-data about which
+part of the binary is data and which part is code. This means that the code can
+be fully parsed before attempting to build the CFG and thus can be used to restrict
+==PAGE:36==
+26
+3 Analysis of the problem
+the value branch targets, whereas the 6502 must use the branch targets to try and
+disambiguate which parts of the binary is code and which part is data.
+To further complicate matters an ELF binary will clearly mark which system
+libraries are linked to, whereas a 6502 binary will just perform a JMP or JSR to
+some address that will/should be a system library. On the Commodore 64 platform,
+these system libraries are placed on a separate ROM, which shares the addressing
+space, and thus the branch target may further depend on the memory bank selected.
+3.2.1.2
+Determining branch targets
+On the 6502 there is only one source of unknown branch targets, the JMP to an in-
+direct address. All conditional branches can only use relative branch targets and the
+JSR can only use absolute addressing and are thus trivial to determine branch targets
+for. The unconditional branch to an indirect address poses a challenge though: to
+successfully determine the branch target, the possible memory values at that address
+must be statically determined. The only sound analysis for this is an over approxi-
+mation and may thus in the worst case yield the result that the potential target is
+the entire memory space.
+The ARM Cortex M3 also support indirect branching via the BX and BLX
+instructions which both branch to an address stored in a register. The analysis in
+this case requires reasoning statically about the value of a specific register, which in
+the general case, is also not possible to guarantee a bound on values.
+So even though techniques exist, that can take advantage of the fact that assembly
+code for the ARM platform is almost always produced by a compiler [Fle+10] and thus
+are subject to certain rules and constraints, we cannot in the general case guarantee
+that we have a complete CFG. We can, however, know where the points of uncertainty
+lie and deal with them appropriately.
+Actually, knowing that a binary was produced by a compiler from a source program
+that only uses proper structures is not enough, as the program may still contain secu-
+rity flaws (ie. buffer overflows [Cow+00]) that can cause the program to modify the
+control flow on the fly (Return-Oriented Programming, Return-to-libc, etc [PR12]).
+It is, of course, not a goal to reproduce the security flaws, but it is difficult for an emu-
+lator to decide what was intended and what was not, so the most reasonable approach
+is to take the binary at face value and emulate it faithfully. There is a whole research
+area dedicated to ensuring that the control flow present in the source program is also
+present in the binary, known as Control Flow Integrity techniques [Aba+09].
+3.2.2
+The Good
+Any program with a well-defined and well-formed CFG can be represented by the
+native WebAssembly control flow constructs. In the context of WebAssembly this
+means that every branch instruction can be related to a function call, a loop, an
+if-else construct or a jump to a break out of a block.
+==PAGE:37==
+3.2 Translation from source to target
+27
+3.2.2.1
+Functions
+Functions and function calls are the first high-level construct to detect: these map
+directly to the WebAssembly functions and function calls. They can be identified in a
+platform-specific manner either by special instructions (the jump to subroutine, JSR,
+and return from subroutine, RTS, instructions on the 6502) or by calling conventions
+(the Procedure Call Standard for ARM Architecture). The calling convention define
+how to establish a new stack frame and the responsibilities of the caller and callee
+in the hand-over and these specific sequences of instructions can be used to detect
+function calls and returns. A subset of the calling convention can sometimes be used
+in non-public methods where the compiler can ensure that certain registers are unused
+by a subroutine and therefore do not need to be pushed/popped from the stack. In
+these cases the exact sequence of instructions depend on the compiler, but are usually
+consistent enough to detect1 - and if not, the resulting CFG would not be reducible
+in any case, if the subroutine is used more than once.
+In the following sections, we will assume that all function and function calls have
+been identified and we are left with modelling the internal structure of each function.
+3.2.2.2
+Re-ordering
+To ensure translation to the WebAssembly constructions are possible, we will need
+to guarantee that the only branches from higher PCs to lower PCs are back edges.
+As is not necessarily so for a reducible CFG in the general case, we will introduce a
+”virtual PC”, by performing a topological sort on the DFST and all forward edges.
+Figure 3.1: An example illustrating an example of acyclic CFG with PCs out of
+order.
+1The ARM BL instruction is used to branch and set the LR registers; the BX LR is used to return.
+==PAGE:38==
+28
+3 Analysis of the problem
+This ordering now ensures that a back edge in a reducible CFG always goes from
+a higher PC to a lower PC.
+3.2.2.3
+Loops
+A loop is formed by every back edge. Each loop is modelled in WebAssembly as a
+Block surrounding a Loop. Both are needed, to allow breaking out of loop, since a
+break to a Loop will set the PC to the beginning of the loop, not the end of it.
+Figure 3.2: A typical CFG for a While loop.
+1 Block 0 (Loop_exit){
+2
+Loop {
+3
+[Condition expressions]
+4
+BR_IF Loop_exit
+5
+6
+[Loop body]
+7
+BR loop
+8
+}
+9 }
+Listing 3.4: Structure of a translated While loop.
+At the end of the loop, a BR inst is needed to jump to the start of the loop again.
+Because the CFG is reducible, there can be no branches into the the loop body,
+but there may still be branches out of the loop from the loop body. That is, the loop
+body may contain a branch similar to the ”break” and ”continue” constructs of many
+imperative languages.
+3.2.2.4
+Blocks
+Blocks are used to place labels. Since the first instruction in every basic block is a
+potential branch target, a naive, but correct, way of construction is simply to add a
+block that end before each basic block. These blocks all start at the beginning of the
+function (or beginning of the loop, if inside one) to ensure that they surround the
+relevant instruction.
+After the terminator instruction of each basic block a WebAssembly BR or BR_IF
+can be inserted to branch to the correct label based on the new value of the machine
+PC.
+==PAGE:39==
+3.2 Translation from source to target
+29
+Branches can be avoided if the target is the immediate successor (ie. have the
+next PC value).
+3.2.2.5
+IFs and IF-ELSEs
+Certain of these blocks and branches can be replaced by native constructs, if IF and
+IF-ELSE patterns can be detected. An IF statement is detected by having a basic
+block with two successors where the basic block dominates both and one successor is
+also the successor of the path going through the other.
+Figure 3.3: A typical CFG for an IF construct.
+In this case, the native WebAssembly constructs uses a single IF construct to
+represent what was a two branches before.
+1 [Condition expressions]
+2 IF {
+3
+[IF body]
+4 }
+Listing 3.5: Structure of a translated If.
+1 Block 0 (end_block) {
+2
+Block 1 (if_block) {
+3
+[Condition expressions]
+4
+BR_IF if_block
+5
+BR end_block
+6
+}
+7
+8
+[IF body]
+9 }
+Listing 3.6: Structure without using native IF.
+An IF-ELSE is detected when a basic block dominates two successors and there
+exist a common descendant of both successors.
+==PAGE:40==
+30
+3 Analysis of the problem
+Figure 3.4: A typical CFG for an IF-ELSE construct.
+In this case, the native WebAssembly constructs uses a single IF-ELSE construct
+to represent what was a two branches before.
+1 [Condition expressions]
+2 IF {
+3
+[IF body]
+4 }
+5 ELSE {
+6
+[ELSE body]
+7 }
+Listing 3.7: Structure of a translated If.
+1 Block 0 (end_block) {
+2
+Block 1 (else_block) {
+3
+Block 2 (if_block) {
+4
+[Condition expressions]
+5
+BR_IF if_block
+6
+}
+7
+[ELSE body]
+8
+BR end_block
+9
+}
+10
+11
+[IF body]
+12 }
+Listing 3.8: Structure without using native IF.
+3.2.3
+The Bad
+For the cases where the CFG is not reducible, we still need a construct that allows us
+to translate the program. This construct is necessarily a work-around, since it must
+represent the non-reducible CFG inside a reducible CFG.
+Such constructs obviously exists in the form of the interpreter loop, where the each
+instruction is read from the current PC, parsed and executed and the PC updated.
+This construct contains too much overhead, however, and does not encode a fixed
+CFG.
+==PAGE:41==
+3.2 Translation from source to target
+31
+Instead we propose a construct, where each basic block in the non-reducible CFG
+is given a label to represent the starting PC. Every WebAssembly block starts from
+the very top of the CFG and there are no loops inside these blocks. The first (and
+inner-most) block contain a switch statement that will branch to the correct label
+based on the value of the PC. Surrounding the whole construct is a loop that is
+branched to after each terminator instruction in the basic blocks.
+1 Loop{
+2
+Block 0 (Unknown_PC){
+3
+Block 1 (PC_xxx3) {
+4
+Block 2 (PC_xxx1) {
+5
+GET_LOCAL PC_INDEX
+6
+CONST FIRST_PC
+7
+SUB
+8
+BR_TABLE PC_xxx1 Unknown_PC PC_xxx3 Unknown_PC
+9
+}
+10
+[ PC_xxx1 starts here]
+11
+BR loop
+12
+}
+13
+[PC_xxx2 starts here]
+14
+BR loop
+15
+}
+16 }
+Listing 3.9: Structure of the construction for non-reducible CFGs.
+This pseudo-WebAssembly code shows the general construct2. The code enters at
+the top and falls through to the inner-most block without executing anything. Then
+the PC is pushed to the stack along with the PC of the first basic block to calculate
+the relative offset. This offset is then used in a jump-table (BR_TABLE) to select
+the correct label for the active PC. Since the jump-table must be continuous, the gaps
+are filled with a label for the ”unknown PC”, which is also used as the default jump.
+If the PC correspond to one of the basic blocks, the correct basic block is executed
+and the loop repeated. If not, the default label is selected and execution falls through
+the bottom of the loop.
+The effect of this is, that all jumps (even long jumps out of the subroutines) will be
+dealt with correctly: either the new PC is included in the construct and the relevant
+basic block executed or it is not, in which case the code bails out to the interpreter.
+This construct is clearly not as efficient as using the proper constructs, as a single
+source branch instruction now becomes:
+1. A branch to the loop
+2. A fetch of the PC
+3. A subtraction for the PC to calculate the offset
+2WebAssembly is normally presented in S-expressions, but here we instead focus on the order of
+the instructions
+==PAGE:42==
+32
+3 Analysis of the problem
+4. A BR_TABLE based on the offset
+.
+Additionally it also affects code size negatively as the jump table in particular can
+become huge if the CFG spans a large area of source code.
+It can, however, be combined with the constructs for reducible CFGs by using it
+only on the non-reducible subgraphs of the CFG and using the reducible constructs
+for the rest.
+3.2.4
+And the Ugly
+Compiling a non-reducible CFG is not necessarily enough to compile all programs, as
+there are still two major hurdles:
+3.2.4.1
+Self-modifying code
+Self-modifying code was one trick used particularly on the 6502 to overcome some
+of the constraints of the platform. Additionally the layout of opcodes followed by
+operands made it quite easy to modify one or the other using simple writes. Especially
+when compared to the ARM Cortex-M3, which makes self-modifying code difficult,
+by not only mingling the encoding of opcodes and operands, but also by splitting the
+memory in execute-only and no-execute pages and often putting the code section in
+a dedicated ROM-block.
+Self-modifying code have the property that it can potentially invalidate the CFG
+at run-time, thereby invalidating any code compiled from it.
+The compiler must
+therefore either guarantee that the code is not self-modifying or provide a mechanism
+for detecting self-modifying code at run-time. Guaranteeing that the code does not
+modify itself requires guaranteeing that no write occurs within the code addresses.
+For absolute addresses this is trivial, but for register offset addressing and/or indirect
+addressing, this becomes essentially a range-value analysis, which can be difficult or
+impossible to perform with enough accuracy to determine whether code-rewriting
+occurs at run-time, due to the fact that data and code can be placed very close to
+each other on the 6502.
+Detecting rewrites at run-time is easier, but comes with a run-time overhead, since
+each write must be checked against the known code addresses.
+In an AOT compiler we have to guarantee that no code-rewrites occur, which
+means that some programs may not compile. In the 6502 setting, there is at least one
+prominent program that uses a form of self-modifying code: the BASIC interpreter,
+which allows execution of arbitrary machine code loaded into memory. The BASIC
+interpreter was the main interface for the 6502-based Commodore 64 system, among
+others, and thus a large portion of the software written for the 6502 assumes the
+presence of the BASIC interpreter and contains the necessary headers to hand-over
+from the BASIC interpreter to the contained machine code.
+A pure AOT compiler is therefore insufficient for dealing with the 6502 platform.
+==PAGE:43==
+3.3 Other optimizations
+33
+A JIT compiler on the other hand can be combined with an interpreter to allow
+optimistically compiling code and bailing out to the interpreter, if the code is modified
+at run-time. The fundamental trade-off here is compile-time vs run-time. The time
+spent compiling is often modified it may be more efficient to always use the interpreter
+rather than wasting time compiling code, that is maybe never executed. On the other
+hand, if the code is only changing rarely, such as when loading a new program via
+the BASIC interpreter, it may be more efficient to compile it rather than use the
+interpreter.
+The JIT approach requires run-time detection of modified code to avoid execut-
+ing stale copies of the code, but may be combined with an under-approximation of
+the updated code addresses to avoid compiling code, that is guaranteed to be self-
+modifying.
+3.2.4.2
+Indeterminable CFGs
+Until this point we have been assuming that a CFG could be constructed from the
+source instructions. This is not always the case: almost every platform includes an
+indirect branch that will set the PC to the value stored at a specific memory address.
+Even if the platform did not provide this natively, it could easily be simulated on
+the 6502 using self-modifying code, by simple updating the operand of an absolute
+branch. This makes it difficult or impossible to determine the CFG statically in some
+cases.
+Again, in a pure AOT compiler solution, this may result in failing to compile
+programs with well-defined, but difficult to determine CFGs.
+In a JIT compiler
+solution, there are a more compelling alternative: we can compile the program for the
+portion of the CFG that we can determine, and if an unknown branch is encountered,
+we simply bail out to the interpreter.
+3.3
+Other optimizations
+So far we have skipped over the content of the actual instructions and only focused
+on the structure of the code. There are two overall approaches to actually executing
+the code emulating each of the instructions in a basic block:
+• Extract the code for each instruction in a method and call with appropriate
+parameters
+• Produce code for all side effects of the instruction in place
+This is essentially a trade-off between code size and a run-time overhead, similar
+to the trade-off faced by any compiler with the option to inline code. In this case the
+number of different functions (instruction types) is likely to be vastly smaller than
+the number of invocations (call sites), which would usually favor the large benefit in
+code size over a relatively small run-time penalty.
+==PAGE:44==
+34
+3 Analysis of the problem
+There is in our case, however, one compelling reason to inline the code - namely
+optimizations. Inlining the code for each instruction allows a number of optimizations
+that were not possible before. The main observation enabling optimizations is that the
+emulator must simply produce the same observable side-effects as the real execution
+of an instruction.
+As a concrete example, if two instructions in a straight-line segment both affect
+the carry and overflow flags, with no instructions in between observing the flags, then
+there is no reason to update the flags in the first case.
+Having access to the code that make up the instruction emulation and not just the
+instruction type thereby allows for (sound) re-orderings and dead code elimination.
+Re-orderings can also allow the stack to be used more efficiently: if two consecutive
+instructions both use the same register, then the value representing that register can
+be pushed to the stack, used for both instructions and only then be stored back into
+main memory.
+3.3.1
+Patching function bodies
+To actually inline a WebAssembly function, we need to patch the instructions to the
+target function.
+There are four main issues that need to be dealt with:
+• Arguments: Arguments usually reside on the stack when passed to a function.
+We need to ensure that they are available in a local variable (in the calling
+function) and update the indices in the callee, before inlining.
+• Local variables: Local variables must be moved to the caling function and the
+indices updated.
+• Return: The control flow needs to be modelled correctly, such that a return
+statement in the callee function becomes a break in the inlined code. We must
+also ensure that return variables are handled correctly; this can be achieved by
+adding a local variable to store the return function.
+• Blocks: The above modifications may turn a single instruction in the callee
+into multiple instructions; in that case it may be necessary to wrap the new
+instructions in a block (and update labels where necessary).
+Additionally we need to check for recursion before inlining. The instruction em-
+ulation functions are very unlikely to be recursive, but it is still worth mentioning
+that trying to inline a recursive function requires special handling. This is non-trivial
+and one strategy could be simply to identify recursive calls and avoid inlining those
+functions.
+Consider a slightly silly Add if positive function that adds two integers and
+return the result, but only if it is positive to illustrate how this might work in practice:
+==PAGE:45==
+3.3 Other optimizations
+35
+1 (func $add (param $0 i32) (param $1 i32) (result i32)
+2
+(local $2 i32)
+3
+(set_local $2 (i32.add (get_local $0) (get_local $1))
+4
+(if (i32.lt (get_local $2) (i32.const 0))
+5
+(return (i32.const 0))
+6
+)
+7
+(return (get_local $2))
+8 )
+9
+10 (func $main (result i32)
+11
+(return (call $add (i32.const 21) (i32.const 21))))
+12 )
+Listing 3.10: Add if positive before inlining.
+To inline this, we must first add two new local variables to store the arguments
+and one new local to store the result:
+1
+2 (func $main (result i32)
+3
+(local $arg1 i32)
+4
+(local $arg2 i32)
+5
+(local $ret i32)
+6
+(set_local $arg1 (i32.const 21))
+7
+(set_local $arg2 (i32.const 21))
+8
+// .. inline code and set $ret
+9
+(return (get_local $ret))
+10 )
+Listing 3.11: Adding local variables to store arguments and return variables.
+To actually inline the code now, we must add the local(s) used in code and update
+all indices. In the code snippets here, we use names for the variables to make it easier
+to distinguish, but keep in mind that the actual encoding is just an index for each
+variable (with arguments taking up the first indices and local variables placed after
+that)
+1
+2 (func $main (result i32)
+3
+(local $arg1 i32)
+4
+(local $arg2 i32)
+5
+(local $ret i32)
+6
+(local $inlined_local i32)
+7
+(set_local $arg1 (i32.const 21))
+8
+(set_local $arg2 (i32.const 21))
+9
+10
+(block $inlined_func
+11
+(set_local $inlined_local (i32.add (get_local $arg1) (get_local
+$arg2))
+12
+(if (i32.lt (get_local $inlined_local) (i32.const 0))
+13
+(block
+14
+(set_local $ret (i32.const 0))
+15
+(br $inlined_func)
+16
+)
+==PAGE:46==
+36
+3 Analysis of the problem
+17
+)
+18
+(set_local $ret (get_local $inlined_local))
+19
+(br $inlined_func)
+20
+)
+21
+22
+(return (get_local $ret))
+23 )
+Listing 3.12: Add if positive after inlining.
+We had to introduce two new blocks in order to keep the control flow the same
+for the first return statement and in order to put more than one instruction inside
+the if-statement. The two (br $inlined_func) statements are, again, encoded using
+indices, so even though the textual representation is the same, the actual encodings
+are different (the first must break out of two blocks and the second must only break
+out of one).
+==PAGE:47==
+CHAPTER 4
+Implementation work
+This chapter will highlight the most important aspects of the implementation of
+the emulator and compilation framework. The chapter will start with a very short
+overview of the necessary tooling for working WebAssembly and will then go into
+detail of the most important aspects of the emulation framework.
+4.1
+WebAssembly platform
+4.1.1
+Tools
+The WebAssembly format is currently supported by all major browsers, but to actu-
+ally produce a binary in the format, a number of tools are available.
+4.1.2
+Emscripten
+The primary compiler is the Emscripten project [Zak11][Ems17]. This compiler suite
+is a fork from the main LLVM branch along with support libraries for C and C++
+programs. Originally designed for asm.js, it has been retrofitted for the WebAssembly
+format. The support libraries include an implementation of libc (malloc, free, etc)
+suitable for the web host environment. The libraries are implemented in Javascript
+and bindings are available for the source programs - either using the regular lan-
+guage mechanics and regular libraries (e.g. ”new” operator in C++, ”malloc” calls
+in c++; std::out or printf calls, etc.) or using explicit APIs for e.g manipulating the
+browser environment, which is not normally available to the source program. The
+implemented libraries focueses heavily on bringing games to the browser with heavy
+support for OpenGL (translated to WebGL) and SDL1 for keyboard/joystick/audio
+I/O and sockets for client/server communcations.
+All of this means that a large part of the run-time environment relies on spe-
+cial methods implemented in a Javascript library, also for WebAssembly programs.
+The compiler packages all of this into a single Javascript library that is responsi-
+ble for loading the WebAssembly binary and exposing the run-time library to the
+loaded module. Furthermore this means that even for programs that uses none of the
+1Simple DirectMedia Layer
+==PAGE:48==
+38
+4 Implementation work
+Javascript-bindings explicitly a lot of the execution of the WebAssembly binary will
+in fact take place in the Javascript run-time support libraries.
+It also means that a simple ”Hello, World!” program in plain c compiled by Em-
+scripten 1.37 needs to import 16 functions from the environment, exports 19 functions
+back to the environment and requires 9578 lines of WebAssembly (in the disassembled
+form). On top of this 2414 lines of Javascript are required for the run-time library
+and another 1300 lines of mixed HTML/css/Javascript to invoke the program and
+present the console to write to. All to write a single line of text to the screen. The
+output is detailed in Appendix B.
+This seems a bit excessive, especially for a program that does not actually allocate
+any memory. The nature of the split libraries, partially implemented by hand in the
+host environment, makes it difficult to apply the regular LLVM optimizations on the
+whole output program. The roots as an asm.js compiler, however, also contribute
+significantly to the problem. For obvious reasons, the embscripten team does not
+want to support two competing versions of the included libraries. But this means,
+for instance, that WebAssembly programs must implement the stack and heap access
+in the same manner as asm.js programs, rather than relying on the stack natively
+available in the WebAssembly format.
+4.1.3
+Binaryen
+The Binaryen project contains a WebAssembly assembler, optimizer and disassem-
+bler and is used as the final stage in compilation, transforming the output of the
+Emscripten compiler into WebAssembly [Web17]. The tool provides C bindings to
+allow it to be embedded in the Emscripten compiler, among others, but it also dis-
+tribute separate binaries to allow working directly with the WebAssembly format.
+The tool currently compiles three formats to WebAssembly: the Emscripten output
+assembly format, the Rust MIR format and asm.js source programs.
+4.1.4
+EMSDK
+The EMSDK project is a distribution tool that is responsible for downloading, com-
+piling and setting up the Emscripten project and dependencies. Since Emscripten
+relies on very specific versions of Clang, Binaryen, Java, Python, Node.js and Em-
+scripten itself, this is quite helpful, but it does underline a certain fragility of the
+project environment.
+4.1.5
+State of the platform
+The WebAssembly platform is overall characterized by being very new - the current
+specification defines what the W3C working group names an MVP2 [W3C17e]. The
+2Minimally Viable Product
+==PAGE:49==
+4.1 WebAssembly platform
+39
+speficication for this early version was only finalized during the project period, in
+March 2017 [W3C17d]. This has stabilized WebAssembly APIs themselves, but the
+supporting tools mentioned above are still (as of May 2017) in a somewhat unstable
+state.
+The documentation states that the Binaryen optimizers are used as part of the
+tools’ assembler, but the actual output binary contains a number of dummy bytes:
+empty sections, maximum rather than minimum number of bytes used to encode
+numbers, etc. The details are specified in Appendix B.
+The EMSDK tool is also quite brittle: Several times during the project period,
+updates to the stable channel caused some of the dependents projects (Binaryen,
+Emscripten) to fail even compiling due to syntax errors. Since the EMSDK manages
+the version of the other tools, unfortunately there are no official way to roll back the
+offending changes when such an error occur.
+The Emscripten compiler output is also a curious mix of very aggressive opti-
+mizations in some cases, provided by the LLVM toolchain (common subexpression
+elimination, constant folding, loop invariant hoisting, etc, etc), but very inefficient
+output in other cases: for instance, a switch statement is implemented using a jump
+table - which in the WebAssembly format means a Br_Table instruction and a block
+for each case in the switch.
+This is fine, when the case values are continuous or
+nearly continuous, but when there are gaps, this can be a problem. For instance, the
+compiler will also apply this strategy even for a switch statement with the integer
+cases ’0’, ’10’, ’100’ and ’1000’. That is, the compiler prefers a jump table with 1001
+entries over an if-else construction with four tests. This example is shown in full in
+Appendix B.
+4.1.6
+Working with Emscripten
+Emscripten currently officially support three source languages: C, C++ and Rust.
+Despite being based on the LLVM toolchain, only these languages are supported,
+due to the requirements associated with providing a libc equivalent in the browser
+environment.
+Since Emscripten is the only official way to compile to WebAssembly at the mo-
+ment, this means that the emulator framework has to be written in one of these
+languages. C and C++ both have a long history of compiler implementations, but
+have an equally long history of terrible memory bugs:
+buffer overflows,use after
+free, double free, use of uninitialized pointers, null pointer dereference, data races,
+etc, etc.
+While a number of work-around and detection schemes has been pro-
+posed [Cow+00] [Cab+12] [Aba+09], the root cause seems to be the broken type
+system and lack of safety features in the two languages. It is therefore worth investi-
+gating the alternative, Rust.
+==PAGE:50==
+40
+4 Implementation work
+4.1.6.1
+Rust
+Rust is relatively new systems language, that eliminates large classes of memory errors
+by eliminating ”null”s and enforcing a notion of ownership on the memory.
+The
+result is that all accessible memory is initialized and that the compiler can provide
+guarantees against data races.
+The trade-off is that the programs written in Rust must be guaranteed to be
+correct. These guarantees are made in the compiler using a static analysis framework.
+This means that the programmer has to have a working understanding of the analyses
+being performed, since the compiler necessarily makes an under-approximation of the
+valid programs. In practice, however, this moves a large class of (potential) errors
+from run-time to compile-time, which makes them a lot easier to debug than say, a
+dangling pointer.
+Features, that support compiler development
+In relation to compiler devel-
+opment, Rust brings a few very relevant features from the ML-language tradition to
+the table, that neither C nor C++ has:
+• Tagged unions: Implemented as enums that are allowed to have different fields
+depending on the value. This is very for, say, storing the type and operand
+of an instruction, while still allowing the instructions to be treated as a single
+type.
+• Pattern matching: In combination with the tagged unions, pattern matching
+is a very compact notion for dealing with cases of the various steps in the
+intermediate representations of a compiler.
+• Higher order functions: While not exclusively relevant for compilers, it is still
+a very handy feature to have.
+• Rich type system: While arguably C++ also have a very rich type system, this
+is nonetheless a very relevant feature and a huge step up over c.
+Interacting with the Javascript environment
+Rust includes a Foreign Function
+Interface (FFI), which is recognized by Emscripten and used to interact with the
+outside world. This allows Rust code to call Javascript functions; the other direction
+is ensured by marking public functions as callable from the outside world.
+Because Rust places almost everything on the stack, special case needs to be taken
+when dealing with the outside environment. In particular, the code must ensure that
+the returned values are not placed on the stack (where they could be overwritten)
+and must ensure that the destructors are not accidentally run on values that were
+supposed to be preserved for the outside world. This requires the use of some of the
+”unsafe” features of Rust, as we are essentially asking the system to potentially leak
+memory.
+==PAGE:51==
+4.1 WebAssembly platform
+41
+Function name mangling
+Rust uses code specialization to deliver generics: that
+is, to have a version of a function, sum, that operates on both integers and floats,
+Rust would actually produce two versions of the code underneath: one that takes
+integer arguments and return values and one that takes floating point values and
+return values.
+To distinguish between the two versions, Rust uses a mangling scheme similar to
+C++, which encodes the types in the name.
+This is fine, except that we must know the name of a function in order to export
+it, and the mangling scheme makes this difficult to predict. We can easily suppress
+mangling for functions by a compiler directive, but this comes at a particular cost:
+with no mangling, we cannot use generics.
+In our case we would really like generics for the 6502 instructions, since we need
+to exchange the memory management between the emulator (which uses a continuous
+piece of memory) and the simulator (which additionally needs to check with memory
+mapped peripherals).
+This is not directly possible in Rust, but to avoid having
+two implementations of the same instructions, we use the Rust macro system to
+generate two different versions of the same code in a fashion where we can control
+the names ourselves. It is not ideal, but preferable to having two implementations of
+the instructions that need to be verified.
+4.1.7
+Memory management
+The WebAssembly platform currently only supports a single piece of linear memory
+for a module. That piece can be grown using the special grow_memory instruction,
+but cannot (in the MVP) be shrinked again. The linear memory behaves as a virtual
+address space by presenting a continuous piece of memory with no reserved addresses
+(out of bounds addresses still cause exceptions, however).
+When a module is initialized a linear memory segment and, once initialized, that
+piece of memory represents the only memory addressable by the module for the
+lifetime of the module. Each linear memory segment can be shared between multiple
+modules, allowing JIT-compiled modules to affect the main module’s memory.
+In practice, the primary Emscripten module will initialize a segment of memory,
+which is exposed via the global Javascript variable, Module. This piece of memory
+is exposed both as a Javascript Uint8Array and as a WebAssembly.Memory instance,
+allowing us to access and manipulate the memory both from Javascript functions and
+from other WebAssembly modules.
+4.1.7.1
+Loading files and arguments
+Emscripten will automatically load the main module itself, but will not load any
+arguments. To actually emulate a binary we therefore need to load the binary and
+place it in memory somehow. WebAssembly do not have any notion of arrays, so it
+is not possible to pass the loaded binary directly via the exposed functions from the
+==PAGE:52==
+42
+4 Implementation work
+module. Additionally, WebAssembly do not have direct access to the XmlHTTPRequest
+and similar in the Javascript API (”Ajax”), which can request data via HTTP, so we
+cannot request new data directly from the inside the WebAssembly module.
+Instead, we must manually place the data in memory and invoke the module’s
+functions with a pointer and a length parameter, which can be translated into an
+array in the emulator program (or rather a Rust Vec). To do this, we must ensure
+that the memory is not overwritten later on by the module’s malloc function, so we
+must ensure that the module’s memory allocation mechanism is aware of the memory
+now used to store the data.
+So, to actually load the data representing the binary to emulate, we first request
+it into the browser via the Javascript Ajax functionality; we then call the module’s
+malloc directly, with the number of bytes we need to store the binary data. Finally
+we copy the binary’s data into the memory via the Uint8Array interface starting at
+the address returned as a pointer from malloc. After these steps we can invoke the
+module’s functions with the data array.
+Aside from being a hassle to go through these steps, this setup has the obvious
+and significant downside that we now have a piece of memory inside the module that
+is managed from outside the module. That means, that it is now necessary for the
+Javascript program to run free on the module, once the module is done with the
+memory. Since Javascript is a garbage collected language with no destructors, there
+are no automatic ways to set this up, so this practice requires a very disciplined
+approach on the side of the programmer to avoid memory leaks in the module.
+4.1.7.2
+Sharing memory between modules
+A newly created module can get access to the main module’s memory by sharing the
+linear memory reference. Doing this means that the new module’s only memory is now
+the same as the main module’s. Because Emscripten placed the C/C++/Rust stack
+in main memory, this also means that the two modules now share a stack and their
+heap. This is actually very good news, because it allows us to seamlessly calling out
+of the main module and into the newly created module, since the calling convention
+is the same and the two modules share a stack.
+Part of the initialization code of the main memory is to setup the stack and heap
+pointers, so to avoid destroying the existing memory when compiling a new module,
+we have to compile it as a Side Module as it is known in Emscripten terminology.
+This simply means that it is compiled without initialization code, but also that it is
+compiled withoutlibc and friends.
+The effect of this is, that the newly created module does not have access to libc
+functions and thus cannot call malloc, free and so on. This again means that the
+newly compiled functions can only use the stack for new variables. Fortunately Rust
+places everything on the stack unless we very explicitly request that it uses the heap3.
+3Via the Box construct or via standard library functions that uses this construct
+==PAGE:53==
+4.2 Emulation platform
+43
+4.2
+Emulation platform
+The emulation framework itself consists of two parts: one part is specific to the
+platform being emulated and one part is shared among all emulators on the platform.
+The shared part is setup to allow different levels of optimizations ranging from pure
+emulation, emulation with instruction caching to various JIT compiler options. In
+the simplest case, the pure emulation, the emulation framework simply requests an
+instruction parse from the machine specific part on the current PC, updates the PC to
+the next position and executes that instruction, indefinitely, whereas the JIT modes
+detects subroutines and compile them on the fly.
+4.2.1
+Source platforms
+The machine specific part are setup to implement a parse operation (that can parse
+one instruction from a given position in memory), one function per instruction (taking
+the appropriate addressing arguments) and one function that can select the correct
+instruction function to invoke from the parsed instruction. All machine state is ex-
+pected to be maintained in a single struct which contains all the relevant registers
+and memory is expected to be emulated as a single array of byte values.
+4.2.1.1
+6502
+The 6502 predates formal specifications, so each of the instructions have been im-
+plemented by hand. To save time and space, and avoid copy-paste errors, the im-
+plementation of addressing modes and each instruction are implemented separately
+as macros that are then combined for each opcode. Furthermore, some instructions
+share the same functionality, but are implemented for more than one of the general
+purpose registers. As an example, consider the CMP instruction (compare register A
+with memory), which is mirrored by CPX and CPY which are identical, but function
+on the X and Y registers instead.
+1 macro_rules! abs_x_addr {
+2
+($machine:ident, $addr:expr) => { $addr + $machine.X as u16 }
+3 }
+4 // absolute y addressing, zeropage addressing , indirect addressing, etc.
+....
+5
+6 macro_rules! compare {
+7
+($machine:ident, $reg:ident, $val:expr ) => {
+8
+let val = ((($machine.$reg) as i16 - ($val) as i16) & 0xFF) as u8;
+9
+$machine.Status = setZeroAndNegative!(setFlags!(carry => $machine.
+Status, ($machine.$reg >= $val) as u8), val);
+10
+}
+11 }
+12
+13 macro_rules! cmp {
+14
+($machine:ident, $val:expr ) => {
+15
+compare!($machine, A, $val);
+==PAGE:54==
+44
+4 Implementation work
+16
+}
+17 }
+18 // CPX, CPY
+19
+20 // CMP
+21 inst_fun_imm!(CMP_imm, machine, imm, cmp!(machine, imm));
+22 inst_fun_addr_read_only!(CMP_abs, machine, $($mem,)* addr, cmp!(machine,
+deref!( addr $(,$mem)*)));
+23 inst_fun_addr_read_only!(CMP_abs_x, machine, $($mem,)* addr, cmp!(machine,
+deref!(abs_x_addr!(machine, addr) $(,$mem)*)));
+24 // ...
+Listing 4.1: Implementation of addressing modes and instructions for CMP.
+The only effect of the CMP instruction is to set the carry, zero and negative flag
+bits on the status registers. This allows subsequent branch instructions to operate
+on those flags. The actual implementation is to subtract the given value (memory
+or immediate) from the general purpose register and then check if the result caused
+each of the three flags to be set (again, implemented as macros to share between all
+the instructions that affect the status flags).
+Since all addressing modes are not available for all instructions, we need to specify
+for each instructions exactly the addressing modes that are available. The names for
+each function can be arbitrary, but do need to match the names given in the instruc-
+tion selection function, so for obvious reasons it is easier to work with a consistent
+naming scheme - the one chosen here is simply [Instruction Memonic]_[adressing
+mode]
+4.2.1.2
+ARM
+The ARM processors do have a formal specification, so rather than a direct implemen-
+tation, we build a separate compiler from the ARM Specification Language (ASL) to
+Rust, adapted to fit the emulation platform. To avoid confusion with the JIT compiler
+of the emulator itself, we will call this the ”transpiler”.
+There are three parts to the specification of each instruction:
+1. Diagram: This is a definition of which bits mark a given instruction encoding
+as well as which bits are used to encode operands.
+2. Decoding: This is specification, in ASL code, for how to interpret the bits of the
+operands. Each encoding for an instruction may encode different operands, but
+the decoding functions ensure that they all map the same, shared operands for
+the instruction. That is, the decoding function can combine or split operands
+or provide implicit values for the operands not provided in an encoding.
+3. Execution: This is a specification for how each instruction affect the machine
+state and memory.
+==PAGE:55==
+4.2 Emulation platform
+45
+Each instruction may have several diagram, decoding pairs, but only one execution
+specification.
+Additionally decoding and execution functions may rely on shared
+library code, also provided in ASL. As an example of the concrete syntax and how
+we translate it to Rust, consider the diagram and decode for first Thumb-2 encoding
+of the ADR instruction:
+1 TAG:adr_T1:decode
+2 d = UInt(Rd);
+imm32 = ZeroExtend(imm8:'00', 32);
+add = TRUE;
+3
+4 TAG:adr_T1:diagram
+5 T16
+6 15:12 _ 1010
+7 11:11 _ 0
+8 10:8 Rd xxx
+9 7:0 imm8 xxxxxxxx
+10
+11 TAG:adr:index
+12 Decode: adr_T1:decode@adr_T1:diagram
+Listing 4.2: ASL specification for ADR T1 encoding.
+The diagram specifies that the instruction is 16 bits long, that bits 11 to 15 should
+form the pattern, ”10100”, for the instruction to be an encoding of the ADR. The
+operands are defined on bits 8 to 10 and 0 to 7, respectively.
+The decode function then define how to actually interpret the operands: the
+register defined by Rd is just interpreted as an unsigned integer, but the immediate
+value given must be extended to be 32 bits long. For this encoding, the add operand
+is implicitly true.
+In Rust code, this becomes:
+1
+pub fn parse_adr_T1(inst : &u32) -> Option<Instruction > {
+2
+if (inst >> 12) & 0b1111u32 != 0b1010u32 {
+3
+return None;
+4
+}
+5
+6
+if (inst >> 11) & 0b1u32 != 0b0u32 {
+7
+return None;
+8
+}
+9
+10
+let Rd = (inst >> 8) & (1u32 << 3) - 1;
+11
+let imm8 = (inst >> 0) & (1u32 << 8) - 1;
+12
+let d = UInt(Rd);
+13
+let imm32 = ZeroExtend((imm8 << 2) + 0b00u32 ,32);
+14
+let add = 1;
+15
+return Some(Instruction::adr {add: add as u32, d: d as u32, imm32:
+imm32 as u32, });
+16
+17
+}
+Listing 4.3: Generated code for ADR T1 encoding.
+The if blocks correspond to the bit patterns that should be present: if they are
+not, then the encoding is for a different function and we return None to signal that
+==PAGE:56==
+46
+4 Implementation work
+the instruction could not be parsed. To actually compare the bits, we have to extract
+a portion of the integer we are interested in.
+There are a few ways this can be
+achieved, but the solution chosen is to shift the desired portion of the integer to the
+least significant bits and apply a binary and for the desired number of bits.
+Implementation
+The transpiler is implemented in F# with the lexer and parser
+auto-generated using the FsLex and FsYacc tools. ASL is an imperative language,
+which allows us to directly model many of the constructs directly in Rust. Indentation
+is used to indicate blocks in ASL: this requires the lexer to keep track of the current
+level of indentation and produce a BEGIN token every time the indentation level is
+increased. It also means that the lexer potentially has to produce multiple tokens for
+a single newline character, since multiple blocks may be closed on a single line.
+Variables in ASL are not declared before use and, in many cases, do not have
+explicit types. This requires a bit of management on our part, since we must infer
+the types and translate correctly to Rust. In most cases we can safely default to
+just using 32-bit unsigned integers, but in a lot of cases we need to know the explicit
+bit-width of the variables. As an example, consider the SInt shared function:
+1 integer SInt(bits(N) x)
+2
+result = 0;
+3
+for i = 0 to N-1
+4
+if x<i> == '1' then result = result + 2^i;
+5
+if x<N-1> == '1' then result = result - 2^N;
+6
+return result;
+Listing 4.4: ASL SInt code.
+This code is equivalent to writing ((x as u32 << (32- N)) as i32) >> (32 -
+N)
+in Rust; that is, it simply interprets the N bits as a signed int. To run the ASL
+code, however, we must keep track of the bit-width of the variable passed to SInt
+and pass it as an explicit variable in the generated Rust code.
+To do this, the transpiler does an initial pass over the code to calculate the global
+environment (functions) and local environment for each shared, parse and execute
+function. This also allows the Rust code to declare all local variables in the top-most
+scope, since blocks in Rust form scopes whereas blocks in ASL does not.
+With these differences in mind, the end code is then produced more or less using
+the equivalent Rust structures directly from the type-annotated AST.
+Testing
+To test the transpiler a number of test-cases has been prepared to ensure
+that the transpiler produces legal and equivalent Rust code for each of the ASL
+constructs.
+The tests are split in two parts: one part tests the diagram and parsing code
+to ensure that the correct guards and the correct bits are being extracted from the
+binary encoding. The other part focuses on the imperative language constructs in
+ASL and ensures that they are correctly translated.
+==PAGE:57==
+4.2 Emulation platform
+47
+4.2.2
+JIT platform
+The JIT compiler must work in concert with the pure interpreter and detect sections of
+code that represent a feasible target for compilation. The implementation focuses on
+detection of subroutines: partly, because a subroutine is structural great match for a
+WebAssembly function, and thus allows easy composition of compiled sections; partly
+because subroutines are feasible to detect and easy to detect the code boundaries of.
+The hierarchy of the components in the implementation are as follows:
+• The pure interpreter parses instructions, executes them and hands them over
+to the cache
+• The cache stores the parsed functions and retrieves instructions previously
+stored as required
+• The compiler detects when a subroutine call is present in the cache and compiles
+it (and stores a reference in the cache)
+4.2.2.1
+Compiling new functions
+The cornerstone of the JIT compiler is, naturally, the compilation of new code on
+the fly. When identifying a subroutine to compile, we also check for any subroutines
+called as part of that code and include those in the code to compile (if we do not
+already have a reference to compiled functions representing those subroutines). The
+overall process is as follows:
+1. Optionally: Ensure that the cache contains the entire subroutines to be com-
+piled (this is not necessarily the case, since the executed code might not have
+touched all branches)
+2. Build the CFG for each subroutine to be compiled
+3. For each subroutine CFG, determine if it is reducible or not
+• If if is, detect the structures to be compiled (loops, etc)
+• If it is not, compile using the fallback method
+4. For each basic block, replace each instruction with the code to execute that
+instruction
+To ensure correct cooperation between compiled functions and interpreted code,
+the compiled functions are created in such a way, that at any program point where
+they might return, the underlying machine and memory must be in such a state, that
+the interpreter can seamlessly take over. Conversely, this also means that when we
+can guarantee that the function cannot return, we are not required to write values to
+the machine register or the main memory, as long as the state is consistent afterwards.
+==PAGE:58==
+48
+4 Implementation work
+In particular, this means that for each basic block, we know that once the basic block
+starts executing it will continue executing until the last instruction in the block. This
+allows us to update the PC only once for each basic block. To ease implementation, we
+simply update the PC for the whole basic block before executing the first instruction
+in the basic block. If the terminator of the basic block is a branch where the conditions
+are met, then the PC will also be updated in that instruction, but the effect will be
+the same.
+For subroutines with incomplete CFGs this also means, that we simply exit early
+from the compiled function, if an undefined part of the CFG is reached at run-time.
+An undefined part of the CFG may be reached either because an indirect branch
+was made, where the address could not be predicted, or because the cache was not
+pre-filled with the whole subroutine. In the later case, it may be beneficial to clear
+the cache to allow recompiling the subroutine next time with a greater part of the
+CFG. The performance trade-off between pre-filling the cache and not is investigated
+in the chapter 5 - Testing and performance analysis.
+4.2.2.2
+Caching
+In principle, it is not necessary to postpone compilation until a function is in the
+cache (that is, until the second time it is invoked) - this is purely a heuristic, to
+avoid compiling code that is only used, say, in initialization of a program. The cache
+is, however, crucial to ensuring a sound compiler: the cache’s role is both to store
+the parsed instructions (and thus avoid wasted work), but also to detect when the
+underlying code pages are modified.
+The cache contains a reference to the instruction on the address of that instruction,
+but also references from the operand bytes back to the actual instruction. Thus, when
+a write is executed and the destination was in the cache, any reference is followed
+before clearing the cache. This ensures that a write to an operand will clear the cache
+for that instruction and allow the emulator to detect, upon reaching that program
+point, that the instruction was no longer in the cache and that it must re-parse that
+instruction.
+For compiled functions, a similar approach is used: at the location of first instruc-
+tion in the function, a reference to the function is inserted into the cache; for all other
+instructions and operands included in the compiled function a reference back to the
+function is inserted. This allows us to invalidate the compiled function as soon as one
+instruction or operand in the function is overwritten. It is necessary to invalidate the
+cache this aggressively, since the compiled code is frozen at compile time and thus
+cannot be modified afterwards.
+For this to work, every write, whether interpreted, cached or in a compiled func-
+tion, must be checked against the cache and the destination potentially invalidated.
+One solution is to compile the cache-handling code into each of the JIT modules, but
+this is balloons the code size and is a computationally heavy operation, since it re-
+quires parsing and patching in parts the binary WebAssembly output of the emulator
+itself. Another solution, which is the one implemented, is to export a function from
+==PAGE:59==
+4.2 Emulation platform
+49
+the main emulator module, that can clear the cache, and call that from the compiled
+module. The difficulty in either method lies in the fact the (cached) instruction is
+available when compiling the JIT module, but is not actually present in the compiled
+code. The effect of the instruction is present, of course, but the actual struct repre-
+senting the instruction is not. The instruction is needed to calculate where the write
+takes place, since that location may depend on the value of memory and registers
+only known at run-time.
+There are many ways around this, from reconstructing the instruction in the
+compiled code, patching part of the instruction code in to calculate the address that
+way, expose the address calculating functions separately and so on, but the solution I
+found most straight-forward was to pass a reference to the instruction and recalculate
+the address in the main memory. This way, we accept a slight overhead, but the
+implementation becomes a lot simpler.
+After potentially invalidating the cache, the compiled function must check that it
+itself was not invalidated - and if it was, it must abort computation. This is done by
+returning early from the function and passing a flag as the return value, to allow the
+caller to also exit early.
+Similarly a function, when it is first invoked, must check that it is still in the
+cache, since it could have been called from a compiled module that just invalided
+that function.
+4.2.2.3
+Working with binary WebAssembly
+The WebAssembly binary format is quite straight-forward to parse and produce, but
+the focus on the easy validation has some unfortunate consequences for modifying
+existing code and patching code segments together.
+The focus on validation also, to some degree, makes debugging more difficult. As
+an example, consider a module, where we want to add a new local function that uses
+some external function. First we have to add a new import statement: that is an
+isolated change to the import segment and we can easily insert the relevant bytes
+and update the size and count arguments for the section. However, if we only insert
+the new import definition, the most likely outcome is that the module now fails to
+validate with a message, which could be about an empty stack or type mismatches.
+Why? Because, once we inserted the imported function, all local function indices were
+incremented by one - means that all call instructions to local functions now point to
+incorrect functions and - most likely - the local functions do not have the take the
+same number of arguments and types.
+So, to properly add an import statement to a module, we have to not only add the
+new import statement, but also find and increment all function calls, that called a
+local function (that is, an index equal to or higher than the newly imported function).
+Debugging these kinds of errors are not trivial, especially since the debugging
+tools available are close to non-existing: if a module fails to validate, it cannot be
+disassembled and thus the only way to debug it is to inspect the binary data and be
+guided by the error message. The error messages vary a bit between the tools: the
+==PAGE:60==
+50
+4 Implementation work
+browsers will usually give an error message pointing to a position in the binary and
+a message related to the stack, with no indication that the error originated because
+of a function call. The Binaryen disassembly tool just flat out crashes if run on a
+non-validating module.
+In the end, I found the easiest way to debug module validation errors was to load
+the Binaryen tool into a debugger and inspect the state of the tool at the point of
+the uncaught exception.
+4.2.2.4
+Compilation new modules on the fly
+Once the WebAssembly binary representing a new module has been prepared it must
+be handed over a Javascript handler to allow creating a new WebAssembly module
+and share the memory of the main module.
+The Javascript handler is responsible for:
+1. Initialize the WebAssembly module
+2. Patch the existing WebAssembly memory reference into the new module
+3. Cache a reference for each exported function from the module (each corresponds
+to a subroutine, named after the starting address)
+The WebAssembly compilation is an asynchronous API. In a pure Javascript world
+this is very convenient to work with as we can either continue on and be notified once
+the compiled module is ready or we can simply await the call and block execution
+at that program point (without blocking the brower UI). In relation to Emscripten,
+however, there are no support for async methods. This means that we have to imple-
+ment the callback logic ourselves and ensure that the emulator can continue correct
+when returning from the Javascript method even when the compiled function is not
+yet ready. To do this, the interface to compile a new module is actually two-way:
+A Javascript function is exposed to the emulator module that allows the module to
+pass a WebAssembly binary and compile the module it represents - and a WebAssem-
+bly callback from the main emulator, that is exposed to the Javascript function.
+The job of the Javascript function is then to respond to the callback from the We-
+bAssembly compilation, update the Javascript cache and then call the WebAssembly
+module to continue. An alternative to this approach could be to take advantage of
+the asynchronous API and simply continue the emulator with the interpreter until
+the compilation completed. That approach seems advantageous, but there are some
+practical difficulties in actually implementing it: First of all, we can only start the
+compiled function at the first instruction in the current version, so either we would
+have to support passing in a PC and starting at a more or less arbitrary point or
+we would have to wait until the next invocation of the function before executing
+it. Secondly, we actually have two separate caches that we need to synchronize: we
+have the internal emulator cache, that keeps track of which instructions are cached
+and which instructions are contained in a compiled function. For this approach to
+==PAGE:61==
+4.2 Emulation platform
+51
+work correctly, we would have to postpone updating the internal cache until after
+the WebAssembly compilation promise returned (or ignore cache and run with pure
+emulation for compilations in-progress).
+Since we cannot have a real parallel compilation pipeline due to the single-thread
+restriction on the emulator itself, it is only the very last stage of the compilation that
+is actually parallel. Therefore this, more complicated approach, is not as attractive
+as it might seem at first glance.
+The newly created methods are invoked from the main emulator module instead of
+an instruction, and whenever the function returns, the emulator continues as before.
+Since the main emulator module cannot contain a reference to the compiled functions
+(as they do not exist at the time of the emulator initialization), the actual invocation
+must use a Javascript function as stand-in. In the actual implementation there are
+a few Javascript methods that work together to maintain a cache of the compiled
+functions and invoke them as necessary.
+4.2.3
+Ensuring correctness
+In addition to ensuring that the individual instructions of the source platform are
+correctly implemented, we must ensure that the emulator itself is implemented cor-
+rectly. For the pure emulator, this is quite easy, as the only job is to update the PC
+correctly, call the parse code and then call the instruction emulator code.
+For the JIT compiling emulator, we must also ensure that the produced modules
+are correct. Since full format verification of the compiler is outside the scope of this
+thesis, the correctness has been tested by a number of test cases. In particular, the
+test cases focuses on the following:
+Emulator module
+Javascript function
+WebAssembly API
+JIT-compiled module
+WASM binary
+Instantiate
+Promise
+Return
+Module
+Invoke
+Return
+Return
+Figure 4.1: Interaction between Emulator module, Javascript, WebAssembly API
+and JIT-compiled module during compilation.
+==PAGE:62==
+52
+4 Implementation work
+• Self-modifying code: The compiled subroutines can be seen as a cached version
+of the instructions that make up the subroutine. To ensure the correctness of
+the implementation, we must therefore have test cases for self-modifying code,
+that invalidates that cache. The subroutine can be modified both from within
+itself and from outside code; both needs to be tests.
+• Non-reducible CFGs: The compiler needs to be able to build a correct work-
+around for non-reducible CFGs. This necessarily includes loops and part of the
+test is to ensure that the correct number of iterations are taken, and that the
+exits work as expected.
+• Reducible CFGs: For the reducible CFGs we also need to test correctness: in
+particular, that the code for the loop constructs are correct and that branches
+work correctly in the simulated control flow. The test cases focuses on this.
+4.3
+C64 Simulator
+Using the emulator as the base a Commodore 64 simulator is created. The addi-
+tional components are: The VIC-II simulator (to simulate the video subsystem) and
+the CIA-6526 interface for the keyboard. All of these operate using shared memory,
+which means that a read or a write to a memory location no longer can be emulated
+by a simple write to an array. If a mapped address is read or written to, the appropri-
+ate subsystem must be consulted rather than main memory. The operating system
+was also present in the form of three ROM sections, for the OS proper, the Basic
+Interpreter and the Character Code Page (for localization). The C64 still had 64
+Kbs of memory, so it also had a mechanism for changing between the shared memory
+mode and a memory-only mode (again, implemented by shared memory).
+In the context of the emulator, this means that all reads and writes from memory
+needs to be intercepted and replaced with a more complex system.
+To avoid re-
+implementing all peripherals, the peripherals from the c64js project was used for
+memory management, CIA-6526 and the VIC-II. The images for the operating system,
+basic interpreter and character pages are all copies of the original distributions.
+4.4
+Limitations of the current implementation
+The emulator platform is completely implemented for the 6502 (core instruction set)
+and is, with the simulated peripherals, able to run the original Commodore 64 oper-
+ating system and BASIC interpreter. The current implementation of the emulator
+platform does has a few limitations, though:
+==PAGE:63==
+4.4 Limitations of the current implementation
+53
+Figure 4.2: Showing the C64 emulator after invoking a BASIC command to change
+the background-color.
+4.4.1
+Optimizations
+The emulator JIT compiler currently does not implement any optimizations. It im-
+plements the CFG reconstruction, reducibility test and recreates the control flow in
+WebAssembly, but does not, currently, implement any optimizations of the emulated
+instructions themselves. The instructions are provided in a separate WebAssembly
+module and called from that. The instruction inlining is currently incomplete; the
+instructions are parsed from the source WebAssembly module, but not yet inlined in
+the produce module.
+4.4.2
+Compiler performance
+The JIT compiler have a few components that could potentially be optimized quite a
+bit. For instance, during the CFG reconstruction, the compiler needs to look for basic
+blocks preset at various addresses. Since each basic block has a starting address and
+a length, this is an ideal case for a data structure that supports a predecessor query,
+if we index the basic blocks by starting address. There are a few data structures that
+support these queries in O(log log u) such as the van Emde Boas trees [Cor+09, p 551]
+or y-fast tries [Cor+09, p 558]. However, the number of basic blocks in a CFG for a
+single function is usually not that large, so it may be that any gain here is completely
+==PAGE:64==
+54
+4 Implementation work
+Figure 4.3: The classic C64 loading color pattern.
+negligible; without proper profiling it is difficult to gauge the relative importance of
+the various compiler components in relation to performance.
+4.4.3
+ARM
+The ASL to Rust transpiler is not yet feature complete. This means that only a tiny
+subset of the instructions are currently being translated from ASL to Rust, but with
+parsing, decoding, execution and shared library code produced correctly. Additionally,
+the emulation framework still contains some platform specific implementations for the
+6502, mostly related to the generation of the WebAssembly code, where the signatures
+for the instruction functions are not generalized to the format of the ARM instructions,
+where each instruction can take many operands.
+The ASL specification itself is published in a machine readable format for both
+the ARM M-8 and the ARM A-8. To use it we therefore have to take the diagram
+code from the M-8 (which is identical to the M-7, since they both use the Thumb-
+2 instruction set encoding), but copy the instruction and parse ASL code from the
+ARM Cortex M3 specification. This work is not fully completed.
+There are not enough instructions written yet for the ARM emulator to emulate
+even simple programs, so the transpiler remains somewhat of a proof-of-concept rather
+than a fully funcioning compiler.
+==PAGE:65==
+4.4 Limitations of the current implementation
+55
+Figure 4.4: A back-port of the ”Flappy bird” game for the C64 running in the
+emulator.
+==PAGE:66==
+56
+==PAGE:67==
+CHAPTER 5
+Testing and
+performance analysis
+In this chapter we will investigate the performance characteristics of the various
+emulation techniques analyzed and implemented in this thesis.
+The chapter will
+start with a detailed description of the test setup, including the difficulties faced
+when trying to measure accurately the performance of an application running in the
+browser. The second part of the chapter is the actual measurements.
+5.1
+Benchmark setup
+The performance benchmark of the emulation framework is set up as a number of
+individual tests for measuring execution time. Each test consists of a binary for the
+source platform which is loaded into a new instance of the emulator for the platform
+and run until completion.
+The tests are split into two parts: one part contains
+computationally heavy operations, that are designed to measure raw execution time
+and allow for a number of optimizations to take effect. The other part contains corner
+cases, such as self-modifying code, both to ensure that the optimizations do not affect
+correctness, but also to examine how such constructs affect performance.
+Each test is executed both with and without the JIT compiler to measure the
+relative benefit/drawback of the hybrid approach.
+5.1.1
+Proof-of-work
+To ensure that the emulated program are actually emulated each test is associated
+with a proof of work. This proof is in the form of a list of expected values in the
+emulated program’s memory. The benchmark will test at startup, that the memory
+does not contain the expected value, and then, after completing the test run, it will
+confirm that the memory does in fact contain the expected value.
+The proofs measures the end result of the task and disregards the intermediate
+calculations’ effect on the memory. This is easier to reason about, since we know
+==PAGE:68==
+58
+5 Testing and performance analysis
+exactly what the output of a benchmark is supposed to be, but not necessarily what
+the intermediate calculations are supposed to be.
+As an example, for the benchmarks that calculates primes, we know that the
+output of the first 10 numbers is supposed to be: 0x01 0x01 0x01 0x00 0x01 0x00
+0x01 0x00 0x00 0x00
+(where 0x01 signals that the given number is a prime and
+0x00 signals that it is not).
+5.1.2
+Included tests
+The benchmark suite contains the following tests:
+5.1.2.1
+Tests of performance
+Primes
+This test calculates prime numbers on the 6502. Since the 6502 does not
+have a multiplication instruction, the test contains a subroutine for multiplication
+and, of course, for the primality test itself and therefore tests nested subroutine calls.
+The primality test is written in a quite naive way and is thus quite computationally
+heavy.
+5.1.2.2
+Tests of structures
+Methods
+This test includes a subroutine for copying a string, accepting arguments
+for the source, length and the destination. The subroutine is called a number of times
+to allow the emulator to detect the subroutine and compile it.
+Self-modifying code
+This test includes two subroutines that are both modified
+at run-time: one modifies itself (and thus requires the compiled code to detect the
+self-modification) and one is modified from the outside of the function.
+Reducible and non-reducible CFGs
+This test includes two subroutines: one
+with a reducible CFG and one with a non-reducible CFG.
+5.1.3
+Optimization modes
+The following modes are tested in the benchmark:
+• Pure emulation
+• Pure emulation with instruction caching
+• JIT compilation
+• Pre-run JIT compilation
+==PAGE:69==
+5.2 Results
+59
+The pre-run JIT is included to try and separate the overhead of the compiler from
+the potential benefit of the compiled code. This is achieved by resetting the PC to
+the initial value and rerunning the test with the same cache.
+5.1.4
+Test machine
+The Benchmarks are all executed on an Intel Core i7-3630QM, 2.4 GHz CPU, running
+Windows 10. The browser used for the tests are: Firefox Nightly, v 55.01a, source
+revision: 275588f4d852d7dc183a9dcc70a311413dc7a063.
+5.2
+Results
+For the 6502, the raw results of the benchmark are as follows:
+Benchmark name
+Interpreter run
+Cache run
+JIT run
+JIT re-run
+Structural tests
+Methods
+20.7 ms
+16.1 ms
+31.4 ms
+1.4 ms
+Self-modifying code
+2.1 ms
+2.7 ms
+63.5 ms
+61.9 ms
+Reducible &
+non-reducible CFG
+4.4 ms
+5.3 ms
+34.9 ms
+1.5 ms
+Stress tests
+Prime numbers
+1228.5 ms
+1238.8 ms
+89.1 ms
+38.2 ms
+Figure 5.1: Raw measurements of the benchmarks.
+The first observation is, that for the actual stress tests, we see a significant boost
+from the JIT compiler: for the prime numbers test, we see a 92% reduction in execu-
+tion time for JIT compiled version and more than 96% reduction for the pre-JIT’ed
+version. This test, of course, is designed to be compiled, with all of the computation
+being performed in subroutines, that can be compiled. Still, more than 90% is an
+enormous speed-up, so it is worth investigating the potential reasons for this.
+For the structural tests, we generally see that the interpreter and interpreter with
+caching are almost equal in terms of performance. The JIT is generally significantly
+slower than the interpreter, with the re-run JIT being the fastest. The notable excep-
+tion of course being the self-modifying code test, where the JIT and JIT re-run are
+almost equally bad.
+==PAGE:70==
+60
+5 Testing and performance analysis
+5.2.1
+JIT overhead
+The structural tests indicate that there is a JIT overhead which outweighs the speed
+up of the compiled code. That is, because these tests are tiny and mostly focuses on
+one structural aspect of the emulator, the code does not run long enough to regain
+the time invested in compiling the subroutines. The JIT re-run on the other hand
+indicate, that the compiled code is still significantly faster, and that given a longer
+test case, the compilation time would have been regained.
+5.2.2
+Cache thrashing
+The one noteworthy exception to the JIT re-run being the fastest is the self-modifying
+code. In this test case both the JIT and JIT re-run perform equally bad. The reason
+for this is cache thrashing, where the emulator will continuously fill the cache, compile
+and then throw everything away once the code is modified.
+For each call to the
+subroutine the JIT will do the following:
+1. When the cache is empty, the emulator will not compile anything and just
+fill the cache using the interpreter. This will clear out one instruction in the
+subroutine (because of the self-modifying code), but most instructions will stay
+in the cache.
+2. When the first instruction of the subroutine is in the cache, the subroutine
+will be compiled. The compiler will first ensure that the cache is filled with
+all reachable instructions in the cache, and will thus fill in the instruction that
+was cleared, and then compile the entire subroutine. Once the subroutine is
+compiled, all instructions in the cache are linked to the same cache entry. Thus
+when one instruction is overwritten, the entire function is evicted from the
+cache.
+This back and forth of caching and flushing can be compared to Cache thrashing
+and generally results in poor performance. In particular in our case, the compiled
+function is evicted from the cache almost as soon as it was put in there and thus takes
+a huge performance penalty, since the compilation overhead is massive compared to
+the slight gain in execution speed for executing just a few instructions from a compiled
+function.
+5.2.3
+Sources of performance gains in the compiled subroutines
+Still, for the cases where the compiled function stays in the cache, there is a significant
+speed-up. Much larger in fact, that what we could reasonably expect from a compiler
+which only builds the control flow and calls the appropriate instruction emulation
+functions. There are two main differences between the interpreted version and the
+compiled version:
+==PAGE:71==
+5.2 Results
+61
+• Context switching: WebAssembly is tightly associated with the Javascript en-
+vironment, but there is still an overhead associated with calling in and out the
+WebAssembly modules.
+• The emulator code itself: The compiled version of a function, of course, bypasses
+the emulator code, including the code to parse, check and update cache, etc.
+Bypassing the emulator code is clearly the main goal of compiling the subroutines,
+but it is possible that a significant part of the observed speed-up comes from the fact
+that the compiled subroutines are kept entirely in a WebAssembly module. There
+are a number of reasons why a function call entirely in WebAseembly is faster than
+a call to a Javacript method, even if they both reside in the same virtual machine:
+Javascript is a dynamic language with an emphasis on meta-programming and run-
+time reconfiguration of the environment. This means that every function in Javascript
+is in fact an object that can be queried and modified. It also means that if we invoke
+a function, say o.foo(); then in order to find the code to actually execute, we must
+first look up the concrete instance of o, then search for foo, which could be defined
+on the object itself or any of the parents in the prototype chain. If foo is found,
+we then execute it - even if we didn’t provide any arguments the function may still
+expect them, so we must query for the signature of the function and fill in undefined
+for the missing arguments (and also construct and provide access to the arguments
+via the special arguments object).
+If we are calling from WebAssembly, we have bound the imported functions to a
+specific instance, so the lookup can be bypassed, but we still need to map arguments
+from the WebAssembly counterpart. WebAssembly modules uses only primitive nu-
+meric types (integers, 32 or 64 bits as well as floating points); Javascript uses a single
+”Number” type for all numeric types, which is defined as a double precision IEEE
+754 [ECM11, p 46].
+Additionally Javacript objects are garbage collected whereas
+WebAssembly is an explicitly managed language. These conversions and differences
+causes an overhead when switching between the Javascript and WebAssembly con-
+text.
+Unfortunately, there are no profilers in existence that can measure where the time
+is spent, so it is difficult to say exactly what the negative contributions of these two
+sources of slow downs are. I believe it is safe to say, that both contribute as we know
+for sure that there is less code in the compiled modules, but not 90% less code being
+executed.
+5.2.4
+Optimizations in the WebAssembly environment
+The executing environment itself poses an additional challenge when trying to gauge
+how various changes and optimizations in the JIT compiler and produced code con-
+tribute: the WebAssembly module itself is executed in a JIT optimized environment;
+how the performance for the WebAssembly part is, is not published, but a lot of en-
+gineering effort has gone into optimizing the Javascript JIT compiler, often claiming
+==PAGE:72==
+62
+5 Testing and performance analysis
+”near native” performance on various tasks. WebAssembly was introduced to provide
+even faster execution, however, the state of the optimizations are not known. This,
+combined with the lack of profiling tools, causes a huge unknown in terms of what
+contributes to the run-time execution time, since we do not known which optimiza-
+tions are implemented and how they impact performance. It is safe to assume that
+there are some optimizations and that they impact performance; it may be contribut-
+ing factor in the speed-ups we see, since the JIT compiled WebAssembly are entirely
+on the WebAssembly side, and thus may be easier to analyze and optimize.
+==PAGE:73==
+CHAPTER 6
+Discussion
+In this chapter we will discuss the suitability of using WebAssembly as an emulation
+host environment. Based on the previous chapters we will evaluate WebAssembly
+as the platform currently stands and discuss how the proposed improvements to the
+platform might affect an emulation framework. We will also discuss how the hybrid
+techniques interact with the WebAssembly platform.
+Finally, we will discuss the
+effects of implementing an emulation framework rather than a single emulator.
+6.1
+Suitability of WebAssembly as an emulation
+platform
+The WebAssembly platform as investigated in this thesis has proved to be a valid
+choice for a emulation host environment.
+It has support across a wide range of
+computing platforms, it supports the c family of source languages as well as more
+modern systems programming language with support for more languages planned -
+and it has proven to be possible to implement a hybrid approach to emulation in a
+reasonably efficient manner. The binary format is quite straight-forward to produce,
+even if it is error prone to make adjustments to existing binary code. However, in a
+number of areas, the WebAssembly platform has been less than ideal for supporting
+an emulation platform.
+6.1.1
+Shortcomings of the contemporary WebAssembly platform
+The contemporary WebAssembly platform is the so-called Minimally Viable Product.
+This version has widespread browser support, but is also restricted, in particular in
+the following areas:
+6.1.1.1
+Dependence on the Javascript environment
+Partly because of the existing tooling and partly because of the limitations of the
+platform itself, the WebAssembly programs relies heavily on the Javascript environ-
+ment to the point where it is difficult to compile anything to WebAssembly without
+forcing a context switch out of WebAssembly and into a Javascript support library:
+anything that touches heap or any form of I/O will go via a Javascript library. This
+==PAGE:74==
+64
+6 Discussion
+means that most of the standard library in Rust or C++ will cause the WebAssembly
+module to call out to the Javascript environment.
+It is great that we can have the seamless integration with Javascript, but if we end
+up using Javascript for the majority of the tasks, a natural question is: would we be
+better off implementing the emulation framework entirely in Javascript? Javascript,
+after all, has fantastic support for changing code on the fly and are supported by quite
+efficient JIT compilers; the same JIT compilers that now co-host the WebAssembly
+environments in fact, which is what allows them to do this seamless integration in
+the first place.
+6.1.1.2
+Poor I/O support
+WebAssemblys primitives do not support arrays in any form - this restriction forces
+us to limit the data transfer to and from WebAssembly to either one integer at a time
+or to use the Javascript interface entirely. Neither option is very desirable, since we
+either have a very inefficient data transfer with a large context switch and function
+call overhead or we have a situation where there are two separate entities that must
+coordinate the role of memory management for the WebAssembly module.
+6.1.1.3
+Source environment emulation support
+This thesis focused primarily on emulation where we purposely limited ourselves to
+the CPU and main memory of the source environment. For an emulator to be use-
+ful we must combine it with a simulator of at least some peripherals of the source
+environment: disk, networking, etc. These parts of the source environment can only
+be simulated via a Javascript interface since WebAssembly itself do not have direct
+access to either the filesystem API, networking APIs, audio or screen APIs. In fact,
+WebAssembly does not even have a console of its own - everything must be passed
+out through the Javascript interfaces.
+This also means that there are some peripherals that will be impossible to imple-
+ment in pure Javascript and which would then need another layer of indirection to
+implement: any peripherals for which no Javascript API or counter part exist, would
+have to be emulated completely outside the browser and then have a way to commu-
+nicate with the browser (via WebSockets or similar), which could then communicate
+into the WebAssembly module. Such a situation could arise if the emulated binary
+communicated with say, a legacy printer via a serial connection; or it could arise
+in emulating IoT devices, where it is common to have sensors that have no support
+in a browser: barometers, infrared temperature sensors, air quality sensors, etc. In
+situations like this, the difficulties introduced by the required peripheral support may
+outweigh the benefits of the widespread support for WebAssembly.
+==PAGE:75==
+6.1 Suitability of WebAssembly as an emulation platform
+65
+6.1.1.4
+Indirect JIT support
+The MVP allowed us to build an indirect support for JIT by building the final
+WebAssembly module in the emulator module and then pass out this binary to a
+Javascript handler, which could invoke module instantiating and take care of patch-
+ing the modules together. Because of the lack of support for passing out arrays, we
+again had to pass out a pointer and a length parameter and then let the Javascript
+handler read directly from the emulator’s memory.
+Ultimately there is not much
+difference between the instantiating of the emulator WebAssembly module itself and
+the subsequent JIT compiled modules then, apart from where the binary source orig-
+inated.
+Aside from doing most of the heavy lifting on the Javascript side, the feature that
+allowed us to get even this minimal version of JIT support was the ability to share
+memory segments. Without this ability to have two instances share a single piece of
+memory, we would have had to copy the entire emulator’s memory back and forth
+between each function call, which would have made JIT compiling unfeasible.
+6.1.1.5
+Poor control flow support
+The limitation of the WebAssembly to supporting reducible control flow graphs is a
+significant limitation when building an emulator. While we were able to build a work-
+around, this limitation still forces us to do a full reducibility analysis for every JIT
+compilation. It also means that indirect branches, where we cannot always predict
+the destination, are impossible to support in a compiled version. This means that -
+even in the absence of self-modifying code - we cannot in the general case guarantee
+that we can produce native WebAssembly code corresponding to a the source binary,
+without having an interpreter to bail out to.
+6.1.1.6
+Single-threaded
+The MVP is single threaded in the sense that only a single thread can operate on a
+piece of linear memory. In addition to preventing us from compiling in parallel, this
+restricts us to emulating single threaded source environments, which is potentially a
+deal-breaker in terms of using WebAssembly as an emulation host platform.
+6.1.2
+Proposed changes to WebAssembly platform
+A number of changes are proposed for the WebAssembly platform that, if imple-
+mented, would significantly affect the suitability of the WebAssembly platform in
+relation to an emulation platform [W3C17a]:
+==PAGE:76==
+66
+6 Discussion
+6.1.2.1
+Direct JIT support
+JIT support is perhaps the most significant change proposed. The proposal suggests
+that the WebAssembly modules would get direct API access to the WebAssembly JIT
+interface, which would allow the module to produce and compile the code directly
+without the Javascript intermediary. Perhaps even more significantly, the proposal
+suggest that the future versions of WebAssembly would be able to modify a module
+on the fly. This would allow the emulator to add, remove and modify functions on
+the fly, rather than having to produce external modules and interface with these via
+a Javascript intermediary.
+Of particular interest in this regard, is the proposed support for Polymorphic
+Inline Caches [HCU91]. These structures would allow us to build a JIT emulator, that
+would first produce a very naive, compiled version of the binary and then gradually
+optimize more and more as a given instruction is visited again and again. This could
+work by first inserting a call to a parse function the first time a PC is visited. The
+next time, the result of the parse could be inlined to call the parsed instruction
+directly. At later stages, the instructions could be inlined and optimized using all
+the techniques discussed in this thesis. The fine-grained control allows for a much
+more responsive optimizations as well as allowing for the whole class of trace-based
+optimizations [Böh+11]
+6.1.2.2
+Support for non-reducible control flow
+The WebAssembly future proposal suggest that support for non-reducible control
+flow might be coming, either in the form of a general GOTO instruction or in the
+form of support for some of the most used non-reducible patterns. Exactly what
+those patterns would be, is non mentioned in the proposal, so the for purpose of the
+emulator, we can only assume that this would be relevant, if a general purpose GOTO
+instruction was included. This would, however, both allow us to eliminate the ugly
+fallback solution for non-reducible CFGs, but also allow for easier code generation of
+partial functions. This would make it possible to, say, (re)compile a loop on the fly,
+rather than a whole function, even if we did not place all blocks for the branch labels
+in the outside code.
+6.1.2.3
+Multi-threaded execution
+Having multi-threaded execution, as proposed, would allow us to compile in parallel
+and thus remove a big portion of the performance penalty of the JIT compiler. It
+would also, naturally, allow for actually emulating multi-threaded platforms, which
+expand the usability of the platform quite a bit.
+==PAGE:77==
+6.2 Suitability of using hybrid techniques
+67
+6.1.2.4
+Better tooling
+The current state of tooling is quite immature and it is one of the top priorities of
+the WebAssembly project to improve this.
+The goals are two-fold: improve com-
+piler support and output, including better optimizations of mixed Javascript and
+WebAssembly programs; and include debugging and profiling tools.
+All of this is essentially related to delivering a better performing emulation plat-
+form: better compilers and optimizers could deliver better performance on the existing
+code base; better tools would guide the performance tuning of the code base. Without
+a profiling tool, it is very difficult to gauge which parts of the code-base is causing
+performance bottlenecks - in particular since the target is so new and somewhat un-
+predictable from a performance point of view. The translation from source code to
+output instruction is non-trivial and the performance of the individual WebAssembly
+instructions rely heavily on the WebAssembly implementation, the host Javascript
+JIT compiler and the host computing environment.
+6.1.2.5
+Non-web embeddings
+Part of the appeal of the WebAssembly platform is that it almost instantly delivers
+run-time support for an emulator across millions, if not billions of devices. However,
+there might be cases where running an emulator in a browser is less than ideal. For
+applications that require security or predictable performance, having a non-web em-
+bedding might matter a great deal. For instance, if emulating a banking mainframe
+application, it might matter a great deal to know the performance is consistent rather
+than sometimes very fast and sometimes not depending on the browsers JIT optimiza-
+tions. And it will certainly matter a great deal to know for sure that the browser
+does not have restart in the middle of a batch job to apply updates.
+Additionally, non-web embeddings might make it easier to simulate certain kinds
+of periphereals. For instance, while Javascript does have a form of a filesystem API
+it is generally very limited due to safety reasons. An application that interacts a lot
+with the filesystem might be emulated much faster by having a more direct access to
+the filesystem exposed to the WebAssembly module. Or the emulated program might
+need to interact with a low-level peripheral for which no communication means exist
+in the Javascript world.
+6.2
+Suitability of using hybrid techniques
+The promise of the hybrid techniques is to get the best of two worlds: we get fast
+start-up times due to the interpreter, but we also get good performance due to the
+JIT compilation of the most used portions of the application. As we investigated
+in this thesis, this claim is not without pitfalls. In particular for the WebAssembly
+platform, there are a few drawbacks:
+==PAGE:78==
+68
+6 Discussion
+• Code size: To actually parse and produce WebAssembly binaries, the JIT com-
+piler must include its own library for working with the format, since there are
+no native facilities for this. Due to the restrictions on the control flow in the
+output, the JIT compiler is also forced to include mechanism for reconstructing
+the CFG and have fallback methods for outputting non-reducible CFGs. This
+is on top of the code required to actually construct a sequence of WebAssembly
+instructions emulating each source binary instruction. Since WebAssembly is
+itself running in a JIT compiled environment, all else being equal, larger code
+modules will result in slower startup, since there are more code to compile in
+the browser.
+• Slow compilation: This is a two-fold problem. One part is surely the current im-
+plementation, but with no profiling tools available, it is difficult to guess where
+the performance bottlenecks are. The other part of this, is the current state
+of the platform, which with its coarse granularity pushes the compiler in the
+direction of compiling bigger chunks at a time, which again causes compilation
+time to go up.
+The proposed changes to the platform is sure to improve some of this, but it is
+inevitable that a mixed mode emulator will require more code that a pure emulator,
+and thus on the WebAssembly platform, start-up times will always be somewhat
+higher.
+An AOT compiler may in many regards be more suitable for the platform, since
+it can produce the more efficient output and avoid including the compiler itself in
+the WebAssembly module, but, of course, only where the code is guaranteed not
+to change during run-time.
+This may be well suited for emulating or simulating
+embedded applications, but is insufficient for simulating whole systems, that load
+programs on the fly, like the Commodore 64 investigated in this thesis.
+The hybrid methods still does bring significant advantages, also when used on the
+WebAssembly platform, even in spite of the current state of the platform; and the
+drawbacks are many ways completely outweighed by the benefits. In particular, a
+simulation of a whole operating system is only possible using pure interpretation or
+hybrid methods, since the actual programs of interest in this case will be loaded at
+run time. We have shown that the hybrid methods do carry a significant advantage
+over the pure interpretation and at no additional implementation cost to future source
+platforms that could be added to the emulator.
+6.3
+Future work
+One area of future work is to support additional platforms; in particular the ARM
+platform should be completed. While this adds support for new binaries that can
+be emulated, it does not in itself bring many new insights about the platform or
+emulation in general, with one major exception: the ARM platform has great support
+==PAGE:79==
+6.3 Future work
+69
+from C & C++ compilers, whereas 6502 does not. By adding the ARM platform to
+the emulation platform we thereby gain access to the huge number of benchmarks
+available in the C language and can thus use these to guide the future performance
+improvements.
+Another interesting prospect is to add support for optimizing the generated output.
+This work would rely heavily on (or perhaps contribute to) the improved tooling for
+WebAssembly. With proper profilers and a better benchmarks, we could have an
+informed discussion about where spending more time compiling would be a reasonable
+trade-off compared to the run-time of the compiled code.
+With more and more granular code generation available from future versions of
+the platform, we might also have the option to add stub code that simply record
+function usage, which could then be re-compiled and optimized as the usage counts
+increases.
+==PAGE:80==
+70
+==PAGE:81==
+CHAPTER 7
+Conclusion
+In this thesis we have investigated the use of WebAssembly as a host platform for an
+emulator. We examined the WebAssembly format and found a particular feature of
+the stack machine to be troublesome: the lack of a general purpose branch instruction.
+This restriction forced us to examine the cases where a source binary could have
+its control flow represented directly in WebAssembly and how to work around the
+limitations, when it could not. In particular, we investigated the concept of control
+flow graph reducibility; how to test it and how to use it as the basis for a code
+generation strategy for WebAssembly.
+For the non-reducible control flow graphs,
+we developed a work around code generation strategy to ensure that the emulator
+platform could support arbitrary source binaries.
+For the emulation platform, we analyzed three overall strategies: pure interpreta-
+tion, ahead-of-time compilation and hybrid/just-in-time compilation. We found that
+pure interpretation was the easiest to implement, but also the slowest in the general
+case; we found that ahead-of-time was not applicable in the general case, because of
+difficulties relating to indirect branches, where the destination depends on the run-
+time values, which causes difficulties with separating data from code in the binary on
+some platforms and because of self-modifying code. For the hybrid methods, we inves-
+tigated how to compile parts of the binary to WebAssembly on during the emulation
+of the binary.
+For the MOS 6502 platform in particular, we also examined the concept of self-
+modifying code and how to emulate that. We found that for pure interpretation, this
+caused no problems, but for the cached strategies (including the hybrid strategies)
+this required special treatment, since the compiled or cached binary could change
+during run-time. We developed special detection and handling of self-modifying code
+to ensure that all emulation strategies worked correctly for an arbitrary source binary.
+For both platforms, we investigated how to validate the correctness of the emula-
+tor, in particular, how to ensure that the individual instruction emulation functions
+are correctly implemented. To do this, we examine two different strategies: direct
+implementation and validation via exhaustive test cases and implementation via an
+instruction specification language.
+For the final evaluation of the performance of the emulation platform we found
+significant speed-ups for the hybrid strategies when the test case ran long enough to
+win back the compilation overhead. The exception being self-modifying code, where
+the hybrid strategies suffered a large penalty due to repeated recompilation of the
+==PAGE:82==
+72
+7 Conclusion
+changed code with little or no change to take advantage of the compiled code.
+In the discussion we found that while the current state of the WebAssembly plat-
+form allowed us to build an emulation framework, some aspects of the platform worked
+against the performance of the emulator. In particular, the lack of granularity in com-
+pilation, lack of threading (for parallel compilation) and lack of support for arbitrary
+control flow.
+Solutions to all three challenges are on the roadmap for future We-
+bAssembly platforms, though, and we can thus expect the platform to become a
+more suitable target for an emulation platform in the future.
+==PAGE:83==
+APPENDIX A
+Appendix A - 6502
+addressing modes
+This appendix lists the addressing mode of the 6502 processor [MOS76].
+Accumulator
+OPC A.
+This addressing mode is implicit to an opcode and uses the A register as the
+operand.
+Absolute
+OPC $HHLL.
+This addressing mode uses an absolute address as the operand. The address is
+given by two bytes (page and offset).
+Absolute, X-indexed
+OPC $HHLL, x.
+This addressing mode uses an absolute address, incremented by the value of the
+X register. The addition is performed with carry and do carry over to the next page,
+if the offset exceeds FF.
+Absolute, Y-indexed
+OPC $HHLL, y.
+This addressing mode is identical to the x-indexed variant, but uses the Y register
+instead.
+Immediate
+OPC #$LL.
+This addressing mode uses the value immediate byte given as the operand.
+Indirect
+OPC ($HHLL).
+This addressing mode uses loads the two bytes stored at the given address first
+(HHLL and HHLL + 1); this address is then the absolute address of the operand.
+Indirect, X-indexed
+OPC ($LL,x).
+This addressing mode first add the X register to the address given. If the result
+overflows, only the low byte is used. This creates a zero-page address (00LL) - this
+address is then used as an indirect address.
+==PAGE:84==
+74
+A Appendix A - 6502 addressing modes
+Indirect, Y-indexed
+OPC ($LL),y.
+This addressing mode first loads the value at the zero page as an indirect address
+(00LL) and then adds the Y register. This address is then used an absolute address.
+Relative
+OPC $BB.
+This addressing mode is used exclusively for branching. It calculates a new PC
+value by adding the relative byte given to the current PC. The relative byte is given
+as a signed integer in two’s complement.
+Zero-page
+OPC $LL.
+Like absolute addressing, but on the zero-page: 00LL
+Zero-page, X-indexed
+OPC $LL, x.
+A zero-page, incremented by the X register. The result is not allowed to overflow
+and thus only the low byte of the result is used.
+Zero-page, Y-indexed
+OPC $LL, y.
+Like the X-index variant, but uses the Y register instead.
+==PAGE:85==
+APPENDIX B
+Appendix B - Tool
+output
+This appendix lists a number of example programs and outputs from the WebAssem-
+bly tools, as referenced in the thesis.
+B.1
+Emscripten
+B.1.1
+Hello World
+The ”Hello, world!” program:
+1 #include <stdio.h>
+2 int main() {
+3
+printf("Hello, world!\n");
+4
+return 0;
+5 }
+Listing B.1: Hello.c.
+The program is compiled with the command: emcc.bat hello.c -Os -s WASM=1
+-o hello.html -g.
+The options used are:
+-Os : Like LLVMs -O3, but with special Emscripten options to reduce code size.
+-s WASM=1 : The option to output WebAssembly rather than asm.js
+-g : Output a text-version of the WebAssembly module in addition to the binary
+1 (module
+2
+(type $FUNCSIG$iiii (func (param i32 i32 i32) (result i32)))
+3
+(type $FUNCSIG$ii (func (param i32) (result i32)))
+4
+(type $FUNCSIG$vii (func (param i32 i32)))
+5
+(type $FUNCSIG$vi (func (param i32)))
+6
+(type $FUNCSIG$i (func (result i32)))
+7
+(type $FUNCSIG$iii (func (param i32 i32) (result i32)))
+==PAGE:86==
+76
+B Appendix B - Tool output
+8
+(type $FUNCSIG$v (func))
+9
+(import "env" "DYNAMICTOP_PTR" (global $DYNAMICTOP_PTR$asm2wasm$import i32)
+)
+10
+(import "env" "STACKTOP" (global $STACKTOP$asm2wasm$import i32))
+11
+(import "env" "STACK_MAX" (global $STACK_MAX$asm2wasm$import i32))
+12
+(import "env" "abort" (func $abort (param i32)))
+13
+(import "env" "enlargeMemory" (func $enlargeMemory (result i32)))
+14
+(import "env" "getTotalMemory" (func $getTotalMemory (result i32)))
+15
+(import "env" "abortOnCannotGrowMemory" (func $abortOnCannotGrowMemory (
+result i32)))
+16
+(import "env" "___lock" (func $___lock (param i32)))
+17
+(import "env" "___syscall6" (func $___syscall6 (param i32 i32) (result i32)
+))
+18
+(import "env" "___setErrNo" (func $___setErrNo (param i32)))
+19
+(import "env" "_abort" (func $_abort))
+20
+(import "env" "___syscall140" (func $___syscall140 (param i32 i32) (result
+i32)))
+21
+(import "env" "_emscripten_memcpy_big" (func $_emscripten_memcpy_big (param
+i32 i32 i32) (result i32)))
+22
+(import "env" "___syscall54" (func $___syscall54 (param i32 i32) (result
+i32)))
+23
+(import "env" "___unlock" (func $___unlock (param i32)))
+24
+(import "env" "___syscall146" (func $___syscall146 (param i32 i32) (result
+i32)))
+25
+(import "env" "memory" (memory $0 256 256))
+26
+(import "env" "table" (table 6 6 anyfunc))
+27
+(import "env" "memoryBase" (global $memoryBase i32))
+28
+(import "env" "tableBase" (global $tableBase i32))
+29
+(global $DYNAMICTOP_PTR (mut i32) (get_global
+$DYNAMICTOP_PTR$asm2wasm$import))
+30
+(global $STACKTOP (mut i32) (get_global $STACKTOP$asm2wasm$import))
+31
+(global $STACK_MAX (mut i32) (get_global $STACK_MAX$asm2wasm$import))
+32
+(global $__THREW__ (mut i32) (i32.const 0))
+33
+(global $threwValue (mut i32) (i32.const 0))
+34
+(global $tempRet0 (mut i32) (i32.const 0))
+35
+(elem (get_global $tableBase) $b0 $___stdio_close $b1 $___stdout_write
+$___stdio_seek $___stdio_write)
+36
+(data (i32.const 1212) "\b0\05")
+37
+(data (i32.const 1268) "\f8\04\00\00\05")
+38
+(data (i32.const 1284) "\01")
+39
+(data (i32.const 1308) "\01\00\00\00\02\00\00\00\cc\07\00\00\00\04")
+40
+(data (i32.const 1332) "\01")
+41
+(data (i32.const 1347) "\n\ff\ff\ff\ff")
+42
+(data (i32.const 1396) "\f8\04\00\00Hello, world!")
+43
+(export "_malloc" (func $_malloc))
+44
+(export "getTempRet0" (func $getTempRet0))
+45
+(export "_free" (func $_free))
+46
+(export "_main" (func $_main))
+47
+(export "setTempRet0" (func $setTempRet0))
+48
+(export "establishStackSpace" (func $establishStackSpace))
+49
+(export "stackSave" (func $stackSave))
+50
+(export "_memset" (func $_memset))
+51
+(export "_sbrk" (func $_sbrk))
+52
+(export "_emscripten_get_global_libc" (func $_emscripten_get_global_libc))
+53
+(export "_memcpy" (func $_memcpy))
+==PAGE:87==
+B.1 Emscripten
+77
+54
+(export "stackAlloc" (func $stackAlloc))
+55
+(export "setThrew" (func $setThrew))
+56
+(export "_fflush" (func $_fflush))
+57
+(export "stackRestore" (func $stackRestore))
+58
+(export "___errno_location" (func $___errno_location))
+59
+(export "runPostSets" (func $runPostSets))
+60
+(export "dynCall_ii" (func $dynCall_ii))
+61
+(export "dynCall_iiii" (func $dynCall_iiii))
+62
+... 9577 lines of function code omitted
+63 )
+Listing B.2: Hello.wast (header only).
+B.1.2
+Switch
+The current compilation strategies of Emscripten are not always well adapted to
+WebAssembly. Consider the following snippet of a switch statement (with side effects
+to avoid optimizing the cases away)
+1 int a = argc;
+2 int retVal = 0;
+3 int sideEffect = 0;
+4 switch(a){
+5
+case 0:
+6
+retVal = 42;
+7
+sideEffect ++;
+8
+break;
+9
+case 10:
+10
+retVal = 43;
+11
+sideEffect --;
+12
+break;
+13
+case 100:
+14
+retVal = 13;
+15
+sideEffect -=10;
+16
+break;
+17
+18
+case 1000:
+19
+retVal = 13;
+20
+sideEffect -=10;
+21
+break;
+22
+default:
+23
+retVal = -1;
+24
+sideEffect = 0;
+25
+break;
+26 }
+Listing B.3: Switch statement snippet with huge gaps in the case values.
+1 (block $switch i32
+2
+(block $switch-default
+3
+(block $switch-case2
+4
+(block $switch-case1
+==PAGE:88==
+78
+B Appendix B - Tool output
+5
+(block $switch-case0
+6
+(block $switch-case
+7
+(br_table $switch-case $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-case0 $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-case1 $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+==PAGE:89==
+B.1 Emscripten
+79
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+==PAGE:90==
+80
+B Appendix B - Tool output
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+==PAGE:91==
+B.1 Emscripten
+81
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+==PAGE:92==
+82
+B Appendix B - Tool output
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-default
+$switch-default $switch-default $switch-default $switch-
+default $switch-default $switch-default $switch-default $switch
+-default $switch-default $switch-case2 $switch-default
+8
+(get_local $0)
+9
+)
+10
+)
+11
+(set_local $1
+12
+(i32.const 1)
+13
+)
+==PAGE:93==
+B.1 Emscripten
+83
+14
+(br $switch
+15
+(i32.const 42)
+16
+)
+17
+)
+18
+(set_local $1
+19
+(i32.const -1)
+20
+)
+21
+(br $switch
+22
+(i32.const 43)
+23
+)
+24
+)
+25
+(set_local $1
+26
+(i32.const -10)
+27
+)
+28
+(br $switch
+29
+(i32.const 13)
+30
+)
+31
+)
+32
+(set_local $1
+33
+(i32.const -10)
+34
+)
+35
+(br $switch
+36
+(i32.const 13)
+37
+)
+38
+)
+39
+(set_local $1
+40
+(i32.const 0)
+41
+)
+42
+(i32.const -1)
+43
+)
+Listing B.4: Corresponding WebAssembly output.
+==PAGE:94==
+84
+B Appendix B - Tool output
+B.2
+Binaryen
+B.2.1
+Binary output
+Consider a minimal WebAssembly, where all required parts are imported from the
+outside environment:
+1 (module
+2
+(type $0 (func (result i32)))
+3
+(import "env" "memory" (memory $0 256 256))
+4
+(import "env" "table" (table 6 6 anyfunc))
+5
+(import "env" "memoryBase" (global $memoryBase i32))
+6
+(import "env" "tableBase" (global $tableBase i32))
+7
+(export "main" (func $main))
+8
+(func $main (result i32)
+9
+(return (i32.const 42))
+10
+)
+11 )
+Listing B.5: Minimal WebAssembly module (minimal.wast).
+If we compile this with the Binaryen assembler: wasm-as minimal.wast and load
+the result into a hex editor we get the following:
+Figure B.1: The byte content of the produced WebAssembly binary.
+Two byte sections are highlighted:
+• Right after the header ”.asm” and the version byte value 0x01, we get three
+empty bytes. That is an optional section (id 0x00) with an empty name (0x00
+length) and an empty payload (0x00).
+• The payload length of the type section is five bytes. This is encoded as a variable
+length integer - presumably specified like this to avoid wasting space for small
+integers. Instead, the Binaryen tool uses the maximum number of bytes: the
+value 0x05 is encoded as 0x85 0x80 0x80 0x80 0x00. This pattern is repeated
+is many places in the binary.
+==PAGE:95==
+Bibliography
+[Aba+09]
+Martı́n Abadi et al. “Control-flow integrity principles, implementations,
+and applications”. In: ACM Trans. Inf. Syst. Secur. 13.1 (2009), 4:1–4:40.
+doi: 10.1145/1609956.1609960. url: http://doi.acm.org/10.1145/
+1609956.1609960.
+[Ala17]
+Alastair Reid. ARM Releases Machine Readable Architecture Specifica-
+tion. https://alastairreid.github.io/alastairreid.github.io/
+ARM-v8a-xml-release/. Accessed: 2017-04-23. 2017.
+[All70]
+Frances E. Allen. “Control Flow Analysis”. In: SIGPLAN Notices 5.june
+(1970), pages 1–19.
+[ARM10]
+ARM Limited. ARMv7-M Architecture. Reference Manual. ARM Lim-
+ited., 2010.
+[ASU86]
+Alfred V. Aho, Ravi Sethi, and Jeffrey D. Ullman. Compilers: Princi-
+ples, Techniques, and Tools. Addison-Wesley series in computer science /
+World student series edition. Addison-Wesley, 1986. isbn: 0-201-10088-6.
+url: http://www.worldcat.org/oclc/12285707.
+[Böh+11]
+Igor Böhm et al. “Generalized just-in-time trace compilation using a par-
+allel task farm in a dynamic binary translator”. In: ACM SIGPLAN No-
+tices. Volume 46. 6. ACM. 2011, pages 74–85.
+[Cab+12]
+Juan Caballero et al. “Undangle: early detection of dangling pointers in
+use-after-free and double-free vulnerabilities”. In: International Sympo-
+sium on Software Testing and Analysis, ISSTA 2012, Minneapolis, MN,
+USA, July 15-20, 2012. 2012, pages 133–143. doi: 10.1145/2338965.
+2336769. url: http://doi.acm.org/10.1145/2338965.2336769.
+[Coc70]
+John Cocke. “Global common subexpression elimination”. In: SIGPLAN
+Notices 5.june (1970), pages 20–24.
+[Cor+09]
+Thomas H. Cormen et al. Introduction to Algorithms, 3rd Edition. MIT
+Press, 2009. isbn: 978-0-262-03384-8. url: http://mitpress.mit.edu/
+books/introduction-algorithms.
+[Cow+00]
+Crispin Cowan et al. “Buffer overflows: Attacks and defenses for the vul-
+nerability of the decade”. In: DARPA Information Survivability Confer-
+ence and Exposition, 2000. DISCEX’00. Proceedings. Volume 2. IEEE.
+2000, pages 119–129.
+==PAGE:96==
+86
+Bibliography
+[ECM11]
+ECMA International. ECMAScript Language Specification. https : / /
+www.ecma-international.org/publications/files/ECMA-ST/Ecma-
+262.pdf. Accessed: 2017-06-08. ECMA International, June 2011.
+[Ems17]
+Emscripten Constributors. Main - Emscripten 1.37.10 documentation.
+http://kripken.github.io/emscripten-site/. Accessed: 2017-05-23.
+2017.
+[FGP07]
+Michael Franz, Andreas Gal, and Christian W. Probst. “Automatic gener-
+ation of machine emulators: Efficient synthesis of robust virtual machines
+for legacy software migration”. In: Software Engineering 2007, Fachta-
+gung des GI-Fachbereichs Softwaretechnik, 27.-30.3.2007 in Hamburg.
+2007, pages 83–94. url: http://subs.emis.de/LNI/Proceedings/
+Proceedings105/article1464.html.
+[Fle+10]
+Andrea Flexeder et al. “Interprocedural Control Flow Reconstruction”. In:
+Proceedings of the 8th Asian Conference on Programming Languages and
+Systems. APLAS’10. Shanghai, China: Springer-Verlag, 2010, pages 188–
+203. url: http://dl.acm.org/citation.cfm?id=1947873.1947892.
+[HCU91]
+Urs Hölzle, Craig Chambers, and David Ungar. “Optimizing Dynamically-
+Typed Object-Oriented Languages With Polymorphic Inline Caches”. In:
+ECOOP’91 European Conference on Object-Oriented Programming, Geneva,
+Switzerland, July 15-19, 1991, Proceedings. 1991, pages 21–38. doi: 10.
+1007/BFb0057013. url: http://dx.doi.org/10.1007/BFb0057013.
+[HU72]
+Matthew S. Hecht and Jeffrey D. Ullman. “Flow Graph Reducibility”. In:
+SIAM J. Comput. 1.2 (1972), pages 188–202. doi: 10.1137/0201014.
+url: http://dx.doi.org/10.1137/0201014.
+[ICT17]
+ICT Data and Statistics Division. ICT Facts and Figures 2016. http:
+//www.itu.int/en/ITU-D/Statistics/Pages/facts/default.aspx.
+Accessed: 2017-05-23. 2017.
+[Kla17]
+Klaus2m5. Klaus2m5/6502_65C02_functional_tests. https://github.
+com/Klaus2m5/6502_65C02_functional_tests. Accessed: 2017-04-20.
+2017.
+[LA04]
+Chris Lattner and Vikram Adve. “LLVM: A Compilation Framework
+for Lifelong Program Analysis & Transformation”. In: Proceedings of the
+2004 International Symposium on Code Generation and Optimization
+(CGO’04). Palo Alto, California, March 2004.
+[Mbo17]
+Mborgbrant. mborgbrant/c64js. https : / / github . com / mborgbrant /
+c64js. Accessed: 2017-04-20. 2017.
+[MOS76]
+MOS TECHNOLOGY INC. MCS6500 MICROCOMPUTER FAMILY.
+PROGRAMMING MANUAL. MOS TECHNOLOGY INC, 1976.
+[Moz14]
+Mozilla Inc. asm.js - Working Draft. http://asmjs.org/spec/latest/.
+Accessed: 2017-05-10. 2014.
+==PAGE:97==
+Bibliography
+87
+[Net17]
+NetMarketShare. Browser Market Share. https://www.netmarketshare.
+com/browser-market-share.aspx. Accessed: 2017-05-23. 2017.
+[NNH99]
+Flemming Nielson, Hanne Riis Nielson, and Chris Hankin. Principles of
+program analysis. Springer, 1999. isbn: 978-3-540-65410-0. doi: 10.1007/
+978-3-662-03811-6. url: https://doi.org/10.1007/978-3-662-
+03811-6.
+[PR12]
+Marco Prandini and Marco Ramilli. “Return-Oriented Programming”. In:
+IEEE Security & Privacy 10.6 (2012), pages 84–87. doi: 10.1109/MSP.
+2012.152. url: https://doi.org/10.1109/MSP.2012.152.
+[Pro02]
+Mark Probst. “Dynamic binary translation”. In: UKUUG Linux Devel-
+oper’s Conference. Volume 2002. sn. 2002.
+[Rei17]
+Alastair Reid. “Trustworthy Specifications of ARM v8-A and v8-M Sys-
+tem Level Architecture”. In: (2017). url: https://alastairreid.github.
+io/papers/fmcad2016-trustworthy.pdf.
+[Ski17]
+Skilldrick. Easy 6502 by skilldrick. https://skilldrick.github.io/
+easy6502/. Accessed: 2017-04-20. 2017.
+[Tar73]
+Robert Endre Tarjan. “Testing Flow Graph Reducibility”. In: Proceedings
+of the 5th Annual ACM Symposium on Theory of Computing, April 30
+- May 2, 1973, Austin, Texas, USA. 1973, pages 96–107. doi: 10.1145/
+800125.804040. url: http://doi.acm.org/10.1145/800125.804040.
+[W3C17a]
+W3C. Features to add after the MVP - WebAssembly. http://webassembly.
+org/docs/future-features/. Accessed: 2017-06-02. 2017.
+[W3C17b]
+W3C. Javascript API - WebAssembly. http://webassembly.org/docs/
+js/. Accessed: 2017-05-23. 2017.
+[W3C17c]
+W3C. Non-Web Embeddings - WebAssembly. http://webassembly.org/
+docs/non-web/. Accessed: 2017-05-23. 2017.
+[W3C17d]
+W3C. Roadmap - WebAssembly. http://webassembly.org/roadmap/.
+Accessed: 2017-05-10. 2017.
+[W3C17e]
+W3C. Semantics - WebAssembly. http : / / webassembly . org / docs /
+semantics/. Accessed: 2017-05-10. 2017.
+[Wan+10]
+Qigang Wang et al. “An FPGA Based Hybrid Processor Emulation Plat-
+form”. In: International Conference on Field Programmable Logic and
+Applications, FPL 2010, August 31 2010 - September 2, 2010, Milano,
+Italy. 2010, pages 25–30. doi: 10 . 1109 / FPL . 2010 . 16. url: https :
+//doi.org/10.1109/FPL.2010.16.
+[Web17]
+WebAssembly. WebAssembly/binaryen. https://github.com/WebAssembly/
+binaryen. Accessed: 2017-04-20. 2017.
+==PAGE:98==
+88
+Bibliography
+[Zak11]
+Alon Zakai. “Emscripten: an LLVM-to-JavaScript compiler”. In: Compan-
+ion to the 26th Annual ACM SIGPLAN Conference on Object-Oriented
+Programming, Systems, Languages, and Applications, OOPSLA 2011,
+part of SPLASH 2011, Portland, OR, USA, October 22 - 27, 2011. 2011,
+pages 301–312. doi: 10.1145/2048147.2048224. url: http://doi.acm.
+org/10.1145/2048147.2048224.

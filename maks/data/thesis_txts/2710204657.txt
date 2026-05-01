@@ -1,0 +1,3240 @@
+==PAGE:1==
+Analyzing information flow in hierarchical
+Variational Autoencoders
+Master Thesis
+DTU Compute
+Department of Applied Mathematics and Computer Science
+==PAGE:2==
+==PAGE:3==
+Analyzing information flow in hierarchical Variational Autoencoders
+Master Thesis
+April, 2022
+By
+Jan Piotr Latko
+Copyright:
+Reproduction of this publication in whole or in part must include the cus­
+tomary bibliographic citation, including author attribution, report title, etc.
+Cover photo:
+Vibeke Hempler, 2012
+Published by:
+DTU, Department of Applied Mathematics and Computer Science,
+Richard Petersens Plads, Building 324, 2800 Kgs. Lyngby Denmark
+www.compute.dtu.dk
+ISSN:
+[0000­0000] (electronic version)
+ISBN:
+[000­00­0000­000­0] (electronic version)
+ISSN:
+[0000­0000] (printed version)
+ISBN:
+[000­00­0000­000­0] (printed version)
+==PAGE:4==
+Abstract
+I analyze the latent representations of hierarchical VAEs and investigate the decoder vari­
+ance, particularly in connection to model uncertainty. Through qualitative analysis, I find
+indications that VAEs learn feature hierarchies along the latent depth. I observe that ELBO
+and decoder variance correlate to input complexity, which could explain why VAEs tend to
+estimate high density on specific images outside of the training domain. I propose a com­
+plexity correction method that yields improvements in out­of­domain detection (OODD)
+with ELBO and decoder variance. I show that, after correcting for complexity, the decoder
+variance can be used for OODD, which indicates that it incorporates a notion of uncer­
+tainty beyond the low­level statistics captured by an image compression algorithm. Fur­
+thermore, I find that the magnitude of the decoder variance correlates with specific visual
+attributes and can be used to classify them. My experiments provide support to specula­
+tions about hierarchical VAEs made in recent research, inform the discussion about their
+applicability to uncertainty modelling and anomaly detection, and give insight into the role
+of the decoder variance.
+ii
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:5==
+Acknowledgements
+Jan Piotr Latko (s193223), MSc Mathematical Modelling and Computation, DTU
+Søren Hauberg , PhD, Professor, DTU
+Supervisor
+Lars Maaløe, PhD, Honorary Associate Professor, DTU / Corti
+External supervisor
+Analyzing information flow in hierarchical Variational Autoencoders
+iii
+==PAGE:6==
+Abbreviations
+• VAE – Variational Autoencoder
+• OOD – out­of­domain
+• OODD – out­of­domain detection
+• AUROC – area under receiver operating characteristic curve
+• ELBO – evidence lower bound
+• KL – Kullback–Leibler divergence / KL divergence
+• LLR – log­likelihood ratio
+• DDPM –Denoising Diffusion Probabilistic Model
+• GAN – Generative Adversarial Network
+iv
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:7==
+Contents
+Abstract . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ii
+Acknowledgements
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iii
+1
+Introduction
+1
+1.1
+Theoretical background . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+1
+1.2
+Related work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+1.3
+Aims and contributions . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+2
+Methods
+11
+2.1
+Data . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+2.2
+Models
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+3
+Experiments
+15
+3.1
+Hierarchical VAEs learn feature hierarchy on different latent levels
+. . . . . 15
+3.2
+Is variance a good indicator of OOD data? . . . . . . . . . . . . . . . . . . . 23
+3.3
+Input complexity influences ELBO and variance in VAEs and can be lever­
+aged to improve OODD . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 29
+3.4
+Does decoder variance express uncertainty? . . . . . . . . . . . . . . . . . 37
+4
+Discussion and conclusions
+45
+Bibliography
+47
+A More generated images
+51
+B More attribute classification
+55
+C Complexity and ELBO
+57
+D Complexity and variance
+60
+E
+OODD with variance
+63
+Analyzing information flow in hierarchical Variational Autoencoders
+v
+==PAGE:8==
+vi
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:9==
+1
+Introduction
+In this work, I focus on a group of probabilistic models called Variational Autoencoders
+(VAEs) [1] in particular VAEs with hierarchical latent structure. I study the way the infor­
+mation is encoded by specific internal representations of those models and investigate the
+relation of the parameters of the latent distributions to low­level image statistics, high­level
+semantics, domain shift and uncertainty.
+The character of this project is mainly to improve the understanding of VAEs through an
+in­depth analysis and to provide ground for further discussion and development of said
+models, therefore proposing novel methods within this work is of secondary concern.
+In the following sections, I first introduce some fundamental concepts, then refer to related
+research to motivate and ground this project, and finally discuss the aims and contribu­
+tions.
+1.1
+Theoretical background
+1.1.1
+Unsupervised learning and generative models
+In unsupervised learning, contrary to supervised learning, there is no known target value
+to predict [2, Ch. 1], which makes it possible to train the models on large datasets without
+a need for target labels, which can be expensive to obtain. A particular type of (usually)
+unsupervised models are generative models, which try to model the input distribution and
+allow to sample new data points. Generative models that maximize the likelihood of the
+data directly or through its approximation are called explicit likelihood models. Explicit
+likelihood models allow for calculating the density (or its approximation) for a given sam­
+ple, which can be used to evaluate and compare several models in a ”standard” way using
+a test dataset. Popular explicit likelihood models include:
+• Autoregressive models [3] – formulate the generative process in a sequential man­
+ner, where the input distribution is factorized as:
+p(x) =
+n
+∏
+i=1
+p (xi | x1, . . . , xi−1)
+(1.1)
+so each element of x (e.g. each pixel in an image) is conditioned on all ”previous”
+elements. Autoregressive models (e.g. PixelCNN [3] and PixelRNN [4]) can gen­
+erate compelling images, but due to the sequential nature are computationally very
+expensive.
+• Flow­based models [5] – in which the change of variable rule is used to map the
+data distribution pX(x) to a chosen prior distribution pH(h) (e.g. Gaussian) through
+an invertible function h = f(x). The need for the mapping function f to be invertible
+makes it more difficult to scale the model up and requires some ”tricks” to achieve
+a mapping function that is powerful enough to fit a complex dataset [6].
+• Variational Autoencoders (VAEs) [1] – VAEs’ generative process p(x|z) (parametrized
+by a decoder network) conditions the data x on some latent variable z. Distribution
+of z is approximated through amortized variational inference [2, Sec. 10.1] by intro­
+ducing an approximate posterior q(z|x) (parametrized by an encoder network). The
+model is trained by maximizing the lower bound on the data likelihood (evidence
+Analyzing information flow in hierarchical Variational Autoencoders
+1
+==PAGE:10==
+lower bound – ELBO). As VAEs are the main focus of this work I discuss them in
+detail in the next section.
+• Denoising Diffusion Probabilistic Models (DDPMs) [7][8] – diffusion models de­
+fine the generative process as a Markov chain in which source noise (distributed
+according to some prior e.g. white noise) is gradually transformed into a meaningful
+image (or other data type). The reverse process (image to noise) is defined as a ran­
+dom walk from the original image. The model is trained to remove the noise added
+in the reverse process and reconstruct the original image. Similarly to VAEs diffu­
+sion models also optimize the likelihood lower bound. DDPMs have been shown to
+be able to generate images of very high fidelity while remaining higher diversity than
+GANs [9]. Despite many similarities to VAEs (DDPMs are a special case of a VAE
+with a very specific generative distribution and approximate posterior), DDPMs do
+not produce meaningful latent space.
+On the contrary, implicit likelihood models do not need to define the density function di­
+rectly and are trained through optimizing some other objective, often through generating
+samples from the model [10]. Generative Adversarial Networks (GANs) [11] are very
+popular implicit likelihood generative models. They are based on a minimax game be­
+tween a generative model which aims to produce samples that will ”fool” the discriminative
+model that in turn tries to classify between real data points from the generated samples.
+GANs generate images of very high fidelity, however doubts about the diversity of images
+they produce have been raised [12][9]. GANs also tend to be more difficult to train com­
+pared to explicit likelihood models, as their optimization objective relies on a good balance
+between the generative and discriminative model.
+In this project, I focus exclusively on VAEs. As probabilistic explicit likelihood models
+VAEs should, in principle, have some appealing properties. The high diversity of the im­
+ages generated by VAEs (contrary to GANs that provide good fidelity, but low diversity)
+[12] supports the hypothesis that VAEs cover the breadth of the data distribution better
+than GANs. VAE’s ability to model complex data distributions can be used for anomaly
+detection [13] [14][15]. Other possible applications of density modelling would be uncer­
+tainty estimation and active learning.
+VAEs can be easily evaluated and compared to other explicit likelihood models and have
+recently been shown to yield competitive results in terms of likelihood [16]. Compared
+to other high­performing explicit likelihood models such as autoregressive models and
+DDPMs, VAEs are faster during inference and generation as they only require a single
+pass through the model. VAEs learn latent representations that can be useful for semi­
+supervised learning [17][18] or data compression [12].
+1.1.2
+Variational Autoencoders (VAE)
+First let us consider a simple VAE with a single latent layer shown in Figure 1.1. Let us
+define the input data x (e.g. an RGB encoded image) and some latent variable z. Then
+the distribution p(z) is our prior or generative distribution (which we can assume to be
+e.g. isotropic multivariate Gaussian). We then model the generative distribution pθ(x|z)
+and the (amortized) approximate posterior qϕ(z|x) with some parametric distributions (e.g.
+Gaussian). The parameters of those distributions (e.g. mean and variance of a Gaussian
+distribution) are usually modelled by neural networks to which we refer as decoder and
+encoder respectively.
+Given a complex model (e.g. neural network) of pθ(x | z), computing the exact marginal
+likelihood of a datapoint pθ(x(i)) is intractable as it would require evaluating the integral
+2
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:11==
+Figure 1.1: Simple VAE visualized as a probabilistic graphical model. Generative model
+pθ denoted by solid lines and variational approximation qΦ – by dashed lines. Source: [1].
+pθ(x(i)) =
+∫
+pθ(z)pθ(x(i) | z)dz. This is also why we are unable to find the exact posterior
+pθ(z | x) = pθ(x | z)pθ(z)/pθ(x) and instead use the approximation qϕ(z|x).
+In variational inference it is a common objective to try to minimize the KL divergence
+between the variational distribution (in this case the approximate posterior qϕ(z | x)) and
+true distribution (here true posterior p(z | x)) [19] which we do not know. Neither the KL
+divergence nor likelihood can be calculated exactly, therefore we optimize the evidence
+lower bound (ELBO) which we derive as follows (note that for discrete z we would sum
+instead of integrating):
+KL (qϕ(z | x)||p(z | x)) =
+∫
+z
+qϕ(z | x) log qϕ(z | x)
+p(z | x)
+=
+∫
+z
+qϕ(z | x) log qϕ(z | x)p(x)
+p(z, x)
+=
+∫
+z
+qϕ(z | x)
+(
+log qϕ(z | x)
+p(z, x) + log p(x)
+)
+=
+(∫
+z
+qϕ(z | x) log qϕ(z | x)
+p(z, x)
+)
++
+(∫
+z
+log p(x)qϕ(z | x)
+)
+=
+(∫
+z
+qϕ(z | x) log qϕ(z | x)
+p(z, x)
+)
++
+(
+log p(x)
+∫
+z
+qϕ(z | x)
+)
+,
+∫
+z
+q(z) = 1
+= log p(x) +
+(∫
+z
+qϕ(z | x) log qϕ(z | x)
+p(z, x)
+)
+(1.2)
+rearranging:
+−
+(∫
+z
+qϕ(z | x) log qϕ(z | x)
+p(z, x)
+)
+= log p(x) −KL (qϕ(z | x)||p(z | x))
+(1.3)
+KL divergence is always non­negative therefore the left­hand­side term is a lower bound
+on the marginal likelihood (log p(x)), and we refer to it as variational lower bound or evi­
+dence lower bound (ELBO) [20], which I denote by L:
+L = −
+(∫
+z
+qϕ(z | x) log qϕ(z | x)
+p(z, x)
+)
+≤log p(x)
+(1.4)
+Note that the gap between ELBO and marginal likelihood is equal to the KL divergence
+between the approximate and true posterior. The integral over z can be rewritten as an
+expectation w.r.t. qϕ(z | x):
+Analyzing information flow in hierarchical Variational Autoencoders
+3
+==PAGE:12==
+L = −
+∫
+z
+qϕ(z | x) log qϕ(z | x)
+p(z, x)
+= −Ez∼qϕ(z|x)
+[
+log qϕ(z | x)
+p(z, x)
+]
+= −Eq [log qϕ(z | x) −log p(x, z)]
+= −Eq [log qϕ(z | x) −(log p(x | z) + log p(z))]
+= −Eq [log qϕ(z | x) −log p(x | z) −log p(z)]
+= Eq [log p(x | z)] −Eq
+[
+log qϕ(z | x)
+p(z)
+]
+= Eq [log p(x | z)] −
+∫
+z
+qϕ(z | x) log qϕ(z | x)
+p(z)
+= Eq [log p(x | z)] −KL (qϕ(z | x)||p(z))
+(1.5)
+in this form we could interpret ELBO as reconstruction likelihood minus KL divergence
+between the approximate posterior and the prior.
+Considering our encoder and decoder and a single datapoint x(i) we can write:
+log pθ(x(i))
+≥
+Lθ,ϕ(x(i))
+= Eqϕ(z|x(i))[log pθ(x(i) | z)] −KL(qϕ(z | x(i))∥pθ(z))
+(1.6)
+to estimate the first term we can use a Monte Carlo estimator with a single sample [20]:
+Eqϕ(z|x(i))[log pθ(x(i) | z)] ≈log pθ(x(i) | z(l))
+(1.7)
+where :
+z(l) ∼qϕ(z | x(i))
+The KL term can be either calculated analytically (if possible) or by Monte Carlo sampling,
+depending on the specific choice of prior.
+To maximize ELBO w.r.t. the parameters θ, ϕ we can use gradient­based methods, but
+that requires calculating partial derivatives through the stochastic node z(l) ∼qϕ(z | x(i))
+(and other stochastic operations if more sampling is performed). This can be done using
+the reparameterization trick [1], in which the sampling is done using independent noise
+variables ϵ, that can be treated as constants for the sake of differentiation. Following an
+example ([1]) of univariate Gaussian distribution, we can replace
+z ∼N(µ, σ2)
+(1.8)
+with equivalent:
+z = µ + σϵ
+where :
+ϵ ∼N(0, 1)
+(1.9)
+1.1.3
+Hierarchical VAEs
+A hierarchical VAE can be seen as an extension of a simple VAE that introduces multiple
+levels of latent variables [21]. The dependencies between latent variables should allow
+the model to learn covariance (which is usually ignored within single latent distribution to
+reduce the number of parameters to the diagonal instead of the full covariance matrix) and
+more complex patterns in the data. In a basic form with L latent layers the joint probability
+pθ(x, z) is now factorized as:
+pθ(x, z) = pθ(x, z1, z2...zL) = pθ(x | z1)pθ(zL)ΠL−1
+l=1 pθ(zl | zl+1)
+(1.10)
+4
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:13==
+Figure 1.2: a) Bottom­up VAE. b) LVAE. Stochastic nodes are in circles and deterministic
+in squares. Source: [22]
+where each layer depends only on the last one as visualized in Figure 1.2a. In this case
+the variational posterior factorizes as:
+qϕ(z | x) = qϕ(z1 | x)ΠL−1
+l=1 qϕ(zl+1 | zl)
+(1.11)
+.
+The information flow from data x and lower latent variables to higher latent variables is
+often referred to as bottom­up path and the opposite is called top­down path. VAEs with
+the presented version of inference (1.11) are also referred to as bottom­up, as the latent
+variables are inferred one by one starting from the lower and going to the higher ones.
+As shown by [22], such an approach limits the utilization of higher latent variables as
+both bottom­up and top­down paths go through each latent layer one by one. To improve
+the information flow they introduce a deterministic bottom­up path, through the addition
+of deterministic nodes d1...L as shown in Figure 1.2b and call the new model ladder VAE
+(LVAE). In LVAE the inference is performed through combining the results of the determin­
+istic bottom­up path and the stochastic top­down path, which is shared with the generative
+model. This kind of model is often referred to as top­down VAE. LVAE has the following
+factorization of the encoder:
+qϕ(z | x) = qϕ(zL | x)ΠL−1
+l=1 qϕ(zl | zl+1, x)
+(1.12)
+we can see that now the information in the encoder can flow ”freely” from the data to each
+of the latent layers. The flexibility of the deterministic bottom­up path also increases with
+each deterministic node, which should allow the higher latent variables to encode more
+abstract information.
+While [22] show that LVAE improves utilization of higher latent variables and can suc­
+cessfully scale to 5 latent layers results of [18] suggest that this alone is not sufficient to
+increase the depth even further. To aid this they propose two further improvements: skip­
+connections in the decoder and a bidirectional inference that mixes elements of bottom­up
+and top­down inference. This allows them to scale the model, which they call BIVA, to
+20 latent layers and significantly improve the ELBO as well as the fidelity of generated
+images compared to the previous latent­variable models.
+A more recent paper by [16] introduces Very Deep VAE (VDVAE), which also uses skip­
+connections but is somewhat simpler than BIVA as it only uses top­down inference. The
+Analyzing information flow in hierarchical Variational Autoencoders
+5
+==PAGE:14==
+extensive use of skip­connections with some architectural changes in the model allows
+VDVAE to scale to 66 latent layers on some of the higher resolution datasets. This model
+also produces competitive ELBO and can generate images of very high fidelity, making
+VDVAE one of the state­of­the­art latent variable models for image generation. What is
+more, they also show that stochastic depth is critical for model performance even if the
+number of parameters and the number of layers in the network are held constant.
+The skip connections used in the decoder of VDVAE change the reconstruction likelihood
+from previous p(x | z1) to p(x | z1,...,L). This architecture choice also introduces a similar
+dependency within the latent hierarchy leading to the following factorization:
+p(x, z) = p(x, z1, z2...zL) = p(x | z1,...,L)p(zL)ΠL−1
+l=1 p(zl | z>l)
+(1.13)
+I discuss this model in further detail in Section 2.2.2 as it is used in the experiments.
+In the next chapters, for Gaussian distributions of latent variables I reference the encoder
+mean as µq (µq,l for a specific layer l), the encoder variance as σ2
+q, and the decoder mean
+and variance as µp and σ2
+p respectively.
+1.2
+Related work
+1.2.1
+Feature hierarchy
+[23] have shown that deep neural networks (particularly convolutional networks for com­
+puter vision) learn different levels of abstraction along the model depth forming a feature
+hierarchy. Furthermore, their experiments imply that depth is vital for performance.
+The importance of depth seems to be also the case for deep hierarchical VAEs. [24], how­
+ever, question the ability of a simple top­down VAE (they used LVAE in the experiments)
+to produce a meaningful hierarchy of features. By sampling from different levels of hier­
+archy and comparing the results qualitatively they show that one of the layers captures
+most of the variance, while sampling at other layers has little influence on the generated
+images. They propose an alternative architecture with a flat latent distribution, where the
+latent layers are independent of each other, which in terms of the probabilistic graphical
+model corresponds to a simple one layer VAE. A hierarchy of features is imposed through
+deterministic nodes in both the bottom­up inference path and the top­down generative
+path. This way the latent z is split into parts that are inferred using an increasing num­
+ber of hidden layers stacked on top of each other as in the case of the LVAE encoder,
+but without the top­down stochastic path. They show that such an approach leads to the
+model learning distinct and disentangled features at each level.
+While the deterministic bottom­up and top­down paths bear some similarity to the skip­
+connections used in VDVAE, the ”flat” latent structure is not what the state­of­the­art VAE
+models use, which motivates the question of whether recent deep hierarchical VAEs learn
+a meaningful feature hierarchy. While [18, appendix] and [16] do include some qualitative
+analysis of generated images that aims at showcasing feature hierarchy, it is in both cases
+very limited, particularly in terms of providing any intuition about the role of the encoder
+and decoder variance.
+Analyses of VDVAE [16] and VQ­VAE­2 [12] (recent state­of­the­art VAEs) both suggest
+that the top latents encode more general information about the image, while bottom la­
+tents contribute to generating finer details, textures in high­resolution images. Given that
+the ”hourglass” architecture is very common in hierarchical VAEs (resolution of latent vari­
+ables decreases from the bottom to the top) this can be related to the resolution of the
+6
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:15==
+encoded representations to some extent. Similar relation of bottom stochastic layers with
+fine detail and texture has been found in other generative models as well [25].
+How deep hierarchical VEAs learn and how they utilize the parameters of the latent distri­
+butions (in most cases mean and variance of a Gaussian distribution) to encode informa­
+tion remains an interesting question. Providing a better understanding of the information
+flow in hierarchical VAEs might lead to further improvements in those models and better
+awareness of their limitations.
+1.2.2
+Relation to other generative models
+[16] provides an interesting discussion about the relation of very deep hierarchical VAEs
+to autoregressive models. The author proves that a VAE with as many latent layers as
+the number of elements in the output would be able to operate like an autoregressive
+model and thus in theory generalize it. He attributes the fact that autoregressive models
+historically outperformed VAEs to their deeper statistical dependence, which could explain
+why scaling the stochastic depth seems crucial for the performance of VAEs.
+1.2.3
+Controlled generation
+[26] have shown that specific attributes of generated images can be changed through
+manipulation of the latent variables, which involves extrapolating along precomputed at­
+tribute vectors based on averaged representations of samples with the given attribute.
+This suggests some regularity in the latent space w.r.t. the semantic information.
+Semi­supervised approaches proposed in [17] and [27] introduce a class dependency in
+the VAE structure which in turn allows for controlling the class and ”style” of the generated
+images separately. The qualitative analysis of the images generated by both models
+suggests that a certain level of disentanglement of the information encoded is possible,
+as they successfully produce images of different digits written in similar style through
+sharing the same latent representation.
+Methods of controlled generation have been proposed for other generative models, some
+of which yield very promising results [9][28].
+Controlling the class or particular features during generation is an interesting task on its
+own, but could also be used as a tool for analyzing the latent space of a specific generative
+model.
+1.2.4
+The problem of out of domain data
+One of the applications of generative models is anomaly detection. It is based on an
+assumption that a density estimator (e.g. an explicit likelihood generative model) should
+predict low density for samples away from the distribution of the training data. [29] show
+that this assumption does not actually hold in practice for most of the popular generative
+model types.
+Since this problem was raised, several explanations and solutions have been proposed.
+[29] and [18] hypothesise that this behavior is caused by low­level statistics influencing
+the likelihood more than the high­level semantics, however, they provide limited support
+to this claim.
+To solve this issue, [18] propose an alternative formulation of ELBO in which instead of
+using the approximate posterior qϕ to sample all of the latent variables, the approximate
+posterior qϕ is used only for the top L −k layers and the remaining k layers are sampled
+from the generative distribution pθ. The resulting alternative lower bound L>k is the fol­
+lowing (note that what the distributions are conditioned on might depend on the specific
+Analyzing information flow in hierarchical Variational Autoencoders
+7
+==PAGE:16==
+version of VAE and can differ from the following formula):
+L>k = Epθ(z≤k|z>k)qϕ(z>k|x)
+[
+log pθ(x | z)pθ (z>k)
+qϕ (z>k | x)
+]
+(1.14)
+where L>0 = L would be a regular ELBO. The authors show that L>k assigns relatively
+lower likelihoods to out of domain (OOD) data compared to regular ELBO and that higher
+k seems to work better. The evidence, however, is limited to only few examples in one
+direction (the one that proved problematic in [29], namely CIFAR10 to SVHN and Fashion­
+MNIST to MNIST). They speculate that lower latents capture low­level image features that
+can be as effective in describing images from different (especially simpler) domain, while
+higher latents capture higher­level semantics that do not generalize between distributions.
+Building up on this idea [15] propose a further improvement to this method by applying a
+log likelihood ratio [30] based approach using the two formulations of ELBO, leading to
+the following log likelihood ratio (LLR) score for out­of­domain detection (OODD):
+LLR>k(x) = L(x) −L>k(x)
+(1.15)
+where if the LLR score is high it means that L>k is relatively lower compared to L sug­
+gesting that the model is not able to reconstruct the given sample based on higher latent
+layers, which according to the argumentation from [18] happens for OOD examples. In
+addition to improved results using this method (again with few configurations) they also
+provide qualitative analysis suggesting that reconstructing MNIST images with a model
+trained on FashionMNIST is possible using lower latents, but not higher latents, which
+would support the feature hierarchy argument.
+[31] show a relation between input complexity (measured as the size of the image after
+compression) and model likelihood in generative models. This supports the hypothesis
+about low­level statistics influencing the OODD performance. The authors propose a
+method in which they subtract the complexity estimation from the negative log­likelihood
+to obtain an OOD score (both expressed in bits per dimension), which also can be seen
+as a likelihood ratio approach. Their experiments however only include flow­based and
+autoregressive models and it remains unknown if this behavior holds for VAEs.
+Correctly identifying OOD data is an important goal in the development of robust and
+reliable predictive systems. Analyzing a model’s ability to do so can be a useful tool in
+learning about the model itself. This could be especially relevant for Bayesian methods,
+that in principle should incorporate a notion of uncertainty (e.g. through the variance of
+the predictive distribution).
+1.2.5
+Concerns about variance modelling
+Recently doubts have been raised regarding the ability to appropriately model variance
+in VAEs [32][33][34]. One of the problems raised by [34] is that neural networks tend to
+extrapolate badly [35] and therefore we cannot rely on them to model variance correctly
+outside the support of the training data. In [32] the authors argue for a variance function
+that will yield high values outside the data support, however, it might be difficult to achieve
+for high dimensional hierarchical latent distributions in modern VAEs.
+Another issue is that to minimize reconstruction loss it is more beneficial for the VAE to
+push the variances towards 0 [33]. This is regularized by the KL­divergence, which given
+different decoder and encoder means will encourage the variances to be higher. For
+hierarchical VAEs, in which during training it is the encoder representation that is used for
+reconstructing the image, it could be argued that the incentive to shrink the variance is
+8
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:17==
+stronger for the encoder variance compared to the decoder variance, which is only trained
+through KL­divergence.
+1.3
+Aims and contributions
+A better understanding of how VAEs encode information could be very useful in the fur­
+ther development of those models. The hypothesis about a feature hierarchy learned
+along the latent structure of hierarchical VAEs is appealing, but has been challenged in
+the past [24] and to the best of my knowledge, has not been studied in detail w.r.t. recent
+high­performing VAEs. The role of the variance of the latent distributions has not been
+sufficiently investigated and its robustness is debated [32][33][34]. The behavior of gen­
+erative models under domain­shift [29] has also raised concerns. Further study is needed
+to reevaluate VAEs’ ability to model uncertainty and to give empirical support to some of
+the related speculations [18].
+1.3.1
+Aims
+In this project, I aim to deepen the intuition of how hierarchical VAEs process information,
+by addressing the following questions:
+1. Do hierarchical VAEs encode different visual features in different latent layers?
+• If so, do the encoded features form a feature hierarchy that is consistent with
+the latent hierarchy?
+2. Does the variance of the latent distributions encode a notion of uncertainty?
+• Does input complexity influence the variance significantly?
+• If so, does the variance encode any notion of uncertainty besides what can be
+explained by complexity?
+1.3.2
+Contributions
+The main contributions of this work are the following:
+1.1 I show that the representations at different levels of the latent hierarchy correspond
+to different visual features in the images.
+1.2 I find that sampling at higher layers generates more diverse samples than when
+sampling at lower layers. This is an indication that higher layers encapsulate more
+global features.
+1.3 I show that both mean and variance of latent distributions can be used to classify
+facial attributes with varying accuracy depending on the latent layer, which suggests
+selectivity of encoded information.
+2.
+I show that based just on decoder variance we are able to detect OOD data with
+competitive performance if corrected by complexity. This indicates that decoder
+variance does model uncertainty to some extent.
+3.1 I show that both ELBO and decoder variance correlate with input complexity in VAEs.
+3.2 I propose a complexity correction method that improves OODD performance when
+using ELBO or decoder variance.
+Analyzing information flow in hierarchical Variational Autoencoders
+9
+==PAGE:18==
+10
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:19==
+2
+Methods
+For my experiments I reuse original code from VDVAE 1 [16] and HVAE 2 [15]. My modified
+code for both is available on GitHub 3 4. The models are implemented in PyTorch [36].
+The details of specific experiments are discussed separately further on. This section
+gathers general information about the data and models used, which is relevant to all of
+the experiments in this project.
+2.1
+Data
+I use several different image datasets in my experiments.
+2.1.1
+Grey­scale images
+Mono­channel datasets include the following:
+1. MNIST [37] – handwritten digits.
+2. FashionMNIST [38] – fashion articles.
+3. KMNIST [39] – Japanese handwritten characters.
+4. notMNIST [40] ­ different digital fonts and glyphs.
+5. Omniglot [41] handwritten characters from multiple alphabets.
+All of those are either originally in 28x28 resolution or were resized to 28x28. As in the
+original implementation, the images are either binarized or dequantized. Binarization in­
+volves turning each pixel value to 0 or 1 with the probability corresponding to the original
+pixel value (scaled do the 0­1 range). Dequantization is done by adding uniform noise in
+the 0­1 range to each pixel encoded as en integer in the 0­255 range and then scaling the
+result to the 0­1 range. In both cases, the binary values and noise are resampled during
+training. This procedure is performed to minimize the issues related to fitting a continuous
+model to discrete data as described in [42].
+2.1.2
+Natural images
+Natural (RGB encoded) datasets include the following:
+1. CIFAR10 and CIFAR100 [43] – images of different classes including different ani­
+mals, plants and vehicles.
+2. SVHN [44] – street view house numbers.
+3. FFHQ [25] – Flickr­Faces­HQ Dataset – high resolution dataset of human faces.
+4. CelebA­HQ [45] – high resolution dataset of celebrity faces. I matched labels form
+the original CelebA dataset [46] which include binary annotations of the following
+attributes:
+5_o_Clock_Shadow, Arched_Eyebrows, Attractive, Bags_Under_Eyes, Bald,
+Bangs, Big_Lips, Big_Nose, Black_Hair, Blond_Hair, Blurry, Brown_Hair,
+1Original VDVAE implementation: https://github.com/openai/vdvae
+2Original HVAE implementation: https://github.com/JakobHavtorn/hvae-oodd
+3My VDVAE version: https://github.com/jlatko/vdvae
+4My HVAE version: https://github.com/jlatko/hvae-oodd
+Analyzing information flow in hierarchical Variational Autoencoders
+11
+==PAGE:20==
+Bushy_Eyebrows, Chubby, Double_Chin, Eyeglasses, Goatee, Gray_Hair,
+Heavy_Makeup, High_Cheekbones, Male, Mouth_Slightly_Open, Mustache,
+Narrow_Eyes, No_Beard, Oval_Face, Pale_Skin, Pointy_Nose,
+Receding_Hairline, Rosy_Cheeks, Sideburns, Smiling, Straight_Hair,
+Wavy_Hair, Wearing_Earrings, Wearing_Hat, Wearing_Lipstick,
+Wearing_Necklace, Wearing_Necktie, Young
+For experiments with HVAE, I use CIFAR10/100, SVHN and FFHQ in 32x32 resolution
+(FFHQ required resizing), all of those dequantized.
+For experiments with VDVAE, I use FFHQ and CelebA­HQ in 256x256 resolution as well
+as CIFAR10, SVHN and FFHQ in 32x32 resolution.
+The preprocessing for VDVAE is based on the original implementation, which included
+scaling (normalizing, not changing resolution) images for inputs and outputs with appro­
+priate constants.
+2.2
+Models
+In the experiments I use two model architectures: a simple bottom­up VAE with skip­
+connections (HVAE) and a high­performing very deep top­down VDVAE. This way I can
+perform more experiments, but also test whether the results generalize to a more complex
+architecture.
+2.2.1
+HVAE
+I use the model from [15] and also refer to it as HVAE. It is a bottom­up VAE with L
+latent layers with skip­connections in both inference path and generative path as shown
+in Figure 2.1. In addition to the skip­connections, HVAE uses free bits scheme [47], which
+constraints the influence of KL divergence term in ELBO for a number of iterations such
+that the model is less regularized at the beginning of the training. Weight normalization
+[48] is also applied.
+The model itself is based on residual blocks. In the bottom­up path before each latent layer
+there is a deterministic transformation composed of three residual blocks of the following
+structure:
+y = Conv (Act (Convs(Act(x)))) + x
+with Act being the activation (here ReLU [49]) and Conv denotes a same­padded convo­
+lution. Striding is only performed in the last of the three blocks and only for some of the
+deterministic nodes (depending on the input resolution). This is followed by a stochas­
+tic node which is a diagonal Gaussian distribution parametrized either by a convolutional
+Figure 2.1: Inference and generative path of the HVAE model. Dashed lines denote
+deterministic skip­connections. Source: [15]
+12
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:21==
+layer (most cases) or densely connected layer (top 2 nodes for grey­scale HVAE) with a
+Softplus activation for the standard deviation σ. Each deterministic block is fed the latent
+representation sampled from the previous stochastic node and the output of the previous
+deterministic block forming skip­connections.
+The top­down path is very similar, it uses residual blocks of the same structure, but now
+the stochastic nodes come before the deterministic nodes. The resolution change in the
+decoder is done through nearest­neighbours upsampling. The prior for the top latent layer
+is simply a standard Gaussian.
+Each latent layer is modelled as a diagonal Gaussian distribution (both p and q). HVAE
+model factorizes as follows:
+pθ(x, z) = p(θx, z1, z2...zL) = pθ(x | z1,...,L)pθ(zL)ΠL−1
+l=1 pθ(zl | z>l)
+qϕ(z | x) = ΠL
+l=1qϕ(zl | z<l, x)
+(2.1)
+Training: I train the models as in [15]. I use L = 3 for both grey­scale and natural images.
+For binarized data, I use Bernoulli distribution and for continuous I use a discretized lo­
+gistic mixture [50] as output distributions. To avoid overfitting I train all of the models for
+1000 epochs, do not tune the hyperparameters and simply base my training on the setup
+proposed in the original implementation.
+2.2.2
+VDVAE
+VDVAE [16] has a much more complex architecture shown in Figure 2.2. Deterministic
+bottom­up path is based on several residual blocks [51] built of convolutions with GELU
+[52] activations. Resolution changes in the pool and unpool layers are done through aver­
+age pooling and nearest­neighbours upsampling respectively. Tensors from the bottom­
+up and top­down paths are concatenated and fed into additional convolutional layers to
+obtain the approximate posterior distribution qϕ. To obtain the generative distribution pθ
+only top­down information is used (similarly with additional convolutions, which in this
+case are fed back to the top­down flow). Information from sampled latent z is added to
+the top­down flow as well as info.
+The architecture involves multiple residual connections as it not only uses res­blocks but
+also the top­down segments resemble residual blocks, which should allow for a more
+efficient information and gradient flow and therefore help scaling the network in depth.
+The architecture corresponds to the following factorization (somewhat similar to HVAE,
+but the encoder is now top­down):
+pθ(x, z) = p(θx, z1, z2...zL) = pθ(x | z1,...,L)pθ(zL)ΠL−1
+l=1 pθ(zl | z>l)
+qϕ(z | x) = ΠL
+l=1qϕ(zl | z>l, x)
+(2.2)
+Similarly to HVAE all latent variables are modelled as diagonal Gaussian distributions
+(both p and q).
+Training: For the FFHQ and CelebA­HQ experiments I use a pre­trained FFHQ­256 model
+linked in the original repository 5, which uses 66 latent layers. This model is not only very
+expensive to train (they used about 2.5 weeks on 32 V100 GPUs), but also I’ve found the
+5https://github.com/openai/vdvae#ffhq­256
+Analyzing information flow in hierarchical Variational Autoencoders
+13
+==PAGE:22==
+Figure 2.2: VDVAE architecture. Source: [16]
+training very unstable therefore I decided to use the pre­trained weights. For CIFAR10,
+SVHN and FFHQ­32 I train my own models using the setup prepared for CIFAR10, which
+uses 43 latent layers (with the learning rate lowered to 0.00005 due to stability issues)
+and train the models on 2 or 4 GPUS (using DTU Compute GPU cluster [53]) for about
+7­10 days.
+14
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:23==
+3
+Experiments
+In this chapter I present the experiments I have done during the project including the
+explanation of the methods used, the results and short discussion of each experiment
+individually (discussion summarizing all of the findings is in Chapter 4). The experiments
+are grouped into four main parts:
+• Section 3.1 – is focused on qualitative analysis of generated images and provides
+intuition on which latent layers correspond to different kinds of visual features.
+• Section 3.2 – in which I perform OODD using decoder variance as a proxy for study­
+ing uncertainty.
+• Section 3.3 – where I analyze the correlation of input complexity to model behaviour
+expressed through ELBO and decoder variance and how that can affect thes OODD
+performance (particularly w.r.t. Section 3.2).
+• Section 3.4 – in which I apply findings from Section 3.3 in OODD experiments to
+study variance and uncertainty in further detail. I also analyze the behaviour of the
+variance conditioned on specific facial attributes.
+3.1
+Hierarchical VAEs learn feature hierarchy on different
+latent levels
+I apply several sampling procedures to qualitatively assess whether deep hierarchical
+VAEs encode different visual features at different latent layers and learn meaningful fea­
+ture hierarchy. For that, I use VDVAE pre­trained on FFHQ­256 because human faces
+are relatively regular and have a wide variety of distinctive features.
+3.1.1
+Forced attribute generation
+In the first experiment, I leverage CelebA attributes to detect what kind of visual features
+can be changed through each layer by trying to force specific attributes. This ”forceful”
+approach should have high sensitivity to finding possible changes, as it is not limited by
+model variance and the magnitude of changes can be sufficiently increased.
+Similarly to [26] I try to obtain directions in the latent space that would correspond to spe­
+cific visual attributes with simple arithmetic using binary attribute labels from CelebA­HQ.
+Next, I qualitatively analyze how much a specific feature can be manipulated through a
+simple linear extrapolation on different levels of hierarchy, by visually inspecting gener­
+ated images. While prone to be influenced by correlations in the data this approach should
+show what kinds of changes can be enforced at different levels of latent hierarchy.
+Method
+I use VDVAE trained on FFHQ­256 to obtain representations zl (l is the latent layer index)
+of CelebA­HQ (using the encoder qϕ to sample those). For each CelebA attribute and
+each latent variable zl I calculate the mean of the representations with and without the
+attribute and then use the difference between the means as the “attribute direction” in the
+latent space dl at the layer l. For some features sex correlates very strongly, therefore in
+most cases I calculate a direction per sex and then average them or just use one of the
+sexes if the feature is not available for the other (e.g. Heavy_Makeup will only be present with
+sufficient frequency in female images), those I will refer to as grouped in the figures.
+Analyzing information flow in hierarchical Variational Autoencoders
+15
+==PAGE:24==
+Next, I generate images based on a representation of an encoded image. For a given
+attribute for each layer L (each row is a different latent layer L) I use the encoded repre­
+sentation (zl ∼qϕ, but the sampling is done once beforehand and these representations
+are saved) for layers l > L, and then linearly extrapolate the L’th latent representation
+(zL ∼qϕ) along dL , as in: zL + aj · dL, where aj is a scalar interpolated from some
+negative to positive value through the columns j. Finally for the remaining layers l < L I
+only propagate the decoder mean µp,l, such that they do not contribute to the variability.
+To increase the sensitivity of detecting visual changes I use a magnitude of changes that
+in some examples might generate unnatural and bizarre­looking images.
+Results
+Figure 3.1 shows results of extrapolation along dimensions corresponding to Male,
+Bushy_Eyebrows and Black_Hair attributes. I only show the layers that give the most inter­
+esting results. In a few of the rows corresponding to specific latent layers we can clearly
+see gradually increasing presence of the given attribute, suggesting not only that the in­
+formation about the specific feature is encoded in the given layer, but also that the latent
+space exhibits some consistency and continuity along the chosen direction. The further
+we move in the latent space, the stronger are the visual changes of the given feature that
+we achieve.
+The generated images for both attributes clearly show a difference in which features
+change on different levels of latent hierarchy. The top layer (66’th) does not seem to
+encode much information about sex but affects the colors of the whole image to a certain
+degree, which might be related to it having a spatial resolution of 1x1. Then 64’th and
+63’rd layers correspond to global changes in the images as multiple high­level character­
+istics are modified at the same time. Manipulating sex affects features such as age, and
+hair style and color, as well as facial hair (which also appears gradually), while changing
+eyebrows or hair color results in modifying the age and race as well. This suggests some
+entanglement in the latent space (or at least in the directions I calculated), which is likely
+related to how the features correlate in the dataset and in general (e.g. older, blond­haired
+people are likely to have less distinct eyebrows than black­haired children). Most of these
+changes result in reasonably realistic images.
+Modifying latent representations in mid­levels of the hierarchy leads to less realistic out­
+puts, which might be related to the too large scale of displacement (too high aj). The
+modified features are still related to the target attribute, but they are also more local and
+specific, with only some entanglement. Changing layer 57 in the ”less Male” direction
+results in more hair and some lipstick. Encouraging Bushy_Eyebrows on layers 59 and 52
+focuses more on just the eyebrows, but still with some changes to hair and face. Chang­
+ing hair to more black (or less black) at layer 56 results in more local changes around the
+hair, but the shape of the face is also slightly modified (e.g. eyes).
+Moving on to the lower latents we see that most of the face characteristic is already fixed
+and only more subtle changes are applied. Modifying layer 26 results in manipulating the
+eyebrows or makeup locally, with limited other changes (slight shift in colors in specific
+areas). Hair color changes together with other colors, also slightly in the background, but
+the shape is no longer affected. The bottom layers do not seem to change the image
+much but could correspond to low level details and textures, that are not related to the
+higher­level attributes such as sex to a significant degree.
+Some of the latent layers (including some not presented in Figure 3.1; for more, see Ap­
+pendix A) resulted in very unnatural images, which did not seem to increase the presence
+of the selected attribute, but could be related to light and shading (e.g. layer 33).
+16
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:25==
+Less "Male"
+More "Male"
+66
+16x1x1
+64
+16x4x4
+63
+16x4x4
+57
+16x8x8
+33
+16x32x32
+26
+16x32x32
+23
+16x64x64
+18
+16x64x64
+latent layer (bottom 1-66 top)
+Forced generation "Male"
+(a)
+Less "Bushy_Eyebrows"
+More "Bushy_Eyebrows"
+64
+16x4x4
+63
+16x4x4
+59
+16x8x8
+52
+16x16x16
+39
+16x32x32
+26
+16x32x32
+23
+16x64x64
+latent layer (bottom 1-66 top)
+Forced generation "Bushy_Eyebrows" (grouped)
+(b)
+Analyzing information flow in hierarchical Variational Autoencoders
+17
+==PAGE:26==
+Less "Black_Hair"
+More "Black_Hair"
+66
+16x1x1
+64
+16x4x4
+56
+16x8x8
+26
+16x32x32
+latent layer (bottom 1-66 top)
+Forced generation "Black_Hair" (grouped)
+(c)
+Figure 3.1: Feature extrapolation for different attributes. Central column shows unmodi­
+fied reconstruction, the attribute is gradually removed to the left and added to the right. I
+cherry­picked the most interesting layers.
+Discussion
+The results suggest that higher latent levels correspond to more global changes across
+multiple characteristics such as sex, race and age, while lower latents only encode more
+specific features and localized attributes such as eye makeup and do not significantly af­
+fect the general characteristic. The experiment shows that once some specific features
+are determined at high latent levels, they cannot be changed by lower latents to a mean­
+ingful degree.
+Besides the number of layers connecting the input to a given latent (which increases as
+we go higher in the hierarchy), the resolution of the representations at a given level might
+also contribute to how the model encodes features. It seems reasonable that general
+image characteristics and global features tend to be encoded in higher latents, which have
+lower resolution and correspond to more depth. On the other hand, local features require
+higher resolution but are often less abstract. To test this hypothesis, further experiments,
+possibly involving modifications to the model architecture (e.g. changing the resolutions),
+would be helpful.
+Failure to generate specific attributes at some of the latent layers and the differences
+in the results for layers that are relatively close to each other, implies some degree of
+selectivity of encoded information. One could speculate that this might be related to the
+skip­connections allowing the model to encode information selectively. Without the skip­
+connections, the signal from the top latents would need to be passed through all layers
+not to be lost. While this would make sense in terms of the efficiency of representations
+it remains a hypothesis and could be an interesting direction for further research.
+The ”soapy”, blurry effect when propagating the mode of the decoder distribution or sam­
+pling with low temperature is typical for VAEs [16][18]. I do not pay particular attention to
+this in the analysis, but the lack of texture observed when the decoder mean is used for
+the lower latents could be another indication that features of this kind (fine­detail, texture)
+are encoded lower in the hierarchy.
+The experiment comes with some practical limitations. I include only VDVAE and whether
+18
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:27==
+the findings generalize to other VAE types remains an open question, but I would expect
+other top­down VAEs with skip­connections to yield similar results. The correlations in the
+data might influence the obtained attribute directions in the latent space, but the model
+is expected to learn such correlations and observing how it is expressed can also be in­
+sightful. Using linear extrapolation limits the flexibility of this method and therefore its
+sensitivity, but the simplicity can be considered an advantage as it will only highlight fea­
+tures that are easily available and regular at a given latent layer.
+3.1.2
+Sampling at a single level at a time
+While the previous method gives some intuition about the link of the encoded informa­
+tion to different latent levels, it entirely ignores the variance of the latent distributions. In
+the next experiment, I test whether similar kinds of changes from layer to layer can be
+observed while sampling from the model without forcing any specific direction. I use a
+similar approach to the one used in [24], where the authors generate images by sampling
+at a single layer at a time to assess how each of the layers contributes to the variability in
+the output and whether their model learns a meaningful feature hierarchy.
+Method
+I use representations obtained from FFHQ­256. Similarly to the previous experiment for
+each layer L I use fixed encoded representation for layers l > L (zl ∼qϕ), next I sample
+the L’th layer from the decoder (zL ∼pθ) and for the remaining layers l < L I simply
+use the mean of the decoder distribution µp,l instead of sampling. This way I obtain rows
+of images for which only one layer was sampled (except of pre­computing the encoder
+representations, which is done only once) and all the variation along those rows is caused
+by the variance of this specific layer.
+Results
+The generated images are shown in Figure 3.2. It seems that layers between 62 and 64
+(layer 64 in particular) account for the most significant changes in the images. The images
+sampled at layer 64 have very little in common, suggesting that the top 2 latents contribute
+very little to the final image (those are very small vectors after all). The layers 63 and 62
+vary much less, but still introduce important changes (e.g. sex and hair). Further down
+the latent hierarchy between 56­61 the variation is more subtle and local as features such
+as glasses (presence, shape and color), mouth and hair detail change. For layers 39 and
+below the images might seem identical at first glance, but on a closer inspection (espe­
+cially skin, hair, reflections on the glasses) it is clear that the level of detail is increasing
+and the images get less blurry as I include representations of the original image instead
+of propagating the mode.
+Most of those observations are consistent with the forced generation experiments, al­
+though the previous experiment shows more drastic changes within each row, which is
+somewhat expectable as we can assume that the magnitude of the changes in the la­
+tent space might have also been larger when extrapolating than when sampling using the
+model variance. This difference however seems the most apparent in the lower latents
+(e.g. 26th), where the variation between the sampled images is very small, barely no­
+ticeable, while extrapolation induces readily visible changes. This might suggest that the
+decoder variance of some of the lower latents is relatively smaller and does not contribute
+as much to the variability of the generated images.
+Discussion
+The further down the latent hierarchy we go the more subtle and local the changes are,
+implying that the more abstract and global characteristics of the image are determined in
+the higher latent variables. This confirms the observations from the previous experiment
+and implies that different features are encoded at different levels and that there is a link
+Analyzing information flow in hierarchical Variational Autoencoders
+19
+==PAGE:28==
+66
+16x1x1
+65
+16x1x1
+64
+16x4x4
+63
+16x4x4
+62
+16x4x4
+61
+16x4x4
+59
+16x8x8
+56
+16x8x8
+39
+16x32x32
+33
+16x32x32
+26
+16x32x32
+3
+16x128x128
+latent layer (bottom 0-66 top)
+Figure 3.2: Sampling realizations with one degree of freedom (at a single latent layer per
+each row). I picked the most interesting layers from the total of 66.
+20
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:29==
+Sampled at layer 63
+Sampled at layer 64
+2-layer sampling 64-63 
+Figure 3.3: Sampling realizations with two degrees of freedom at layers 64 and 63
+between the latent hierarchy and the feature hierarchy. What is more, such hierarchical
+changes are available through sampling from the decoder distribution, implying sufficiently
+large decoder variance at several latent layers in the directions corresponding to those
+changes.
+3.1.3
+Sampling at two levels at a time
+To assess the interactions between two latent layers within the range of the decoder vari­
+ance I use a similar approach, but now with 2 degrees of freedom.
+Method
+As in the previous experiment I use representations of an FFHQ­256 image (zl ∼qϕ) for
+layers l > L1 , then I sample z(i)
+L1 ∼pθ from the decoder Nrows times and save those
+representations (i denotes a row number); next I propagate the decoder mean until L2
+(µ(i)
+p,l for L1 > l > L2) and then for each row, i, I sample again Ncols times at layer L2
+(columns), however within each column, j, I use the same noise ϵ(j) (as in z(i,j)
+L2
+= µ(i)
+p,L2 +
+ϵ(j) ◦σ(i)
+p,L2, where ϵ(j) is sampled from the standard normal) to generate samples from
+L2. This way images in each row of Figures 3.3 and 3.4 share the same representation
+z(i)
+L1 and images in each column share the same noise variable ϵ(j) (but modified by the
+individual decoder variances σ(i)
+p,L2).
+Results
+The results of this sampling experiment are shown in Figures 3.3 (L1 = 64, L2 = 63)
+and 3.4 (L1 = 64, L2 = 59). As shown in previous experiments the 64th layer is some­
+what dominant and it is expected that the images within the rows share similar global
+Analyzing information flow in hierarchical Variational Autoencoders
+21
+==PAGE:30==
+Sampled at layer 59
+Sampled at layer 64
+2-layer sampling 64-59 
+Figure 3.4: Sampling realizations with two degrees of freedom at layers 64 and 59
+characteristics. However because of the fixed noise variable, there are visible patterns
+column­wise, especially for L2 = 63, but also, although more subtle, for L2 = 59 (e.g.
+glasses, hair shape, mouth). An interesting observation is that specific features intro­
+duced through sampling at L2 (column­wise) depend on the representation sampled at
+L1 (row­wise). This can be readily seen when focusing on the faces with glasses, which
+appear only for specific columns and only at certain rows, and do so in a semantically
+consistent manner – white adult men are more likely to wear glasses than young girls
+(it seems plausible that such correlation is present in the data). Similar patterns can be
+observed for other features, for example, lip color (in Figure 3.3 column 4, some women
+seem to have lipstick, while men only slightly more pink lips), facial hair, mouth expression
+(Figure 3.4 column 2, wide, open smiles for already smiling faces and only a slightly open
+mouth and a subtle smile for rows with more serious expressions).
+Discussion
+The features introduced by sampling at two latent layers visibly interact with each other.
+Specific attributes, such as glasses or facial hair appear through sampling at a lower level
+only if they are consistent with the features sampled at a higher level. This suggests that
+the model is able to learn the correlation of different features (e.g. age and glasses or sex
+and facial hair) in some way.
+The results support the hypothesis that the latent hierarchy might be a contributing factor
+in deep VAE’s ability to learn semantically meaningful covariances. However, alternative
+interpretations are also possible, for example, one could argue that such interaction of the
+features is a result of the deterministic path of the decoder trying to compose a coherent
+image, which could explain the observations even assuming no interaction between the
+22
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:31==
+latent layers. Therefore further experiments would be necessary to conclude that it is in
+fact the outcome of the hierarchical structure of the latent variables.
+3.2
+Is variance a good indicator of OOD data?
+Qualitative analysis in Section 3.1 gives intuition about the relation of the latent space to
+visual features. This, however, tells more about the meaning of the modes of the latent
+distributions, while not necessarily explaining the role of the variances, which has been
+debated (see Section 1.2.5).
+Given both the generative distribution and the approximate posterior modelled with Gaus­
+sian distributions, the variance could be interpreted as uncertainty about the value of the
+latent variable. Therefore, in principle, it seems reasonable to expect the variance to
+relate to model uncertainty about the input data.
+A specific case under which one would expect a model to express uncertainty (although
+deep learning models tend to fail to do so, which I discuss in Sections 1.2.4 and 1.2.5) is
+when it is given a data point that falls out of the domain it was trained on. In the following
+section, I use OODD experiments as a proxy to assess whether the variance of the latent
+distributions incorporates a notion of uncertainty.
+Method
+I train HVAE and VDVAE on natural datasets (SVHN, CIFAR10 and FFHQ­32) and only
+HVAE on grey­scale datasets (see Section 2.1), the latter in both binarized and contin­
+uous versions. Next for each model (trained on different in­domain data), for each data
+point from in­domain and out­of­domain datasets (from the same category – natural, gray­
+scale continuous and binarized), I compute different values, such as (negative) ELBO and
+average decoder variance, and use them directly as OOD scores (higher value indicates
+OOD data). The results are measured as the area under receiver operating characteristic
+curve (AUROC) of classifying between in­domain and OOD examples for each score and
+each dataset pair within the groups.
+Averaging the variance yields a single value per data point, which makes it possible to
+use it directly as an OOD score, that should correspond to the general magnitude of
+the variance. Using such a simple method does not require any fitting or tuning (except
+choosing which layers to use) and will not find any complex patterns that would make the
+results difficult to interpret. For a given layer l I calculate the average decoder variance
+as:
+¯σ2p,l = 1
+N
+N
+∑
+i
+σ2
+p,l,i
+(3.1)
+where N is the number of dimensions of the latent variable zl. To avoid searching for the
+best single layer (which for VDVAE could cause some overfitting) I average again over
+several layers. The average over multiple layers is done on the per­layer averages, as in:
+¯σ2p =
+1
+L2 −L1
+L2
+∑
+l=L1
+¯σ2p,l
+(3.2)
+such that each layer is weighted evenly, regardless of the resolution. For VDVAE, which
+in this case has 43 latent layers, I use the average over the top 10 and over all layers, and
+refer to the resulting scores as p_vart10 and p_var respectively. The motivation to consider
+top 10 latent layers (not e.g. bottom 10) comes from the findings from the previous section,
+which suggest that higher latents encode more variability. For HVAE, which is not as deep,
+I only use the average over all the layers (p_var). I use the same approach for the encoder
+variance (q_vart10 and q_var).
+Analyzing information flow in hierarchical Variational Autoencoders
+23
+==PAGE:32==
+0
+1
+ELBO [AUROC]
+0
+1
+p_var [AUROC]
+(a) OODD HVAE: decoder vari­
+ance against ELBO.
+0
+1
+ELBO [AUROC]
+0
+1
+p_vart10 [AUROC]
+(b) OODD VDVAE: decoder vari­
+ance (top­10) against ELBO.
+B&W - continuous
+B&W - binarized
+All OOD
+Color: in-domain
+Color: ood
+  CIFAR10
+  CIFAR100
+  SVHN
+  FFHQ32
+(c) Legend.
+Figure 3.5: Visual pairwise comparison of specific scores (ELBO and decoder variance)
+used for OODD. Each point on the scatterplots marks a pair of AUROC results (for two
+scores denoted on the x and y axes) for an in­domain/OOD dataset pair. The specific
+setup (dataset pair) of the points can be read in the legend only for natural datasets (as
+those are somewhat more interesting) while for grey­scale the distinction is made between
+continuous and binarized. A marker above the dashed line means that the score on the
+y­axis performed better in the given setup. E.g. in the center figure (b) the marker with
+yellow ring inside and purple outside corresponds to detecting CIFAR10 as OOD given
+a model trained on FFHQ32, and the resulting AUROC scores when using ELBO and
+p_vart10 can be read on the x and y axes respectively. The stars correspond to classifying
+between an in­domain dataset and all other OOD datasets from the same category at
+once.
+Results
+The results of the OODD experiments are shown in Table 3.1 (including results that be­
+come relevant in the next sections), however, the number of individual results makes it
+difficult to assess performance based on the tables alone. To increase readability I visual­
+ize pairwise comparisons of specific scores through scatterplots presented in Figure 3.5,
+where each marker corresponds to evaluations between a single in­domain and OOD
+dataset pair based on two OOD scores (one for each axis). For VDVAE for the decoder
+variance I visualize the average over top­10 layers as it yielded slightly better results (see
+Appendix E for more detail).
+Comparing the decoder variance to ELBO, we can observe very similar results for natural
+datasets both on HVAE and VDVAE. For grey­scale datasets, the discrepancies are larger,
+but it is not clear that one of the scores performs considerably better. It seems that when
+trained on non­binarized MNIST the variance does not provide any useful information in
+terms of OODD (resulting in AUROC very close to 0.5). It is possible that with such a
+simple dataset the model did not use variance much.
+Both methods fail to classify SVHN as OOD data. This is consistent with the findings
+from the recent research on OODD with deep generative models [29][31][15] which have
+discussed this w.r.t. the model likelihood (lower bound in case of VAE) and my results
+show that decoder variance exhibits a similar issue.
+24
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:33==
+Discussion
+So far the decoder variance performs comparably with ELBO for OODD. These results
+are promising, but the consistent failure of both methods on some dataset configurations
+does not allow for a satisfactory conclusion and motivates a more in­depth analysis of this
+behaviour, which is the aim of the next section.
+The encoder variance achieved similar results to the decoder variance for the natural
+datasets (slighly better on VDVAE and slightly worse on HVAE), but failed on most of the
+grey­scale configurations (see Appendix E for more details), therefore I focus mainly on
+the decoder variance, which behaves more consistently in the experiments.
+CIFAR10 (in) ­ [AUROC]
+statistic
+FFHQ32
+SVHN
+all
+ELBO
+0.824
+0.186
+0.558
+ELBO (∗)
+0.808
+0.400
+0.638
+p_var (top­10)
+0.788
+0.262
+0.569
+p_var (top­10) (∗)
+0.758
+0.441
+0.626
+q_var (top­10)
+0.908
+0.160
+0.597
+q_var (top­10) (∗)
+0.901
+0.306
+0.653
+complexity
+0.638
+0.279
+0.488
+FFHQ32 (in) ­ [AUROC]
+statistic
+CIFAR10
+SVHN
+all
+ELBO
+0.608
+0.108
+0.358
+ELBO (∗)
+0.746
+0.447
+0.597
+p_var (top­10)
+0.901
+0.473
+0.687
+p_var (top­10) (∗)
+0.928
+0.626
+0.777
+q_var (top­10)
+0.961
+0.695
+0.828
+q_var (top­10) (∗)
+0.970
+0.778
+0.874
+complexity
+0.362
+0.169
+0.265
+SVHN (in) ­ [AUROC]
+statistic
+CIFAR10
+FFHQ32
+all
+ELBO
+0.972
+0.999
+0.988
+ELBO (∗)
+0.974
+0.999
+0.989
+p_var (top­10)
+0.983
+1.000
+0.993
+p_var (top­10) (∗)
+0.984
+1.000
+0.993
+q_var (top­10)
+0.989
+1.000
+0.995
+q_var (top­10) (∗)
+0.989
+0.999
+0.995
+complexity
+0.721
+0.831
+0.785
+(a) OODD AUROC scores – VDVAE: natural datasets
+Analyzing information flow in hierarchical Variational Autoencoders
+25
+==PAGE:34==
+CIFAR10 (in) ­ [AUROC]
+statistic
+CIFAR100
+FFHQ32
+SVHN
+all
+LLR>2
+0.507
+0.384
+0.709
+0.550
+ELBO
+0.533
+0.826
+0.091
+0.445
+ELBO (∗)
+0.555
+0.752
+0.462
+0.572
+p_var
+0.538
+0.805
+0.045
+0.425
+p_var (∗)
+0.564
+0.710
+0.649
+0.633
+q_var
+0.551
+0.774
+0.091
+0.439
+q_var (∗)
+0.564
+0.696
+0.436
+0.551
+complexity
+0.503
+0.749
+0.064
+0.404
+FFHQ32 (in) ­ [AUROC]
+statistic
+CIFAR100
+CIFAR10
+SVHN
+all
+LLR>2
+0.892
+0.931
+0.979
+0.934
+ELBO
+0.561
+0.544
+0.057
+0.388
+ELBO (∗)
+0.795
+0.795
+0.773
+0.788
+p_var
+0.600
+0.577
+0.074
+0.417
+p_var (∗)
+0.887
+0.877
+0.955
+0.906
+q_var
+0.650
+0.609
+0.142
+0.467
+q_var (∗)
+0.836
+0.815
+0.850
+0.834
+complexity
+0.262
+0.251
+0.009
+0.174
+SVHN (in) ­ [AUROC]
+statistic
+CIFAR100
+CIFAR10
+FFHQ32
+all
+LLR>2
+0.841
+0.850
+0.934
+0.869
+ELBO
+0.990
+0.991
+1.000
+0.993
+ELBO (∗)
+0.980
+0.979
+1.000
+0.985
+p_var
+0.988
+0.990
+0.999
+0.991
+p_var (∗)
+0.993
+0.994
+0.999
+0.995
+q_var
+0.978
+0.984
+1.000
+0.986
+q_var (∗)
+0.974
+0.979
+0.999
+0.982
+complexity
+0.931
+0.936
+0.991
+0.949
+(b) OODD AUROC scores – HVAE: natural datasets
+26
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:35==
+FashionMNIST (in) ­ [AUROC]
+statistic
+KMNIST
+MNIST
+Omniglot
+notMNIST
+all
+LLR>2
+0.940
+0.965
+0.934
+0.985
+0.956
+ELBO
+0.647
+0.264
+0.215
+0.887
+0.503
+ELBO (∗)
+0.897
+0.808
+0.860
+0.946
+0.878
+p_var
+0.946
+0.974
+0.955
+0.709
+0.896
+p_var (∗)
+0.936
+0.958
+0.923
+0.707
+0.881
+q_var
+0.634
+0.773
+0.856
+0.213
+0.619
+q_var (∗)
+0.558
+0.345
+0.365
+0.210
+0.370
+complexity
+0.378
+0.074
+0.047
+0.529
+0.257
+KMNIST (in) ­ [AUROC]
+statistic
+FashionMNIST
+MNIST
+Omniglot
+notMNIST
+all
+LLR>2
+0.755
+0.587
+0.526
+0.965
+0.708
+ELBO
+0.910
+0.273
+0.261
+0.878
+0.580
+ELBO (∗)
+0.976
+0.630
+0.739
+0.923
+0.817
+p_var
+0.799
+0.403
+0.368
+0.794
+0.591
+p_var (∗)
+0.856
+0.777
+0.846
+0.775
+0.813
+q_var
+0.097
+0.737
+0.514
+0.334
+0.421
+q_var (∗)
+0.039
+0.437
+0.108
+0.412
+0.249
+complexity
+0.622
+0.133
+0.087
+0.658
+0.375
+MNIST (in) ­ [AUROC]
+statistic
+FashionMNIST
+KMNIST
+Omniglot
+notMNIST
+all
+LLR>2
+0.996
+0.996
+0.910
+1.000
+0.975
+ELBO
+1.000
+1.000
+0.894
+1.000
+0.973
+ELBO (∗)
+1.000
+1.000
+0.975
+1.000
+0.994
+p_var
+0.887
+0.875
+0.866
+0.854
+0.870
+p_var (∗)
+0.618
+0.718
+0.944
+0.440
+0.680
+q_var
+0.006
+0.081
+0.302
+0.020
+0.102
+q_var (∗)
+0.086
+0.528
+0.109
+0.466
+0.298
+complexity
+0.926
+0.867
+0.343
+0.926
+0.766
+(c) OODD AUROC scores – HVAE: binarized black and white datasets
+Analyzing information flow in hierarchical Variational Autoencoders
+27
+==PAGE:36==
+FashionMNIST (in) ­ [AUROC]
+statistic
+KMNIST
+MNIST
+Omniglot
+notMNIST
+all
+LLR>2
+0.969
+0.948
+0.964
+0.999
+0.970
+ELBO
+0.670
+0.214
+1.000
+0.978
+0.716
+ELBO (∗)
+0.569
+0.327
+1.000
+0.975
+0.718
+p_var
+0.977
+0.965
+0.984
+0.965
+0.973
+p_var (∗)
+0.988
+0.991
+0.958
+0.975
+0.978
+q_var
+0.280
+0.437
+0.018
+0.068
+0.200
+q_var (∗)
+0.449
+0.136
+0.776
+0.344
+0.426
+complexity
+0.670
+0.280
+0.989
+0.652
+0.648
+KMNIST (in) ­ [AUROC]
+statistic
+FashionMNIST
+MNIST
+Omniglot
+notMNIST
+all
+LLR>2
+0.653
+0.336
+0.705
+0.970
+0.666
+ELBO
+0.936
+0.295
+1.000
+0.900
+0.783
+ELBO (∗)
+0.998
+0.668
+1.000
+0.993
+0.915
+p_var
+0.728
+0.477
+0.903
+0.801
+0.727
+p_var (∗)
+0.828
+0.685
+0.794
+0.819
+0.782
+q_var
+0.470
+0.864
+0.024
+0.181
+0.385
+q_var (∗)
+0.257
+0.699
+0.267
+0.199
+0.355
+complexity
+0.330
+0.138
+0.917
+0.500
+0.471
+MNIST (in) ­ [AUROC]
+statistic
+FashionMNIST
+KMNIST
+Omniglot
+notMNIST
+all
+LLR>2
+0.828
+0.810
+0.584
+0.975
+0.799
+ELBO
+1.000
+0.999
+1.000
+1.000
+1.000
+ELBO (∗)
+1.000
+1.000
+1.000
+1.000
+1.000
+p_var
+0.501
+0.497
+0.498
+0.501
+0.499
+p_var (∗)
+0.503
+0.501
+0.506
+0.504
+0.503
+q_var
+0.016
+0.092
+0.000
+0.003
+0.028
+q_var (∗)
+0.003
+0.155
+0.000
+0.003
+0.040
+complexity
+0.720
+0.862
+1.000
+0.812
+0.849
+(d) OODD AUROC scores – HVAE: non­binarized (continuous) grey­scale datasets
+Table 3.1: OODD AUROC scores for different groups of datasets. (*) denotes complexity
+offset. Main headers for each subtable denote the in­domain dataset and the column
+headers correspond to OOD datasets.
+28
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:37==
+3.3
+Input complexity influences ELBO and variance in VAEs
+and can be leveraged to improve OODD
+The problem of OOD data discussed in Section 1.2.4 appears to also affect the variance,
+therefore in this section, I attempt to investigate this issue in further detail. My goal is
+to test whether the relation of input complexity to likelihood shown for flow­based and
+autoregressive models [31] holds for VAEs’ ELBO and if there is a similar link for the
+decoder variance. If so, then I aim to check if this relationship can be accounted for in
+OODD tasks to further study the decoder variance and uncertainty.
+3.3.1
+Image complexity correlates to ELBO and decoder variance
+First, I analyze the complexity distributions of the used datasets and the correlation of
+complexity with ELBO and variance.
+Method
+I calculate the complexity for each sample as the size of a JPEG compressed image.
+Next, I use the VDVAE and HVAE models trained on different datasets to collect relevant
+per­sample statistics.
+Results
+Figure 3.6 shows that the distributions of complexities differ between the datasets. Nat­
+ural datasets (Figure 3.6b) have quite regular unimodal distributions with SVHN being
+the easiest to compress and FFHQ32 the most complex. Binarized grey­scale datasets
+(Figure 3.6a) have less regular complexities, but they still have significant differences
+between simpler datasets like MNIST or Omniglot and more complex such as FashionM­
+NIST. Some distributions appear multimodal e.g. FashionMNIST with a spike in density
+around medium complexity and an even more irregular spike in notMNIST at very low
+complexity.
+I visualize the relation between the input complexity and ELBO, LLR>2 and the average
+decoder and encoder variances at layer 0 (p_var_0, q_var_0, see eq. (3.1)) as scatter­plots
+with trendlines for HVAE in Figure 3.7a and 3.7b (binarized gray­scale and natural images
+respectively). Similarly for VDVAE on natural images I use ELBO and the decoder and
+encoder variances averaged over all layers (p_var and q_var, see eq. (3.2)), shown in
+Figure 3.7c. The relation of variance at specific layers with complexity is discussed in
+Appendix D.
+In all cases, there is a clear negative correlation between complexity and ELBO both for
+in­domain and OOD data (for nonMNIST there is a cluster of data points with low com­
+plexity that stands out and skews the trend, which I ignore). Given the difference between
+100
+200
+300
+400
+500
+600
+700
+800
+900
+complexity [bytes]
+0.000
+0.002
+0.004
+0.006
+0.008
+0.010
+Density
+FashionMNIST
+KMNIST
+MNIST
+Omniglot
+notMNIST
+(a) Binarized datasets.
+400
+500
+600
+700
+800
+complexity [bytes]
+0.000
+0.002
+0.004
+0.006
+0.008
+0.010
+Density
+CIFAR10
+FFHQ32
+SVHN
+(b) Natural datasets (32x32).
+Figure 3.6: Distribution of complexities (as size of compressed image in bytes) for each
+dataset.
+Analyzing information flow in hierarchical Variational Autoencoders
+29
+==PAGE:38==
+the complexity distributions, this could explain why differentiating between simpler OOD
+examples (MNIST, SVHN) and a more complex in­domain dataset (FashionMNIST, CI­
+FAR10) tends to be difficult for VAEs [29]. Interestingly, HVAE and VDVAE behave very
+similarly on natural datasets (also w.r.t. variances), with the correlation to complexity be­
+ing lower for VDVAE.
+There are, however, differences between the datasets. In particular, the cluster corre­
+sponding to the in­domain dataset appears relatively higher compared to the same dataset
+in other rows (where it is OOD), showing that ELBO does react to the domain shift, but not
+to an extent that would allow detecting OOD data based on ELBO alone. LLR correlates
+with complexity less, which could explain why it performs better for OODD than ELBO
+when detecting simpler examples.
+(a) HVAE: binarized
+The decoder variance, while slightly less regular than ELBO, still quite consistently pos­
+itively correlates with complexity and reacts to the domain shift to some extent. This
+makes sense intuitively as we can expect the model to be less certain when reconstruct­
+ing complex images and therefore yield higher variance. I note that while there is a di­
+30
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:39==
+rect connection between ELBO and decoder variance through the KL­divergence term,
+the reconstruction likelihood term (Eq [log p(x | z)]) does not depend on the latent part of
+the decoder distribution (p(zi | z>i)) and it behaves similarly to ELBO (see Appendix C),
+therefore those observations about ELBO and decoder variance do not explain each other
+directly.
+The encoder variance behaves somewhat less regularly, it is, in most cases, negatively
+correlated to complexity on the binarized grey­scale data and positively for natural datasets.
+For both VDVAE and HVAE on natural images the encoder and decoder variances exhibit
+similar patterns, which is interesting, given that in other experiments there I observe sig­
+nificant differences between them.
+(b) HVAE: natural
+Discussion
+The experiments show a strong correlation of input complexity with ELBO and decoder
+variance for both HVAE and VDVAE, which could explain why identifying simpler datasets
+as OOD is difficult. A relative difference between in­domain and OOD data can still be
+observed, which is promising for anomaly detection. In Section 3.3.3 I study whether this
+correlation can be used to improve the OODD performance.
+One could argue that this correlation is not desirable, especially within the domain, and
+that such a behaviour is a sign of a bias in the model.
+Analyzing information flow in hierarchical Variational Autoencoders
+31
+==PAGE:40==
+(c) VDVAE: natural
+Figure 3.7: Scatter plots showing the relation of different per sample statistics and in­
+put complexity. Columns represent different statistics (ELBO, LLR, average decoder and
+encoder variance at specific layer), which values are plotted (y­axis) against complexity
+measured as size after JPEG compression (x­axis).
+3.3.2
+Can re­sampling solve the problem?
+In the following experiment, I test whether the relation between ELBO and complexity can
+be weakened by biasing the model towards more complex data points through sampling.
+The hypothesis is that if the model is more exposed to high complexity examples during
+training it should learn to assign them higher density and skew this relation.
+Method
+I train the HVAE model on CIFAR10 and FashionMNIST several times with different sam­
+pling approaches during training and then I compare the ELBO to complexity relation for
+all the models. I use importance sampling during training with the weights calculated from
+complexity with the following function:
+w = ( c
+A)B
+(3.3)
+where w is the importance weight used for sampling, c denotes complexity and A and B
+are parameters. I used the following configurations of parameters:
+• very low: A = 100, B = −11
+• low: A = 100, B = −9
+32
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:41==
+• original: no re­sampling
+• high: A = 100, B = 9
+• very high: A = 100, B = 11
+The resulting training distributions are visualized together with the results in Figure 3.8.
+I compare the ELBO to complexity relation based on the training dataset (without re­
+sampling), which should be more easily influenced by sampling bias during training and
+therefore make the test more sensitive to changes.
+Results
+Figure 3.8 shows the resulting relation of ELBO to complexity as scatter plots with Pear­
+son’s r correlation and corresponding p­value (up to certain precision). For FashionMNIST
+there seems to be regularity in how the complexity distribution influences the correlation.
+Up­sampling high complexity and down­sampling low complexity data points during train­
+ing reduces the resulting correlation while doing the opposite increases it. However, the
+trend and the shape of the scatter plots change very little. For CIFAR10 the results are
+less regular, as both up­sampling and down­sampling reduce the correlation. In both
+cases, the magnitude of the change introduced through re­sampling is small.
+Discussion
+It is possible that it is the spread (not the mean) of the distribution of the training data that
+reduces the correlation to complexity for FashionMNIST, which would also explain obser­
+vations for CIFAR10 better. Given the small scale of the experiment, it is also possible
+that the results are not significant. Regardless of the significance and the main factor,
+the magnitude of the change was very small, therefore I would not expect this kind of
+intervention to influence the ELBO­complexity relation strongly enough.
+The experiment only included a simple HVAE which might have underfitted the data (at
+least for CIFAR10), so it remains an open question whether this behaviour would be re­
+produced with a more powerful model. I have considered some other functions for the
+importance weight and have chosen the exponential function as it empirically yielded the
+best results, but I have not explored this space exhaustively. It is possible that with a
+larger model or a better­fitted weight function the results would be more (or less) signif­
+icant, however, the relatively weak outcomes and limited importance to the main project
+goals did not motivate further investment in this experiment. The approach could still be
+interesting for a study focused primarily on the complexity relation.
+(a) FashionMNIST
+Analyzing information flow in hierarchical Variational Autoencoders
+33
+==PAGE:42==
+(b) CIFAR10
+Figure 3.8: Scatter plots of ELBO against complexity (top rows) and the distribution of
+complexity after re­sampling for the training dataset (bottom rows) for models trained with
+different sampling strategies.
+3.3.3
+Complexity correction improves OOD detection
+To leverage the observed correlation to improve OODD results I propose a method of
+complexity correction based on a linear trend estimated within the in­domain data that
+can be applied to both ELBO and decoder variance.
+Method
+I use the experimental setup of OODD experiments from Section 3.2 to which I introduce
+additional OOD scores. For reference, I use LLR>2 (see Section 1.2.4) which has been
+shown to improve the results on HVAE [15], and complexity – to see how much of the
+results obtained with ELBO and the decoder variance could be explained by the effect of
+complexity alone.
+I also use ELBO and the decoder variance scores modified to account for complexity. For
+a given OOD score S I calculate a corrected version S(∗):
+S(∗) = S −a · c
+(3.4)
+where c is the input complexity and a is the slope of a linear model fitted to predict the
+score S given the complexity c on the in­domain data. To fit the slope I use the training
+set, but in case of overfitting a separate data split could be a good approach (I did not
+observe this to make a significant difference in my experiments). OOD data is not used
+to fit a, so the method is still unsupervised.
+This approach is similar to the one used by [31], but uses an additional slope parameter
+making it a bit more flexible and allowing to use on other scores (e.g. based on variance)
+or possibly with different complexity estimation approaches.
+Results
+The results of the OODD experiments are shown in Table 3.1 and the relevant pairwise
+comparisons are visualized in Figure 3.9 for HVAE and VDVAE.
+We can observe a clear pattern between the complexity and ELBO (Figures 3.9b and
+3.9e), where while ELBO performs almost strictly better than the complexity, the results
+for both scores correlate strongly and very often fail in the same configuration, which is
+34
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:43==
+expected due to the correlation between the scores shown in Section 3.3.1. The decoder
+variance exhibits a similar but slightly weaker pattern on natural datasets for both HVAE
+and VDVAE (Figures 3.9a and 3.9d), but it does not hold for grey­scale images.
+After correcting for complexity (Figures 3.9c and 3.9f) this relation is no longer so clear
+for ELBO (now ELBO(∗)). As expected, the performance for the dataset configurations
+for which complexity yielded AUROC<0.5, improved after correction, while most of the
+remaining results remained similar or only slightly worse. Figures 3.9h and 3.9j show that
+ELBO(∗) performs almost always better or similar to ELBO. Similar improvement applies
+to the decoder variance (Figures 3.9i and 3.9k) for natural datesets, but does not hold for
+grey­scale images.
+Compared to LLR>2 (Figure 3.9l) ELBO(∗) yields competitive results on HVAE, with some
+configurations working better for the former and some for the latter, without any of the two
+methods being clearly better.
+0
+1
+complexity [AUROC]
+0
+1
+p_var [AUROC]
+(a) OODD HVAE: decoder
+variance against complex­
+ity.
+0
+1
+complexity [AUROC]
+0
+1
+ELBO [AUROC]
+(b)
+OODD
+HVAE:
+ELBO
+against complexity.
+0
+1
+complexity [AUROC]
+0
+1
+ELBO(*) [AUROC]
+(c) OODD HVAE: corrected
+ELBO against complexity.
+0
+1
+complexity [AUROC]
+0
+1
+p_vart10 [AUROC]
+(d) OODD VDVAE: decoder
+variance
+(top­10)
+against
+complexity.
+0
+1
+complexity [AUROC]
+0
+1
+ELBO [AUROC]
+(e) OODD VDVAE: ELBO
+against complexity.
+0
+1
+complexity [AUROC]
+0
+1
+ELBO(*) [AUROC]
+(f) OODD VDVAE: corrected
+ELBO against complexity.
+B&W - continuous
+B&W - binarized
+All OOD
+Color: in-domain
+Color: ood
+  CIFAR10
+  CIFAR100
+  SVHN
+  FFHQ32
+(g) Legend
+Analyzing information flow in hierarchical Variational Autoencoders
+35
+==PAGE:44==
+0
+.5
+1
+ELBO [AUROC]
+0
+.5
+1
+ELBO(*) [AUROC]
+(h) OODD HVAE: corrected against not
+corrected ELBO.
+0
+.5
+1
+p_var [AUROC]
+0
+.5
+1
+p_var(*) [AUROC]
+(i) OODD HVAE: corrected against not
+corrected decoder variance.
+0
+1
+ELBO [AUROC]
+0
+1
+ELBO(*) [AUROC]
+(j) OODD VDVAE: corrected against
+not corrected ELBO.
+0
+1
+p_vart10 [AUROC]
+0
+1
+p_vart10(*) [AUROC]
+(k)
+OODD
+VDVAE:
+corrected
+against
+not
+corrected
+decoder
+variance (top­10).
+0
+.5
+1
+LLR > 2 [AUROC]
+0
+.5
+1
+ELBO(*) [AUROC]
+(l)
+OODD
+HVAE:
+corrected
+ELBO
+against LLR>2.
+B&W - continuous
+B&W - binarized
+All OOD
+Color: in-domain
+Color: ood
+  CIFAR10
+  CIFAR100
+  SVHN
+  FFHQ32
+(m) Legend
+Figure 3.9: Visual pairwise comparison of specific scores used for OODD. Each point
+on the scatterplots marks a pair of AUROC results for an in­domain/OOD dataset pair.
+Results for VDVAE and HVAE shown in separate subfigures.
+36
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:45==
+Discussion
+The proposed method of linear correction for image complexity improves the performance
+in OODD tasks for both ELBO and decoder variance for both HVAE and VDVAE. In the
+experiments, corrected ELBO yields results competitive to LLR.
+The method was invented based on the analysis in Section 3.3.1, which means it is not en­
+tirely uninformed of the model behaviour on OOD data, which could be considered a data
+leak. However, this problem can very likely be present in most of the research within the
+field, especially since the main discussion of generative models in application to OODD is
+focused on the image domain with a very limited number of dataset configurations tested.
+This might make the evaluation very susceptible to some kind of overfitting. In fact, signif­
+icant number of state­of­the­art methods [54][55][15] evaluate mainly between CIFAR10
+(in­domain) and SVHN (out­of­domain), and between FashinMNIST (in) and MNIST (out),
+and only in one direction. In my experiments, the methods that perform better CIFAR10
+(in) to SVHN (out) tend to have worse performance SVHN (in) to CIFAR10 (out). [56, Ap­
+pendix] point out a similar problem with some of the recently proposed methods of OODD.
+This makes a reliable comparison to state­of­the­art methods difficult.
+3.4
+Does decoder variance express uncertainty?
+Having alleviated some of the issues connected to different input complexities among the
+datasets, I continue to analyze the variance of the latent distributions and its relation to
+uncertainty.
+3.4.1
+Back to out­of­domain detection
+I follow up on the OODD experiments from Section 3.2 using the findings about the influ­
+ence of input complexity from Section 3.3.3.
+Method
+I apply the complexity correction (Section 3.3.3) to the decoder and encoder variance, an­
+alyze the resulting OODD performance for HVAE and VDVAE and compare it to corrected
+ELBO and LLR.
+Results
+The results of the OODD experiments are shown in Table 3.1 and the pairwise compar­
+isons relevant for this section are visualized in Figure 3.10.
+For HVAE the corrected decoder variance achieves AUROC> 0.5 for almost all of the con­
+figurations (except a few grey­scale) and performed comparably with corrected ELBO and
+LLR (maybe even slightly better on natural datasets). For VDVAE the corrected decoder
+variance and corrected ELBO yielded very similar results.
+The encoder variance after correction performs comparably to the decoder variance on
+natural datasets. However, for grey­scale it still fails to detect OOD samples in most
+configurations.
+Discussion
+The average decoder variance shows competitive performance on OODD tasks, when
+accounted for complexity, which indicates that it encodes a notion of uncertainty, that is
+exhibited through a higher variance given a data point from a different domain and involves
+more than just modelling the complexity of the input image. This could also be the case for
+the encoder variance, however here the results are not as consistent, making it unclear
+whether such conclusion can be drawn for the encoder variance as well.
+Analyzing information flow in hierarchical Variational Autoencoders
+37
+==PAGE:46==
+0
+.5
+1
+ELBO(*) [AUROC]
+0
+.5
+1
+p_var(*) [AUROC]
+(a) OODD HVAE: corrected decoder
+variance against corrected ELBO.
+0
+.5
+1
+LLR > 2 [AUROC]
+0
+.5
+1
+p_var(*) [AUROC]
+(b) OODD HVAE: corrected decoder
+variance against LLR>2.
+0
+1
+ELBO(*) [AUROC]
+0
+1
+p_vart10(*) [AUROC]
+(c) OODD VDVAE: corrected average decoder
+variance (top­10) against corrected ELBO.
+B&W - continuous
+B&W - binarized
+All OOD
+Color: in-domain
+Color: ood
+  CIFAR10
+  CIFAR100
+  SVHN
+  FFHQ32
+(d) Legend.
+0
+1
+q_vart10(*) [AUROC]
+0
+1
+p_vart10(*) [AUROC]
+(e) OODD VDVAE: the encoder and de­
+coder variance (top­10 layers) (corrected).
+0
+1
+q_var(*) [AUROC]
+0
+1
+p_var(*) [AUROC]
+(f) OODD HVAE: the encoder and decoder
+variance (corrected).
+Figure 3.10: Visual pairwise comparison of specific scores used for OODD. Each point
+on the scatterplots marks a pair of AUROC results (for two scores denoted on the x and
+y axes) for an in­domain/OOD dataset pair.
+38
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:47==
+3.4.2
+Face attributes – analysis
+To analyze how the variance behaves on unusual data points, but still within the domain,
+I use some of the less frequent CelebA­HQ attributes. I expect that the variance will be
+significantly different (higher) on the images with the rare attributes, as they could be (to
+some extent) considered outliers.
+Method
+I analyze the per­layer encoder and decoder variances averaged over the data points with
+a specific attribute and compare them against the data points without it. I use relative val­
+ues normalized by the variance of the specific layer averaged over the whole CelebA­HQ
+dataset, such that values close to 1 can be considered unaffected by the attribute. I use
+bootstrapping to assess a range of values that can be expected in a random subsample
+of similar size.
+Results
+The variance statistics are plotted in Figure 3.11. The variances within the rare attribute
+groups on average deviate from the baseline more than would be expected by random
+(at least for the decoder). The decoder variance varies relatively more strongly, more
+regularly and more significantly than the encoder variance. The encoder variance seems
+much noisier, which is consistent with the observations made in other experiments. The
+average variances deviate both ways, higher and lower than the baseline, depending
+on the attribute and the latent layer, contrary to the expectation that it would tend to be
+higher. However, for the decoder, there is some regularity within the feature groups, at
+least locally, as the variance around similar latent levels is consistently higher or lower
+for a given attribute. For example, for Wearing_Hat it remains relatively high for almost all
+layers it deviates at, while for Bald it is relatively low almost everywhere.
+Interestingly, both for encoder and decoder, the variances deviate the most for higher
+latents (above the 50th layer) and to a lesser extent for layers below the 20th, while the
+20­50 region shows less to none relative variability.
+Discussion
+The variance, particularly the decoder variance, tends to deviate from the baseline for the
+samples with rare attributes. It remains unclear whether the observed deviation is related
+to uncertainty, particularly since some attributes tend to increase the average variance,
+while other decrease it.
+One could speculate that specific features will increase the decoder variance if they intro­
+duce more sources of variability (e.g. adding a hat) or decrease the variance when they
+simplify the image (e.g. baldness removes variability caused by hair). Following this hy­
+pothesis, the differences in magnitude change between the layers within a feature group
+(increased variance for one layer and decreased on another) could be explained by doing
+both at the same time for different features and therefore affecting the latent hierarchy in
+different ways.
+A different hypothesis, not necessarily exclusive, would be that since those attributes
+are less frequent, the model did not learn them as well and must increase the variance
+in order to decrease the KL divergence between the encoder and decoder distributions.
+Both hypotheses are speculative and should be treated with a grain of salt, but could be
+an interesting direction for further experiments (however, they might be difficult to test).
+Analyzing information flow in hierarchical Variational Autoencoders
+39
+==PAGE:48==
+0.90
+0.95
+1.00
+1.05
+1.10
+relative difference
+p_var
+6664
+60
+55
+45
+23
+9
+1
+latent layer
+0.98
+0.99
+1.00
+1.01
+1.02
+1.03
+relative difference
+q_var
+Wearing_Hat
+Eyeglasses
+Pale_Skin
+Rosy_Cheeks
+Bald
+lack of specific attribute
+Bootstrapped range
+Figure 3.11: Mean variances of images with specific ”rare” attributes. All values are nor­
+malized by mean variances of the whole datasets, so they specify how much the total
+variance deviates relative to the baseline. Dotted lines show the values for the remaining
+samples without a given attribute. Significance of the deviations is assessed through boot­
+strapping, the grey area shows a range of values obtained by randomly sampling 1000
+data points (whole dataset is 30000, Wearing_Hat class has 1070) repeated 1000 times.
+3.4.3
+Face attributes – classification
+Qualitative experiments in Section 3.1 indicate that different visual features are encoded
+at different latent layers. In Section 1.2.4, I observe differences in the behaviour of the
+variance conditioned on facial attributes. Based on those observations, I expect that the
+parameters of the latent distributions, conditioned on the attributes, exhibit patterns that
+should be regular enough for a simple classifier to detect said attributes at least at some
+latent layers.
+I perform classification of facial attributes based on the latent parameters (both means
+and variances) as a proxy to provide insight into which layers encode information related
+to specific visual attributes in a separable way. I expect to find differences between the
+layers that will be consistent with the findings from Sections 3.1 and 1.2.4.
+Method
+To focus only on the information easily available within the latent space, I choose to use
+a simple k­nearest neighbors (KNN) classifier [2] with k = 11. I split the dataset into a
+training set of around 21,000 and a test set of close to 9,000 samples. For each attribute, I
+downsample the less frequent class to balance the data. I use each of the encoder mean –
+40
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:49==
+µq,l, decoder mean – µp,l, encoder variance – σ2
+q,l, and decoder variance – σ2
+p,l (denoted
+as KNN(qm), KNN(pm), KNN(qv), KNN(pv) respectively) at each latent layer – l (except a few
+bottom ones due to high resolution and memory issues), one at a time, as the input to the
+KNN classifier and try to predict a chosen binary attribute. As sex is highly correlated with
+some of the attributes I obtain the scores per sex (except when classifying sex) and then
+average (or choose only one if appropriate).
+Results
+The results of the classification are shown as AUROC scores plotted against the latent
+layer in Figure 3.12. The classification results in general are quite good for Male and
+Wearing_Hat, while the scores are not as high for Young and Heavy_Makeup. However in all
+cases, the model clearly picks up some signal (even if very weak for Heavy_Makeup) at least
+at some latent layers for all parameters (AUROC achieves at least 0.6).
+It can be seen that the encoder mean behaves similarly for all of the presented attributes,
+its performance peaks at the higher latents (around layers 62­64) and then gradually de­
+creases to almost 0.5 AUROC (meaningless prediction) at mid latents and then slightly
+goes up around layers 23­30. Interestingly, the layers that performed well in classifying
+an image as male also yielded reasonable changes with forced generation of this attribute
+in Figure 3.1a.
+The remaining parameters – the encoder variance σ2
+q,l, and the decoder mean and vari­
+ance (µp,l and σ2
+p,l), behave somewhat similarly to each other, staying relatively high
+throughout most of the latent hierarchy in most cases.
+Discussion
+The consistency of the performance of the encoder mean, µq,l, with the qualitative results
+in the previous section suggests there is some pattern in how the information is encoded
+by the VAE. This supports the hypothesis that specific features are encoded on different
+layers of hierarchy, however, it also seems that some dominant layers tend to encapsulate
+more information than other ones at least in terms of the connection to visual semantic
+features related to the analyzed attributes. Both the encoder and decoder variance do
+react to the facial attributes allowing for classification (to some extent), but the pattern is
+not consistent with the encoder mean, making it difficult to interpret the results.
+3.4.4
+Face attributes – anomaly detection
+Following the analysis in Section 3.4.2 and the classification results from Section 3.4.3, I
+test whether the observed behaviour of the variance allows for detecting specific attributes
+(particularly rare ones) in an unsupervised manner, simply through the magnitude of the
+variance. This is similar to the OODD experiments in Section 3.2, but focuses on particular
+cases of in­domain data.
+Method
+Similarly to OODD experiments in Section 3.2 I use the average variance per layer as a
+score for detecting specific attributes. As in Section 3.4.3 I calculate the AUROC scores
+per sex and average or use only one. I compare the results of the unsupervised detection
+with the encoder and decoder variance (q_var and p_var respectively) with the classification
+results from the previous section.
+Results
+The AUROC scores per latent layer for detecting different attributes are shown in Fig­
+ure 3.12. As in the previous experiments, the encoder variance appears to be less regu­
+lar. The decoder variance does perform reasonably well on some features, however not
+necessarily in the same direction each time. For Male and Bald lower variance happens
+to be a good indicator of the attribute presence with AUROC down to around 0.3 and 0.1
+respectively.
+Analyzing information flow in hierarchical Variational Autoencoders
+41
+==PAGE:50==
+66
+60 55
+45
+23
+9
+1
+latent layer
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+AUROC
+Male
+(a)
+66
+60 55
+45
+23
+9
+1
+latent layer
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+AUROC
+Wearing_Hat (grouped)
+(b)
+66
+60 55
+45
+23
+9
+1
+latent layer
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+AUROC
+Young (grouped)
+q_var
+p_var
+KNN(qm)
+KNN(pm)
+KNN(qv)
+KNN(pv)
+(c)
+66
+60 55
+45
+23
+9
+1
+latent layer
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+AUROC
+Heavy_Makeup (female)
+(d)
+66
+60 55
+45
+23
+9
+1
+latent layer
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+AUROC
+Bald (male)
+(e)
+Figure 3.12: Per latent layer AUROC scores of supervised attribute classification using
+KNN on encoder and decoder means and variances (dotted lines) and unsupervised at­
+tribute detection (solid lines) based on encoder and decoder variances. Vertical grid lines
+on x­axis correspond to layers where resolution changes (except layers 1 and 66).
+42
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:51==
+Interestingly, the simple unsupervised approach seems to be competitive with the su­
+pervised KNN classification for features such as Wearing_Hat, Bald (if negative variance is
+considered) and Heavy_Makeup, while for Male and Young KNN performs considerably better.
+Moreover, there is a strong similarity in the unsupervised performance of the decoder vari­
+ance on Male (if negative variance is considered) and Heavy_Makeup (only on female faces)
+and somewhat on Bald, which could suggest that features that allow detecting makeup
+and baldness are also dominant in detecting female faces. This is not the case for KNN,
+which classifies Male much better Heavy_Makeup and Bald.
+Unsupervised detection based on the decoder variance yields best results at different
+latent layers than KNN on the encoder mean does.
+The AUROC scores are particularly high (or low, which is also very informative) for the
+attributes: Wearing_Hat and Bald. These were also the most significant in the analysis of
+the variance in Section 3.4.2.
+Discussion
+The ability to detect face attributes based only on the decoder variance, using a very
+naïve unsupervised approach (average) or a supervised, but still simple, KNN classifier
+shows that there is a relation of the decoder variance to the attributes of the image. The
+results do not clarify what is the exact nature of this connection, but considering the rare
+attributes as a kind of outliers, a plausible hypothesis would be that it relates to a notion
+of uncertainty about specific visual features.
+Based on how the supervised and unsupervised methods perform on different attributes,
+one could speculate that lower­level or local features (hat, makeup, hair, skin) affect the
+decoder variance in a more consistent and straightforward way (detectable through the
+total magnitude) than higher­level characteristics (sex, age), which correlate to several
+lower­level features that affect the variance in different ways, resulting in a pattern that is
+too complex for averaging, but regular enough for a simple classifier to recognize. This
+remains a hypothesis but could be an interesting direction for future research.
+Analyzing information flow in hierarchical Variational Autoencoders
+43
+==PAGE:52==
+44
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:53==
+4
+Discussion and conclusions
+The qualitative analysis of the images generated by latent extrapolation along ”attribute
+dimensions” implies that hierarchical VAEs encode different features at different latent
+layers. Sampling experiments further support this claim, as the visual features changed
+through sampling or extrapolation depend on which latent layer is being manipulated.
+While some entanglement of the features across latent layers can be observed, high­
+level latent layers affect general features and low­level layers appear to correspond to
+finer detail and local features. This supports the hypothesis that hierarchical VAEs learn
+feature hierarchies across the latent structure.
+Furthermore, I observe interactions between the features while sampling at two latent
+layers, which can be a sign of the model learning covariance in the data through the de­
+pendency between the latent layers. However, this remains a hypothesis, as alternative
+explanations are also plausible. For example, one could speculate that the deterministic
+path of the decoder might be responsible for composing a consistent image, resulting in
+interactions between the features without the need for a hierarchical generative distribu­
+tion.
+The amount of variability in the visual features caused by changes in the latent representa­
+tions differs from layer to layer and some latent levels appear to be more impactful on the
+generated images. Trying to classify face attributes based on encoder representations,
+yields very different results depending on which latent layer is used, with a pattern that is
+somewhat consistent with the results obtained when trying to forcefully generate the same
+attribute. These observations imply selectivity in where specific information is encoded
+in the latent hierarchy. I hypothesise that this might be related to the skip connections
+in both bottom­up and top­down paths allowing the information to flow more freely be­
+tween higher latent layers and the input, without requiring the lower latents to redundantly
+encode the same information.
+I observe that, conditioned on the attributes of the image, the variances at specific latent
+layers consistently deviate in magnitude more, compared to the variances at other levels
+that on average barely change. This, combined with the previous observations suggesting
+selectivity in encoding, leads me to speculate that maybe some of the latent variables are
+not used to a significant extent and could be replaced with deterministic nodes. This
+would, however, be in contrast to the findings about the stochastic depth being crucial
+for the performance of hierarchical VAEs [16] and at the moment I do not have sufficient
+evidence to support this hypothesis. Anyway, I believe that further study in this direction
+could yield interesting results. A possible idea for investigating this would be to perform
+ablation experiments where specific stochastic nodes are turned into deterministic ones,
+and analyze how the performance changes.
+The hypothesis that low­level image statistics are influencing OODD performance in spe­
+cific dataset configurations [29][18] is supported by my analysis, in which I observe that
+ELBO correlates with image complexity, measured as the size after compression. My at­
+tempts to weaken this correlation by oversampling high­complexity images during training
+do not yield satisfactory results. This implies that VAEs (and likely other generative models
+[31]), as density estimators, are biased towards predicting high densities for data points
+with low complexity, which might not necessarily be a desired property. This could be
+Analyzing information flow in hierarchical Variational Autoencoders
+45
+==PAGE:54==
+particularly relevant for applications such as anomaly detection or active learning, which
+motivates further research and urges caution.
+The correlation of ELBO to complexity could explain why dataset configurations in which
+the OOD dataset is ”simpler” than the training dataset are particularly problematic in
+OODD experiments. Based on those observations, I propose a method of correcting
+for input complexity based on a linear trend that improves OODD performance when us­
+ing ELBO and yields results that are competitive with the LLR approach [15]. The method
+generalizes between the two VAE architectures I tried and can be applied to different OOD
+scores (e.g. the average decoder variance), not only ELBO.
+I observe the decoder variance to also correlate to input complexity. More complex images
+result in higher total variance of the decoder distributions. This makes sense intuitively
+as a more complex image should be more difficult to reconstruct and one could speculate
+that it might cause the decoder to be more uncertain. After correcting for complexity, de­
+coder variance can be used to detect OOD samples with performance that is comparable
+with corrected ELBO and LLR. This implies that decoder variance captures some notion
+of uncertainty, which goes beyond the low­level statistics that are used by image com­
+pression algorithms. Furthermore, the magnitude of the decoder variance correlates with
+some visual features and can be used to detect some of the less frequent facial attributes.
+Here the findings are not as consistent, but might still suggest that the decoder variance
+encodes uncertainty related to these attributes.
+Some other, more general attributes can be classified with a simple KNN model based
+just on the decoder variance, meaning that said variance must be reacting to the visual
+attributes in a sufficiently regular way. The implications of this are also not clear, but one
+could speculate that the decoder expresses uncertainty related to different features that
+depend on the more abstract attribute, which allows to classify it.
+I do note that some of those interpretations are speculative. However, taking into ac­
+count competitive performance in detecting OOD data as well as experiments with facial
+attributes within the domain (some of which could be seen as outliers), the results, collec­
+tively, support the hypothesis that the decoder variance encodes a notion of uncertainty.
+The discussion about VAEs’ ability to model uncertainty is highly relevant w.r.t. applica­
+tions such as anomaly detection. While these findings are promising, I do believe, based
+on the complexity analysis, that more research is needed to better understand what fac­
+tors influence the behavior of VAEs, which is crucial in terms of reliability.
+In my analysis, I focused much less on the encoder variance because it did not behave
+as regularly and did not yield as good results as the decoder variance. I speculate that
+this might be related to the encoder distribution being used to sample model representa­
+tions, that are in turn used to reconstruct the image during training. While KL­divergence
+will encourage the (encoder and decoder) variance to be higher in certain situations, the
+reconstruction error might promote lower encoder variance. What is more, the encoder
+variance depends on both the deterministic bottom­up and stochastic top­down paths,
+while the decoder variance only on the top­down path. More research is needed to inves­
+tigate the role of encoder variance, which is essential in understanding VAEs, but, to the
+best of my knowledge, it has not been studied in sufficient detail.
+46
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:55==
+Bibliography
+[1]
+Diederik P Kingma and Max Welling. “Auto­encoding variational bayes”. In: arXiv
+preprint arXiv:1312.6114 (2013).
+[2]
+Christopher M Bishop and Nasser M Nasrabadi. Pattern recognition and machine
+learning. Vol. 4. 4. Springer, 2006.
+[3]
+Aaron van den Oord et al. Conditional Image Generation with PixelCNN Decoders.
+2016. arXiv: 1606.05328 [cs.CV].
+[4]
+Aaron van den Oord, Nal Kalchbrenner, and Koray Kavukcuoglu. Pixel Recurrent
+Neural Networks. 2016. arXiv: 1601.06759 [cs.CV].
+[5]
+Laurent Dinh, David Krueger, and Yoshua Bengio. “Nice: Non­linear independent
+components estimation”. In: arXiv preprint arXiv:1410.8516 (2014).
+[6]
+Diederik P. Kingma and Prafulla Dhariwal. Glow: Generative Flow with Invertible
+1x1 Convolutions. 2018. arXiv: 1807.03039 [stat.ML].
+[7]
+Jascha Sohl­Dickstein et al. Deep Unsupervised Learning using Nonequilibrium
+Thermodynamics. 2015. arXiv: 1503.03585 [cs.LG].
+[8]
+Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising Diffusion Probabilistic Mod­
+els. 2020. arXiv: 2006.11239 [cs.LG].
+[9]
+Prafulla Dhariwal and Alex Nichol. Diffusion Models Beat GANs on Image Synthe­
+sis. 2021. arXiv: 2105.05233 [cs.LG].
+[10]
+Ian Goodfellow. “Nips 2016 tutorial: Generative adversarial networks”. In: arXiv
+preprint arXiv:1701.00160 (2016).
+[11]
+Ian Goodfellow et al. “Generative adversarial nets”. In: Advances in neural informa­
+tion processing systems 27 (2014).
+[12]
+Ali Razavi, Aaron Van den Oord, and Oriol Vinyals. “Generating diverse high­fidelity
+images with vq­vae­2”. In: Advances in neural information processing systems 32
+(2019).
+[13]
+Jinwon An and Sungzoon Cho. “Variational autoencoder based anomaly detection
+using reconstruction probability”. In: Special Lecture on IE 2.1 (2015), pp. 1–18.
+[14]
+Haowen Xu et al. “Unsupervised anomaly detection via variational auto­encoder for
+seasonal kpis in web applications”. In: Proceedings of the 2018 world wide web
+conference. 2018, pp. 187–196.
+[15]
+Jakob D Drachmann Havtorn et al. “Hierarchical vaes know what they don’t know”.
+In: International Conference on Machine Learning. PMLR. 2021, pp. 4117–4128.
+[16]
+Rewon Child. “Very deep vaes generalize autoregressive models and can outper­
+form them on images”. In: arXiv preprint arXiv:2011.10650 (2020).
+[17]
+Durk P Kingma et al. “Semi­supervised learning with deep generative models”. In:
+Advances in neural information processing systems 27 (2014).
+[18]
+Lars Maaløe et al. “Biva: A very deep hierarchy of latent variables for generative
+modeling”. In: Advances in neural information processing systems 32 (2019).
+[19]
+Michael I Jordan et al. “An introduction to variational methods for graphical models”.
+In: Machine learning 37.2 (1999), pp. 183–233.
+[20]
+Diederik P Kingma and Max Welling. “An introduction to variational autoencoders”.
+In: arXiv preprint arXiv:1906.02691 (2019).
+[21]
+Danilo Jimenez Rezende, Shakir Mohamed, and Daan Wierstra. “Stochastic back­
+propagation and approximate inference in deep generative models”. In: Interna­
+tional conference on machine learning. PMLR. 2014, pp. 1278–1286.
+Analyzing information flow in hierarchical Variational Autoencoders
+47
+==PAGE:56==
+[22]
+Casper Kaae Sønderby et al. “Ladder variational autoencoders”. In: Advances in
+neural information processing systems 29 (2016).
+[23]
+Matthew D Zeiler and Rob Fergus. “Visualizing and understanding convolutional
+networks”. In: European conference on computer vision. Springer. 2014, pp. 818–
+833.
+[24]
+Shengjia Zhao, Jiaming Song, and Stefano Ermon. “Learning hierarchical features
+from generative models”. In: arXiv preprint arXiv:1702.08396 (2017).
+[25]
+Tero Karras, Samuli Laine, and Timo Aila. “A style­based generator architecture for
+generative adversarial networks”. In: Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition. 2019, pp. 4401–4410.
+[26]
+Anders Boesen Lindbo Larsen et al. “Autoencoding beyond pixels using a learned
+similarity metric”. In: International conference on machine learning. PMLR. 2016,
+pp. 1558–1566.
+[27]
+Lars Maaløe et al. “Auxiliary deep generative models”. In: International conference
+on machine learning. PMLR. 2016, pp. 1445–1453.
+[28]
+Jun­Yan Zhu et al. “Unpaired image­to­image translation using cycle­consistent ad­
+versarial networks”. In: Proceedings of the IEEE international conference on com­
+puter vision. 2017, pp. 2223–2232.
+[29]
+Eric Nalisnick et al. “Do deep generative models know what they don’t know?” In:
+arXiv preprint arXiv:1810.09136 (2018).
+[30]
+Adolf Buse. “The likelihood ratio, Wald, and Lagrange multiplier tests: An expository
+note”. In: The American Statistician 36.3a (1982), pp. 153–157.
+[31]
+Joan Serrà et al. “Input complexity and out­of­distribution detection with likelihood­
+based generative models”. In: arXiv preprint arXiv:1909.11480 (2019).
+[32]
+Georgios Arvanitidis, Lars Kai Hansen, and Søren Hauberg. “Latent space oddity:
+on the curvature of deep generative models”. In: arXiv preprint arXiv:1710.11379
+(2017).
+[33]
+Andrew Stirn and David A Knowles. “Variational variance: Simple, reliable, cali­
+brated heteroscedastic noise variance parameterization”. In: arXiv preprint arXiv:2006.04910
+(2020).
+[34]
+Pierre Segonne, Yevgen Zainchkovskyy, and Søren Hauberg. “Robust uncertainty
+estimates with out­of­distribution pseudo­inputs training”. In: arXiv preprint arXiv:2201.05890
+(2022).
+[35]
+Keyulu Xu et al. “How neural networks extrapolate: From feedforward to graph neu­
+ral networks”. In: arXiv preprint arXiv:2009.11848 (2020).
+[36]
+Adam Paszke et al. “PyTorch: An Imperative Style, High­Performance Deep Learn­
+ing Library”. In: Advances in Neural Information Processing Systems 32. Ed. by H.
+Wallach et al. Curran Associates, Inc., 2019, pp. 8024–8035. url: http://papers.
+neurips.cc/paper/9015-pytorch-an-imperative-style-high-performance-deep-learning-
+library.pdf.
+[37]
+Yann LeCun et al. “Gradient­based learning applied to document recognition”. In:
+Proceedings of the IEEE 86.11 (1998), pp. 2278–2324.
+[38]
+Han Xiao, Kashif Rasul, and Roland Vollgraf. Fashion­MNIST: a Novel Image Dataset
+for Benchmarking Machine Learning Algorithms. Aug. 28, 2017. arXiv: cs.LG/1708.
+07747 [cs.LG].
+[39]
+Tarin Clanuwat et al. “Deep learning for classical japanese literature”. In: arXiv
+preprint arXiv:1812.01718 (2018).
+[40]
+Yaroslav Bulatov. “Notmnist dataset”. In: Google (Books/OCR), Tech. Rep.[Online].
+Available: http://yaroslavvb. blogspot. it/2011/09/notmnist­dataset. html 2 (2011).
+48
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:57==
+[41]
+Brenden M Lake, Ruslan Salakhutdinov, and Joshua B Tenenbaum. “Human­level
+concept learning through probabilistic program induction”. In: Science 350.6266
+(2015), pp. 1332–1338.
+[42]
+Jonathan Ho et al. “Flow++: Improving flow­based generative models with varia­
+tional dequantization and architecture design”. In: International Conference on Ma­
+chine Learning. PMLR. 2019, pp. 2722–2730.
+[43]
+Alex Krizhevsky, Geoffrey Hinton, et al. “Learning multiple layers of features from
+tiny images”. In: (2009).
+[44]
+Yuval Netzer et al. “Reading digits in natural images with unsupervised feature
+learning”. In: (2011).
+[45]
+Tero Karras et al. “Progressive Growing of GANs for Improved Quality, Stability, and
+Variation”. In: CoRR abs/1710.10196 (2017). arXiv: 1710.10196. url: http://arxiv.
+org/abs/1710.10196.
+[46]
+Ziwei Liu et al. “Deep learning face attributes in the wild”. In: Proceedings of the
+IEEE international conference on computer vision. 2015, pp. 3730–3738.
+[47]
+Durk P Kingma et al. “Improved variational inference with inverse autoregressive
+flow”. In: Advances in neural information processing systems 29 (2016).
+[48]
+Tim Salimans and Durk P Kingma. “Weight normalization: A simple reparameteri­
+zation to accelerate training of deep neural networks”. In: Advances in neural infor­
+mation processing systems 29 (2016).
+[49]
+Abien Fred Agarap. “Deep learning using rectified linear units (relu)”. In: arXiv preprint
+arXiv:1803.08375 (2018).
+[50]
+Tim Salimans et al. “Pixelcnn++: Improving the pixelcnn with discretized logistic mix­
+ture likelihood and other modifications”. In: arXiv preprint arXiv:1701.05517 (2017).
+[51]
+Kaiming He et al. “Deep residual learning for image recognition”. In: Proceedings
+of the IEEE conference on computer vision and pattern recognition. 2016, pp. 770–
+778.
+[52]
+Dan Hendrycks and Kevin Gimpel. “Gaussian error linear units (gelus)”. In: arXiv
+preprint arXiv:1606.08415 (2016).
+[53]
+DTU Compute. DTU Compute GPU Cluster. url: https://itswiki.compute.dtu.dk/
+index.php/GPU_Cluster.
+[54]
+Xuming Ran et al. “Detecting out­of­distribution samples via variational auto­encoder
+with reliable uncertainty estimation”. In: Neural Networks 145 (2022), pp. 199–208.
+[55]
+Jie Ren et al. “Likelihood ratios for out­of­distribution detection”. In: Advances in
+Neural Information Processing Systems 32 (2019).
+[56]
+Zhisheng Xiao, Qing Yan, and Yali Amit. “Likelihood regret: An out­of­distribution
+detection score for variational auto­encoder”. In: Advances in neural information
+processing systems (2020). url: https://arxiv.org/abs/2003.02977.
+Analyzing information flow in hierarchical Variational Autoencoders
+49
+==PAGE:58==
+50
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:59==
+A
+More generated images
+I provide additional visualizations of forced attribute generation discussed in Section 3.1.1,
+as I find them particularly interesting, with more layers included in Figure A.2 and other
+interesting attributes in Figure A.3. I also visualize 2­layer sampling (Section 3.1.3) for
+the top layer (66th) and 64th layer in Figure A.1. Those supplementary results, show that
+the top layer influences the general color characteristics of the image and to some extent
+other, more abstract attributes, such as age and sex.
+Sampled at layer 64
+Sampled at layer 66
+2-layer sampling 66-64 
+Figure A.1: Sampling realizations with two degrees of freedom at layers 66 and 64
+Analyzing information flow in hierarchical Variational Autoencoders
+51
+==PAGE:60==
+Less "Male"
+More "Male"
+66
+16x1x1
+65
+16x1x1
+64
+16x4x4
+63
+16x4x4
+62
+16x4x4
+61
+16x4x4
+60
+16x8x8
+59
+16x8x8
+58
+16x8x8
+57
+16x8x8
+56
+16x8x8
+54
+16x16x16
+52
+16x16x16
+latent layer (bottom 1-66 top)
+Forced generation "Male"
+52
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:61==
+Less "Male"
+More "Male"
+50
+16x16x16
+48
+16x16x16
+46
+16x16x16
+42
+16x32x32
+39
+16x32x32
+36
+16x32x32
+33
+16x32x32
+30
+16x32x32
+26
+16x32x32
+23
+16x64x64
+18
+16x64x64
+13
+16x64x64
+latent layer (bottom 1-66 top)
+Forced generation "Male"
+Figure A.2: Feature extrapolation for attribute Male.
+Analyzing information flow in hierarchical Variational Autoencoders
+53
+==PAGE:62==
+Less "Pale_Skin"
+More "Pale_Skin"
+65
+16x1x1
+64
+16x4x4
+50
+16x16x16
+latent layer (bottom 1-66 top)
+Forced generation "Pale_Skin" (grouped)
+(a) Pale_Skin
+Less "Smiling"
+More "Smiling"
+66
+16x1x1
+64
+16x4x4
+63
+16x4x4
+62
+16x4x4
+56
+16x8x8
+46
+16x16x16
+latent layer (bottom 1-66 top)
+Forced generation "Smiling" (grouped)
+(b) Smiling
+Figure A.3: Feature extrapolation for different attributes. Central column shows unmodi­
+fied reconstruction, the attribute is gradually removed to the left and added to the right.
+54
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:63==
+B
+More attribute classification
+In Figure B.1 I show supplementary attribute classification results (as in Sections 3.4.3
+and 3.4.4). Eyeglasses, Smiling and Rosy_Cheeks are particularly interesting as in this case
+decoder mean and variance around layer 40 perform very well with KNN. This could be
+an indication that these features, as more local and lower­level, are expressed to a larger
+extent in this section of the latent hierarchy, which would be consistent with the qualitative
+analysis in Section 3.1. This is, however, just a speculation.
+Analyzing information flow in hierarchical Variational Autoencoders
+55
+==PAGE:64==
+66
+60 55
+45
+23
+9
+1
+latent layer
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+AUROC
+Eyeglasses (grouped)
+(a)
+66
+60 55
+45
+23
+9
+1
+latent layer
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+AUROC
+Pale_Skin (grouped)
+(b)
+66
+60 55
+45
+23
+9
+1
+latent layer
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+AUROC
+Smiling (grouped)
+q_var
+p_var
+KNN(qm)
+KNN(pm)
+KNN(qv)
+KNN(pv)
+(c)
+66
+60 55
+45
+23
+9
+1
+latent layer
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+AUROC
+Rosy_Cheeks (female)
+(d)
+Figure B.1: Per latent layer AUROC scores of supervised attribute classification using
+KNN on encoder and decoder means and variances (dotted lines) and unsupervised at­
+tribute detection (solid lines) based on encoder and decoder variances. Vertical grid lines
+on x­axis correspond to layers where resolution changes (except layers 1 and 66).
+56
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:65==
+C
+Complexity and ELBO
+Figure C.1 shows relation of ELBO, reconstruction likelihood (log p(x|z)) and KL­divergence
+with complexity. All of those values correlate with complexity in a similar manner.
+(a) HVAE: binarized
+Analyzing information flow in hierarchical Variational Autoencoders
+57
+==PAGE:66==
+(b) HVAE: natural
+58
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:67==
+(c) VDVAE: natural
+Figure C.1: Scatter plots showing the relation of different per sample statistics and input
+complexity. Columns represent different statistics (ELBO, reconstruction likelihood and
+KL­divergence), which values are plotted (y­axis) against complexity measured as size
+after JPEG compression (x­axis).
+Analyzing information flow in hierarchical Variational Autoencoders
+59
+==PAGE:68==
+D
+Complexity and variance
+Figure D.1 shows the relation of the encoder and decoder variance and complexity for
+different latent layers for both VDVAE and HVAE. For HVAE on grey­scale images there
+are significant differences between the layers. For VDVAE and HVAE on natural images
+it is much more consistent, however for VDVAE bottom layers start behaving differently,
+while for HVAE the top layer of the encoder also seems off.
+(a) HVAE: binarized
+60
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:69==
+(b) HVAE: natural
+Analyzing information flow in hierarchical Variational Autoencoders
+61
+==PAGE:70==
+(c) VDVAE: natural, encoder
+(d) VDVAE: natural, decoder
+Figure D.1: Scatter plots showing the relation of average variances at different layers and
+input complexity. Columns represent different statistics, which values are plotted (y­axis)
+against complexity measured as size after JPEG compression (x­axis).
+62
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:71==
+E
+OODD with variance
+Figure E.1 shows additional pairwise comparisons of OODD performance of different
+scores. The decoder variance seems to perform similarly to the encoder variance on
+natural datasets, but much better on grey­scale. For VDVAE the average over top­10
+layers gives better results than the average over all of the layers for both encoder and
+decoder variance. For encoder variance the complexity correction seems to be improving
+the results on natural datasets.
+Analyzing information flow in hierarchical Variational Autoencoders
+63
+==PAGE:72==
+0
+1
+p_vart10(*) [AUROC]
+0
+1
+p_var(*) [AUROC]
+(a) OODD VDVAE: the decoder
+variance averaged over top­10
+and all layers (corrected).
+0
+1
+q_vart10(*) [AUROC]
+0
+1
+q_var(*) [AUROC]
+(b) OODD VDVAE: the encoder
+variance averaged over top­10
+and all layers (corrected).
+B&W - continuous
+B&W - binarized
+All OOD
+Color: in-domain
+Color: ood
+  CIFAR10
+  CIFAR100
+  SVHN
+  FFHQ32
+(c) Legend.
+0
+1
+q_vart10 [AUROC]
+0
+1
+p_vart10 [AUROC]
+(d) OODD VDVAE: the encoder
+and decoder variance (top­10 lay­
+ers).
+0
+1
+q_var [AUROC]
+0
+1
+p_var [AUROC]
+(e) OODD HVAE: the encoder and
+decoder variance.
+0
+1
+q_vart10 [AUROC]
+0
+1
+q_vart10(*) [AUROC]
+(f) OODD VDVAE: corrected and
+not corrected encoder variance
+(top­10 layers).
+0
+1
+q_var [AUROC]
+0
+1
+q_var(*) [AUROC]
+(g) OODD HVAE: corrected and
+not corrected encoder variance .
+Figure E.1: Visual pairwise comparison of specific scores used for OODD. Each point on
+the scatterplots marks a pair of AUROC results (for two scores denoted on the x and y
+axes) for an in­domain/OOD dataset pair. The specific setup (dataset pair) of the points
+can be read in the legend only for natural datasets (as those are somewhat more inter­
+esting) while for grey­scale the distinction is made between continuous and binarized. A
+marker above the dashed line means that the score on the y­axis performed better in the
+given setup. The stars correspond to classifying between an in­domain dataset and all
+other OOD datasets from the same category at once.
+64
+Analyzing information flow in hierarchical Variational Autoencoders
+==PAGE:73==
+Analyzing information flow in hierarchical Variational Autoencoders
+65
+==PAGE:74==
+Technical
+University of
+Denmark
+Richard Petersens Plads, Building 324
+2800 Kgs. Lyngby
+Tlf. +45 45 25 30 31
+www.compute.dtu.dk

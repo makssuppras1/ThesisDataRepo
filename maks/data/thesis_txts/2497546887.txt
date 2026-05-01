@@ -1,0 +1,2517 @@
+==PAGE:1==
+Master’s thesis
+Estimation of soil moisture and
+vegetation parameters from Sentinel data
+Stefan Krebs Lange-Willman
+s140447
+February 2020
+Supervisors:
+Henning Skriver
+Inge Sandholt
+==PAGE:2==
+Abstract
+The present project presents the technical implementation, testing and validation of a soil
+moisture retrieval algorithm in Python using C-band Sentinel-1 data at high incidence
+angle (∼42°). The retrieval algorithm is based on the alpha approximation. The alpha
+approximation utilizes the dense temporal coverage of the Sentinel-1 mission, assuming
+that changes in backscatter between subsequent acquisitions are only due to variations
+in soil moisture, such that vegetation and roughness can be neglected. The area used for
+testing the algorithm was chosen to be the region surrounding the Foulum test center for
+agricultural studies in Denmark, due to the availability of time series from 2018 of in situ
+soil moisture measurements to be used for validation. Masking of too densely vegetated
+areas have been performed using the cross-polarized component of the SAR backscatter,
+which have been validated using NDVI maps.
+Auxiliary data, including land cover maps and parcel borders enable the computation
+of backscatter ﬁeld means, signiﬁcantly reducing the impact of speckle noise and thus
+decreasing uncertainty of the estimated soil moisture. Consequently, the results have ﬁeld
+scale resolution (i.e. ∼0.1 km). The permittivity to soil moisture inversion is performed
+using the Hallikainen polynomial model, where a soil texture map provide the information
+necessary to obtain precise results.
+Further work will aim toward applying a change detection algorithm in order to detect
+sudden temporal changes in vegetation and surface roughness, as the alpha approximation
+is inherently sensitive to such sudden changes.
+i
+==PAGE:3==
+Preface
+This Master’s thesis was prepared at the National Space Institute at the Technical Uni-
+versity of Denmark in partial fulﬁllment of the requirements for acquiring a MSc. Eng.
+degree in Earth and Space Physics and Engineering.
+ii
+==PAGE:4==
+Acknowledgements
+I would like to thank my supervisors Henning Skriver and Inge Sandholt for giving me
+useful advice and for helping me maintain a vision of the end goal, as I have a strong
+tendency to get lost in the details. I also thank Kenan Vilic of Sandholt Aps, for providing
+and helping me gain access to the NDVI and other data sets.
+On a less serious note, I thank Torbjørn Skjerne Aggernæs for letting me beat him
+in chess when I needed to let oﬀsome steam. I also thank Rasmus Brethvad Larsen for
+reminding that there is always time to grab a beer.
+Lastly, I would like to thank my beloved girlfriend Lise Grüner Hanson for helping
+me keep my spirits high and cheering me up in desperate situations, as well as for proof
+reading this thesis.
+iii
+==PAGE:5==
+Contents
+Abstract
+i
+Preface
+ii
+Acknowledgements
+iii
+1
+Introduction
+1
+1.1
+Synthetic Aperture Radar . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+1.2
+Soil moisture
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+1.3
+Outline for the thesis . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2
+Theory
+5
+2.1
+Alpha approximation method . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+2.1.1
+Estimation of permittivity . . . . . . . . . . . . . . . . . . . . . . .
+8
+2.1.2
+Dielectric Mixing Model . . . . . . . . . . . . . . . . . . . . . . . .
+9
+2.2
+Minimum Error Thresholding . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+2.3
+Multichannel ﬁltering . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+3
+Data description
+14
+3.1
+Sentinel-1 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+3.2
+Sentinel-2: NDVI . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+16
+3.3
+Land cover and parcel borders . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+3.4
+Soil texture . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+4
+Method
+20
+4.1
+Initialization and ﬁltering
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+4.2
+Masking (Thresholding) . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+4.3
+Alpha approximation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+24
+4.4
+Fresnel inversion
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+4.5
+Soil moisture estimation . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+5
+Results and discussion
+28
+5.1
+Validation from synthetic data and sensitivity to αmin . . . . . . . . . . .
+28
+5.2
+Soil moisture and sensitivity to N . . . . . . . . . . . . . . . . . . . . . . .
+31
+iv
+==PAGE:6==
+CONTENTS
+v
+5.3
+Threshold masks using γV H . . . . . . . . . . . . . . . . . . . . . . . . . .
+34
+5.3.1
+NDVI and γV H . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+5.4
+Uncertainty . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+38
+5.5
+Invalid assumptions . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+38
+6
+Future work
+44
+7
+Conclusion
+46
+Bibliography
+46
+Appendices
+49
+A
+50
+A.1 Quartic solution . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+50
+A.2 Alternative solution to the VV Fresnel equation . . . . . . . . . . . . . . .
+50
+B
+52
+B.1
+Supplementary ﬁgures for section 5.3 . . . . . . . . . . . . . . . . . . . . .
+52
+C
+53
+C.1 Supplementary ﬁgures for section 5.5 . . . . . . . . . . . . . . . . . . . . .
+53
+D
+56
+D.1 Functions for inversion of the Fresnel equation . . . . . . . . . . . . . . . .
+56
+D.2 Functions for inversion of the DMM
+. . . . . . . . . . . . . . . . . . . . .
+63
+D.3 Functions for multichannel ﬁltering . . . . . . . . . . . . . . . . . . . . . .
+65
+==PAGE:7==
+List of Figures
+2.1
+Polynomial ﬁts used for soil moisture inversion. . . . . . . . . . . . . . . .
+10
+2.2
+Test image and histogram for VH thresholding. . . . . . . . . . . . . . . .
+11
+3.1
+Aerial photograph of the area of interest. . . . . . . . . . . . . . . . . . . .
+14
+3.2
+Examples of the Sentinel-1 images used. . . . . . . . . . . . . . . . . . . .
+15
+3.3
+NDVI and cloud mask . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+16
+3.4
+Land cover in the Foulum area. . . . . . . . . . . . . . . . . . . . . . . . .
+17
+3.5
+Parcel borders in the Foulum area
+. . . . . . . . . . . . . . . . . . . . . .
+18
+3.6
+Soil texture over the Foulum area of interest.
+. . . . . . . . . . . . . . . .
+19
+4.1
+Example of MA and multichannel ﬁlters . . . . . . . . . . . . . . . . . . .
+21
+4.2
+Histogram for the AOI at doy 162. . . . . . . . . . . . . . . . . . . . . . .
+22
+4.3
+Rye and rape histograms.
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+23
+4.4
+Temporal evolution of winter rape and winter rye VH backscatter.
+. . . .
+23
+4.5
+Masks of applying a constant threshold of -14dB
+. . . . . . . . . . . . . .
+24
+4.6
+αV V at doy 198.
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+4.7
+εs at doy 198. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+4.8
+Example of the retrieved soil moisture maps.
+. . . . . . . . . . . . . . . .
+27
+5.1
+Simulated soil moisture. . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+29
+5.2
+Simulated backscatter in dB.
+. . . . . . . . . . . . . . . . . . . . . . . . .
+30
+5.3
+Mean soil moisture mv for all spring barley ﬁelds. . . . . . . . . . . . . . .
+32
+5.4
+Mean soil moisture mv for all winter wheat ﬁelds. . . . . . . . . . . . . . .
+32
+5.5
+Mean soil moisture mv for all corn ﬁelds. . . . . . . . . . . . . . . . . . . .
+33
+5.6
+Retrieved SM for doy 78 (19 March). . . . . . . . . . . . . . . . . . . . . .
+33
+5.7
+Side-by-side comparison of the Type 0 mask and the constant threshold
+mask.
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+34
+5.8
+VH masks for diﬀerent days. . . . . . . . . . . . . . . . . . . . . . . . . . .
+35
+5.9
+NDVI histograms.
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+5.10 Temporal evolution of NDVI and VH backscatter over a single rape ﬁeld. .
+37
+5.11 2D histogram of γvh and NDVI. . . . . . . . . . . . . . . . . . . . . . . . .
+37
+5.12 Example of uncertainty estimation strategy for N = 4. . . . . . . . . . . .
+38
+5.13 Standard deviation maps in %.
+. . . . . . . . . . . . . . . . . . . . . . . .
+39
+vi
+==PAGE:8==
+LIST OF FIGURES
+vii
+5.14 Retrieved soil moisture for four days. . . . . . . . . . . . . . . . . . . . . .
+41
+5.15 Retrieved soil moisture standard deviation for four days
+. . . . . . . . . .
+42
+5.16 Rain and mean soil moisture after masking. . . . . . . . . . . . . . . . . .
+43
+B.1
+2D histogram, showing NDVI against VH backscatter. . . . . . . . . . . .
+52
+C.1 Retrieved soil moisture for four days. . . . . . . . . . . . . . . . . . . . . .
+54
+C.2 Retrieved soil moisture standard deviation for four days. . . . . . . . . . .
+55
+==PAGE:9==
+List of Tables
+2.1
+Polynomial coeﬃcients relating soil moisture and the real part of the per-
+mittivity, as experimentally determined by [17]. . . . . . . . . . . . . . . .
+10
+3.1
+Crop types coverage based on the map in ﬁgure 3.4.
+. . . . . . . . . . . .
+18
+3.2
+Danish soil texture classiﬁcation . . . . . . . . . . . . . . . . . . . . . . . .
+19
+4.1
+Soil texture percentages used in the DMM model. . . . . . . . . . . . . . .
+27
+5.1
+Rmse between simulated and retrieved SM.
+. . . . . . . . . . . . . . . . .
+31
+viii
+==PAGE:10==
+Chapter 1
+Introduction
+This project will be concerned with the estimation of soil moisture over agricultural land,
+using Polarimetric SAR C-band images with dense temporal coverage, i.e. using Sentinel-
+1 data. This will be part of the MOIST (Managing and Optimizing Irrigation using
+Satellite Tools) project in an eﬀort to optimize irrigation strategies through estimation
+of crop water stress and evapotranspiration, for which soil moisture is a crucial factor.
+Many methods for estimating surface soil moisture (SSM) exist, hence the ﬁrst step
+of the project will be to evaluate current SSM retrieval algorithms applied to vegetated
+(agricultural) areas and to choose an appropriate method.
+In particular, the alpha approximation method proposed by [1] shows promise as it
+has the capability to decouple the eﬀect of soil moisture from surface roughness and
+vegetation by considering the ratio of co-polarized backscatter coeﬃcients from SAR ac-
+quisitions made on consecutive days. This assumes that surface roughness and vegetation
+eﬀects change much slower than soil moisture, such that they can be assumed invariant
+between consecutive acquisitions. As with many other SSM retrieval methods, the alpha
+approximation also assumes that the backscatter is dominated by the attenuated surface
+scattering in the Water Cloud Model (WCM).
+The latter assumption is tested in the later work by [2] who develops a simple thresh-
+olding algorithm to classify farmlands as dominated by either volume or surface scattering
+using the cross-polarized backscatter component.
+Therefore, in this project the thresholding method by [2] is implemented along with
+the alpha approximation method. An important aspect is the validation of the classiﬁca-
+tion performed by the thresholding algorithm. Ways to do have been investigated, where
+the initial idea was to use optical remote sensing images and its derivatives e.g. NDVI
+to compare with.
+In the following sections, some of the basic concepts related to and important for soil
+moisture retrieval from space-borne platforms are introduced. Afterwards an outline for
+the structure of the report is given.
+1
+==PAGE:11==
+CHAPTER 1. INTRODUCTION
+2
+1.1
+Synthetic Aperture Radar
+Synthetic Aperture Radar is an imaging radar (RAdio Detection And Ranging) technique
+that builds upon the concepts of the Side-Looking Airborne Radar (SLAR). In a SLAR
+system, the radar antenna is mounted on an airborne moving platform, where it transmits
+radar pulses, and records the returned radar echoes (backscatter). The antenna direction
+is called the range direction, while the perpendicular direction (direction of the along-
+track movement of the platform) is known as the azimuth direction. In the SLAR system,
+the resolution in the range direction is determined by the bandwidth of the transmitted
+radio signal, while the azimuth resolution is inversely proportional to the diameter of the
+antenna [3], and linearly depends on the range, such that, ρaz = λR/D, where ρaz is the
+azimuth resolution, λ is the wavelength, and R and D are range and aperture diameter
+respectively. Thus, in order to obtain a good azimuth resolution at long ranges, a large
+aperture is necessary, which makes this technique ill-suited for space-borne platforms.
+Since multiple pulses hit the target as the platform moves along-track, these echoes can
+be added, as if they were all recorded by one synthetic aperture. This process, along
+with focussing of the obtained images due to the Doppler shift of the signal, results in a
+theoretical azimuth resolution of ρaz = D/2, and is thus independent of the distance to
+the target [4].
+Along with measuring the intensity and frequency of the received signal, a SAR sys-
+tem can also be used to measure the phase and polarization of the signal. The phase
+can be used in Interferometric SAR (InSAR or SARIn) techniques, to detect ground dis-
+placement (e.g. after earthquakes, land subsidence in coastal cities) or to make precise
+elevation maps. The polarization is measured in Polarimetric SAR (PolSAR) systems,
+where the antenna transmits either vertical or horizontal polarization, and records the
+received vertical or horizontal polarization. Thus, four polarization combinations are
+possible, i.e. VV, HH, VH or VH, where the ﬁrst letter denotes the transmitted polariza-
+tion and the last letter denotes the received polarization. When a SAR system has the
+capability to measure two polarizations simultaneously (usually VV+VH or HH+HV) it
+is referred to as dual polarization, while the system is called fully polarimetric if all four
+conﬁgurations are available. PolSAR is an important way to classify land areas, since the
+signal polarization carry information about the physical and electromagnetic properties
+of the ground.
+In particular, soil moisture has a large eﬀect on the relative permittivity of the surface.
+If other eﬀects on the signal polarization can be modelled, it is therefore possible to
+estimate soil moisture from PolSAR images.
+1.2
+Soil moisture
+Many methods for soil moisture retrieval exist, and they can in general be divided into
+methods for optical, thermal infrared [5], [6], [7] and microwave passive and active sensors
+[5], [6], [7], [8].
+The following will focus on active microwave soil moisture retrieval
+techniques based on [8].
+==PAGE:12==
+CHAPTER 1. INTRODUCTION
+3
+Within active microwave remote sensing a wide number of soil moisture retrieval
+methods exist. Common to them all is, that they all seek to estimate the soil dielec-
+tric constant εs, from which the soil moisture can be inverted using a class of models
+known as Dielectric Mixing Models (DMM). The active methods can be further divided
+into physical, empirical, semi-empirical and change detection approaches. The physical
+models model the backscatter based on the physical interaction between the SAR signal
+and the ground target, and can also sometimes synonymously be referred to as Radiative
+Transfer (RT) models. Examples of physical models are the well-known Small Pertur-
+bation Model (SPM), the Small Slope Approximation (SSA) and the Integral Equation
+Model (IEM). These models generally use as input, parameters characterizing the surface
+(roughness, correlation length, etc.), frequency, incidence angle, and of course the dielec-
+tric constant, to model the SAR backscatter. They are also, in general, only applicable
+to bare soil, and thus do not account for the contribution from vegetation.
+Semi-empirical models seek to alleviate some of the weaknesses of the physical models
+by applying calibration parameters, mainly to account for surface roughness conditions,
+which can not always be known, if the model is to be applied over a large area.
+Empirical models, reject the basis in physical understanding altogether, and describe
+a direct functional relation between backscatter and soil moisture. It is noted in [8], that
+most empirical models prescribe a linear relationship, while some includes an exponential
+term. Though they may describe local conditions very well due to extensive calibration,
+they do so at the expense of having to be calibrated at every new location, requiring
+suiting in situ observations. Another type of empirical model may be the model utilizing
+neural networks (machine learning) to establish a backscatter - to - SM relation, such as
+the model used in [9]. While this type of model may be eﬀective, the lack of foundation
+in physical processes, and the black box nature of neural networks makes it intuitively
+unattractive.
+The last class of models is the change detection approach, which seek to utilize the
+multi-temporal nature of modern space-borne SAR systems. Some of the most common
+change detection algorithms are the delta-index method [10], the alpha approximation
+method [1], and the TU Wien method [11]. Common to these methods is that they
+seek to factor out the inﬂuence of roughness and vegetation by utilizing the consecutive
+acquisitions. The alpha approximation is attractive, due to its ease of implementation
+and that it only has a singe calibration parameter, and thus it was chosen for this project.
+1.3
+Outline for the thesis
+This section gives a summary of the chapters that can be found in this thesis.
+Chapter 2 describes the theoretical background for the techniques and models that
+have been used in this thesis. The reasoning for the alpha approximation and threshold-
+ing algorithm that classiﬁes pixels into volume and attenuated surface scattering classes
+is given.
+Chapter 3 describes the area that has been analysed as well the data that
+has been used in the report. Next, in chapter 4, the speciﬁcs of the algorithm imple-
+mentation in Python are explained. Afterwards, in chapter 5, the results are presented
+==PAGE:13==
+CHAPTER 1. INTRODUCTION
+4
+and discussed. The results focus on characterizing the inﬂuence of the two important
+algorithm parameters αmin and N which are introduced in chapter 2. The results also
+evaluate the performance of the thresholding method that was used, as well as present a
+method for quantifying the uncertainty of the retrieved soil moisture maps. Suggestions
+for continued work and improvements for this thesis is then given in chapter 6. Finally,
+concluding remarks are given in chapter 7.
+==PAGE:14==
+Chapter 2
+Theory
+This chapter describes the theoretical background for the algorithms and techniques
+that have been implemented during the course of this project. Most prominently, the
+reasoning behind the alpha approximation method and its underlying assumptions is
+explained in detail.
+2.1
+Alpha approximation method
+The alpha approximation method is a method for soil moisture retrieval ﬁrst developed by
+[1] which assumes that in a suﬃciently short time span, changes in surface roughness and
+vegetation canopy structure are small, such that changes in backscatter are dominated
+by variations in soil moisture.
+Using the Water Cloud Model (WCM) [6] [7], the radar backscatter can be described
+as a linear combination of three terms:
+σ0 ≈τ 2σsurf + σvol + σsv
+(2.1)
+Where the ﬁrst two terms are the attenuated surface, σsurf (with τ 2 accounting for
+the two-way attenuation through the vegetation canopy) and volume scattering, σvol,
+mechanisms respectively, and the third term, σsv accounts for higher order interactions,
+e.g. multiple scattering events from the vegetation. The alpha approximation assumes
+conditions such that the Small Perturbation Model (SPM) can be applied [1]. The SPM
+desribes the scattering of an electromagnetic wave at the rough interface between two
+dielectric media, and thus is used to model the surface scattering term in equation 2.1:
+σpp,surf = 4π k4 h2 cos4 ϑ|αpp|2 W(2k sin ϑ, 0)
+(2.2)
+with W(kx, ky) being the surface roughness spectrum, which for a Gaussian surface au-
+tocorrelation is given as:
+Wgauss(kx, ky) = l2
+π exp
+ 
+−(k2
+x + k2
+y)l2
+4
+!
+(2.3)
+5
+==PAGE:15==
+CHAPTER 2. THEORY
+6
+In equations 2.2 and 2.3, subscript pp denotes the co-polarized conﬁguration (pp =
+HH or V V ), ϑ is the incidence angle, k is the wave number, h is the root mean squared
+(rms) surface height and l is the correlation length. |αpp|2 is the modiﬁed Fresnel coeﬃ-
+cient that accounts for the response to the dielectric properties εs of the soil. The Fresnel
+coeﬃcients take the forms given by:
+|αHH(εs, ϑ)| =
+
+εs −1
+(cos ϑ +
+p
+εs −sin2 ϑ)2
+
+|αV V (εs, ϑ)| =
+
+(εs −1)(sin2 ϑ −εs(1 + sin2 ϑ))
+(εs cos ϑ +
+p
+εs −sin2 ϑ)2
+
+(2.4)
+Note, that the surface scattering term in equations 2.1 and 2.2 is proportional to |αpp|2,
+and we can thus write σsurf as the product of the attenuation factor, a surface roughness
+factor and the reﬂection coeﬃcient:
+σsurf = τ 2 F(· · · ) |αpp|2
+(2.5)
+where F(· · · ) accounts for the surface roughness.
+The next assumption is then, that the two latter terms in equation 2.1 can be ne-
+glected, such that the measured backscatter can be considered to be dominated by the
+surface interaction. This is certainly true for bare soil, but typically also for cereal crops
+and grasses [6], [7], [12]. A justiﬁcation for neglecting the volume scattering term will be
+given in section 2.2, while the higher order term σsv is typically neglected in the literature
+[6], [7].
+The core assumption in the alpha approximation is, that changes in surface roughness
+and vegetation are comparably small between consecutive acquisitions on days i and i+1
+(i.e. the vegetation attenuation τ 2 and soil roughness F are constant in the considered
+time interval). The alpha approximation states that
+σ(i+1)
+0
+σ(i)
+0
+= τ 2 F |α(i+1)
+pp
+|2
+τ 2 F |α(i)
+pp|2
+≈|α(i+1)
+pp
+|2
+|α(i)
+pp|2
+(2.6)
+Thus from consecutive measurements of either HH or VV backscatter the correspond-
+ing equation can be written:
+|α(i+1)
+pp
+| −SSi+1,i · |α(i)
+pp| = 0
+(2.7)
+where the denotation SSi+1,i =
+q
+σ(i+1)
+0
+/σ(i)
+0
+has been used. For a given period including
+N acquisitions where no change in roughness and vegetation has been assumed, the
+corresponding set of N −1 equation can be constructed, in order to estimate |α(i)
+pp| for
+i ∈[1, N]. One could also think to include the equations for non-consecutive acquisitions,
+e.g. if the no change assumption has been made for N = 3 acquisitions, then the system
+==PAGE:16==
+CHAPTER 2. THEORY
+7
+would include the equations:
+|α(2)
+pp | −SS21 · |α(1)
+pp | = 0
+|α(3)
+pp | −SS32 · |α(2)
+pp | = 0
+|α(3)
+pp | −SS31 · |α(1)
+pp | = 0
+(2.8)
+However, this system of equations is not linearly independent, since the ﬁrst two equations
+imply the last:
+|α(2)
+pp | = SS21 · |α(1)
+pp |
+⇓
+|α(3)
+pp | −SS32 · (SS21 · |α(1)
+pp |) = |α(3)
+pp | −SS31 · |α(1)
+pp | = 0
+(2.9)
+since SS32·SS21 =
+q
+σ(3)
+0 /σ(2)
+0 ·
+q
+σ(2)
+0 /σ(1)
+0
+=
+q
+σ(3)
+0 /σ(1)
+0
+= SS31. Thus the last equation
+in 2.8 is redundant, as would be any equation included to account for no change between
+non-consecutive acquisitions. Intuitively, of course no change between days 1 and 2 and
+between days 2 and 3 implies no change between days 1 and 3.
+The linearly independent system of equations that arise is consequently underdeter-
+mined, and thus inﬁnite solutions exist with one degree of freedom, among those the
+trivial |α(i)
+pp| = 0 for all i. Therefore the alpha values must be constrained by lower and
+upper bounds (αmin and αmax) for an appropriate solution to be found. The solution
+could be found through deﬁning the matrix form Ax = b of the system in equation 2.7,
+where:
+A =
+
+
+−SS21
+1
+0
+· · ·
+0
+0
+0
+−SS32
+1
+· · ·
+0
+0
+...
+...
+0
+0
+0
+· · ·
+−SSN,N−1
+1
+
+
+(2.10)
+where A ∈RN−1×N, x = [ α1, α2, . . . αN ]T ∈RN×1 and b is the null vector ∈RN−1×1.
+This underdetermined system can be solved through a Bounded Variable Least Squares
+(BVLS) approach [13]. This is a constrained optimization problem that requires the use
+of a suitably chosen search algorithm. Initially, the function lsq_linear of the scipy
+module for Python was used.
+This function uses as default a trust region algorithm
+to solve a linear LS problem with bounds on the variables. However, due to the large
+number of variables reaching the order of 108 - 109, this approach turned out to be too
+slow to satisfy the needs of this project. Therefore, no further eﬀort was made to apply
+optimization algorithms for the purpose of estimating the alpha coeﬃcients.
+Instead, the approach of [14] was adopted, who show that the Maximum Likelihood
+(ML) solution can be found by setting the last parameter αN = λ (though it could
+really be any of the parameters). The ML solution is then found to be (omitting the pp
+subscript):
+ˆα = λ · [ ˆS1,N ˆS2,N, . . . , ˆSN,N]
+(2.11)
+==PAGE:17==
+CHAPTER 2. THEORY
+8
+where
+λ = max
+i∈[1,N]
+ 
+αmin
+ˆSi,N
+!
+(2.12)
+and
+ˆSi,N =
+
+
+N−1
+Y
+j=i
+SSj+1,j
+
+
+−1
+except for i = N where ˆSN,N = 1
+(2.13)
+Note, that the ML solution does not make use of an upper bound αmax, but only employs
+the lower bound. The above equations can be simpliﬁed, by expanding the expression
+for ˆSi,N, and recognizing that the numerator of one term cancels with the denominator
+of the next term:
+ˆSi,N =
+
+
+s
+σ(i+1)
+σ(i)
+·
+s
+σ(i+2)
+σ(i+1) · · ·
+s
+σ(N)
+σ(N−1)
+
+
+−1
+=
+
+
+s
+σ(N)
+σ(i)
+
+
+−1
+=
+s
+σ(i)
+σ(N)
+(2.14)
+Inserting this into equation 2.11, we obtain
+ˆαi = αmin
+p
+σ(i) max
+i∈[1,N]
+ r
+1
+σ(i)
+!
+(2.15)
+This means intuitively, that the lowest observed σ0 in the time series consisting of N
+observations, will be assigned a value equal to αmin, and the remaining observations will
+be assigned an α equal to the ratio
+p
+σi/min(σ) and scaled by αmin.
+This raises the task of determining the value for αmin, to be used. The choice of
+this parameter will have great inﬂuence on the solution, as it can be seen directly from
+equation 2.15, that the solution is proportional to αmin. It has been suggested by [15] to
+use operational, low resolution (∼40km) soil moisture products retrieved from missions
+such as ESA’s SMOS or NASA’s SMAP, in order to estimate αmin. Later, in chaper 4
+it will be elaborated how to choose these bounds for the α values. Furthermore, since
+the lowest backscatter value in the time series sets the scale of all the alpha values, it
+means that this approach is sensitive to outliers in the data set. Thus, thorough masking
+of point scatterers such as houses etc., as well as speckle ﬁltering becomes all the more
+important.
+2.1.1
+Estimation of permittivity
+After the α coeﬃcients have been estimated, the soil relative permittivity εs can be
+determined from equations 2.4, given knowledge of the incidence angle ϑ. In the HH
+polarization case, the solution can be derived analytically as
+εs = 1 + 4|αHH| cos2 ϑ
+(1 −|αHH|2)
+(2.16)
+==PAGE:18==
+CHAPTER 2. THEORY
+9
+However, in the VV case, the solution is not quite as readily extracted. Remembering
+the Fresnel equation for the VV polarization:
+|αV V (εs, ϑ)| =
+
+(εs −1)(sin2 ϑ −εs(1 + sin2 ϑ))
+(εs cos ϑ +
+p
+εs −sin2 ϑ)2
+
+(2.17)
+Naively, one could solve it as a non-linear optimization problem, however that would be
+very slow since all is performed on a pixel basis as already determined from the alpha
+estimation, which was even a linear LS problem.
+Under the assumption that εs ∈R and εs ≥1 and ϑ ∈]0, π/2[, then the denominator
+in equation 2.17 is always real and positive, and the numerator is always real and negative.
+Thus we can drop the absolute value operation:
+|αV V (εs, ϑ)| = −(εs −1)(sin2 ϑ −εs(1 + sin2 ϑ))
+(εs cos ϑ +
+p
+εs −sin2 ϑ)2
+(2.18)
+[Balenzano, private comm.] suggests, that a solution be found by changing the variable
+to y =
+p
+εs −sin2 ϑ (such that εs = y2+sin2 ϑ) and rearranging, to obtain from equation
+2.18, a quartic equation in y:
+y4 [ |αV V | cos2 ϑ −sin2 ϑ −1 ] +
+y3 [ 2|αV V | cos ϑ ] +
+y2 [ |αV V |(1 + 2 sin2 ϑ cos2 ϑ) −2 sin4 ϑ + 1 ] +
+y1 [ 2|αV V | sin2 ϑ cos ϑ ] +
+y0 [ |αV V | sin4 ϑ cos2 ϑ + sin4 ϑ −sin6 ϑ] = 0
+(2.19)
+The quartic equation has a well known closed form solution, and thus it can readily be
+solved to obtain the 4 solutions. The formula for the solution can be seen in appendix
+A. Of those 4, only the real solutions are considered. Furthermore, the solutions of y
+must also ensure that 1 < εs < 80, i.e.
+it would not be possible to have a relative
+permittivity less than 1 (vacuum) or greater than 80 (pure water at room temperature).
+These value constraints for the permittivity are conservative, and a more realistic range
+of soil permittivity would likely be from around 4 to 35 [16]. In the end, this diﬀerence
+does not matter, as the pixels are masked based on their soil moistures instead of based
+on permittivity.
+Subject to the constraints above, it is expected that only one solution is valid. Oth-
+erwise, if more than one or perhaps no solutions can be found, the pixel value in the
+resulting εs image will be masked (set to NaN) in the resulting data array.
+2.1.2
+Dielectric Mixing Model
+Once the permittivities have been estimated, one can use a number of diﬀerent models,
+collectively referred to as Dielectric Mixing Models (DMM), which relate soil properties
+to dielectric properties, to obtain the soil moisture. In [17], a polynomial expression with
+==PAGE:19==
+CHAPTER 2. THEORY
+10
+emipirically determined coeﬃcients is ﬁtted to describe the dielectric constant (both real
+and imaginary part) as a function of soil moisture and soil composition:
+εs = (a0 + a1 S + a2 C) + (b0 + b1 S + b2 C) mv + (c0 + c1 S + c2 C) m2
+v
+(2.20)
+where S and C are soil sand and clay content (in %), respectively, and ai, bi, ci, i = 0, 1, 2
+are the empirically determined coeﬃcients, which have been separately determined for
+both the real and imaginary part of εs.
+mv is the volumetric soil moisture content
+[cm3/cm3]. In [17], the coeﬃcients for a range of diﬀerent radio frequencies are deter-
+mined. Of the frequencies for which coeﬃcients were determined by [17] are 4 GHz and
+6 GHz closest to the 5.405 GHz used by Sentinel-1. These can be seen in table 2.1.
+Freq.
+a0
+a1
+a2
+b0
+b1
+b2
+c0
+c1
+c2
+4 GHz
+2.927
+-0.012
+-0.001
+5.505
+0.371
+0.062
+114.826
+-0.389
+-0.547
+6 GHz
+1.993
+0.002
+0.015
+38.086
+-0.176
+-0.633
+10.720
+1.256
+1.522
+Table 2.1: Polynomial coeﬃcients relating soil moisture and the real part of the
+permittivity, as experimentally determined by [17].
+Figure 2.1: Polynomial ﬁts by [17], used for soil moisture inversion, for two diﬀerent soil
+classes (JB-1 is sand rich, and JB-7 is clay rich.)
+Figure 2.1, shows the graphs relating soil moisture and permittivity using coeﬃcients
+for the two frequencies in table 2.1. As seen, for a given soil type, the two frequencies are
+very close to each other. Thus the uncertainty related to correct determination of soil
+texture is higher. As mentioned, Sentinel-1 uses 5.405 GHz, and therefore the coeﬃcients
+for 6 GHz as determined by [17] have been used to estimate the soil moisture.
+==PAGE:20==
+CHAPTER 2. THEORY
+11
+2.2
+Minimum Error Thresholding
+The assumption mentioned in conjunction with equation 2.1 states that the volume scat-
+tering term can be neglected due to a small inﬂuence from vegetation. This assumption
+is not always valid, and thus a method for determining when it is valid is necessary.
+This can be done by using a thresholding algorithm applied to the VH backscatter, as
+described by [2].
+[2] base their method on the works of [18] and [19], who develop a technique that they
+dub Minimum Error Thresholding, in which an image consisting of pixels belonging to
+two diﬀerent probability density functions (pdf’s), are categorized. An example of this is
+seen in ﬁgure 2.2, where the superposition of two Gaussian populations of pixels (orange
+and green) give rise to a bimodal distribution. The optimal threshold separating the two
+Figure 2.2: Left: image with pixels drawn from two pdf’s as seen in right: observed
+histogram along with the individual pdf’s of the circle and surroundings.
+classes of pixels will be found where the two normal distributions intersect [18]:
+N(x|µ, σ2) =
+1
+√
+2πσ exp
+
+−(x −µ)2
+2σ2
+
+(2.21)
+Equating the two pdf’s:
+1
+√
+2πσu
+exp
+
+−(x −µu)2
+2σ2u
+
+· Pu =
+1
+√
+2πσl
+exp
+
+−(x −µl)2
+2σ2
+l
+
+· Pl
+⇔
+−2 ln σu −(x −µu)2
+σ2u
++ 2 ln Pu = −2 ln σl −(x −µl)2
+σ2
+l
++ 2 ln Pl
+(2.22)
+where Pu and Pl are the a priori probabilites of the pdf’s related to the population size,
+i.e. the fraction of pixels in each class. Rewriting equation 2.22 as a quadratic equation
+==PAGE:21==
+CHAPTER 2. THEORY
+12
+in x:
+x2 ·
+
+−1
+σ2u
++ 1
+σ2
+l
+
++ x · 2
+µu
+σ2u
+−µl
+σ2
+l
+
+−µ2
+u
+σ2u
+−µ2
+l
+σ2
+l
++ 2 ln
+ σl
+σu
+
++ 2 ln
+Pu
+Pl
+
+= 0
+(2.23)
+The solution to equation 2.23 is trivial, and so, the intersection between the two popu-
+lations can be found.
+However, the underlying pdf’s are not necessarily known and one can thus not solve
+the problem directly. Therefore, [18] suggest that by starting at an initial guessed thresh-
+old τ0, the image can be segmented iteratively, where, at each iteration the means and
+variances of the two pixel classes are re-estimated and a new threshold is found. [19]
+report convergence within 20 iterations, though sometimes the algorithm will converge
+towards a threshold outside the intersection i.e. either towards the left or right in ﬁgure
+2.2. If this happens, the algorithm will have to be restarted with a new initial threshold.
+As mentioned, the above algorithm is applied to the VH backscatter. The rationale
+behind this, is due to the observation, that vegetation tends to depolarize the signal.
+Thus, the backscattered signal is expected to contain both horizontal and vertical com-
+ponenets, regardless of the transmitted polarization. Contrarily, backscatter from bare
+surfaces, is not depolarized to the same extent [2]. Hence, the backscatter from a bare
+or sparsely vegetated surface is expected to be dominated by the co-polarized compo-
+nent of the signal, while the backscatter from densely vegetated areas is expected to be
+dominated by the cross-polarized component. Using this approach, [2], is then able to
+adaptively determine a threshold for the VH component, and then classify areas of VH
+above that threshold as dominated by volume scattering and vice versa.
+From knowledge of the phenological stages and temporal evolution of the backscatter
+from various types of crops, [2] is furthermore able to determine a constant threshold
+of −14 dB, that well separates crops dominated by surface or volume scattering. This
+constant threshold can be used in the cases where a bimodal distribution is not present
+in the data, and thus an adaptive thresholding method would not be applicable.
+2.3
+Multichannel ﬁltering
+As with all SAR data, speckle noise is present in the data. Thus, before processing the
+data, it is sought to reduce the speckle noise and consequently increasing the equivalent
+number of looks (ENL). This can be done by utilizing the multi-temporal nature of
+Sentinel-1 data, due to its short repetition time of 6 days. [20] develops a linear ﬁlter
+that minimizes the local variance for each pixel using co-registered images. The following
+section follows [20], and describes the reasoning behind the speckle reduction ﬁlter that
+has been implemented in this project. The linear ﬁlter satisﬁes
+Jk =
+M
+X
+i=1
+Aki Ii
+(2.24)
+==PAGE:22==
+CHAPTER 2. THEORY
+13
+for k ∈[1, M] and where M is the number of images used for ﬁltering, Jk is the k’th
+ﬁltered image and Ii is the i’th original unﬁltered image, and Ak are the ﬁlter coeﬃcients
+applied to images i = 1, 2, 3... in order to obtain image k. The operation in equation
+2.24 is performed for a single position in the image, i.e. it is pixel-based. The local
+means of the ﬁltered images should be the same as the local mean in the original images:
+⟨Jk⟩= ⟨Ik⟩≡σk (where ⟨·⟩denotes local mean), i.e. the ﬁlter should be unbiased and
+not alter the local mean. Note that σ denotes local mean, and not standard deviation or
+backscatter as it usually does. Expressed formally, this means
+M
+X
+i=1
+Aki σi = σk
+(2.25)
+The variance of the ﬁltered images Jk is then given by:
+Vk =
+X
+i
+X
+j
+= Aki Akj Cij
+(2.26)
+where Cij = ⟨(Ii −σi)(Ij −σj)⟩is the covariance matrix of the input images.
+By
+minimizing the variance given by equation 2.26 subject to the equality constraint in
+equation 2.25, [20] obtain the simple solution:
+Jk =
+σk
+P
+i Li
+M
+X
+i=1
+Li
+σi
+Ii
+(2.27)
+which is valid when considering uncorrelated images. Here, Li is the number of looks of
+the i’th image. When the images furthermore have the same ENL, then we can further
+simplify to obtain:
+Jk = σk
+M
+M
+X
+i=1
+Ii
+σi
+(2.28)
+The assumptions made to form the last expression can be considered valid for our ap-
+plication, since all images are taken from Sentinel-1 and thus have the same number of
+looks. The correlation between images is assumed negligible due to the 6 day revisit
+period being long enough. However, even in the presence of correlation between images,
+[20] argues that equation 2.28 can still be used, but it will lead to a less than optimal re-
+duction in speckle noise (and corresponding increase in ENL). Due to the diﬃculty/time
+consumption, of estimating the covariance matrix and ease of implementation of the ﬁl-
+ter in equation 2.28, this method is chosen. The performance of the ﬁlter is quantiﬁed
+in terms of the Equivalent Number of Looks, the estimation of which is performed by
+selecting a uniform area and estimating the mean and variance of that area.
+ENL = M2
+V
+(2.29)
+==PAGE:23==
+Chapter 3
+Data description
+This chapter describes the diﬀerent types of data that have been used in the project. The
+area of interest (AOI) for this study, was chosen to be the region surrounding the Foulum
+National Center for Food and Agriculture, due to the availability of time series of in situ
+soil moisture measurements. The primary type of data is SAR images from the Sentinel-1
+satellites, which have been cropped to cover the AOI and thus span 16 × 20 km2. An
+aerial photo of the region can be seen in ﬁgure 3.1. In the south west corner of the AOI
+Figure 3.1: Aerial photograph of the area of interest as outlined by the red box. The
+yellow star marks the test ﬁelds from where in situ measurements are available, and has
+coordinates 525600 E, 6265200 N in the UTM 32N map projection.
+14
+==PAGE:24==
+CHAPTER 3. DATA DESCRIPTION
+15
+is the city of Viborg and to the east is the lake Tjele Langsø seen. To the north of Tjele
+Langsø is seen the forest Lindum Skov, while to the south is another small, W-shaped
+forest.
+The in situ data span the year of 2018, and consist of measurements made at the yellow
+star in ﬁgure 3.1. However, the analyzed SAR data is from 2017, so the original plan
+to use the in situ data for validation was unfortunately not possible. Instead the in situ
+data was used for an initial estimate of the minimum soil moisture, in the determination
+of αmin.
+3.1
+Sentinel-1
+The EU Copernicus programme hosts a number of Earth Observation (EO) satellites,
+the data from which is freely accessible via the online ”Copernicus Open Access Hub”
+[21].
+The work in this project is based primarily on data from the Sentinel-1 (S-1)
+mission, which is comprised by the two satellites Sentinel-1A and Sentinel-1B (S-1A and
+S-1B) launched on 3 April 2014 and 25 April 2016, respectively [22]. S-1A and S-1B will
+be followed by S-1C and S-1D to ensure the future data ﬂow. S-1 achieves near daily
+coverage over Europe, with 6 days exact repeat period. This makes S-1 data products
+highly suitable for studying the temporal evolution of various phenomena, such as soil
+moisture.
+Figure 3.2: Example of the Sentinel-1 polarimetric data used in the study, taken at day
+of year (doy) 66 (7 March).
+==PAGE:25==
+CHAPTER 3. DATA DESCRIPTION
+16
+The S-1 satellites carry an active C-band SAR system, measuring at a centre fre-
+quency of 5.405 GHz. S-1 has the capability of measuring dual polarizations (VV+VH
+or HH+HV), with the primary acquisition mode over land being the former. Hence, that
+is what has been used in this project. The data set used span the whole year of 2017,
+thus containing 60 images from S-1 orbit 117 over the area of interest, and includes both
+VV and VH polarizations. The images were pre-processed in ENVI and geo-referenced
+to UTM 32N coordinate system and stored in ENVI format [23] with single (32 bit)
+precision. Examples of the backscatter VV and VH images that were used can be seen
+in ﬁgure 3.2. Note, that the co-polarized (VV) backscatter is comparably brighter than
+the cross-polarized backscatter (VH).
+The number of looks after pre-processing is around 9 looks. The size of the images is
+1600 × 2000 pixels with a pixel size of 10 m. The spatial resolution in both directions is
+approximately 20 m.
+3.2
+Sentinel-2: NDVI
+Sentinel-2 (S-2) is another mission in the Sentinel family of EO satellites within the
+Copernicus framework. S-2 provides multi-spectral imagery in the VNIR to SWIR range
+[24] of the Earth from a sun-synchronous orbit, useful for computing derivatives such as
+Leaf Area Index (LAI) and Normalized Diﬀerence Vegetation Index (NDVI). NDVI is
+what has been used in this project, in order to validate a vegetation classiﬁcation scheme,
+based on the VH backscatter. NDVI is computed as
+NDV I = NIR −RED
+NIR + RED
+(3.1)
+Figure 3.3: NDVI (left) displays NDVI values from -1 (red) through 0 (white) to 1
+(green) and cloud mask (right) is a boolean array with cloud free pixels displayed as
+black, and detected clouds are white. The images are both from 19 July 2017.
+Because vegetation generally absorbs red wavelengths, and is strongly reﬂective at
+Near Infrared (NIR) wavelengths, while other natural targets on land reﬂect red and NIR
+==PAGE:26==
+CHAPTER 3. DATA DESCRIPTION
+17
+roughly equally, NDVI will be more positive when vegetation dominates, and around zero
+for other targets. If the target absorbs NIR and reﬂects red light, then NDVI will be
+negative. Hence, NDVI can be used to assess the relative amount of vegetation present.
+The NDVI data set was provided by Sandholt Aps, containing 158 acquisitions cov-
+ering Jylland (or part of Jylland) and spanning the period from 3 January 2017 to 31
+December 2017. These images were supplied with corresponding cloud masks, since the
+optical and infrared images of S-2 are sensitive to cloud cover. Example images of the
+NDVI and cloud mask is seen in ﬁgure 3.3. Notice, that the cloud masking algorithm is
+not perfect, as some clearly visible ﬁelds, roads and lakes are classiﬁed as clouds. Gener-
+ally, cloud free images are scarce, and as a consequence only around 10 images are cloud
+free, and thus useable.
+3.3
+Land cover and parcel borders
+A land cover (classiﬁcation) map as well as parcel information were used in this study,
+both of which are provided by The Danish Agricultural Agency (Landbrugsstyrelsen) [25].
+The land cover map can be seen in ﬁgure 3.4. It can be seen that the most dominating
+crop types are grass, spring barley and corn.
+The precise statistics of the crop types are
+Figure 3.4: Land cover in the Foulum area. Legend: Green: Grass, Red: Spring barley,
+Blue: Corn, Yellow: Winter wheat, Orange: Winter barley, Purple: Winter rye, Pink:
+Winter rape. Additionally, black denotes unclassiﬁed areas, such as lakes, forests,
+building, roads, etc., while white denotes the remaining classiﬁed areas, all of which
+constitute less than 1% of the total area.
+==PAGE:27==
+CHAPTER 3. DATA DESCRIPTION
+18
+Crop type
+Coverage
+Unclassiﬁed
+36.44%
+Grasses
+17.80%
+Spring barley
+12.04%
+Corn
+9.10%
+Winter wheat
+4.59%
+Winter barley
+3.16%
+Winter rye
+2.92%
+Winter rape
+2.81%
+Table 3.1: Crop types coverage based on the map in ﬁgure 3.4.
+found in table 3.1. Figure 3.5 displays the parcel borders, which were used to compute
+ﬁeld means of the relevant quantities. Note, that the parcel data enumerates all the
+parcels in the area, while ﬁgure 3.5 only shows the borders between them.
+Figure 3.5: Parcel borders in the Foulum area, with a zoom to the central area, as
+indicated by red colors.
+3.4
+Soil texture
+Soil texture maps describe the soil composition i.e. its content of sand, silt, clay, etc.,
+and are used for inverting the permittivity to obtain soil moisture. The soil texture map
+used in this project, is provided by the Danish Agency for Data Supply and Eﬃciency
+==PAGE:28==
+CHAPTER 3. DATA DESCRIPTION
+19
+Figure 3.6: Soil texture over the Foulum area of interest.
+(SDFE) [26] and was developed by the Danish Centre for Food and Agriculure (DCA) in
+2014. The map shows the soil surface classiﬁed after the Danish JB classiﬁcations, and
+can be seen in ﬁgure 3.6. As seen from ﬁgure 3.6, JB types 1, 2, 4 and 11 are the most
+abundant so the soil is generally sandy. The classiﬁcation details can be seen in table
+3.2 [27].
+Description
+JB
+Clay
+Silt
+Fine sand
+Sand
+Abundance
+Coarse sand
+1
+0-5
+0-20
+0-50
+75-100
+35.7%
+Fine sand
+2
+0-5
+0-20
+40-95
+75-100
+10.4%
+Coarse clay mixed sand
+3
+5-10
+0-25
+0-40
+65-95
+4.6%
+Fine clay mixed sand
+4
+5-10
+0-25
+40-95
+65-95
+33.6%
+Coarse sand mixed clay
+5
+10-15
+0-30
+0-40
+55-90
+0.4%
+Fine sand mixed clay
+6
+10-15
+0-30
+40-90
+55-90
+0.2%
+Clay
+7
+15-25
+0-35
+40-85
+0.6%
+Heavy clay
+8
+25-45
+0-45
+10-75
+0%
+Very heavy clay
+9
+45-100
+0-50
+0-55
+0%
+Silt
+10
+0-50
+20-100
+0-80
+0%
+Humus
+11
+13.6%
+Table 3.2: Danish soil texture classiﬁcation. The JB column shows the soil type
+category. The Clay, Silt, Fine Sand and Sand columns denote mass percentage (from
+[27]), while Abundance denotes the concentration in the area of interest in ﬁgure 3.6.
+==PAGE:29==
+Chapter 4
+Method
+In this chapter, the processing steps taken to obtain soil moisture are described. De-
+tails on how the speciﬁc algorithms that have been implemented are given, as well as
+a description of each of the inputs and outputs of each processing step. The code that
+has been developed is seen in appendix D. Throughout this chapter, function names in
+this font will refer to the implemented functions, the code for which can be found in
+appendix D.
+The S-1 images that have been used in the implementation are of dimensions 1600 ×
+2000 with a pixel size of 10m and thus cover an area of 16 × 20 km2. The images span a
+time period of one year, so with 6 days revisit period, 60 images are acquired.
+4.1
+Initialization and ﬁltering
+The SAR images are stored in ENVI format, and are loaded into a numpy array in Python
+via the implemented function read_binary. Along with the images themselves, parcel
+borders, land cover and incidence angle maps are loaded as well. The incidence angles ϑ
+were used to obtain the gamma backscatter coeﬃcient γ0 = σ0/ cos ϑ, as recommended
+by [2], in order to reduce the inﬂuence of varying incidence angle over the scene.
+The multichannel ﬁlter (MF), as given by equation 2.28, is then applied to the VV and
+VH images, using the implemented function multich_simplest. This method does not
+perform any spatial averaging, and thus preserves resolution, better than a simple uniform
+Moving Average (MA) ﬁlter. However, the local means σi still need to be estimated from
+a window centered at the pixel being ﬁltered (i.e. σi is just the result after MA ﬁltering),
+for use in equation 2.28.
+This results in some loss of spatial resolution, but not as
+pronounced as with a MA ﬁlter. Examples of the ﬁltered images after using the MF
+and MA ﬁlter is seen in ﬁgure 4.1. Note that the ENL is roughly the same, while the
+multichannel ﬁlter preserves edges better than the simple MA ﬁlter.
+20
+==PAGE:30==
+CHAPTER 4. METHOD
+21
+Figure 4.1: Left: Zoom to an area after applying the multichannel ﬁlter to the VV
+channel. Right: Same as left, but with a moving average ﬁlter. The red outline marks
+the ﬁeld that has been used to estimate ENL.
+4.2
+Masking (Thresholding)
+After the images have been ﬁltered, the segmentation into attenuated surface and volume
+scattering classes was performed. As mentioned in section 2.2, this requires a bimodal
+distribution. Figure 4.2 shows the histogram for the AOI after removal of non-agricultural
+areas (forest, lakes, buildings, etc.) at doy 162. As seen, this distribution is not bimodal,
+and the adaptive thresholding method is not immediately applicable. As noted in [18],
+this can be due to the presence of highly unequal population sizes. To investigate further,
+two crop types of roughly equal population size, each expected to belong to diﬀerent
+scattering classes is considered. It is noted in [2], that rape is expected to exhibit volume
+scatter due to its ramiﬁed structure after full development, while cereals (barley, wheat,
+rye, etc.) is expected to be dominated by surface scattering year round. From table 3.1,
+we see that winter rye and winter rape have roughly the same population sizes. Therefore,
+these two crop classes are used to see if they can generate a bimodal distribution, which
+can be seen in ﬁgure 4.3. As seen from ﬁgure 4.3, the rye and rape ﬁelds are well separated
+at doy 66 (7 March) and 162 (11 June), while they almost perfectly overlap at doy 282
+(9 October). The adaptive threshold algorithm separates the two crop types at doy 66
+and 162 fairly well, although it might not make sense to apply it for doy 66, since both
+crops are expected to exhibit surface scattering.
+Winter rape is usually harvested during July [28] (doy 210 to 240), which agrees
+with ﬁgure 4.3, showing that the rape ﬁelds do not exhibit volume scattering at doy 282.
+However, at doy 66, winter rape, which is planted in August, has had time to develop
+==PAGE:31==
+CHAPTER 4. METHOD
+22
+Figure 4.2: Histogram for the whole AOI (exluding lakes, forests, buildings etc.), for
+doy 162 (11 June). The red line marks the −14dB point.
+[28], and thus shows higher VH backscatter than rye. At doy 162, both crops are well-
+developed, and this is also where the largest VH backscatter is observed for both of them.
+Furthermore, rye is below −14dB for all three dates, indicating that the rye ﬁelds are
+dominated by attenuated surface scattering, as expected.
+If we look at the temporal evolution of the VH backscatter of winter rape only, as
+seen in ﬁgure 4.4, winter rape starts to become dominated by volume scattering after
+around doy 150 until doy 210, which is in agreement with [2]. Furthermore, we see, that
+even though winter rye is expected to be dominated by attenuated surface scatter during
+the full growing season, some individual ﬁelds exceed the threshold (grey lines in ﬁgure
+4.4) which would therefore be masked by a constant threshold of -14dB. Likewise, some
+rape ﬁelds are below the threshold even though they are expected to be dominated by
+volume scattering.
+The above analysis shows, that it is possible to obtain a bimodal distribution, which
+can then be segmented using the adaptive thresholding method of [2], by considering
+only a subsection of the AOI, such as only winter rape and winter rye. A variant of this
+method is applied in [29] for ﬂood detection, where the ”ﬂooded” pixel class is expected
+to cover only a small and spatially conﬁned area of the full image.
+However, this does not seem generally applicable, since we are interested in classifying
+the full image, and as noted by [30] and observed in ﬁgure 4.2, in general, a bimodal
+distribution does not occur. Therefore it was opted to use the constant threshold of
+−14dB for segmenting all images based on the VH γ backscatter, as described in [2] as
+==PAGE:32==
+CHAPTER 4. METHOD
+23
+Figure 4.3: Rye and rape histograms at diﬀerent times during the year. The red and
+blue vertical lines denote the thresholds found by the adaptive threshold method at the
+dates 66 and 162 respectively, while the vertical black line marks the −14dB constant
+threshold.
+Figure 4.4: Temporal evolution of winter rape and winter rye ﬁelds. Black shows the
+mean for all ﬁelds, while grey depicts the individual ﬁelds. The red line again marks
+the −14dB threshold.
+==PAGE:33==
+CHAPTER 4. METHOD
+24
+Figure 4.5: Masks after applying the constant threshold of −14dB during spring and
+summer.
+suitable when the γV H distribution is not bimodal. An example of the resulting masks
+is seen in ﬁgure 4.5. Note that the mask also ﬁlters away most of the forest and cities,
+however these areas will be masked anyway based on the land cover map, so the masks in
+ﬁgure 4.5 only show the masking of those pixels that are not forest, lake and buildings.
+4.3
+Alpha approximation
+This section describes the alpha approximation implementation, which is the core of this
+project.
+The input data to this part of the retrieval process, is the ﬁltered VV images from
+section 2.3. Equation 2.15, which is used to determine αV V is fairly simple to apply,
+however the important part is to determine the assumed period N where no changes in
+surface roughness and vegetation occur, as well as the parameter αmin.
+[12] and [31] report using N = 4 in their study of the DEMMIN site in Germany
+using ENVISAT/ASAR images with an average revisit period of 10 days. This implies,
+an assumption of 40 days without change in surface or vegetation conditions. Making
+the same assumption, this is equivalent to using N = 6 for the S-1 data with 6 days
+exact revisit period. Initially in this project, it was decided to also use N = 4, but later
+we will see how changing this parameter will impact the results. The other parameter of
+importance, αmin, is a scaling parameter that the retrieved α value is proportional to,
+and thus will have a big inﬂuence. Optimally, it should be tuned according to the time
+of year, as well as spatially, to account for spatial and temporal variability.
+During the development and testing of all the parts of algorithm, it was decided to
+use αmin = 0.5 for all pixels and days of the year. This made it easier to focus on the
+other parts, such as bug ﬁxing etc. The value αmin = 0.5, was chosen by assuming a
+minimum percentage of soil moisture of mv,min = 0.03 and inserting that into equation
+==PAGE:34==
+CHAPTER 4. METHOD
+25
+Figure 4.6: αV V at doy 198.
+2.20 followed by insertion into equation 2.17. The reason for choosing mv,min = 0.03 was
+based on inspection of the in situ data from 2018. This yielded α between 0.48 and 0.53
+after varying the incidence angle between 40° to 43° and for all soil (JB) types. This was
+the reasoning for choosing αmin = 0.5. An example of the retrieved alpha values is seen
+in ﬁgure 4.6.
+4.4
+Fresnel inversion
+The inversion of the retrieved αV V values is performed as described in section 2.1.1, by
+inverting equation 2.17, by rewriting it into a fourth degree polynomial.
+The implemented function fresnel_quartic_coeff is ﬁrst applied, and computes
+the polynomial coeﬃcients as given by equation 2.19 from inputs of αvv and incidence
+angle.
+The computed coeﬃcients are then given as input to the other implemented
+function quartic_solver, which computes the four solutions to the quartic equation as
+described in appendix A. Between zero or all of the four solutions may be real, however
+it is expected that two will be real and two will be complex [Balenzano, private comm.].
+Since the obtained solutions for y have the form y =
+p
+εs −sin2 ϑ and it was assumed
+that εs ∈R then y can not be negative.
+Therefore, if there is only one real, non-
+negative solution for y, then that solution is accepted. If, however, there among the two
+real solutions are no or two non-negative solutions, then the inversion for that pixel is
+considered to have failed, and it will therefore be masked. The reason for masking the
+case of two non-negative real solutions is, that it introduces an ambiguity about which
+solution to choose. Furthermore, if there contrary to the expectation are no real solutions
+==PAGE:35==
+CHAPTER 4. METHOD
+26
+Figure 4.7: εs at doy 198.
+(only complex solutions), then that pixel will also be masked.
+After the solutions for y have been found, the relative permittivity is computed as
+εs = y2 + sin2 ϑ. To check that the correct solutions have been found, the implemented
+function fresnel_vv can be used to compute the forward problem, which should yield
+the same αV V values as were originally used as input.
+An example of the retrieved
+permittivity is seen in ﬁgure 4.7
+4.5
+Soil moisture estimation
+The soil moisture estimation is performed by inverting the Dielectric Mixing Model in
+equation 2.20. The coeﬃcients from table 2.1 for 6 GHz have been used. Apart from the
+previously estimated dielectric constants εs, the soil texture is also necessary in the form
+of percentage sand S and clay C content. The soil texture map over the AOI, as seen
+in ﬁgure 3.6, classiﬁes the area into 11 classes, while table 3.2, shows the clay and sand
+intervals for each class. Note that silt percentage is not included in the Hallikainen model
+that was used, and that ﬁne sand in table 3.2, has been included in the sand content
+S.
+From the intervals in table 3.2, the center of each interval has been used in the
+computation, as seen in table 4.1. The quadratic polynomial of equation 2.20, is easily
+solvable, and from the two obtained solutions, only the positive solution is accepted. If
+both solutions are negative or no real solutions exist (i.e. complex roots), then that pixel
+is masked. The reason for obtaining negative or complex soil moistures, is due to too low
+values of εs. The function implementing the above, is called hallikainen_polyn_inv
+and an example of the soil moisture that is retrieved is seen in ﬁgure 4.8.
+==PAGE:36==
+CHAPTER 4. METHOD
+27
+Description
+JB
+Clay
+Sand
+Coarse sand
+1
+2.5
+80
+Fine sand
+2
+2.5
+80
+Coarse clay mixed sand
+3
+7.5
+70
+Fine clay mixed sand
+4
+7.5
+70
+Coarse sand mixed clay
+5
+12.5
+60
+Fine sand mixed clay
+6
+12.5
+60
+Clay
+7
+20
+50
+Heavy clay
+8
+35
+35
+Very heavy clay
+9
+70
+20
+Silt
+10
+25
+40
+Humus
+11
+10
+60
+Table 4.1: Soil texture percentages used in the DMM model.
+Figure 4.8: Example of the retrieved soil moisture maps with masked pixels in blue.
+Colorbar units are [ cm3/cm3]
+==PAGE:37==
+Chapter 5
+Results and discussion
+This chapter present the results from validation and testing of the implemented retrieval
+algorithm.
+Firstly, the sensitivity of retrieved soil moisture to the choice of the two
+parameters αmin and N is examined in sections 5.1 and 5.2. Afterwards, the resulting
+VH masks are presented, and it is studied if masks indeed agree with NDVI. Uncertainty
+maps are generated, in order to clarify if algorithm assumptions have been met. This
+leads to the analysis of said uncertainty maps with comparison to crop calendars, in
+order to assess the underlying physical reason for the invalid assumptions. Finally, the
+retrieved soil moisture maps are compared to precipitation data.
+5.1
+Validation from synthetic data and sensitivity to αmin
+It was tested that the implemented retrieval algorithm behaves as expected under known
+conditions.
+Therefore, synthetic data of backscatter was generated, using the Small
+Perturbation Model. The synthetic data was then used as input to the algorithm to
+obtain retrieved SM from the synthetic data.
+The synthetic data was generated by drawing from a normal distribution 100 × 100
+values, for 4 ”days” with diﬀerent SM mean and the same variance. These can be seen
+in ﬁgure 5.1. From these simulated SM values, the permittivity εs was computed from
+equation 2.20 with S = 60 and C = 10. From the permittivity, the simulated backscatter
+was then computed from the SPM model in equation 2.2. The forward Fresnel equation
+in 2.17 was also used to compute α, such that the true synthetic αmin was known. The
+simulated backscatter values can be seen in ﬁgure 5.2.
+The 4 simulated backscatter images were then used to compute the retrieved SM,
+applying the implemented algorithm. Note here that the assumption of invariant vege-
+tation and roughness conditions is valid by design, since the 4 images all used the same
+input parameters, except of course for soil moisture.
+The results were quantiﬁed by the root mean square diﬀerence (rmse) between the
+simulated and retrieved mv images, and can be seen in table 5.1. As seen, at an αmin
+oﬀset of 0 for all pixels, the rmse is eﬀectively 0 for all simulated days. This indicates
+that the algorithm behaves as expected under known conditions. If the Fresnel inversion
+28
+==PAGE:38==
+CHAPTER 5. RESULTS AND DISCUSSION
+29
+Figure 5.1: Simulated soil moisture, with means as indicated by the titles, and standard
+deviation of 0.05 cm3/cm3. The superscript in the titles denote the the day.
+==PAGE:39==
+CHAPTER 5. RESULTS AND DISCUSSION
+30
+Figure 5.2: Simulated backscatter in dB.
+==PAGE:40==
+CHAPTER 5. RESULTS AND DISCUSSION
+31
+αmin oﬀset
+µ = 0.1
+µ = 0.15
+µ = 0.2
+µ = 0.05
+Inv. rate
+0
+6.70e-17
+8.44e-17
+1.09e-16
+6.53e-17
+1
++0.1
+0.0476
+0.0711
+0.0982
+0.0270
+1
++0.2
+0.1096
+0.1728
+0.2485
+0.0572
+0.998
++0.3
+0.1907
+0.2909
+0.3760
+0.0921
+0.954
++0.5
+0.3317
+0.4386
+0.5161
+0.1774
+0.748
++1.0
+0.5249
+0.5988
+0.6554
+0.4163
+0.3717
+−0.1
+0.0404
+0.0548
+0.0705
+0.0264
+0.915
+−0.2
+0.0782
+0.1014
+0.1265
+0.0528
+0.829
+−0.5
+0.1477
+0.1761
+0.2054
+0.1300
+0.103
+Table 5.1: Rmse between simulated and retrieved SM.
+yielded no real positive solutions, or the inversion of the DMM yielded mv outside the
+interval [0, 1], the resulting pixel was set to NaN. This is reﬂected by the inversion rate,
+which shows the fraction of pixels in all 4 images, that were succesfully inverted from
+simulated backscatter to SM.
+The remaining rows in table 5.1 show how the rmse changes when αmin deviates from
+the true value, and thus quantify the sensitivity to αmin. As expected, for increasing
+oﬀset, the rmse also increases. The inversion rate decreases, which can be explained by
+the mv values increasing for increasing α, and exceeding the upper limit of soil moisture.
+Similarly, for negative oﬀsets, the same trends can be observed. It can also be noted,
+that the negative oﬀsets produce lower rmse than the corresponding positive oﬀset. For
+example, at αmin = αmin,true + 0.5 and µ = 0.1, the rmse is 0.3317, while for αmin =
+αmin,true −0.5 the rmse is 0.1477. Thus, the retrieved SM is more sensitive to positive
+oﬀsets than negative. However, the inversion rate is also very low at negative oﬀset,
+which might explain the diﬀerence.
+5.2
+Soil moisture and sensitivity to N
+Tests were run to test the inﬂuence of the parameter N, which determines the period
+where vegetation and soil roughness conditions are assumed invariant.
+Five diﬀerent
+values of N were used with N = 3, 4, 5, 6, 8 while αmin = 0.5 and k = 11 (k being the
+size of the ﬁlter window used to estimate local backscatter means) were kept constant.
+As seen from ﬁgures 5.3, 5.4 and 5.5, the retrieved soil moisture well match the overall
+pattern of the observed backscatter. It can also be seen that generally the retrieved
+SM values tend to increase as a higher N is used. Since the alpha values are scaled
+by the inverse square root of the lowest backscatter within a period of N acquisitions,
+and because increasing N can never increase the lowest observed backscatter within the
+period, then the retrieved alpha values can only become larger, thus resulting in higher
+SM values, which is what is observed in the ﬁgures. This can also be seen in ﬁgure 5.6,
+where maps for the same day are shown with diﬀerent N. It can be noticed that not only
+the bright ﬁelds become brighter, but rather the general level of SM becomes brighter.
+==PAGE:41==
+CHAPTER 5. RESULTS AND DISCUSSION
+32
+Figure 5.3: Mean soil moisture mv for all spring barley ﬁelds, as retrieved with varying
+N. Also shown is the mean γvv backscatter in black.
+Figure 5.4: Mean soil moisture mv for all winter wheat ﬁelds, as retrieved with varying
+N. Also shown is the mean γvv backscatter in black.
+==PAGE:42==
+CHAPTER 5. RESULTS AND DISCUSSION
+33
+Figure 5.5: Mean soil moisture mv for all corn ﬁelds, as retrieved with varying N. Also
+shown is the mean γvv backscatter in black.
+Figure 5.6: Retrieved SM for doy 78 (19 March) showcasing the eﬀect of increased
+period N.
+==PAGE:43==
+CHAPTER 5. RESULTS AND DISCUSSION
+34
+The observations made here, do however not necessarily give information about the
+assumption of invariant vegetation and roughness conditions. Rather they underline the
+impact of the calibration parameter αmin, since it is this parameter that determines the
+overall level for the retrieved SM values by assigning a ﬁxed lowest value to the darkest
+pixels.
+5.3
+Threshold masks using γV H
+This section describes the masks derived from the VH backscatter. The masks based on
+the VH backscatter are assessed using the NDVI maps, since both, in principle, should
+be related to the amount of vegetation. The land cover map was also used to produce
+a mask ﬁltering out all pixels that contain forest, lakes and cities. This mask is referred
+to as "Type 0", since in the land cover map, forests, lakes and cities are all in the same
+category, and encoded with a 0. The Type 0 mask is the same for all images throughout
+the year. Figure 5.7, shows the Type 0 mask side-by-side with a mask derived from VH
+backscatter using a constant threshold of −14 dB. As seen, the VH mask masks many
+Figure 5.7: Side-by-side comparison of the Type 0 mask and the constant threshold
+mask.
+of the same pixels as the Type 0 mask. This is emphasized in ﬁgure 5.8, where the two
+masks are shown on top of each other. Generally, the VH mask ﬁlters out the same areas
+as the Type 0 mask, but does not ﬁlter the areas completely out. This can be seen for
+example over the city of Viborg to the south west, and over the two forests north and
+south of Tjele Langsø. The lakes do not get masked, since backscatter is generally very
+low due to specular reﬂection. There are also ﬁelds that are masked by the VH mask,
+most noticeably at doy 186 (5 July), where most vegetation is at its peak. At doy 264 (21
+September), most ﬁelds have been harvested, so low amount of vegetation is expected.
+This ﬁts with the derived VH mask at doy 264 as seen in ﬁgure 5.8, where the lowest
+amount of pixels are masked out of the three days shown.
+Optimally, there would be no need to use the Type 0 mask, since from an operational
+view point, such detailed classiﬁcation maps are not available, though forests, lakes and
+cities would probably be fast to detect. However, it was decided to use a combined mask
+==PAGE:44==
+CHAPTER 5. RESULTS AND DISCUSSION
+35
+Figure 5.8: VH masks for diﬀerent days (blue) plotted on top of the Type 0 mask (red).
+==PAGE:45==
+CHAPTER 5. RESULTS AND DISCUSSION
+36
+Figure 5.9: Histgrams of NDVI over the whole scene (excluding lakes, forests etc.) for
+diﬀerent days of the year, as indicated by the legend.
+of the Type 0 and VH masks, for the ﬁnal retrieved SM maps.
+5.3.1
+NDVI and γV H
+Figure 5.9 shows the histograms of NDVI for selected relatively cloud free days during the
+year 2017. As seen, the histograms for days 200, 303 and 310 (19 July, 30 October and 6
+November), exhibit peaks toward high NDVI, while the days 70 and 83 (11 and 24 March)
+show peaks toward the low end as expected. Days 113 and 235 (23 April and 23 August)
+follow the same expected pattern, but also have peaks at low NDVI. This is most likely
+because there were clouds in those images, that have not been completely removed by the
+cloud mask. The temporal evolution of the mean VH backscatter and NDVI for a single
+ﬁeld is seen in ﬁgure 5.10. Here, it is not directly clear if there is a correlation between
+the two, due to the low amount of NDVI data points.
+The 2D histogram (equivalent
+to a density scatter plot) as seen in ﬁgure 5.11, shows the correlation between the two
+parameters NDVI and γV H. One could attempt to ﬁt a regression line to the scatter
+plot to quantify to correlation, but it was decided not to do so, since already by visual
+inspection, a correlation is hard to observe. If any correlation was present, it would show
+up as a diagonal trend.
+The conclusion is that no correlation between γV H and NDVI is observed. This does
+however not mean that the masks based γV H do not mask densely vegetated areas, since
+as seen in the previous section, the forests north and south of Tjele Langsø are correctly
+==PAGE:46==
+CHAPTER 5. RESULTS AND DISCUSSION
+37
+Figure 5.10: Temporal evolution of the mean NDVI and VH backscatter over a single
+rape ﬁeld. γV H is in absolute units and has been normalized as
+(γV H −γmin)/(γmax −γmin)
+Figure 5.11: 2D histogram of γvh and NDVI.
+==PAGE:47==
+CHAPTER 5. RESULTS AND DISCUSSION
+38
+masked (albeit not completely) as well as the winter rape ﬁelds during summer (as seen
+from ﬁgure 4.4).
+5.4
+Uncertainty
+The uncertainty of the retrieved SM values have been estimated by following the sugges-
+tion by [31], to use overlapping periods of N acquisitions to compute standard deviation.
+The strategy is seen in ﬁgure 5.12. Assuming that N = 4 consecutive images are used in
+Figure 5.12: Example of uncertainty estimation strategy for N = 4.
+the estimation, there will be 4 blocks of length 4 overlapping each date, as highlighted in
+green. That means that for each date, 4 resulting maps of soil moisture can be retrieved.
+A single uncertainty map for each date can then be derived by computing the standard
+deviation of the 4 SM maps. It is mentioned in [31], that these uncertainty maps can be
+used to assess if the algorithm assumptions are met or perhaps if αmin has been tuned
+correctly. As seen in ﬁgure 5.13, the standard deviation at doy 186 (5 July) has the high-
+est general level. As explained, this indicates an increased chance that the assumptions
+are invalid.
+5.5
+Invalid assumptions
+In this section, an analysis of the speciﬁc soil moisture maps retrieved for each date
+is made, with the purpose of identifying periods where the algorithm assumptions are
+not met. This analysis is performed mainly by visual inspection of the SM maps and
+their corresponding standard deviation maps. When outliers are identiﬁed, they will be
+compared with known Danish crop calendars, in order to estimate if the ﬁeld had just
+been plowed or harvested which would explain a large change in retrieved soil moisture
+compared to the surrounding ﬁelds.
+The ﬁrst example is seen in ﬁgure 5.14, where four consecutive (12-30 April) retrieved
+SM maps are shown. For the two central days (doy 108 and 114), the whole scene increases
+in SM, with some individual ﬁelds increasing more than the rest. The same ﬁelds are
+also seen to have a higher standard deviation when inspecting ﬁgure 5.15.
+The ﬁeld type of some of the ﬁelds that light up the most, was then seen to be
+potato ﬁelds, as marked by the red outlines in ﬁgures 5.14 and 5.15. According to [32],
+==PAGE:48==
+CHAPTER 5. RESULTS AND DISCUSSION
+39
+Figure 5.13: Standard deviation maps in % (instead of in cm3/cm3) at 4 diﬀerent days,
+derived using N = 4. The colored background is the masked pixels.
+==PAGE:49==
+CHAPTER 5. RESULTS AND DISCUSSION
+40
+April is the recommended month to sow potatoes in Denmark, which would ﬁt with the
+observation that these ﬁelds probably did not have invariant soil roughness or vegetation
+conditions during this period.
+In appendix C, ﬁgures C.1 and C.2 display the same as ﬁgures 5.14 and 5.15, but for
+diﬀerent days during the summer (11-29 July). Here it is seen (though most is masked)
+that almost all of the spring barley ﬁelds light up in the retrieved SM maps at the same
+time, as compared to the background. It is not known what causes this spike in spring
+barley intensity, but it is likely related to the harvesting of this crop. It is also observed
+that for doy 204, almost the whole scene is masked. This is probably due to it raining
+during that day (23 July).
+This can be conﬁrmed by looking at the precipitation time series for 2017, which
+has been downloaded from the Danish Meteorological Institute weather archive [33], and
+plotted in ﬁgure 5.16. The precipitation data has a data point for each day during 2017
+its units (before normalization) is in mm, and is valid for Viborg kommune. From ﬁgure
+5.16, it can be noted that many of the spikes coincide with each other among those, also
+the precipitation event on doy 204, which probably explains why the whole AOI has been
+masked for that date.
+The above analysis focuses on two speciﬁc events where potato and spring barley
+ﬁelds are the cause of anomalous increases in the retrieved soil moisture. However, the
+same analysis can be performed for every image during the year, and thus the anomalies
+can be sought characterized. This can help identify points where correct masking has
+not been performed, since optimally the masking should be done autonomously so as to
+correctly assess when soil moisture can be retrieved accurately.
+==PAGE:50==
+CHAPTER 5. RESULTS AND DISCUSSION
+41
+Figure 5.14: Retrieved soil moisture for four days with masked pixels in blue. The red
+outlines show potato ﬁelds.
+==PAGE:51==
+CHAPTER 5. RESULTS AND DISCUSSION
+42
+Figure 5.15: Retrieved soil moisture standard deviation for four days with masked
+pixels in blue. The red outlines show potato ﬁelds.
+==PAGE:52==
+CHAPTER 5. RESULTS AND DISCUSSION
+43
+Figure 5.16: Rain and mean soil moisture after masking.
+==PAGE:53==
+Chapter 6
+Future work
+This chapter discusses how the individual parts of the work in this thesis could be con-
+tinued.
+Further work on optimizing the masking of vegetated areas is needed. As was seen in
+some of the results, anomalously high soil moistures are retrieved for individual ﬁelds and
+crop types, which most likely is caused by changes in vegetation or soil roughness condi-
+tions. This work could include a study on how to better mask using the VH backscatter,
+since the analyzed scene was imaged at high incidence angles (42° −43°), which might
+justify revisiting the constant VH threshold of −14dB. This is because in [2], the −14dB
+is based on images acquired at incidence angles between 23° −33°. Although the γ0
+backscatter is less sensitive to incidence angle, a diﬀerence of around 10° is probably
+still enough to result in a signiﬁcant reduction in backscatter. Thus, a densely vegetated
+ﬁeld with γ0 above −14dB at 30° incidence angle, may have γ0 below −14dB at higher
+incidence angle and therefore not be masked by a −14dB threshold.
+The capabilities of the implemented algorithm have been demonstrated, and it has
+been shown that the results are inﬂuenced by the choice of the parameters αmin and N.
+Though in situ measurements of soil moisture are available, it was not possible to use it
+for calibration to a satisfying extent, due to it spanning the year 2018, while the images
+used are from 2017. Thus, further work within this topic is important so as to correctly
+calibrate the αmin parameter. As discussed in section 2.1, it would be interesting to use
+low resolution soil moisture maps derived from ESA’s SMOS or NASA’s SMAP in order
+to obtain αmin values that calibrate the results both spatially and temporally. The SM
+maps computed by the SMOSAR algorithm [31], which also uses the alpha approximation
+were also available over AOI for comparison, but they were not used. This was because
+it was decided that it would not make sense to compare the absolute levels of SM maps
+that were calibrated and some that were not calibrated. However, in the future, where
+the SM maps of this thesis have been calibrated, this comparison would be interesting.
+The analysis of sensitivity to soil texture is also a point for future studies. Detailed
+soil texture maps are available in Denmark but that is not necessarily the case in other
+countries. An idea could be to apply diﬀerent DMM’s for this purpose.
+Initially in this project it was thought that the alpha approximation algorithm could
+44
+==PAGE:54==
+CHAPTER 6. FUTURE WORK
+45
+be combined with a change detection algorithm such as the ones described by [34], in order
+to identify periods where the assumptions of soil roughness and vegetation invariance are
+valid. Due to time constraints, it was not possible to investigate this idea, but it certainly
+has potential as a continuation of this thesis work.
+==PAGE:55==
+Chapter 7
+Conclusion
+This thesis presents the implementation and testing of a soil moisture retrieval algorithm
+based on the alpha approximation method of estimating the dielectric constant of the
+soil. The present report thus describes the necessary theory along with the data used for
+testing.
+The main body of work in this thesis, lies in the implementation phase, where the
+algorithm elements all have implemented from the bottom in Python, based on theory in
+the literature. Thereafter, has been the testing of the generated results, as described in
+the Results chapter, in which the capabilities of the current implementation are demon-
+strated and it is described how the retrieved soil moisture maps are sensitive to the
+parameters αmin and N. Here, it was seen that the retrieved soil moisture is more sen-
+sitive to positive oﬀsets in αmin than to negative oﬀsets. Additionally, it is observed
+that assuming a longer period of roughness and vegetation invariance N result in higher
+values of SM.
+The retrieved SM maps are not usable in their current state, due to the lack of
+calibration using ground measurements. Therefore it is concluded that said calibration
+is necessary for the SM maps to have practical usefulness, as discussed under the Future
+work chapter.
+Furthermore, it is observed that the masks derived from the cross-polarized compo-
+nent of the backscatter coeﬃcient do not mask all the anomalous ﬁelds, particularly in
+the summer. It is therefore concluded that further work on this topic is needed.
+46
+==PAGE:56==
+Bibliography
+[1]
+A. Balenzano, F. Mattia, G. Satalino, and M. W. J. Davidson, “Dense temporal
+series of c- and l-band SAR data for soil moisture retrieval over agricultural crops”,
+IEEE Journal of Selected Topics in Applied Earth Observations and Remote Sens-
+ing, vol. 4, no. 2, pp. 439–450, Jun. 2011.
+[2]
+G. Satalino, A. Balenzano, F. Mattia, and M. W. J. Davidson, “C-band SAR data
+for mapping crops dominated by surface or volume scattering”, IEEE Geoscience
+and Remote Sensing Letters, vol. 11, no. 2, pp. 384–388, Feb. 2014.
+[3]
+H. Skriver, Basic radar principles, Sep. 2009.
+[4]
+J. J. Mohr, Sar light - an introduction to synthetic aperture radar, Aug. 2005.
+[5]
+D. Zhang and G. Zhou, “Estimation of soil moisture from optical and thermal
+remote sensing: A review”, Sensors, vol. 16, no. 8, p. 1308, Aug. 17, 2016.
+[6]
+L. Wang and J. J. Qu, “Satellite remote sensing applications for surface soil mois-
+ture monitoring: A review”, Frontiers of Earth Science in China, vol. 3, no. 2,
+pp. 237–247, Jun. 2009.
+[7]
+M. S. Moran, C. D. Peters-Lidard, J. M. Watts, and S. McElroy, “Estimating soil
+moisture at the watershed scale with satellite-based radar and land surface models”,
+Canadian Journal of Remote Sensing, vol. 30, no. 5, pp. 805–826, Oct. 1, 2004.
+[8]
+L. Karthikeyan, M. Pan, N. Wanders, D. N. Kumar, and E. F. Wood, “Four decades
+of microwave satellite soil moisture observations: Part 1. a review of retrieval algo-
+rithms”, Advances in Water Resources, vol. 109, pp. 106–120, Nov. 2017.
+[9]
+N. N. Baghdadi, M. El Hajj, M. Zribi, and I. Fayad, “Coupling SAR c-band and
+optical data for soil moisture and leaf area index retrieval over irrigated grasslands”,
+IEEE Journal of Selected Topics in Applied Earth Observations and Remote Sens-
+ing, vol. 9, no. 3, pp. 1229–1243, Mar. 2016.
+[10]
+D. Thoma, M. Moran, R. Bryant, C. Collins, M. Rahman, and S. Skirvin, “Com-
+parison of two methods for extracting surface soil moisture from c-band radar im-
+agery”, in IGARSS 2004. 2004 IEEE International Geoscience and Remote Sensing
+Symposium, vol. 2, Sep. 2004, pp. 827–830. doi: 10.1109/IGARSS.2004.1368532.
+47
+==PAGE:57==
+BIBLIOGRAPHY
+48
+[11]
+M. Hornacek, W. Wagner, D. Sabel, H.-L. Truong, P. Snoeij, T. Hahmann, E.
+Diedrich, and M. Doubkova, “Potential for high resolution systematic global sur-
+face soil moisture retrieval via change detection using sentinel-1”, IEEE Journal of
+Selected Topics in Applied Earth Observations and Remote Sensing, vol. 5, no. 4,
+pp. 1303–1311, Aug. 2012.
+[12]
+A. Balenzano, G. Satalino, V. Pauwels, and F. Mattia, “Soil moisture retrieval
+from dense temporal series of c-band SAR data over agricultural sites”, in 2011
+IEEE International Geoscience and Remote Sensing Symposium, Vancouver, BC,
+Canada: IEEE, Jul. 2011, pp. 3136–3139.
+[13]
+J. D. Ouellette, J. T. Johnson, A. Balenzano, F. Mattia, G. Satalino, S.-B. Kim,
+R. S. Dunbar, A. Colliander, M. H. Cosh, T. G. Caldwell, J. P. Walker, and A. A.
+Berg, “A time-series approach to estimating soil moisture from vegetated surfaces
+using l-band radar backscatter”, IEEE Transactions on Geoscience and Remote
+Sensing, vol. 55, no. 6, pp. 3186–3193, Jun. 2017.
+[14]
+A. Balenzano, G. Satalino, F. Lovergine, M. Rinaldi, V. Iacobellis, N. Mastronardi,
+and F. Mattia, “On the use of temporal series of l-and x-band SAR data for soil
+moisture retrieval. capitanata plain case study”, European Journal of Remote Sens-
+ing, vol. 46, no. 1, pp. 721–737, Jan. 2013.
+[15]
+F. Mattia, A. Balenzano, G. Satalino, F. Lovergine, J. Peng, U. Wegmuller, O.
+Cartus, M. W. J. Davidson, S. Kim, J. Johnson, J. Walker, X. Wu, V. Pauwels,
+H. McNairn, T. Caldwell, M. Cosh, and T. Jackson, “Sentinel-1 & sentinel-2 for
+Soil moisture retrieval at ﬁeld scale”, in IGARSS 2018 - 2018 IEEE International
+Geoscience and Remote Sensing Symposium, Valencia: IEEE, Jul. 2018, pp. 6143–
+6146.
+[16]
+L. He, Q. Qin, R. Panciera, M. Tanase, J. P. Walker, and Y. Hong, “An extension
+of the alpha approximation method for soil moisture estimation using time-series
+SAR data over bare soil surfaces”, IEEE Geoscience and Remote Sensing Letters,
+vol. 14, no. 8, pp. 1328–1332, Aug. 2017.
+[17]
+M. T. Hallikainen, F. T. Ulaby, M. C. Dobson, M. A. El-rayes, and L.-k. Wu, “Mi-
+crowave dielectric behavior of wet soil-part 1: Empirical models and experimental
+observations”, IEEE Transactions on Geoscience and Remote Sensing, vol. GE-23,
+no. 1, pp. 25–34, Jan. 1985, issn: 0196-2892, 1558-0644. doi: 10.1109/TGRS.1985.
+289497.
+[18]
+J. Kittler and J. Illingworth, “Minimum error thresholding”, Pattern Recognition,
+vol. 19, no. 1, pp. 41–47, Jan. 1986.
+[19]
+Q.-Z. Ye and P.-E. Danielsson, “On minimum error thresholding and its implemen-
+tations”, Pattern Recognition Letters, vol. 7, no. 4, pp. 201–206, Apr. 1988.
+[20]
+S. Quegan and Jiong Jiong Yu, “Filtering of multichannel SAR images”, IEEE
+Transactions on Geoscience and Remote Sensing, vol. 39, no. 11, pp. 2373–2379,
+Nov. 2001.
+==PAGE:58==
+BIBLIOGRAPHY
+49
+[21]
+(). Copernicus open access hub, [Online]. Available: https://scihub.copernicus.
+eu/ (visited on 01/27/2020).
+[22]
+(). Sentinel-1 overview, [Online]. Available: https://sentinel.esa.int/web/
+sentinel/user-guides/sentinel-1-sar/overview (visited on 01/27/2020).
+[23]
+(). Envi header format, [Online]. Available: https://www.harrisgeospatial.com/
+docs/ENVIHeaderFiles.html (visited on 01/27/2020).
+[24]
+(). Sentinel-2 overview, [Online]. Available: https://sentinel.esa.int/web/
+sentinel/missions/sentinel-2 (visited on 01/16/2020).
+[25]
+(). Hvordan får du adgang til data?, [Online]. Available: https : / / lbst . dk /
+landbrug/kort- og- markblokke/hvordan- faar- du- adgang- til- data/ (vis-
+ited on 01/27/2020).
+[26]
+(). Geodata-info - styrelsen for dataforsyning og eﬀektivisering, [Online]. Avail-
+able: https://www.geodata-info.dk/srv/dan/catalog.search#/metadata/
+cb28018e-de07-4c3e-a03c-012a34567734 (visited on 01/15/2020).
+[27]
+(). Beskrivelse af jord, [Online]. Available: https://ign.ku.dk/partnerlandskab/
+god-vaekstjord/beskrivelse-af-jord/ (visited on 01/15/2020).
+[28]
+Dyrkningsvejledning: Vinterraps. [Online]. Available: https://www.dlf.dk/landbrug/
+raps/dyrkningsvejledninger (visited on 01/21/2020).
+[29]
+G. Boni, L. Ferraris, L. Pulvirenti, G. Squicciarino, N. Pierdicca, L. Candela, A. R.
+Pisani, S. Zoﬀoli, R. Onori, C. Proietti, and P. Pagliara, “A prototype system
+for ﬂood monitoring based on ﬂood forecast combined with COSMO-SkyMed and
+sentinel-1 data”, IEEE Journal of Selected Topics in Applied Earth Observations
+and Remote Sensing, vol. 9, no. 6, pp. 2794–2805, Jun. 2016.
+[30]
+L. Pulvirenti, G. Squicciarino, L. Cenci, G. Boni, N. Pierdicca, M. Chini, C. Versace,
+and P. Campanella, “A surface soil moisture mapping service at national (italian)
+scale based on sentinel-1 data”, Environmental Modelling & Software, vol. 102,
+pp. 13–28, Apr. 2018.
+[31]
+A. Balenzano, F. Mattia, G. Satalino, V. Pauwels, and P. Snoeij, “SMOSAR algo-
+rithm for soil moisture retrieval using sentinel-1 data”, in 2012 IEEE International
+Geoscience and Remote Sensing Symposium, Munich, Germany: IEEE, Jul. 2012,
+pp. 1200–1203.
+[32]
+Læggekartoﬂer - dyrkningsvejledning, SEGES.
+[33]
+(). Vejrarkiv, DMI, [Online]. Available: https://www.dmi.dk/vejrarkiv/ (visited
+on 01/02/2020).
+[34]
+K. Conradsen, A. A. Nielsen, and H. Skriver, “Determining the points of change
+in time series of polarimetric SAR data”, IEEE Transactions on Geoscience and
+Remote Sensing, vol. 54, no. 5, pp. 3007–3024, May 2016.
+[35]
+(). Solving a quartic equation, [Online]. Available: https://artofproblemsolving.
+com/community/c2231h1039153 (visited on 01/15/2020).
+==PAGE:59==
+Appendix A
+A.1
+Quartic solution
+This appendix describes the closed form solution of a quartic equation of the form:
+x4 + a x3 + b x2 + c x + d = 0
+(A.1)
+The following solution follows that of [35]. Generally, the roots are:
+x1,2 = −a
+4 ±
+√u + v
+2
+−
+√2u −v ∓w
+2
+x3,4 = −a
+4 ±
+√u + v
+2
++
+√2u −v ∓w
+2
+(A.2)
+where,
+u = a2
+4 −2
+3b
+v = t
+3 + ∆0
+3t
+w = a3 −4ab + 8c
+4√u + v
+(A.3)
+and,
+t =
+ 
+∆1 +
+p
+∆2
+1 −4∆3o
+2
+!1/3
+∆0 = b2 −3ac + 12d
+∆1 = 2b3 −9abc + 27a2d + 27c2 −72bd
+(A.4)
+A.2
+Alternative solution to the VV Fresnel equation
+Before the solution of rewriting the VV Fresnel equation into a quartic equation by
+shifting the variable from εs to y =
+p
+εs −sin2 ϑ, it was thought to solve it as a regular
+quadratic equation. Remembering the Fresnel equation:
+|αV V (εs, ϑ)| =
+
+(εs −1)(sin2 ϑ −εs(1 + sin2 ϑ))
+(εs cos ϑ +
+p
+εs −sin2 ϑ)2
+
+(A.5)
+50
+==PAGE:60==
+APPENDIX A.
+51
+This equation can be rewritten as a (quasi) quadratic equation aε2
+s + b(εs)εs + c = 0 in
+εs where,
+a = |αV V | cos2 ϑ −1 −sin2 ϑ
+b(εs) = 2|αV V | cos ϑ
+p
+εs −sin2 ϑ) + 2 sin2 ϑ + |αV V | + 1
+c = −|αV V | sin2 ϑ −sin2 ϑ
+(A.6)
+This equation can be solved iteratively, by giving an initial guess for the value of ε(0)
+s
+to be used in b(ε(0)
+s ), solving the resulting quadratic equation to obtain ε(1)
+s , recomputing
+b(ε(1)
+s ) and so on until convergence. This method was tested extensively, and proved to
+converge to a tolerance of about 10−3 within 5-6 iterations. However, after the quartic
+solution was found, it was discovered that the quartic solution arrived at more precise
+solutions with less computation time. Therefore it was decided to use the quartic solution.
+==PAGE:61==
+Appendix B
+B.1
+Supplementary ﬁgures for section 5.3
+This appendix shows additional ﬁgures similar to ﬁgure 5.11, but for diﬀerent pairs of
+days. Also in these two 2D histograms, no clear correlation is seen.
+Figure B.1: 2D histogram, showing NDVI against VH backscatter.
+52
+==PAGE:62==
+Appendix C
+C.1
+Supplementary ﬁgures for section 5.5
+This appendix provides additions ﬁgures for section 5.5. The ﬁgures can be seen on the
+following pages.
+53
+==PAGE:63==
+APPENDIX C.
+54
+Figure C.1: Retrieved soil moisture for four days with masked pixels in blue. The red
+outlines show spring barley ﬁelds.
+==PAGE:64==
+APPENDIX C.
+55
+Figure C.2: Retrieved soil moisture standard deviation for four days with masked pixels
+in blue. The red outlines show spring barley ﬁelds.
+==PAGE:65==
+Appendix D
+D.1
+Functions for inversion of the Fresnel equation
+"""This file contains functions related to the Fresnel equations.
+inverting the Fresnel equation to obtain
+"""
+import numpy as np
+def fresnel_vv(eps,th):
+""" Evaluate the Fresnel equation for VV polarization.
+Input:
+eps: relative permittivity
+th : incidence angle (rad), Should be in the interval [0,pi/2[
+Output: Fresnel coefficient (alpha_vv)
+"""
+sint2 = np.sin(th)**2
+cost = np.cos(th)
+num = (eps-1)*(sint2-eps*(1+sint2))
+den = (eps*cost+np.sqrt(eps-sint2))**2
+return abs(num/den)
+def quartic(th,alpha):
+""" Computes the coefficients of the VV Fresnel equation, when
+rearranged to form a quartic in y, where y = sqrt(eps-sin^2(th)) <=>
+eps = y^2+sin^2(th).
+Input:
+th : incidence angle (rad), Should be in the interval [0,pi/2[
+alpha: Fresnel coefficient
+56
+==PAGE:66==
+APPENDIX D.
+57
+Output:
+a,b,c,d such that y^4+ay^3+by^2+cy+d = 0
+th and alpha can be np.array, in which case the output will have the
+same shape as the input.
+"""
+cost = np.cos(th)
+cost2 = cost**2
+sint2 = np.sin(th)**2
+sint4 = sint2**2
+a4 = alpha*cost2-1-sint2
+a3 = 2*alpha*cost
+a2 = alpha*(1+2*sint2*cost2)-2*sint4+1
+a1 = 2*alpha*sint2*cost
+a0 = alpha*sint4*cost2-sint4*sint2+sint4
+a = a3/a4+0j
+b = a2/a4+0j
+c = a1/a4+0j
+d = a0/a4+0j
+return a,b,c,d
+def fresnel_quartic_coeff(x0,th,alpha):
+""" Computes the coefficients of the VV Fresnel equation, when
+rearranged to form a quartic in eps (relative permittivity)
+eps^4+a*eps^3+b*eps^2+c*eps+d = 0. Some of the coefficients contain a
+factor sqrt(eps-sin^2(th)), in which the guess value x0 is inserted
+instead of eps.
+To be used with fresnel_quartic_iterative_solver(...) to iteratively
+update x0 until convergence.
+Input:
+x0 : initial guess for eps
+th : incidence angle (rad), Should be in the interval [0,pi/2[
+alpha: Fresnel coefficient
+Output:
+a,b,c,d such that eps^4+a*eps^3+b*eps^2+c*eps+d = 0
+"""
+cost = np.cos(th)
+cost2 = cost**2
+sint2 = np.sin(th)**2
+==PAGE:67==
+APPENDIX D.
+58
+sint4 = sint2**2
+alpha2 = alpha**2
+a4 = (-cost2**2*alpha2 + (-sint2 - 1)**2)
+a3 = (-4*alpha2*np.sqrt(x0 - sint2)*cost**3 - 2*(-sint2 - 1)**2 +
+2*sint2*(-sint2 - 1) - 6*cost2*alpha2)
+a2 = (6*alpha2*sint2*cost2 + (-sint2 - 1)**2 - 4*sint2*(-sint2 - 1) +
+sint4 - alpha2)
+a1 = (-4*alpha2*(x0 - sint2)**(3/2)*cost + 2*sint2*(-sint2 - 1) -
+2*sint4 + 2*sint2*alpha2)
+a0 =
+- sint4*alpha2 + sint4
+a = a3/a4
+b = a2/a4
+c = a1/a4
+d = a0/a4
+return a,b,c,d
+def quartic_solver(fun,*args):
+"""Solves a quartic equation x^4+ax^3+bx^2+cx+d = 0 using a closed
+form solution.
+Input: Takes a function, fun, as input that computes the coefficient
+a,b,c,d. The function may take additional arguments specified in *args.
+The coefficients may be scalars or np.array, but should have the np.dtype
+complex data format (64 or 128).
+Output: np.array of shape (4, ...) of same dtype as the input.
+NB!!! Apparently closed form solutions to quartic equations can be
+numerically imprecise, so pay attention!
+"""
+a,b,c,d=fun(*args)
+delta0 = b**2-3*a*c+12*d
+delta1 = 2*b**3-9*a*b*c+27*a**2*d+27*c**2-72*b*d
+t = ((delta1+np.sqrt(delta1**2-4*delta0**3))/2)**(1/3)
+==PAGE:68==
+APPENDIX D.
+59
+u = a**2/4-2/3*b
+v = t/3+delta0/(3*t)
+w = (a**3-4*a*b+8*c)/(4*np.sqrt(u+v))
+x1 = -a/4+np.sqrt(u+v)/2-np.sqrt(2*u-v-w)/2
+x2 = -a/4-np.sqrt(u+v)/2-np.sqrt(2*u-v+w)/2
+x3 = -a/4+np.sqrt(u+v)/2+np.sqrt(2*u-v-w)/2
+x4 = -a/4-np.sqrt(u+v)/2+np.sqrt(2*u-v+w)/2
+sols = np.array([x1,x2,x3,x4])
+return sols
+def fresnel_quartic_iterative_solver(fun,x0, imax, *args):
+"""Solves a quartic equation x^4+ax^3+bx^2+cx+d = 0 using a closed
+form solution. Assumes that some or all of the coefficients are
+functions of x themselves, and then iteratively solves for x and
+updates the coefficients until imax number of iterations have been
+performed.
+At each iteration 4 solutions are obtained of which one solution is
+chosen based on physical constraint of relative permittivity. Hence, if
+no real solutions exist or if multiple solutions have real values greater
+than 1 (which would lead to ambiguity in the next choice of x0) an
+AssertionError is thrown. Otherwise, that is exactly one real solution
+greater than 1 exist, then that value is used as the next x0 and the
+iteration continues.
+Input:
+fun: function that computes the coefficients a,b,c,d. fun should
+use the specified x0 as guess value for computation of those coefficients
+a,b,c,d that depend on x. fun may take additional arguments specified in
+*args. The coefficients output by fun may be scalars or np.array, but
+should have the np.dtype complex data format (64 or 128).
+x0 : initial guess value of x to be used for computing the
+quartic coefficients in fun.
+==PAGE:69==
+APPENDIX D.
+60
+imax: maximum number of iterations. If imax = 1 then this
+function is equivalent to quartic_solver and it should be considered to
+use that instead.
+*args: additional arguments that fun may take.
+Output: np.array of same shape as the coefficients output by fun.
+To be used with fresnel_quartic_coeff, to solve the Fresnel equation.
+NB! Only runs for imax number of iterations. Optimally, a convergence
+criterion based on a tolerance tol should be used, but for now it works
+by setting imax to a reasonably high number e.g. to 20.
+NB!!! Apparently closed form solutions to quartic equations can be
+numerically imprecise, so pay attention!
+"""
+for i in range(imax):
+a,b,c,d=fun(x0,*args)
+delta0 = b**2-3*a*c+12*d
+delta1 = 2*b**3-9*a*b*c+27*a**2*d+27*c**2-72*b*d
+t = ((delta1+np.sqrt(delta1**2-4*delta0**3))/2)**(1/3)
+u = a**2/4-2/3*b
+v = t/3+delta0/(3*t)
+w = (a**3-4*a*b+8*c)/(4*np.sqrt(u+v))
+x1 = -a/4+np.sqrt(u+v)/2-np.sqrt(2*u-v-w)/2
+x2 = -a/4-np.sqrt(u+v)/2-np.sqrt(2*u-v+w)/2
+x3 = -a/4+np.sqrt(u+v)/2+np.sqrt(2*u-v-w)/2
+x4 = -a/4-np.sqrt(u+v)/2+np.sqrt(2*u-v+w)/2
+sols = np.array([x1,x2,x3,x4])
+#
+print(sols)
+==PAGE:70==
+APPENDIX D.
+61
+assert np.all((sols>1).sum(axis=0)==1), "More than one solution
+is greater than 1"
+assert np.any(np.isreal(sols)), "No real solutions"
+x0 = np.max(sols,axis=0)
+return x0
+def fresnel_quadratic_coeff(x0,th,alpha):
+""" Computes the coefficients of the VV Fresnel equation, when
+rearranged to form a quadratic polynomial in eps (relative
+permittivity) a*eps^2+b*eps+c = 0. Some of the coefficients contain a
+factor sqrt(eps-sin^2(th)), in which the guess value x0 is inserted
+instead of eps.
+To be used with fresnel_quadratic_iterative_solver(...) to
+iteratively update x0 until convergence.
+Input:
+x0 : initial guess for eps
+th : incidence angle (rad), Should be in the interval [0,pi/2[
+alpha: Fresnel coefficient
+Output:
+a,b,c such that a*eps^2+b*eps+c = 0
+"""
+cost = np.cos(th)
+sint = np.sin(th)
+sint2 = sint**2
+a = (alpha*cost**2-1-sint2)
+b = 2*alpha*np.sqrt(x0 - sint2)*cost + 2*sint2 + alpha + 1
+c = -sint2*(alpha+1)
+return a,b,c
+def fresnel_quadratic_iterative_solver(fun,x0=1, imax=10, *args):
+"""Solves a quadratic equation a*x^2+b*x+c = 0 using the closed form
+solution. Assumes that some or all of the coefficients are functions
+of x themselves, and then iteratively solves for x and updates the
+coefficients until imax number of iterations have been performed.
+==PAGE:71==
+APPENDIX D.
+62
+At each iteration 2 solutions are obtained of which one solution is
+chosen based on physical constraint of relative permittivity. Hence, if
+no real solutions exist or if multiple solutions have real values greater
+than 1 (which would lead to ambiguity in the next choice of x0) an
+AssertionError is thrown. Otherwise, that is exactly one real solution
+greater than 1 exist, then that value is used as the next x0 and the
+iteration continues.
+Input:
+fun: function that computes the coefficients a,b,c. fun should
+use the specified x0 as guess value for computation of those coefficients
+a,b,c,d that depend on x. fun may take additional arguments specified in
+*args. The coefficients output by fun may be scalars or np.array
+x0 : initial guess value of x to be used for computing the
+quartic coefficients in fun.
+imax: maximum number of iterations.
+*args: additional arguments that fun may take.
+Output: np.array of same shape as the coefficients output by fun.
+To be used with fresnel_quadratic_coeff, to solve the Fresnel
+equation.
+NB! Only runs for imax number of iterations. Optimally, a convergence
+criterion based on a tolerance tol should be used, but for now it works
+by setting imax to a reasonably high number e.g. to 20.
+"""
+sols = np.array([x0,x0])
+for i in range(imax):
+a,b,c = fun(x0,*args)
+d = b**2-4*a*c
+assert np.all(d>=0), "No real solutions"
+x1 = (-b+np.sqrt(d))/(2*a)
+x2 = (-b-np.sqrt(d))/(2*a)
+sols = np.array([x1,x2])
+==PAGE:72==
+APPENDIX D.
+63
+#
+assert len(sols[sols>1])==1, "More than one solution is greater
+than 1"
+assert np.all((sols>1).sum(axis=0)==1), "More than one solution
+is greater than 1"
+x0 = np.max(sols,axis=0)
+return x0
+D.2
+Functions for inversion of the DMM
+import numpy as np
+def hallikainen_polyn_inv(eps,S,C):
+"""Solves the second degree polynomial using the coefficients from
+Hallikainen 1985 for 6 GHz to obtain soil moisture (mv) values from
+input values of relative permittivity (eps)
+and soil composition
+expressed by inputs of sand (S) and clay (C) percentages. Output
+np.array will be the same shape as the input array. """
+a0 = 1.993
+a1 = 0.002
+a2 = 0.015
+c
+= a0+a1*S+a2*C-eps
+b0 = 38.086
+b1 = -0.176
+b2 = -0.633
+b
+= b0+b1*S+b2*C
+c0 = 10.720
+c1 = 1.256
+c2 = 1.522
+a
+= c0+c1*S+c2*C
+d = b**2-4*a*c
+mv0 = (-b+np.sqrt(d))/(2*a)
+mv1 = (-b-np.sqrt(d))/(2*a)
+return mv0,mv1
+def hallikainen_polyn(mv,S,C):
+==PAGE:73==
+APPENDIX D.
+64
+"""Solves the second degree polynomial using the coefficients from
+Hallikainen 1985 for 6 GHz to obtain soil moisture (mv) values from
+input values of relative permittivity (eps)
+and soil composition
+expressed by inputs of sand (S) and clay (C) percentages. Output
+np.array will be the same shape as the input array. """
+a0 = 1.993
+a1 = 0.002
+a2 = 0.015
+c
+= a0+a1*S+a2*C
+b0 = 38.086
+b1 = -0.176
+b2 = -0.633
+b
+= b0+b1*S+b2*C
+c0 = 10.720
+c1 = 1.256
+c2 = 1.522
+a
+= c0+c1*S+c2*C
+return a*mv**2+b*mv+c
+def hallikainen_polyn_4GHz(mv,S,C):
+"""Solves the second degree polynomial using the coefficients from
+Hallikainen 1985 for 4 GHz to obtain soil moisture (mv) values from
+input values of relative permittivity (eps)
+and soil composition
+expressed by inputs of sand (S) and clay (C) percentages. Output
+np.array will be the same shape as the input array. """
+a0 = 2.927
+a1 =
+-0.012
+a2 = -0.001
+c
+= a0+a1*S+a2*C
+b0 = 5.505
+b1 = 0.371
+b2 = 0.062
+b
+= b0+b1*S+b2*C
+c0 = 114.826
+c1 = -0.389
+c2 = -0.547
+a
+= c0+c1*S+c2*C
+==PAGE:74==
+APPENDIX D.
+65
+return a*mv**2+b*mv+c
+D.3
+Functions for multichannel ﬁltering
+"""This file contains functions for performing multichannel filtering:
+multich_simplest: Filters input images assuming they are uncorrelated
+and the same number of looks.
+compute_ENL: Estimates the Equivalent Number of Looks of a user
+specified area in an image.
+"""
+import numpy as np
+import scipy.ndimage as filt
+from functions import *
+import matplotlib.pyplot as plt
+import time
+def multich_simplest(im,k=5):
+""" Performs the simplest multichannel filtering, assuming no
+correlation between images and the same number of looks.
+Input:
+im: np.array of shape (Ny,Nx,M) where (Ny,Nx) are the dimensions
+of the images and M is the number of images.
+k: size of the window used to estimate local means. Default is
+k=5.
+Output:
+Filtered images with same shape as im.
+"""
+im_means = filt.uniform_filter(im,size=(k,k,1))
+return
+((im/im_means).sum(axis=2)/im.shape[2])[:,:,np.newaxis]*im_means
+def compute_ENL(im, interval=False, w=5):
+"""Compute Equivalent Number of Looks for a specified (uniform) area
+for one or multiple images.
+Input:
+im: image for which to compute ENL
+interval: sequence of ints (ymin, ymax, xmin, xmax) specifying
+the area over which to compute ENL. Default: computes ENL based on the
+full input image.
+"""
+==PAGE:75==
+APPENDIX D.
+66
+if im.ndim == 3:
+if im.shape[2]==1:
+im = im[:,:,0]
+size = (w,w)
+else:
+size = (w,w,1)
+elif im.ndim == 2:
+size = (w,w)
+w2 = w//2
+if interval == False: # default -> use full image
+area = im
+else:
+area =
+im[(interval[0]-w2):(interval[1]+w2),(interval[2]-w2):(interval[3]+w2),]
+#
+area =
+im[(interval[0]):(interval[1]),(interval[2]):(interval[3]),]
+means = filt.uniform_filter(area, size = size)
+var = filt.generic_filter(area, function = np.var, size = size,
+extra_keywords = {'ddof':1})
+if not interval==False:
+means = means[w2:-w2,w2:-w2,]
+var
+= var[w2:-w2,w2:-w2,]
+return (means,var)

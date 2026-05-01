@@ -1,0 +1,1771 @@
+==PAGE:1==
+Many Lights Sampling Methods for Real-Time Rendering of
+Subsurface Scattering
+Thomas Conrad
+Technical University of Denmark
+Kongens Lyngby, Denmark
+s183742@dtu.dk
+Figure 1: Subsurface scattering in the Stanford dragon, lit by a single arealight above
+ABSTRACT
+This paper presents a novel approach for real-time rendering
+of translucent materials. An evenly distributed pointcloud
+on the translucent meshes is used as a collection of virtual
+pointlights which is sampled for subsurface scattering. The
+ReStir sampling method is used for rendering of direct il-
+lumination in the scene, and to collect incoming light in
+the virtual pointlights. For rendering the internal scattering
+in the volume, in addition to ReStir sampling, octree based
+spatial sampling is implemented to importance sample the
+BSSRDF of the translucent material. The efficacy of the ap-
+proach is evaluated by comparing to a converged render using
+random sampling, which demonstrates the ability of the sam-
+pling method to accelerate the convergence of subsurface
+scattering, making it suitable for real-time applications.
+CCS CONCEPTS
+• Computing methodologies →Ray tracing.
+KEYWORDS
+Ray Tracing, Subsurface Scattering, Real Time, Many Lights Sam-
+pling
+This work is licensed under a
+Creative
+Commons
+“Attribution-
+ShareAlike 4.0 International” license.
+1
+INTRODUCTION
+Translucent materials are constantly encountered in everyday life.
+These are materials like skin, milk, wax, snow and marble. In these
+materials, light entering the object can scatter hundreds of times
+before exiting the volume at a different location. This can blur small
+details in objects, like wrinkles in skin, and gives translucent mate-
+rials a characteristic soft appearance and diffuse glow. Therefore,
+rendering the appearance of translucent material has long been
+researched for applications in games, movies and other areas of
+computer graphics. Especially for simulating the true appearance
+of skin it is necessary to simulate subsurface scattering effects, as
+skin without subsurface scattering lands right in the uncanny val-
+ley. Companies such as Pixar have long been rendering subsurface
+scattering using extremely expensive Monte Carlo methods. Given
+that these renders can take several thousands of hours to finish,
+there is little hope of them being implemented for real-time ray
+tracing. But as consumer graphics hardware is getting increasingly
+more powerful and better algorithms are developed, methods that
+would have earlier taken up minutes or even hours can now run in
+milliseconds. Accurate simulation of real-time subsurface scattering
+represents one of the cutting-edge technologies just on the verge
+of feasibility, and hopefully, this work has pushed the boundary, if
+only by the tiniest amount.
+This work implements a version of subsurface scattering evaluated
+by the use of a point-cloud storing incident radiance over the sur-
+face of a translucent mesh. By implementing efficient many lights
+sampling methods the physical appearance of various translucent
+materials can be approximated in real-time. The implementation of
+rendering real-time subsurface effects brought with it a very effi-
+cient implementation for a many lights direct illumination renderer,
+which can render huge scenes in real-time.
+2
+PRIOR WORK
+Texture space diffusion
+In one of the earliest implementations of subsurface scattering
+Borshukov and Lewis [2003] showed the feasibility of performing
+==PAGE:2==
+Thomas Conrad
+diffusion in texture space. By rendering the irradiance map to a
+texture and blurring it, a convincing approximation of subsurface
+scattering can be achieved. The technique was implemented in real
+time by d’Eon et al. [2007]. It is very suitable for real time as texture
+space blurs can be evaluated cheaply using hardware filtering. The
+drawback of this technique is that a good UV mapping is needed
+for the surface. Mapping using seams for edges will not work with
+this method, as the mapping from mesh to UV-space needs to be
+differentiable. In cases where the UV mapping isn’t isometric d’Eon
+et al. [2007] use stretch maps, derived from the Jacobian of the trans-
+formation, to modify the blur radii such that the diffusion becomes
+correct when the texture is mapped to the mesh.
+screen-space diffusion
+The method introduced by Jimenez et al. [2009] to approximate
+subsurface scatting of skin in real-time, seems to be the current
+standard for subsurface scattering in games. Like texture space
+diffusion it’s a multi-pass algorithm. In the first pass, the incoming
+radiance can be rendered to a screen-space texture. A stencil to
+mark all skin pixels, as well as a depth buffer is also rendered here.
+A second pass can then be performed which blurs the radiance of
+all skin pixels. A screen-space stretch map is calculated using the
+depth map, scaling the kernel radius inversely with the distance
+and gradient of the distance. This method is also very quick to
+evaluate and can look very convincing when the diffusion is subtly
+like it is for skin. The main drawback is that it only evaluates the
+subsurface scattering in screen-space, meaning that if a light source
+was occluded by a translucent material, the light from behind the
+object wouldn’t be taken into account for subsurface scattering,
+only that of the neighbouring pixels.
+Depth maps
+A simple method for real-time subsurface scattering proposed by
+Hery [2005] uses depth maps to evaluate subsurface scattering. By
+rendering a z-buffer from the point of view of each light source
+and comparing it to the depth of the camera, obstructions between
+the camera and light source can be found, much like how shadows
+can be calculated using shadow mapping1. Instead of completely
+blocking the light as in shadow maps, with this technique, if the
+object shadowing the light source is translucent, the irradiance
+of the light is merely attenuated by the distance it has travelled
+through the object. This allows for subsurface scattering of even
+lights which are behind objects. However, as the number of light
+sources increases this method becomes increasingly expensive to
+evaluate
+Ray traced real-time subsurface scattering
+With the recent advent of hardware ray tracing, methods for evalu-
+ating real-time subsurface scattering using ray tracing have been
+implemented in engines like Nvidia Omniverse and Unity. By trac-
+ing rays inside the translucent material, points on the surface where
+light is evaluated can be generated. By then back-propagating the
+sampled light to the initial point of intersection at the mesh un-
+biased subsurface scattering can be evaluated. There are many
+1https://www.student.dtu.dk/~s183742/Worksheet%209/index.html
+different tricks for importance sampling directions inside the vol-
+ume and guiding the path to light, but this method is still very
+costly requiring many rays per pixel to be traced, and often has
+high variance in the sampled irradiance, due to the search space of
+subsurface scattering being much larger than what can be evalu-
+ated in real-time. Using general filtering methods can bring down
+this variance significantly and learning-based models specifically
+aimed at volume rendering for real-time ray tracing have recently
+been developed [Hofmann et al. 2023], but evaluating ray traced
+subsurface scattering in real-time is still a ways off.
+3
+PRELIMINARIES
+A short primer on rendering
+When rendering a scene the goal is to calculate the amount of
+light hitting the camera lens from each point which is visible by
+the camera. As there are an infinite amount of individual visible
+locations, the visible radiance is usually averaged over a grid of
+pixels, the screen. The way to calculate the visible radiance from
+a pixel is to solve the rendering equation, eq. (1) [Kajiya 1986],
+for the position in each pixel. In the rendering equation, the light
+contributions from both the emitted and reflected radiance, 𝐿𝑒and
+𝐿𝑟, at the position in the direction of the viewing location are added
+up to equal the total incoming light.
+𝐿𝑜(𝒙𝑜, ®
+𝜔𝑜) = 𝐿𝑒(𝒙𝑜, ®
+𝜔𝑜) + 𝐿𝑟(𝒙𝑜, ®
+𝜔𝑜) = 𝐿𝑒(𝒙𝑜, ®
+𝜔𝑜)
++
+∫
+2𝜋
+BSDF(𝒙𝑜, ®𝜔𝑖, ®
+𝜔𝑜)𝐿𝑖(𝒙𝑜, ®𝜔𝑖) (®𝑛· ®𝜔𝑖) d ®𝜔𝑖
+(1)
+Where 𝒙𝑜, ®
+𝜔𝑜are the position and direction of the radiated light, ®𝜔𝑖
+is the direction of the incoming light, and ®𝑛is the normal direction
+at the position of the radiated light. The problem of evaluating the
+rendering equation arises when the reflected light is considered,
+as this has to take all visible light sources in a hemisphere around
+the visible point into account. The incoming light from a given di-
+rection is then modified by the Bidirectional Scattering Distribution
+Function (BSDF) [Nicodemus 1965], a function which specifies how
+light from an incoming direction is scattered in an outgoing direc-
+tion. Under this convention, any surface which can be connected
+to a light source by a series of rays is a light source in itself and has
+to be taken into account in the rendering equation. Approximating
+this entire integral is known as global illumination and is reserved
+for media like movies where they can afford to spend thousands of
+CPU hours per frame [Dean Takahashi 2013]. Instead, most modern
+techniques use clever techniques and approximations, which trade
+quality for speed to achieve a look reminiscent of global illumi-
+nation while running at interactive framerates. In this paper, to
+render the likeness of materials and objects which exhibit subsur-
+face scattering, sampling techniques from Bitterli et al. [2020] and
+Lin and Yuksel [2020] have been heavily relied upon to make a
+simple lighting technique converge in real-time.
+Monte Carlo importance sampling for solving
+integrals
+As explained above, rendering is in many ways just a problem of
+solving an integral. This can be done using Monte Carlo methods,
+==PAGE:3==
+Many Lights Sampling Methods for Real-Time Rendering of Subsurface Scattering
+which are numerical techniques used to approximate complex in-
+tegrals using random numbers. Importance sampling is a type of
+Monte Carlo integration that aims to reduce the variance of the
+estimate by generating random numbers more efficiently.
+In the case of solving the integral 𝐿=
+∫𝑏
+𝑎𝑓(𝑥)d𝑥using simple
+Monte Carlo integration, the integral can be solved by uniformly
+generating values for 𝑥𝑖∈[𝑎,𝑏] and averaging the values 𝑓(𝑥𝑖) ·
+(𝑏−𝑎). However, in the case where the function has signification
+variation, a lot of samples might be used to evaluate an insignificant
+portion of the integral. Instead, samples can be drawn proportion-
+ally to a different probability distribution 𝑔(𝑥) which is positive
+whenever 𝑓(𝑥) is nonzero. The integral can then be written as an
+expectation value using 𝑔(𝑥):
+𝐿=
+∫𝑏
+𝑎
+𝑓(𝑥)𝑑𝑥=
+∫𝑏
+𝑎
+ 𝑓(𝑥)
+𝑔(𝑥)
+
+𝑔(𝑥)𝑑𝑥= E
+ 𝑓(𝑥)
+𝑔(𝑥)
+
+(2)
+The advantage of this representation is that we can now sample
+points according to 𝑔(𝑥), which may lead to more efficient esti-
+mates.
+To estimate the integral using importance sampling, we generate
+𝑁random samples 𝑥1,𝑥2, . . . ,𝑥𝑁from the distribution 𝑔(𝑥). Then,
+the Monte Carlo estimate of the integral is given by:
+⟨𝐿⟩= 1
+𝑁
+𝑁
+∑︁
+𝑖=1
+𝑓(𝑥𝑖)
+𝑔(𝑥𝑖)
+(3)
+The importance sampling estimate has a lower variance com-
+pared to standard Monte Carlo integration when the importance
+function is well chosen. The choice of the importance function
+depends on the properties of the integrand. Ideally, it should be
+similar to the integrand in regions where 𝑓(𝑥) is significant.
+ReSTIR
+Reservoir-based Spatio-Temporal Importance Resampling, or ReSTIR
+for short is a many lights sampling method devoped by Bitterli
+et al. [2020]. It uses a combination of resampled importance sam-
+pling (RIS) [Talbot et al. 2005] and weighted reservoir sampling
+[Chao 1982; Vitter 1985] to achieve low variance real-time direct
+illumination.
+The ReSTIR algorithm has since been extended to be able to
+handle global illumination [Ouyang et al. 2021] and volume render-
+ing [Lin et al. 2021], and an algorithm for utilizing the benefits of
+ReSTIR while still providing convergence guarantees has also been
+developed [Lin et al. 2022]. When used together with a real-time
+denoising scheme such as SVGF [Schied et al. 2017] or DLSS [Nvidia
+Gameworks 2023] this method is the state of the art method for
+real-time ray tracing [Nvidia 2021], and is widely used in modern
+RTX capable games.
+Weighted reservoir sampling [Chao 1982; Vitter 1985] is a tech-
+nique to sample N random elements from a stream of 𝑀random
+samples {𝑥1,𝑥2, . . . ,𝑥𝑀}, each sampled according to some distri-
+bution 𝑝. Weighted reservoir sampling was developed as a way to
+randomly select data on tape drives where random access was not
+possible, so the tape would have to be rewound to reread data. In
+reservoir sampling, only a single pass of the 𝑀samples is performed,
+and at the end, each sample will have a probability of having been
+Figure 2: Graph illustrating the flow of ReStir. Copied from
+[Bitterli et al. 2020]
+chosen proportional to the weight of the sample. This weight cor-
+responds to the desired final sample pdf. It does this by constantly
+keeping track of the total weight it has seen so far, the currently
+selected sample and the number of samples seen. When a new sam-
+ple is generated with weight 𝑤𝑖it is then chosen with a probability
+𝑝=
+𝑤𝑖
+𝑤𝑠𝑢𝑚. An important aspect is then that any can be combined
+with another reservoir to draw a sample from a combination of the
+two reservoir’s populations. As long as the two reservoir weights
+are generated using the same method, this combination remains
+unbiased. This turns out to be extremely useful in light sampling
+applications when reservoirs can be shared temporally and spatially.
+Resampled Importance Sampling (RIS) [Talbot et al. 2005] is
+a technique to sample approximately from a distribution ˆ𝑝which
+might be hard to sample from using another distribution 𝑝which
+is possible to draw samples from. It is an alternative to Multiple Im-
+portance Sampling (MIS) [Veach and Guibas 1995]. In RIS 𝑀initial
+samples are drawn from the "bad" distribution 𝑝. 𝑁of the initial
+samples are then chosen proportional to the desired pdf:
+𝑝(𝑥𝑧| 𝒙) =
+w (𝑥𝑧)
+Í𝑀
+𝑖=1 w (®𝑥𝑖)
+w(𝑥𝑗) =
+ˆ𝑝(𝑥𝑗)
+𝑝(𝑥𝑗)
+(4)
+Having picked 𝑁samples, {𝑦1, . . . ,𝑦𝑁} the N-sample RIS estimator
+is then:
+⟨𝐿⟩𝑁,𝑀
+ris
+= 1
+𝑁
+𝑁
+∑︁
+𝑖=1
+©­
+«
+𝑓(𝑦𝑖)
+ˆ𝑝(𝑦𝑖) · ©­
+«
+1
+𝑀
+𝑀
+∑︁
+𝑗=1
+w  𝑥𝑖𝑗
+ª®
+¬
+ª®
+¬
+(5)
+Which essentially reweights each final sample as if it was drawn
+directly from ˆ𝑝, and corrects it based on how close the value of 𝑝
+is to ˆ𝑝to account for the fact that the final sample distribution is
+only an approximation of ˆ𝑝. The complete RIS algorithm is then:
+ALGORITHM 1: Resampled Importance Sampling
+Result: Estimate of integral
+1 Draw 𝑀proposals from the source distribution {𝑥1, . . . ,𝑥𝑀} ∼𝑝(𝑥𝑗)
+2 Compute a weight for each proposal, w(𝑥𝑗) =
+ˆ𝑝(𝑥𝑗)
+𝑝(𝑥𝑗)
+3 Draw 𝑁samples from the proposals {𝑦1, . . . , 𝑦𝑁} ∼𝑤(𝑦𝑗)
+4 Estimate the integral, using eq. (5);
+The novel idea of ReStir is the combination of Talbot-style RIS
+==PAGE:4==
+Thomas Conrad
+with weighted reservoir sampling. The main drawback to using
+only RIS for light sampling is that as 𝑀is increased, large arrays
+are required to store all the previously seen samples. On a GPU
+where cache misses will often be the limiting factor, storing these
+large arrays lead to massive slowdowns. Instead, using reservoir
+sampling only 𝑁reservoirs are kept in memory, with each reservoir
+storing the number of samples seen, the total weight seen and the
+final sample. This combined process is seen in algorithm 2. While
+the final samples will be drawn from an identical distribution to
+that obtained using algorithm 1 no previous samples are stored in
+memory. The RIS with WRS algorithm is:
+ALGORITHM 2: RIS with weighted reservoir sampling
+Input: Reservoirs {𝑟1, . . . ,𝑟𝑁}
+Output: Estimate of integral, filled reservoirs
+1 𝐿←0.0
+2 for 𝑗←1 to 𝑁do
+3
+for 𝑖←1 to 𝑀do
+4
+Draw sample 𝑥𝑖∼𝑝(𝑥𝑖) ;
+⊲Using alias table
+5
+Calculate weight 𝑤𝑖= ˆ𝑝(𝑥𝑖)
+𝑝(𝑥𝑖)
+6
+𝑟𝑗.w_sum ←𝑟𝑗.w_sum + 𝑤𝑖
+7
+if rand() · 𝑟𝑗.w_sum < 𝑤𝑖then
+8
+𝑟𝑗.𝑦←𝑥𝑖
+9
+end
+10
+𝑟𝑗.𝑀←𝑟𝑗.𝑀+ 1
+11
+end
+12
+𝑟𝑗.𝑊←
+1
+ˆ𝑝(𝑟𝑗.𝑦) ·
+
+1
+𝑟𝑗.𝑀𝑟𝑗.w_sum
+
+
+
+Equation (5)
+13
+𝐿←𝐿+ 𝑓(𝑟𝑗.𝑦) · 𝑟𝑗.𝑊
+14 end
+15 return 1
+𝑁· 𝐿
+In the ReStir paper by Bitterli et al., the initial M samples are chosen
+based on their unshadowed path contribution, which is the unoc-
+cluded luminance of a light. This value is relatively straightforward
+to calculate as it skips the costly ray intersection step. Visibility is
+then traced for the 𝑁chosen samples in the end, to ensure some
+amount of shadows.
+Using the property of reservoirs that they can be freely combined,
+the ReStir method used a series of reservoir reuse steps to improve
+the quality of the samples in the reservoirs. A graph illustrating the
+sample flow is shown in 2.
+Temporal reuse of the reservoirs is carried out after shadows
+have been traced. If the same object is rendered multiple frames
+in a row, a lot of lights have already been sampled and traced for
+that position. If the scene is relatively temporally stable, not saving
+those previous good candidates is a massive waste of computational
+resources. Temporal reuse reuses previously good samples by com-
+bining the current reservoir with that of the last frame, increasing
+the effective sample population per frame. In the paper the authors
+recommend limiting the amount of times a sample can be reused
+by decreasing its sample weight as it is reused further. This is to
+avoid artifacts where extremely bright and long-lived samples fill
+the screen, not allowing other lights to be sampled. Not retracing
+the reused samples can introduce bias if objects move around in
+the scene, but a method for dealing with this bias is also introduced
+in the ReStir paper.
+Spatial reuse is the last step in Reservoir-based Spatio-Temporal
+Importance Resampling. This step combines nearby reservoirs, al-
+lowing a single good sample to spread to a large area. Several itera-
+tions of this can be performed, increasing the distance a sample can
+travel in screen-space linearly with the number of iterations, and
+the number of pixels that can use a sample exponentially with the
+number of iterations. Reusing reservoirs from different locations
+in the scene can also introduce bias, as visibility isn’t guaranteed
+from other locations than the original reservoir location.
+Bitterli et al. describes both a biased and an unbiased way of per-
+forming this reuse. In the unbiased variant, additional shadow rays
+are traced when samples are exchanged, to ensure that the selected
+sample is still visible. The unbiased variant uses a heuristic based
+on the depth and normal difference to reject reservoir combination
+when the geometry of the two reservoirs is too different. In practise
+the unbiased variant visually looks much better than the biased
+variant, as more samples are reused and because fewer rays are
+traced the performance is much better. The bias is however visible
+in many scenes, where shadows get blurred around the edges and
+in some cases completely disappear.
+Subsurface Scattering
+Subsurface scattering is the effect of light entering an object, scat-
+tering internally several times, and then exiting the material again
+at another point on the surface. This effect is shown in Figure 3.
+When travelling inside the medium, the intensity of the incoming
+radiance will decrease exponentially with distance, until it either
+hits the surface and exits the medium or is absorbed inside the
+volume. Generally, different wavelengths of light will be absorbed
+inside the medium at different rates, often giving the light contri-
+bution from subsurface scattering a distinctly different colour than
+that of the incoming radiance. A real-life example of this which we
+encounter every day is the translucency of skin. In human skin red
+colours tend to travel a lot further than other colours before being
+absorbed. This leads to the distinct red glow that is observed near
+thin areas of skin when light is being shone from behind, like when
+holding your hand to block the sun.
+The main difference between transparent and translucent materials
+is the behaviour of the light inside the medium. As already stated, in
+translucent materials the light bounces around at a near-continuous
+rate. In transparent materials, however, the light is refracted at the
+point of intersection due to the difference in the effective speed of
+light (refractive index 𝑛) of the two materials. Thereafter it contin-
+ues in a straight path through the object until being absorbed or
+exiting the material, upon which refraction occurs again. As the
+movement of the light is straight inside the material, a single inter-
+section point and direction maps to a single exit point. This makes
+transparent materials relatively easy to evaluate, with the exception
+of caustics, as it just requires a few extra traces to evaluate the path
+of the ray.
+==PAGE:5==
+Many Lights Sampling Methods for Real-Time Rendering of Subsurface Scattering
+Figure 3: Illustration of the light scattering process inside
+translucent materials. Copied from [Jensen et al. 2001]
+On the other hand, for translucent materials, a ray entering a mate-
+rial could exit anywhere on the surface of the material which can
+be connected by a series of lines. To model the light exiting a point
+when subsurface scattering is present, the generalised rendering
+equation (eq. (6)) [Jensen et al. 2001] must be used:
+𝐿𝑜(𝒙𝑜, ®
+𝜔𝑜) = 𝐿𝑒(𝒙𝑜, ®
+𝜔𝑜) + 𝐿𝑟(𝒙, ®
+𝜔𝑜) = 𝐿𝑒(𝒙𝑜, ®
+𝜔𝑜)
++
+∫
+𝐴
+∫
+2𝜋
+BSSRDF(𝒙𝑖, ®𝜔𝑖; 𝒙𝑜, ®
+𝜔𝑜)𝐿𝑖(𝒙𝑜, ®𝜔𝑖) (®𝑛· ®𝜔𝑖) d ®𝜔𝑖d𝒙𝑖
+(6)
+Here the same parameters are used as in eq. (1), with the addition of
+the location of the incoming radiance ®𝑥𝑜. The BSDF of the rendering
+equation has been replaced by the bidirectional surface scattering re-
+flectance distribution function (BSSRDF), and an additional integral
+over the surface 𝐴of the object is performed. The BSSRDF is a func-
+tion which roughly describes how much of the light from the rest of
+the surface is internally scattered to exit at the observed point. This
+function is intractable and would ideally be evaluated using Monte
+Carlo methods to get as close as possible to the underlying physical
+phenomenon [Rushmeier 1988]. When evaluating random walk
+subsurface scattering with Monte Carlo integration a length and
+direction is importance sampled based on the exponential atten-
+uation profile of the material (𝐿𝑟𝑖(𝑥𝑖+ 𝑠®𝜔𝑖, ®𝜔𝑖) = 𝑒−𝜎𝑡𝑠𝐿𝑖(𝑥𝑖, ®𝜔𝑖))
+and the phase function 𝑝( ®𝜔, ®𝜔′). To determine whether the ray was
+absorbed by the last bounce, or can still keep propagating inside
+the medium, Russian roulette, developed by John Von Neumann
+and Stan Ulan, can be used. Performing these steps yields the sim-
+plest possible Monte Carlo integrator for the random walk problem,
+which will still converge in reasonable time. This random walk
+technique is however not generally possible for real-time applica-
+tions due to the number of samples needed to reduce variance, and
+therefore techniques have been developed which approximates the
+true solution, such as the work by Frisvad et al. [2014].
+In this work, the BSSRDF is instead modelled using an isotropic
+diffusion profile 𝑅𝑑(·), as introduced by Jensen et al. [2001]. The
+diffusion profile describes how light at one location is distributed
+over different distances from the original location. With this ap-
+proximation, the costly BSSRDF becomes:
+𝑆𝑑(®𝑥𝑖, ®𝜔𝑖; ®𝑥𝑜, ®𝜔𝑜) = 1
+𝜋𝐹𝑡(®𝑥𝑖, ®𝜔𝑖) 𝑅𝑑(∥®𝑥𝑖−®𝑥𝑜∥2) 𝐹𝑡(®𝑥𝑜, ®𝜔𝑜)
+(7)
+Where 𝐹𝑡is the Fresnel transmittance at the boundary, ®𝑥𝑖and ®𝑥𝑜
+are the same as in eq. (6) and 𝑅𝑑(·) is the isotropic diffusion profile.
+This automatically sets the phase function to a constant
+1
+4𝜋. Three
+different models for the diffusion profile have been implemented
+and used. The simplest is the unscattered approximation. This as-
+sumes that light never bounces inside of the volume, travelling in a
+straight line. The unscattered diffusion profile becomes:
+𝑅𝑑𝑖𝑟𝑒𝑐𝑡
+𝑑
+(𝑟) = 𝜌𝑑
+𝑟2𝜎2
+𝑡
+2𝜋𝑒−𝜎𝑡𝑟
+(8)
+Where 𝜌𝑑is the diffuse reflectance (albedo) and 𝜎𝑡= 1
+𝑙𝑠with 𝑙𝑠
+being the mean free path of single scattering. In this case as the
+unscattered diffusion is merely used for model validation, the diffuse
+scattering distance has been used instead. The factor
+𝑟2
+2𝜋𝜎2
+𝑡has been
+set to ensure that the diffuse reflectance holds:
+𝜌𝑑=
+∫∞
+0
+𝑅𝑑(𝑟)2𝜋d𝑟⇔
+∫∞
+0
+𝑟2𝜎2
+𝑡
+2𝜋𝑒−𝜎𝑡𝑟d𝑟= 1
+(9)
+This is to ensure that the diffuse BSSRDF simplifies to the diffuse
+reflectance when an even amount of light is supplied from all dis-
+tances, such as an infinitely thick and wide slab lit from a light
+infinitely far away.
+The second model implemented is the dipole diffusion approxima-
+tion by Jensen et al. [2001]. This model models the diffuse scattering
+inside an object by the combination of a real light source inside
+the volume at a distance 𝑑𝑟and a virtual light source outside at a
+distance 𝑑𝑣:
+𝑅𝑑𝑖𝑝𝑜𝑙𝑒
+𝑑
+(𝑟) = 𝛼′
+4𝜋
+(
+𝐶1
+𝑒−𝜎𝑡𝑟𝑑𝑟
+𝑑2𝑟
++ 𝐶2
+𝑒−𝜎𝑡𝑟𝑑𝑣
+𝑑2𝑣
+)
+,
+𝐶1 = 𝑧𝑟
+
+𝜎𝑡𝑟+ 1
+𝑑𝑟
+
+and 𝐶2 = 𝑧𝑣
+
+𝜎𝑡𝑟+ 1
+𝑑𝑣
+
+(10)
+The dependence of the diffusion profile and the of this model: 𝜎′𝑠
+and 𝜎𝑎, is highly non-linear and makes it extremely difficult predict
+appearance based on parameters. Following the approach of Jensen
+and Buhler [2002], the model has been reparameterized to be de-
+pendent on the diffuse reflectance 𝜌𝑑and the diffuse mean free
+path length 𝑙𝑑. The diffuse reflectance is the colour of an evenly lit
+surface, whereas the diffuse mean free path length is the colour of
+scattered light far from a light source. The variables of Equation (10)
+are then defined as:
+𝜎′
+𝑡=
+1
+𝑙𝑑
+√︁
+3(1 −𝛼)
+𝜎′
+𝑠= 𝛼𝜎′
+𝑡
+𝜎𝑎= 𝜎′
+𝑡−𝜎′
+𝑠
+𝜎𝑡𝑟=
+√︃
+3𝜎𝑎𝜎′
+𝑡
+𝑧𝑟= 1
+𝜎′
+𝑡
+𝑧𝑣= 𝑧𝑟(1 + 4
+3𝐴)
+𝐴= 1 + 𝐹
+1 −𝐹
+𝐹= −1.440
+𝑛2
++ 0.710
+𝑛
++ 0.668 + 0.0636𝑛
+This results in an expression for 𝑅𝑑which is dependent on the
+reduced albedo 𝛼, 𝑙𝑑and the relative index of refraction 𝑛. To find
+the diffuse albedo 𝑅𝑑is inserted into Equation (9). Jensen et al.
+[2001] evaluated this to be:
+𝜌𝑑= 𝛼′
+2
+
+1 + 𝑒−4
+3𝐴√
+3(1−𝛼′)
+𝑒−√
+3(1−𝛼′)
+(11)
+In this work, solving for 𝛼is performed using Newton’s method
+using 𝜌𝑑as the starting point for the root finding procedure.
+==PAGE:6==
+Thomas Conrad
+The last method implemented is the approximate reflectance profile
+of Christensen [2015]. They found an efficient approximation to the
+diffusion profile by function fitting to a Monte Carlo simulation:
+𝑅𝐵𝑢𝑟𝑙𝑒𝑦
+𝑑
+(𝑟) = 𝑒−𝑟/𝑑+ 𝑒−𝑟/(3𝑑)
+8𝜋𝑑𝑟
+(12)
+Where the parameter 𝑑is a function of the diffuse mean free path
+length and surface albedo:
+𝑑=
+𝑙𝑑
+1.85 −𝜌𝑑+ 7|𝜌𝑑−0.8|3
+(13)
+This function is very simple and efficient to evaluate while provid-
+ing results very close to the ground truth. The one downside is that
+it tends to infinity for 𝑟→0. A simple fix to not run into errors
+is to clamp the minimum depth while sampling. This won’t add
+any bias as when evaluating the radiance the clamping isn’t used.
+This also won’t be a problem when evaluating the mesh samples
+as discs covering a surface instead of infinitesimal points on the
+surface, which is discussed later on.
+In Appendix B renders have been carried out with the different
+models. For the rest of the paper 𝑅𝐵𝑢𝑟𝑙𝑒𝑦
+𝑑
+(𝑟) have been used as it
+seemed the most visually pleasing of the three models.
+4
+IMPLEMENTING RESTIR FOR MANY-LIGHT
+SAMPLING
+Implementing the ReStir method took an excessively long time to
+implement, the main reason being the overhead that came with
+starting a project. The article by Bitterli et al. explained the process
+in very simple terms and was easy to read, but there are many
+pitfalls when implementing it, and debugging graphics hardware
+can be hard. The RenderDoc software from https://renderdoc.org/
+was invaluable in the implementation process.
+Efficient loading of emissive triangles
+When sampling light from emissive triangles using the method
+of Algorithm 2, the largest bottleneck by far is the time is takes
+to load in the triangle objects from global memory. These objects
+must contain a complete descriptor of the triangle: its three vertex
+locations, base emissive RGB strength and if the triangle is lit by an
+emissive texture the UV coordinates of the vertices as well as the
+texture index. In total this is at least 76 bytes, going up to 109 bytes
+if interpolation of the vertex normals is wanted. By using lower size
+data types and unit vector compression, this can be reduced to 28
+bytes resulting in a near 4x speedup of sampling time. Then when
+the final sample is to be evaluated, the full 109 byte precision is
+used to avoid artifacts, following the overarching theme of sample
+cheap, evaluate accurately. The specific space saving measures are:
+• Use 16 bit floats for vertex positions.
+• Only use face normal.
+• Compress face normal to 32 bit using octahedron encoding
+[Meyer et al. 2010].
+• Use the average colour of the emissive texture in 16 bit
+floating format.
+The last element, requires an expensive pre-pass on the CPU. For
+each triangle with an emissive texture, the the triangle is projected
+to the texture using its UV coordinates. The average color is then
+found, using bilinear interpolation in cases where a pixel is partially
+inside the triangle.
+Alias sampling
+When sampling lights for direct illumination, the simplest way
+to do it is to sample inversely to triangle area by generating a
+uniformly random triangle index and a set of barycentric coordi-
+nates. Then the probability of sampling that point on a triangle
+Ω is 𝑝(Ω) =
+1
+𝐴·𝑛, with A being the triangle area and n being the
+total amount of triangles. This specific probability comes from the
+fact there were n triangles to choose from, but as the probability of
+sampling two triangles of vastly different sizes is identical, larger
+triangles will be undersampled compared to smaller triangles. The
+validity can be checked by integration of the probability over the
+triangle:
+∫
+Ω 𝑝(Ω)𝑑𝑥= 1
+𝑛. The problem with this sampling scheme
+is that it doesn’t take the luminance of the emissive triangles into
+account. The variance can be decreased by using power sampling,
+where samples are drawn proportional to the irradiance of the area.
+The obstacle is then that there is no intuitive way to draw such
+a sample in O(1) time like with the random sampling. The intu-
+itively simple way to perform power sampling would be to have
+all emissive triangles sorted and generate a number 𝑥𝑗∼[0, 𝐼𝑡𝑜𝑡],
+𝐼𝑡𝑜𝑡being the total radiance of all triangles. Using binary search
+the corresponding triangle can be found and sampled in O(log(𝑛))
+operations. There does however exist a way to draw samples from
+a discrete probability distribution in constant time, described first
+by Walker [1974]. The method, called Alias Sampling, relies on
+generating two random numbers per sample. With the first random
+number a random element (triangle) in the set is chosen. There is
+then a possibility of rejecting the chosen element and instead using
+its corresponding alternative. If the total power 𝐼𝑗of the initial
+element is at or above 𝐼𝑡𝑜𝑡
+𝑛
+it will always be chosen. If it has less
+power, it will have a probability 1 −𝐼𝑗·𝑛
+𝐼𝑡𝑜𝑡of instead choosing its
+alternative. The alternatives are then assigned in such a way that
+all the probability mass of the samples whose initial sampling prob-
+ability got truncated is present in the alternatives. Such a scheme
+can always be created as the sample probabilities form a partition of
+unity. This sampling method has been implemented for the direct
+illumination light sampling for fast sampling with lower variance
+than random sampling.
+5
+SUBSURFACE SCATTERING EVALUATION
+The method used to evaluate subsurface scattering in this paper
+uses a presampled point-cloud as a set of virtual pointlights (mesh
+samples). The mesh samples have been placed into an octree on
+the GPU which allows efficient spatial and hierarchical methods.
+The entire practical implementation is discussed later and a graph
+showing the control flow of the render loop is show in Figure 6. In
+short, the method uses to steps to calculate the subsurface scatter-
+ing.
+First, for every point in the point-cloud incoming direct illumi-
+nation is sampled using the ReStir algorithm. This is identical to
+what is being done for the areas of the scene visible by the camera,
+==PAGE:7==
+Many Lights Sampling Methods for Real-Time Rendering of Subsurface Scattering
+but using the point-cloud ensures that even areas of the scene not
+visible by the camera are sampled.
+Second, for every pixel visible by the camera if the hit object is
+translucent light is sampled from the virtual pointlights and using
+a subsurface diffusion profile the radiance transmitted through the
+translucent mesh is estimated. Doing this sampling of pointlights is
+extremely difficult as to densely cover a mesh the distance between
+points should be close to the diffuse mean free path length, usually
+resulting in several hundreds of thousands of points. Because of the
+random motion experienced by light packets inside a volume, the
+average distance travelled is much shorter than for light travelling
+in nonparticipating media. Therefore, the vast majority of samples
+in the point-cloud are not contributing significantly to the subsur-
+face scattering of a point on the mesh. Two methods have been
+implemented to improve sample generation from the point-cloud.
+The first is using the full ReStir process where reservoirs are saved
+which store good points in the point-cloud. The second method
+uses the octree to sample proportional to the incoming radiance of
+the points. Both methods work independently of each other an can
+be combined to work in tandem, as instead of sampling randomly
+in the ReStir sample generation, the octree can be used for sample
+generation.
+Octree sampling
+To importance sample from the BSSRDF, the surface samples are
+placed into an octree. By traversing the octree, a light can be sam-
+pled according to the approximate light contribution of the point in
+O(𝑛log(𝑛)) time complexity, where n is the amount of points in the
+octree. The sampling algorithm is implemented in pseudocode in
+Algorithm 3. The octree sampling algorithm is recursive in nature,
+but as the GPU has no stack it is implemented iteratively in code.
+For each child cell in an octree grid, the total radiance of the cell is
+calculated. In practise this is performed by multiplying the average
+radiance with the amount of points in the cell. If the cell is not a
+leaf node, and therefore contains multiple points, the distance to
+use for the BSSRDF isn’t known. Instead, the BSSRDF is calculated
+for both the farthest and closest possible points in the cell, which
+roughly approximates the average BSSRDF. This is an approach
+inspired by the implementation of real-time stochastic lightcuts by
+Lin and Yuksel [2020]. In their article they use a perfect binary tree
+to sample virtual pointlights. For each node in their perfect binary
+tree they store a bounding box which encompasses all points con-
+tained by the node. In the case where a node is inside the bounding
+box, the minimum distance goes to infinity. This leads to a poten-
+tial singularity. Yuksel [2021] got around this by just ignoring the
+distance when the point was too close to the bounding box, but
+instead Lin and Yuksel [2020] calculates a sampling probability of
+a node by using both the closest and farthest points in the possible
+child nodes.
+𝑤min
+𝑗
+=
+𝑰𝑗𝑆
+
+𝑑min
+𝑗
+(𝒙)
+𝐿
+𝑤max
+𝑗
+=
+𝑰𝑗𝑆
+
+𝑑max
+𝑗
+(𝒙)
+𝐿
+(14)
+Here, 𝒙is the shaded point, 𝑑min/max
+𝑗
+(𝒙) is either the shortest or the
+longest possible distance to a point in the cell, 𝑆(𝑟) is the isotropic
+BSSRDF, which only depends on distance, mean free path and
+diffuse reflectance. The norm | · |𝐿signifies the luminance of the
+ALGORITHM 3: Radiance Based Octree Sampling
+Input
+:Origin: 𝑥
+Output:Incoming radiance from sample and pdf of sample
+1 max_weights[8],min_weights[8] ←0
+2 𝑝𝑑𝑓←1, cur_node ←root
+3 while true do
+4
+for each node𝑖in cur_node do
+5
+if node𝑖is empty then
+6
+skip
+7
+else if node𝑖is a child then
+8
+𝑚𝑎𝑥_𝑤𝑒𝑖𝑔ℎ𝑡𝑠[𝑖] ←𝑓(𝑛𝑜𝑑𝑒𝑖.𝐼, |𝑛𝑜𝑑𝑒𝑖.pos −𝑥|);
+9
+𝑚𝑖𝑛_𝑤𝑒𝑖𝑔ℎ𝑡𝑠[𝑖] ←𝑓(𝑛𝑜𝑑𝑒𝑖.𝐼, |𝑛𝑜𝑑𝑒𝑖.pos −𝑥|);
+10
+else
+11
+Find 𝑑min and 𝑑max;
+⊲node𝑖is a parent
+12
+𝑚𝑎𝑥_𝑤𝑒𝑖𝑔ℎ𝑡𝑠[𝑖] ←𝑓(𝑛𝑜𝑑𝑒𝑖.𝐼,𝑑min);
+13
+𝑚𝑖𝑛_𝑤𝑒𝑖𝑔ℎ𝑡𝑠[𝑖] ←𝑓(𝑛𝑜𝑑𝑒𝑖.𝐼,𝑑max);
+14
+end
+15
+end
+16
+sample 𝑟𝑎𝑛𝑑in [0,1];
+17
+𝑤cumulative ←0;
+18
+for each 𝑤𝑚𝑖𝑛
+𝑖
+, 𝑤𝑚𝑎𝑥
+𝑖
+in weights do
+19
+𝑝←0.5
+
+𝑤𝑚𝑖𝑛
+𝑖
+Í
+𝑗𝑤𝑚𝑖𝑛
+𝑗
++
+𝑤𝑚𝑎𝑥
+𝑖
+Í
+𝑗𝑤𝑚𝑎𝑥
+𝑗
+
+20
+𝑤cumulative ←𝑤cumulative + 𝑝;
+21
+if 𝑟𝑎𝑛𝑑< 𝑤cumulative then
+22
+𝑝𝑑𝑓←𝑝𝑑𝑓· 𝑝;
+23
+if node𝑖is a leaf then
+24
+return 𝑓(𝑦𝑖.𝐼, ∥𝑦𝑖.pos −𝑥∥), 𝑝𝑑𝑓
+25
+else
+26
+cur_node ←node𝑖;
+27
+end
+28
+end
+29
+end
+30 end
+colour calculated by the REC. 709 standard [ITU-R BT.709-6 2015].
+The probabilities associated with the weights are then calculated
+by normalising the weights.
+𝑝min
+𝑗
+=
+𝑤min
+𝑗
+Í
+𝑖𝑤min
+𝑖
+𝑝max
+𝑗
+=
+𝑤max
+𝑗
+Í
+𝑖𝑤max
+𝑖
+(15)
+The final for each cell is the average of the largest and smallest
+probability 𝑝𝑗= 0.5
+
+𝑝min
+𝑗
++ 𝑝max
+𝑗
+
+. When calculating the weights,
+Lin and Yuksel employ a neat trick to avoid diving by zero. They
+multiply all weights in eq. (15) by the total product of the distances.
+This cancels out the division by zero and turns it into a multiplica-
+tion by zero for all other weights.
+Interestingly, when using the BSSRDF by Christensen [2015] which
+also includes a singularity, this method doesn’t deliver good results.
+As soon as one of the weights has a minimum distance of 0 the
+associated weight 𝑤min
+𝑗
+goes to infinity. This leads to 𝑝min
+𝑗
+always
+having a value of 1 for the cell containing 𝒙and 𝑝min
+𝑖≠𝑗to be 0. All
+information about the total light intensity of a cell is lost and it
+is granted an unconditional 50% sampling probability. While this
+might work for Lin and Yuksel, when used for participating media
+==PAGE:8==
+Thomas Conrad
+like volumes it leads to very visible artifacts.
+A simple solution is to clamp the minimum distance to a mini-
+mum value when sampling the octree. Then the division by zero
+effects are avoided and the results still visually look good, as the
+evaluated radiance is using the correct formula.
+The min and max weights are still used when sampling from the
+octree. Using the minimum in this case is needed as often times the
+width of the cell will be much larger than the scattering distance
+of the subsurface model. In that case, if the average position of all
+points or the centroid of the cell was to be used, it would seem as if
+the cell contained no light. If the cell contains a somewhat isotropic
+distribution of points, and is large, most of the illumination to a
+sampled point outside of the cell with come from the points in the
+cell closest to the sampled point. Therefore the smallest distance
+can be a good indicator of the possible amount of light that can be
+received. Including the longest distance is to have a measure of the
+size of the cell. Even though large cells might have a high maximum
+contribution they will also contain a lot of points far away form
+the sample location, whereas smaller cells will have more of the
+points closer and contributing more. Using both leads to a good
+approximator of the total received illumination of a cell.
+6
+IMPLEMENTATION DETAILS OF
+SUBSURFACE SCATTERING
+The implementation of the procedure described in this work has
+been carried out using C++ for the CPU code and Vulkan with
+GLSL for the GPU code. Vulkan has been chosen as it is an open
+source cross-platform framework offering minimal overhead for
+frame generation. In a real-time application such as this, reducing
+frametimes wherever possible is necessary which made Vulkan a
+good choice. The learning curve is extremely steep, as it exposes a
+lot of the low level mechanics of the framework to the user. The
+real advantage of using Vulkan in this project was the reduced CPU
+overhead of launching GPU invocations, increasing the parallel
+region substantially.
+Octrees on the GPU On a CPU building a pointer based octree is
+relatively simple and a nice exercise in spatial trees. On the GPU
+however, building and using octrees are very difficult as there is
+no dynamical memory management. The way that they have been
+implemented in this work is by building the octree on the CPU
+using standard procedures and then flatten the entire thing into
+a contiguous, array-based structure, which is transferred to GPU
+memory. When transferring memory from the CPU to the GPU
+like this, taking the endianness of the two devices into account is
+necessary as they may differ. Each node in the CPU octree becomes
+a grid on the GPU, loosely following the implementation of indi-
+rection grids explained in GPU Gems 2 [Pharr and Fernando 2005,
+Chapter 37]. The memory layout of a grid is visually illustrated in
+Figure 4. Each grid contains 8 cells, representing the 8 octants of the
+node in a predefined order. A cell can be empty, a leaf or a parent,
+distinguished by the amount of contained points within it. A leaf
+node contains a single point and instead of position and intensity
+Figure 4: Illustration showing the memory layout of a single
+grid-array.
+stored the index of the point-cloud sample which it represents. A
+parent node in comparison will store the total intensity of all the
+lights it contains as well as the average position of the points. The
+average position isn’t used in the rendering pipeline and could be
+replaced by the spanned solid angle of the contained points for
+heuristic purposes.
+When flattening the octree to the indirection grids, care is taken to
+ensure that each level of the octree is contiguously gathered in the
+array. This allows efficient parallel summation of the light in each
+node, a process explained in pass 3.
+Clustered evaluation of octree nodes
+When employing an octree for tree sampling of VPL’s, the traversal
+is often a very expensive and slow process. This is because of the
+many random reads from global memory, which is a bottleneck.
+One way to increase sampling efficiency without increasing the
+error much is to use clustered evaluation [Jensen and Buhler 2002].
+The main idea is to approximate the a branch node as a single light
+when the error associated with this is small. The information known
+about a branch node is only the total light intensity and average
+position of the points in it, which isn’t enough to evaluate the light
+contribution. However, when a node is observed from far away, the
+far field approximation can be used, as d𝑅𝑑(𝑟)
+d𝑟
+→0,𝑟→∞. Thus
+it is a reasonable approximation to evaluate all lights in a node as
+single powerful light, using the voxel centroid as the position. This
+technique has been implemented by Jensen and Buhler [2002] for
+use in subsurface evaluation. They use the maximum solid angle
+spanned by the points in the voxel as a heuristic for whether to
+split the node:
+Δ𝜔=
+𝐴𝑣
+®𝑥−®𝑃𝑣
+
+(16)
+𝐴𝑣is the area of points in the node, 𝑉𝑒𝑐𝑥is the origin position
+and ®𝑃𝑣is the irradiance weighted average position of the contained
+points. In the implementation in this work another heuristic is used.
+==PAGE:9==
+Many Lights Sampling Methods for Real-Time Rendering of Subsurface Scattering
+Figure 5: Comparison of three different thresholds for the
+clustering heuristic, as well as the time to sample from the
+octree.
+The heuristic is the difference in tone-mapped luminance of placing
+all points at the closest and farthest points inside the node. This
+difference measure is an upper bound on the possible error from
+evaluating the entire cell as a single light source. The reason for
+using the difference in luminance after tonemapping is that it ties
+it to the real appearance on screen, meaning the same clustering
+distance will correspond to the same difference in visual quality. In
+practise this approach works well and has the potential to vastly
+accelerate octree traversal, at the cost of minor artifacts. A node
+is set to never be evaluated as a cluster if the origin is inside the
+node, much like the solid angle heuristic. The speed-up effects of
+clustering can be seen in Figure 5. When the clustering threshold
+is too low the visual artifacts resulting from the approximation
+become apparent, but using reasonable values the technique can
+drastically speed up sampling.
+Sample generation on the surface
+The samples used for subsurface evaluation must be evenly dis-
+tributed over the surfaces. If they are unevenly distributed, areas
+with a higher density of points will tend to have a higher luminance
+from subsurface scattering, due to the approximation being more
+accurate in those areas. The method used in this work for generat-
+ing a sample distribution is a two step approach. First a very high
+amount of points are sampled uniformly on the surface. For this
+Alias sampling [Walker 1974] is again used to sample proportional
+to the triangle area. Sampled points are rejected if they’re too close
+to a preexisting point to limit the depth of the octree. This is further
+explained in Appendix A. Thereafter, Sample Elimination by Yuksel
+[2015] is used to select a subset of the initial samples with Poisson
+disk property. The method is computationally efficient, but the cho-
+sen sample subset can never be better than the initial sample set,
+which leads to low frequency noise in the subsurface scattering.
+An alternative for sample generation which has been used by
+[Jensen and Buhler 2002] it the point repulsion algorithm [Turk
+1992]. This method iteratively moves the points on the surface away
+from each other using a repulsion force until convergence. This
+generates very even distributions without tiling artifacts, but is
+very computationally expensive and has therefore not been imple-
+mented.
+Dealing with low frequency noise
+Due to not using perfect sampling and only using a limited number
+of constant samples, low frequency noise will be present in the
+final render even when convergence is reached. One way to deal
+with this is to not treat the samples as infinitesimally small points,
+but instead as a disc of Poisson radius 𝑟𝑝on the surface where the
+actual sampled location could be anywhere within. As the points on
+the surface display Poisson disc propertied, this will tend to cover
+the surface. A practical way to sample a location is then to offset
+the sample location a distance between 0 and 𝑟𝑝tangentially to the
+surface, which can approximate the diffuse disc reflectance profile:
+𝑅𝑑𝑖𝑠𝑐
+𝑑
+( ®𝑥𝑜) =
+1
+𝜋𝑟2𝑝
+∫
+Ω
+𝑅𝑑(∥®𝑥𝑜−®𝑥𝑖∥)d ®𝑥𝑖
+(17)
+Where Ω is the sampled Poisson disc of radius 𝑟𝑝. The problem
+encountered when trying to implement this disc sampling was that
+it requires the normal plane of the sample. This cannot be known
+when traversing the octree for nodes containing multiple points,
+and it therefore wasn’t implemented. Again, a way to circumvent
+this issue is to not use disc sampling when traversing the octree, but
+only use it when evaluating light contributions. The implemented
+noise reduction method is to clamp the minimum distance to the
+Poisson disc radius, which is an extremely crude approximation of
+Equation (17). Because the clamping removes all contribution from
+scattering paths shorter than the Poisson radius, large Poisson radii
+result in a render that is biased towards longer scattering paths. The
+approximation becomes better the smaller the Poisson radius, and
+combined with a high sampling density the bias is not perceptible
+while successfully removing low frequency noise.
+7
+APPLICATION RENDER LOOP
+Several passes are needed to render an image with both spatiotem-
+poral reservoir sampling and octree sampling of virtual pointlights
+on translucent meshes. The reason multiple passes are necessary is
+because of a dependence on prior calculations. As everything on
+the GPU is calculated in massively parallel environments, relying
+on data sharing in the same pass between threads results in race
+conditions. Therefore, each calculation which can be done indepen-
+dent of neighbouring threads is performed in a single invocation, as
+there is an overhead for each pass launched. A dependency graph
+of the different passes in the implementation can be seen in Figure 6.
+Pass 1: G-Buffer pass
+The primary hit of all rays is calculated using traditional rasteri-
+zation, as it is a hybrid renderer. The primary advantage of this
+the performance benefit of rasterization vs ray tracing. Even with
+hardware Ray Tracing, rasterization is essentially free compared
+to tracing rays. Saving half of the rays traced by using a hybrid
+approach saves a lot of time to use for light sampling. This G-Buffer
+pass writes information about the primary hit of the scene into
+textures. It saves the hit position, albedo, normal direction, material
+ID, tangent, UV coordinates, motion vector, and depth. By using a
+==PAGE:10==
+Thomas Conrad
+so-called ping-pong technique the position, albedo and normal of
+the previous frame is also stored. This done by using two different
+descriptor sets, Vulkan’s way of telling a shader where in memory
+different attributes are stored. By never writing the position, albedo
+and normal to the same location in memory two frames in a row,
+two sets of textures will be stored, one for the newly rendered frame
+and one for the previous frame. This technique has essentially zero
+overhead compared to not saving previous frame information. This
+information is essential for the temporal reuse in ReStir, as the way
+to minimize bias is to only accept previous samples with similar
+features.
+Pass 2: Ray-Tracing pass
+This pass is responsible for tracing all the rays. Initially 𝑀points on
+the different lights in the scene are power sampled and 𝑁samples
+are collected using resampled importance sampling with reservoir
+sampling, Algorithm 2. In this implementation, for direct illumina-
+tion 𝑁was kept at 1. This is done both for every pixel on the screen
+which collided with geometry, and for every point to be sampled on
+the translucent geometry. After the sample generation the visibility
+of the samples is traced, which is what enables shadows in the scene.
+At the end of the pass, the screen-space and mesh-space reservoirs
+are combined with the reservoirs of the previous frame. This step
+allows good samples to keep being used, vastly increasing the effec-
+tive sample amount per frame. As the camera might have moved
+between frames the location of the best screen-space reservoir isn’t
+necessarily located in the same pixel. Therefore the motion vectors
+calculated in pass 1 are used to find the previous pixel index of
+the geometry. These motion vectors are found by reprojecting the
+world space positions of the current visible geometry to clip coor-
+dinates using the projection and view matrices from the previous
+frame and comparing to the current clip coordinates. To determine
+whether a reservoir is eligible for temporal reuse, a heuristic based
+on normal and position since the last frame is used. As the mesh
+samples are stationary in space, no reprojection is necessary.
+Pass 3: Octree light summation
+In pass 2 the incident radiance for each point in the octree was
+found. This radiance is stored at the nodes of the octree which hold
+the individual points. When sampling using the octree, the total
+light intensity stored in each node of the octree must be known.
+This compute shader pass iteratively sums up all the light stored
+in the children of a node and writes it to the parent. To avoid race
+conditions this must be done in a minimum of 𝑛−1 parallel invo-
+cations, 𝑛being the amount of levels in the octree. The lowest level
+does not have to be run as it can only contain leaf nodes. Prefer-
+ably the octree should be as vertically spread out as possible when
+integrating the radiance from the child nodes, with a minimum
+amount of empty nodes. This is because nodes on the same level
+are independent of each other as there is no overlap. Therefore,
+the light from them can be summed in parallel on the GPU. Even
+though this process requires many shader invocations, it is a very
+efficient process, due to the contiguous memory layout of each indi-
+vidual level in the octree, meaning that the amount of cache misses
+is minimised. This process of summing the light is equivalent to
+the generation of mipmaps for an image.
+Rasterize G-Buﬀer
+Sample DI for octree
+Sample DI for pixels
+Trace visibility of DI
+Temporal reuse of DI
+Generate octree mipmaps
+Spatial reuse of DI
+Sample SSS from octree
+Spatial reuse of SSS
+HDR color
+Filtering
+Temporal reuse of SSS
+Tonemapping and UI
+Figure 6: Rendering pipeline of the application, with all
+passes grouped by color. DI is direct illumination from are-
+alights, SSS is subsurface scattering propagating through an
+object from a sample on the mesh.
+Pass 4: Octree traversal and SSS sampling
+After summation of the light for each node of the octree, the octree
+can be used for sampling using Algorithm 3. For each pixel that
+hits a translucent object the full RIS with WRS method is used to
+importance sample points in the point-cloud based on outgoing
+radiance, using the BSSRDF. After the initial samples have been
+chosen, they are combined with the chosen reservoirs from the
+previous frame to increase effective sampling count. Like in pass 2,
+the motion vectors calculated in pass 1 are used to find the pixel
+index of the previous reservoirs. The same heuristic for choosing
+whether to combine reservoirs as in pass 2 is used to minimise
+reuse bias.
+Pass 5: Spatial reuse and colour calculation
+After pass 2 and pass 4 are finished, two sets of reservoirs filled
+with samples have been generated, one for direct illumination and
+one for subsurface illumination. A biased spatial reservoir reuse
+pass [Bitterli et al. 2020] is run first. Here, reservoirs from neigh-
+bouring pixels are reused to reduce variance. This is also where
+the Fresnel transmittance effects are added for the subsurface scat-
+tering. While sampling, diffuse Fresnel transmittance is assumed.
+==PAGE:11==
+Many Lights Sampling Methods for Real-Time Rendering of Subsurface Scattering
+After sampling the Fresnel transmittance based on the angle and
+relative index of refraction is used. After the reuse, the light from
+the emissive materials, the direct illumination and the subsurface
+scattering is accumulated into an HDR texture of the rendered im-
+age.
+Pass 6: Filtering, Tonemapping and UI
+When pass 5 has completed, all the pixels of the scene have been
+rendered. Mipmaps of the HDR texture are calculated for automatic
+exposure, and filtering techniques can have access to all pixels with-
+out race-conditions. This is necessary if DLSS or Optix Denoising
+is to be implemented. The only pixel reuse currently implemented
+is simple temporal reprojection and reuse:
+𝑐𝑜𝑙[𝑖] = 𝛼new_col[𝑖] + (1 −𝛼) old_col[𝑗]
+(18)
+Where 𝛼is the weight of the new sample, usually around 0.2, 𝑖is
+the current pixel index and 𝑗is the previous pixel index found by
+reprojection. This has not been used for any of the tests performed.
+Finally the tonemapping is calculated using the ACES algorithm
+[Arrighetti 2017] and the Imgui UI is rendered.
+8
+RESULTS
+To perform the performance evaluation and testing, the program
+was run in Linux using an RTX 4090 gpu with the vulkan beta
+driver 525.47.31.
+Direct Illumination rendering results
+In order to evaluate the efficacy of the ReStir implementation pre-
+sented in this study, rendering experiments were conducted using
+the Amazon Lumberyard Bistro scene, as depicted in Figure 7. The
+left image represents the scene rendered with random sampling of
+arealights and no spatiotemporal reuse, while the right image show-
+cases the employment of ReStir. Although ReStir exhibits slower
+execution times, the obtained results demonstrate its significant
+value and more than justify the additional computational cost.
+Figure 7: The Amazon Lumberyard Bistro scene at night with
+2,832,120 triangles and 20,638 emissive triangles rendered
+using the ReStir implementation in this paper.
+Figure 8: Left: Dragons in the Bistro scene without subsurface
+scattering. Right: Dragons in the Bistro scene with subsurface
+scattering.
+Subsurface Scattering rendering results
+Two different many lights sampling methods for subsurface point-
+light sampling have been described and implemented in this work,
+the ReStir sampling method and the octree sampling method. Com-
+bining the two methods yields four separate configurations for
+which results have been gathered:
+• Random sampling, no reuse
+• Random sampling + Temporal reuse
+• Octree sampling, no reuse
+• Octree sampling + Temporal reuse
+The first method only uses resampled importance sampling with
+reservoir sampling to sample subsurface scattering lights, sampling
+all lights randomly and only keeping them for a frame. The Tempo-
+ral reuse method combines the reservoirs temporally to preserve
+good samples. Spatial reuse was also implemented, but didn’t work
+well for subsurface scattering, so it has been left out. The octree
+sampling method performs no reuse, but generates high quality
+samples from a spatial data structure, at the cost of samples be-
+ing expensive to generate. The last method combines uses both
+previous methods for sample generation. All tests were run using
+200k samples on the mesh, and for two different values of 𝑁, the
+amount of subsurface reservoirs per pixel. More reservoirs mean
+fewer initially generated samples but more saved and reused sam-
+pled. For comparison a baseline was created by letting the random
+sampler run, and using the average of tens of thousands of samples
+for convergence. In Section 8 all the visual renders of this test are
+shown. The right column shows color differences for each method
+compared to the baseline of the cropped in view.
+All methods in the test were normalised to run in equal time, with
+the goal being 125 fps or 8ms spent per frame. As the rendering time
+was equal for all methdos this was then adjusted by changing the
+amount of initial samples generated until the subsurface sampling
+time was identical for all methods.
+For a numerical measure of similarity to the baseline, the peak
+signal to noise ratio [Wang et al. 2004] was used. These results can
+be seen in Table 1.
+==PAGE:12==
+Thomas Conrad
+Baseline
+Random Sampling
+No Reuse
+Octree Sampling
+T
+emporal Reuse
+Random Sampling
+No Reuse
+Octree Sampling
+T
+emporal Reuse
+Octree Samping + T
+emporal Reuse, N=8
+Random Sampling
+No Reuse
+Octree Sampling
+T
+emporal Reuse
+Random Sampling
+No Reuse
+Octree Sampling
+T
+emporal Reuse
+Figure 9: Visual comparisons of the different methods. The left column shows the baseline and best method. Of the remaining
+four groups the top two figures show results for 𝑁= 1 and the bottom two show results for 𝑁= 8. The right column shows the
+difference to the baseline.
+Table 1: Comparison of the PSNR for different sampling tech-
+niques. All methods have been normalised to run in 8 ms
+(125 fps), by increasing sample count when necessary.
+Method
+PSNR, N=1
+PSNR, N=8
+Random sampling, no reuse
+16.343
+16.388
+Random sampling + Temporal reuse
+22.209
+26.338
+Octree sampling, no reuse
+20.638
+24.579
+Octree sampling + Temporal reuse
+23.183
+30.705
+The last test performed is a visual comparison of the influence
+of scaling the diffuse mean free depth by a factor. Four different
+renders corresponding to four scaled scattering depths are shown
+in fig. 10.
+9
+DISCUSSION AND LIMITATIONS
+The best method, based on the testing methodology described above
+and the results in Table 1, is by far the combination of both ReStir
+and octree sampling. This combination was visually identical to the
+baseline implementation while running many orders of magnitude
+faster. Note that this testing was only performed for this one scene
+and using a point-cloud of 200k points. However, it is reasonable
+to assume that the patterns observed generalise to other test cases.
+For all test cases using more reservoirs 𝑁resulted in a better, and
+more converged final outcome, even at the cost of initial samples
+𝑀. Generally this shows that one sample isn’t enough to model the
+subsurface scattering for this object, which will rarely be the case.
+In the case of octree sampling approaches, this notion is further
+reinforced as each generated sample is essentially guaranteed to be
+of high quality. Considering the expensive nature of the sampling
+scheme, it is advisable to reuse all the samples. For the methods
+using temporal reuse the advantage of using multiple reservoirs,
+in this case, is that most of the reservoirs will eventually be filled
+with good samples as temporal reuse progresses. It will take more
+frames than if it was allowed a higher number of initial samples,
+but as the temporal reservoir lifetime is based on the total number
+of samples seen 𝑀and not amount of frames, they will end up with
+the same quality of reservoirs.
+One problem with octree sampling arises from the fact that sam-
+ples are drawn from a spatial data structure, which can introduce
+spatial artifacts. This can be seen in the images in Section 8 where
+==PAGE:13==
+Many Lights Sampling Methods for Real-Time Rendering of Subsurface Scattering
+Figure 10: Renders of the subsurface scattering for the Stan-
+ford bunny, using four different scale parameters for the
+diffuse mean free length.
+only the octree sampler is used and is especially noticeable in the
+difference images. When using the octree to trace an image, the
+samples are being generated proportionally to an approximation of
+the received luminance, as it has to be evaluated for entire nodes
+at a time. The final result after averaging enough frames will be
+unbiased, due to dividing by the sample probabilities, but when
+not being given the chance to converge the spatial artifacts can
+look extremely jarring. The artifacts essentially stem from the ap-
+proximation of the received radiance per node being worse in some
+areas than others, simple due to where the octree has been split.
+When temporal sample reuse is employed in conjunction, this issue
+is mitigated, as the estimation of received radiance is enhanced by
+utilizing information from previous samples. Additionally, combin-
+ing octree sampling with spatial reuse was extremely effective at
+removing these artifacts as the samples were allowed to propagate
+through voxel boundaries via screen-space.
+From the difference image in Section 8 interesting conclusions
+can be drawn to the effects of the different sampling schemes. In
+the northwest quadrants where random sampling is performed, it
+can be seen that especially the blue colour is lacking. In this case
+where the diffuse reflectance is white and the mean free path is
+longest for red wavelengths, a lack of blue colour means the short
+paths are being undersampled. The explanation for this is that the
+long path lengths stem from a lot of dim light sources while the
+short path lengths stem from very few and very bright light sources.
+As importance sampling of the received luminance isn’t performed,
+these short paths tend to be comparatively undersampled. The op-
+posite seems to be the case for the schemes employing temporal
+reuse for 𝑁= 1. They undersample long paths and become too
+blue. This can be explained by them only having a single reservoir.
+They want to importance sample the luminance, and the short blue
+paths carry more luminance. So if 75% of the luminance is from
+short paths, 75% of the reservoirs will only contain blue samples.
+Therefore, most of the time, when they can only hold a single sam-
+ple it will the that. In comparison, when the amount of reservoirs
+is increased this tendency disappears completely. Now that more
+reservoirs are available, in the case of a 75/25 percent luminance
+split between short and long scattering paths, 6 reservoirs will on
+average hold blue samples and 2 will hold red samples.
+Regarding temporal stability: It may seem as if ReStir sam-
+pling (temporal reuse) and octree sampling are pretty close in terms
+of performance, not counting the artifacts of pure octree sampling.
+However, the single frame renders shown in Section 8 do not tell
+the whole story. Even though there is variance in both methods by
+themselves, the temporal instability of the octree method is way
+worse than the ReStir method. When sing ReStir temporal reuse,
+good samples last a long time, resulting in variance with temporally
+long periods. By exclusively relying on octree sampling, new sam-
+ples are used every frame. Even though each result sampled from
+the octree is good, it still draws new results almost every single
+frame, resulting in a flickering appearance when observed over
+time. Combining the two methods completely fixes the temporal
+instability as samples are now allowed to be kept for longer.
+In fig. 10 the effects of shorter and longer diffuse mean free paths
+can be seen. With extremely short scattering lengths the artifacts
+go beyond just "low frequency noise" as the point-cloud itself be-
+comes apparent. This method of rendering subsurface scattering
+will not perform well in those cases and instead, blur based tech-
+niques can be used in these cases. The further the scattering length
+is increased the more luminance will bleed through, from the lit side
+of the bunny. In a surprising turn of events, for very long scattering
+lengths the scattered illumination will tend to stop being modulated
+by the mean free path length, and instead by the difference of the
+albedo and the mean free path length. This is of course due to the
+approximation used as it assumes a mix of both short and long
+scattered paths, but in the case where a significant amount of the
+diffuse reflectance is made up of light from paths longer than the
+length of the model, the approximation breaks down.
+Combining many lights scenes with translucent objects: Gen-
+erally, the effects of subsurface scattering are often less pronounced
+in scenes with a large amount of light sources, as most surfaces
+will be directly lit, and therefore the short diffuse reflectance will
+dominate. In these cases, the pronounced subsurface scattering can
+then be seen more in corners and crevices, where most paths to
+light sources will be blocked. In Figure 8 this is seen on the two
+Stanford dragons in the Bistro scene. The biggest difference be-
+tween the image with and without subsurface scattering is near the
+mouth, where light bleeds through to the dark areas, illuminating
+the thinner areas. Additionally, the model received a softer look as
+the subsurface scattering will smooth out features much smaller
+than the diffuse mean free path length. However, this short scatter-
+ing that results in a blurred look can already be simulated quite well
+==PAGE:14==
+Thomas Conrad
+using much more efficient methods such as screen-space diffusion.
+The difference between the cheap and expensive methods become
+more apparent when light has to travel further inside objects or
+when less of the object is illuminated. So even though many lights
+sampling methods are very applicable for rendering subsurface
+scattering from a point-cloud, placing these translucent objects in
+scenes with many lights won’t necessarily use the technique to its
+fullest.
+The remaining problem is then the low frequency noise present
+even in the baseline image, when the biased depth clamping is
+removed. Numerous methods available are available to fix this, and
+some have even been described in this paper. Implementing one of
+these along with increasing the number of points the octree can
+hold is the logical immediate next step of this work.
+There are issues with the most basic ReStir DI version. The spatial
+reuse can break down in scenes with very high variance, such as
+scenes with small, bright features. These small bright features are a
+natural consequence of using the point-sampled subsurface scat-
+tering approximation, and when using spatial reuse in these cases
+artifacts will appear. This issue has also been observed in other
+implementations of ReStir [Tomasz Stachowiak 2022]. From the
+limited testing that has been done it seems that numerical precision
+might be causing artifacts with spatial reuse, as when both the
+sample weight and radiance contribution of a reservoir are very
+low the integral estimator ⟨𝐿⟩(𝑟) ≈𝑓(𝑟𝑦)
+𝑟𝑊
+becomes numerically
+unstable, which can lead to runaway illumination.
+A notable consequence of sampling the subsurface scattering from
+a point-cloud in this way is that different meshes can be added
+at no additional complexity. As all translucent triangle faces are
+treated equally, they will all be merged in a single point-cloud. This
+is exploited to create the render in Figure 8, where two dragons
+are placed close to each other in the same scene. Since the sam-
+pling technique used for subsurface scattering focuses on excluding
+unimportant points, meshes that are spaced apart will typically not
+be included in the sampling process, resulting in minimal loss of
+quality. If multiple meshes are brought close enough together, light
+bleed from one to the other could take place, but in some ways
+this is not too inaccurate as that could physically happen. Because
+the point-cloud are also stored in a sparse tree based structure,
+very little extra information is needed to store different translucent
+meshes in the same scene.
+The only major drawback of the current octree implementation is
+that only 16 bits are allocated for the child offset value. This limits
+the total possible amount of grids on a level to 65536. In practise
+this has always been enough to generate at least 200k points, and a
+run-time check is performed to ensure that no nodes are unreach-
+able using 16 bit pointers. Using 32 bit values for the amount of
+points contained in a node as well as the child offset would allow an
+extreme amount of points to be stores, placing the limiting factor
+on the amount of VRAM available on the GPU. Such an implemen-
+tation was used for https://github.com/ThomasConrad/VoxelTrace
+where millions of voxels could be Ray-traced in real-time.
+In this project, lot of work has been put into developing a novel
+approach for applying ReStir DI [Bitterli et al. 2020] with point-
+sampled subsurface scattering. In the end, the developed approach
+of sampling points on the translucent meshes (virtual pointlights),
+then using reservoir sampling to evaluate the incident direct illumi-
+nation for each sample, and finally approximating the subsurface
+scattering radiance of a pixel by reservoir sampling of the virtual
+pointlights, is quite similar to the approach for global illumination
+of ReStir GI [Ouyang et al. 2021]. Applying techniques for virtual
+light sampling from ReStir GI into the framework developed in
+this work might help to improve both efficiency and stability of
+rendering. The approach presented in this paper has complete sep-
+aration between the evaluation of subsurface scattering and direct
+illumination, but it may not be the most optimal solution.
+With more time, a simple way to combine the real illumination
+from lights in the scene with the scattered illumination from in-
+side the mesh is to importance sample from both arealights and
+virtual pointlights when evaluating the outgoing radiance of a pixel.
+Instead of having a separate BSDF to handle diffuse and specular
+reflections and a BSSRDF to handle subsurface scattering, combin-
+ing them is a simpler and more scalable approach. Simplifying the
+program in this way could also expand the parallel region of the
+different shaders, giving a slight performance boost.
+10
+CONCLUSION
+In this paper a method for real-time rendering of translucent ma-
+terials is proposed. The method is implemented in a Vulkan based
+hardware ray-traced renderer. The renderer is able to render direct
+illumination in complex scenes with thousands of light sources at
+hundreds of frames per second, while also capturing the soft and
+smooth appearance of translucent materials. The renderer combines
+the spatiotemporal reservoir sampling method with spatial octree
+sampling for efficient samples of virtual pointlights for subsurface
+scattering. Through testing, the advantages and disadvantages of
+the different methods implemented have been analysed, and the
+resulting best method is achieved by a combination of temporal
+reservoir reuse and octree imporance sampling.
+11
+ACKNOWLEDGEMENTS
+I would like to express my sincerest gratitude to my supervisor,
+Jeppe Revall Frisvad, for providing invaluable guidance and unwa-
+vering support throughout the project. His prompt responsiveness
+and willingness to address queries, even during late hours, have
+been greatly appreciated.
+Furthermore, the I extend my gratitude to Morten Hannemose
+for valuable discussions and feedback on the thesis layout, Mark
+Bo Jensen for assistance with Vulkan, Henrik Philippi for insights
+into filtering methods and DLSS, and Hans Henrik for assistance
+in optimising GPU cache hits. I would also like to acknowledge
+the department of DTU Compute for generously providing a high-
+performance computer for conducting the experiments and grant-
+ing access to an office space for productive work.
+==PAGE:15==
+Many Lights Sampling Methods for Real-Time Rendering of Subsurface Scattering
+REFERENCES
+Walter Arrighetti. 2017. The academy color encoding system (ACES): A professional
+color-management framework for production, post-production and archival of still
+and motion pictures.
+https://doi.org/10.3390/jimaging3040040
+Benedikt Bitterli, Chris Wyman, Matt Pharr, Peter Shirley, Aaron Lefohn, and Wojciech
+Jarosz. 2020. Spatiotemporal reservoir resampling for real-time ray tracing with
+dynamic direct lighting. ACM Transactions on Graphics 39, 4 (2020). https://doi.
+org/10.1145/3386569.3392481
+George Borshukov and J. P. Lewis. 2003. Realistic human face rendering for "The
+Matrix Reloaded". In ACM SIGGRAPH 2003 Sketches & Applications. ACM, New
+York, NY, USA, 1–1. https://doi.org/10.1145/965400.965470
+M. T. Chao. 1982. A general purpose unequal probability sampling plan. Biometrika
+69, 3 (1982). https://doi.org/10.1093/biomet/69.3.653
+Per H. Christensen. 2015. An approximate reflectance profile for efficient subsurface
+scattering. In ACM SIGGRAPH 2015 Talks, SIGGRAPH 2015. https://doi.org/10.1145/
+2775280.2792555
+Dean Takahashi. 2013.
+How Pixar made Monsters University, its latest techno-
+logical marvel.
+https://venturebeat.com/media/the-making-of-pixars-latest-
+technological-marvel-monsters-university/
+Eugene d’Eon, David Luebke, and Eric Enderton. 2007. Efficient rendering of hu-
+man skin. EGSR’07 Proceedings of the 18th Eurographics conference on Rendering
+Techniques (2007).
+Jeppe Revall Frisvad, Toshiya Hachisuka, and Thomas Kim Kjeldsen. 2014. Directional
+dipole model for subsurface scattering. ACM Transactions on Graphics 34, 1 (2014).
+https://doi.org/10.1145/2682629
+Christophe Hery. 2005. Implementing a skin BSSRDF (or several...). In ACM SIGGRAPH
+2005 Courses, SIGGRAPH 2005. https://doi.org/10.1145/1198555.1198584
+Nikolai Hofmann, Jon Hasselgren, and Jacob Munkberg. 2023. Joint Neural Denoising of
+Surfaces and Volumes. Proceedings of the ACM on Computer Graphics and Interactive
+Techniques 6, 1 (5 2023), 1–16. https://doi.org/10.1145/3585497
+ITU-R BT.709-6. 2015. BT.709 : Parameter values for the HDTV standards for production
+and international programme exchange. , 3 pages. https://www.itu.int/rec/R-REC-
+BT.709-6-201506-I/en
+Henrik Wann Jensen and Juan Buhler. 2002. A rapid hierarchical rendering technique
+for translucent materials. In Proceedings of the 29th Annual Conference on Computer
+Graphics and Interactive Techniques, SIGGRAPH ’02. https://doi.org/10.1145/566570.
+566619
+H. W. Jensen, S. R. Marschner, M. Levoy, and P. Hanrahan. 2001. A practical model
+for subsurface light transport. In Proceedings of the ACM SIGGRAPH Conference on
+Computer Graphics. https://doi.org/10.1145/383259.383319
+Jorge Jimenez, Veronica Sundstedt, and Diego Gutierrez. 2009. Screen-space perceptual
+rendering of human skin. ACM Transactions on Applied Perception 6, 4 (9 2009),
+1–15. https://doi.org/10.1145/1609967.1609970
+James T. Kajiya. 1986. RENDERING EQUATION. Computer Graphics (ACM) 20, 4
+(1986). https://doi.org/10.1145/15886.15902
+Daqi Lin, Markus Kettunen, Benedikt Bitterli, Jacopo Pantaleoni, Cem Yuksel, and Chris
+Wyman. 2022. Generalized resampled importance sampling: Foundations of ReSTIR.
+ACM Transactions on Graphics 41, 4 (2022). https://doi.org/10.1145/3528223.3530158
+Daqi Lin, Chris Wyman, and Cem Yuksel. 2021. Fast volume rendering with spa-
+tiotemporal reservoir resampling. ACM Transactions on Graphics 40, 6 (2021).
+https://doi.org/10.1145/3478513.3480499
+Daqi Lin and Cem Yuksel. 2020. Real-Time Stochastic Lightcuts. Proceedings of
+the ACM on Computer Graphics and Interactive Techniques 3, 1 (2020).
+https:
+//doi.org/10.1145/3384543
+Quirin Meyer, Jochen Süßmuth, Gerd Sußner, Marc Stamminger, and Günther Greiner.
+2010. On floating-point normal vectors. Computer Graphics Forum 29, 4 (2010).
+https://doi.org/10.1111/j.1467-8659.2010.01737.x
+Fred E. Nicodemus. 1965. Directional Reflectance and Emissivity of an Opaque Surface.
+Applied Optics 4, 7 (1965). https://doi.org/10.1364/ao.4.000767
+Nvidia. 2021. RTX Direct Illumination (RTXDI). https://developer.nvidia.com/rtx/ray-
+tracing/rtxdihttps://github.com/NVIDIAGameWorks/RTXDI
+Nvidia Gameworks. 2023. Nvidia Real Time Denoiser Documentation.
+Y. Ouyang, S. Liu, M. Kettunen, M. Pharr, and J. Pantaleoni. 2021. ReSTIR GI: Path
+Resampling for Real-Time Path Tracing. Computer Graphics Forum 40, 8 (2021).
+https://doi.org/10.1111/cgf.14378
+Matt Pharr and Randima Fernando. 2005. GPU gems 2 : programming techniques for
+high-performance graphics and general-purpose computation. Vol. 2.
+Holly Edith Rushmeier. 1988. Realistic Image Synthesis for Scenes with Radiatively
+Participating Media. Ph. D. Dissertation. USA.
+Christoph Schied, Anton Kaplanyan, Chris Wyman, Anjul Patney, Chakravarty R.Alla
+Chaitanya, John Burgess, Shiqiu Liu, Carsten Dachsbacher, Aaron Lefohn, and
+Marco Salvi. 2017. Spatiotemporal variance-guided filtering: Real-time reconstruc-
+tion for path-traced global illumination. In Proceedings of High Performance Graphics,
+HPG 2017. https://doi.org/10.1145/3105762.3105770
+Justin Talbot, David Cline, and Parris Egbert. 2005.
+Importance Resampling for
+Global Illumination. Rendering Techniques (Proceedings of the Eurographics Sympo-
+sium on Rendering 2005) August (2005). https://github.com/NVIDIAGameWorks/
+RayTracingDenoiser/blob/master/README.md
+Tomasz Stachowiak. 2022.
+Kajiya Renderer: Global illumination overview.
+https://github.com/EmbarkStudios/kajiya/blob/main/docs/gi-overview.md#noise-
+with-small-and-bright-emissive-surfaces
+Greg Turk. 1992. Re-tiling polygonal surfaces. Computer Graphics (ACM) 26, 2 (1992).
+https://doi.org/10.1145/142920.134008
+Eric Veach and Leonidas J. Guibas. 1995. Optimally combining sampling techniques for
+Monte Carlo rendering. In Proceedings of the 22nd annual conference on Computer
+graphics and interactive techniques - SIGGRAPH ’95. ACM Press, New York, New
+York, USA, 419–428. https://doi.org/10.1145/218380.218498
+Jeffrey S. Vitter. 1985. Random Sampling with a Reservoir. ACM Transactions on
+Mathematical Software (TOMS) 11, 1 (1985). https://doi.org/10.1145/3147.3165
+A.J. Walker. 1974. New fast method for generating discrete random numbers with
+arbitrary frequency distributions. Electronics Letters 10, 8 (1974), 127.
+https:
+//doi.org/10.1049/el:19740097
+Z. Wang, A.C. Bovik, H.R. Sheikh, and E.P. Simoncelli. 2004. Image Quality Assessment:
+From Error Visibility to Structural Similarity. IEEE Transactions on Image Processing
+13, 4 (4 2004), 600–612. https://doi.org/10.1109/TIP.2003.819861
+Cem Yuksel. 2015. Sample Elimination for Generating Poisson Disk Sample Sets. In
+Computer Graphics Forum, Vol. 34. https://doi.org/10.1111/cgf.12538
+Cem Yuksel. 2021. Stochastic Lightcuts for Sampling Many Lights. IEEE Transactions
+on Visualization and Computer Graphics 27, 10 (2021).
+https://doi.org/10.1109/
+TVCG.2020.3001271
+==PAGE:16==
+Thomas Conrad
+12
+APPENDIX
+A
+OCTREE DEPTH LIMITING AND SORTING
+To ensure a maximum allowed depth of the octree, points are re-
+jected if it is so close to a neighbouring point that it would force
+the octree to be split in more levels than the preset maximum. In
+this case, the maximum depth has been set at 20 levels, as this was
+found to not slow down the initial uniform sampling of the mesh
+due to too many rejected samples, while also allowing the light
+integration of the octree to be performed with minimal overhead.
+This is done by ensuring that no two closest points are within the
+same voxel node at the bottom level. Each time the level of the
+amount of potential bottom level nodes is octoupled, splitting each
+node into half along each dimension. This means that for a unit
+bounding box, the side length of a bottom level node will be
+1
+2𝑚
+in each xyz dimension, 𝑚being the maximum amount of levels.
+They will be aligned along a grid with each new node beginning
+at a location in space 𝑁· 2−𝑚,
+𝑁∈[0, . . . , 2𝑚−1]. One way to
+check whether a given point will share a node with another in an
+octree is of course to use perform a nearest neighbour search or
+to check whether the given node already is filled. Both of these
+operations can be drastically sped up with the use of the already
+present octree, allowing them to run in O(log(𝑛)) time. As the
+sampling of points on the translucent meshes is done as a pre-pass,
+the time to sample can generally be ignored, but it would still vastly
+extend the time required to complete the pass. A constant time
+solution exists, by creating a unique hash for the bottom level node
+which each new point is inserted into, and storing each hash in
+a set2 this check can be performed at constant time. As there are
+(2𝑚)3 possible bottom level nodes for an octree of depth 2𝑚, in the
+case where 𝑚= 20 at least 60 bits are required to store an ID for
+a bottom level node. One simple way to generate this node is to
+use the inserted point’s location within the unitary bounding box
+to generate the hash. This position consists of three floating point
+values in the range [0, 1). By converting each to an 𝑚bit unsigned
+integer representation, where the most valuable bit has a value of
+1
+2, the second most valuable bit has a value of 1
+4, and so on, the
+smallest possible discernible increment will have a width of
+1
+2𝑚, 𝑚
+once again being the maximum level of the octree. Therefore any
+two points within the same bottom level node will be given the
+same 𝑚bit unsigned integer representation along each dimension.
+By stacking the three m bit values together, a unique node identifier
+is obtained. In the case of 𝑚= 20, at least 60 bits are required to do
+that. This is equivalent to sorting all the possible bottom level nodes
+along each individual dimension and combining them. The way
+in which the identifier has been obtained in this work is instead
+to use a Morton ordering. This ordering will sort the nodes in the
+same way as the levels of the octree data structure. Therefore, if the
+sampled points on the translucent mesh(es) are sorted according
+to this ordering, the cache locality of the points in memory will be
+improved leading to a slight speedup when integrating the light-
+ing in the octree. Sorting the mesh samples based on the Morton
+code can be done efficiently as the total amount of mesh samples is
+limited, using any standard sorting method.
+2An abstract data structure allowing constant time checks for the existence of an item.
+B
+RENDERS WITH DIFFERENT DIFFUSION
+PROFILES
+Figure 11: Render of the translucent Stanford bunny using
+the unscattered diffusion profile.
+Figure 12: Render of the translucent Stanford bunny using
+the dipole multiscatter diffusion profile
+==PAGE:17==
+Many Lights Sampling Methods for Real-Time Rendering of Subsurface Scattering
+Figure 13: Render of the translucent Stanford bunny using
+the Christensen-Burley approximate diffusion profile.

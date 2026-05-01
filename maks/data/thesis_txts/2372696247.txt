@@ -1,0 +1,2543 @@
+==PAGE:1==
+P E T E R B AY B A S T I A N
+E F F I C I E N T U S E O F
+S PAT I A L D ATA
+S T R U C T U R E S I N
+G P U S H A D E R S
+D E PA R T M E N T O F A P P L I E D M AT H E M AT I C S A N D C O M P U T E R S C I E N C E
+T E C H N I C A L U N I V E R S I T Y O F D E N M A R K
+==PAGE:2==
+==PAGE:3==
+Abstract
+Hybrid shadow rendering combines the quality of ray-tracing with
+the speed of rasterization to provide high-quality shadows, but
+has only been used with fragment shaders until now. We provide
+a solution for hybrid shadow rendering using compute shaders in
+the Unity game engine and provide 3 variations on the method for
+utilizing the full SIMD width of the GPU, in a way not possible
+using only fragment shaders. The results show that hybrid shadow
+rendering provides a large performance increase over ray-tracing,
+especially when restricting the t-interval of the ray. While the 3
+methods provided did not yield an increase in performance, we
+show that the traversal stack is a severe limitation with regards
+to concurrency and that stackless traversal therefor is a must for
+practical usage of hybrid shadow rendering. We also show that it
+is possible to use hybrid shadow rendering without conservative
+rasterization, removing the need of geometry shaders or special
+hardware support.
+Preface
+This thesis was prepared at DTU Compute by Peter Bay Bastian
+(s113119) in fulﬁlment of the requirements for acquiring an M.Sc.
+in Engineering (Digital Media). The thesis has been completed in
+the period between January 2nd 2017 and July 2nd 2017 under
+the supervision of Jeppe Revall Frisvad, and in collaboration with
+Unity Technologies under the supervision of Timothy Cooper. The
+thesis is rated at 35 ECTS points.
+==PAGE:4==
+==PAGE:5==
+Contents
+Introduction
+7
+Method
+11
+Implementation
+29
+Results
+35
+Discussion
+45
+Conclusion
+49
+Bibliography
+51
+==PAGE:6==
+==PAGE:7==
+Introduction
+This project will combine ray-traced shadows with a rasterization-
+based graphics pipeline in the Unity game engine, in order to
+achieve high-quality shadows. In doing so, we will look into the
+architecture and performance of GPUs, algorithms and data struc-
+tures appropriate for real-time ray tracing and how such can be
+integrated into a rasterization pipeline. To achieve real-time per-
+formance we will evaluate the hybrid shadow rendering technique
+from Hertal et al. [HHW09] in a compute shader setting in order to
+take advantage of the increased ﬂexibility of compute shaders.
+Rasterization is the underlying method that is used to
+render most games and other real-time contexts. Rasterization
+reaches a similar level of quality as ray tracing for primary rays,
+but ray tracing has shown to yield better quality for a variety of
+effects compared to rasterization-based equivalents. On the other
+hand, rasterization yields much better performance than ray tracing
+does, in part due to the dedicated rasterization hardware available
+in all GPUs, but also because it solves a more restricted problem.
+Therefor it makes sense to combine rasterization and ray tracing
+techniques into a hybrid rendering setup to get the speed of ras-
+terization and the quality of ray tracing. This is also the trend that
+we’re seeing in real-time graphics today, where ray tracing based
+techniques are becoming more and more common. [GS16] [MM14]
+[Aal13] [Tat06]
+However, the usage is generally limited to ray marching, an
+image-based type of ray tracing that allows for more possibilities
+than rasterization, but does not take the full scene into account and
+suffers from sampling artifacts due to being image based. While
+this is not full-blown ray tracing as we know it from ofﬂine ren-
+dering, it shows that GPUs are rapidly becoming faster and thus
+we might not be far from a future where geometrically precise ray
+tracing is partially used in real-time contexts.
+One particular effect in real-time graphics that suffers a lot
+from being rasterization-based is shadowing. The most utilized
+method for rendering shadows in real-time is shadow mapping,
+[Wil78] where the scene is rasterized from the light’s point of view
+and then sampled during main camera rendering. Typically a
+contact-hardening1 variant of percentage-closer ﬁltering (PCF)
+1 The visual phenomena of a shadow
+becoming softer the further it is from
+the occluder, and likewise harder the
+closer it is to the occluder.
+==PAGE:8==
+8
+efficient use of spatial data structures in gpu shaders
+[Fer05] is applied in order to achieve soft shadows by widening the
+PCF image kernel based on the distance to the occluder. But soft
+shadows occur naturally due to area light sources, while a shadow
+map is inherently unable to represent an area light source.2 Heitz
+2 Only light sources such as point, spot
+and directional can be represented.
+et al. [Hei+16] presents a method for real-time lighting using area
+light sources. Unfortunately this method does not support shadow-
+ing in itself, and shadow mapping is not of much help here due to
+the aforementioned issue.
+When performing shadow mapping, the sampling rate is com-
+pletely determined upfront, but in reality we need different sam-
+pling rates based on the distance to the camera and the occluders
+and occludees. This causes various aliasing issues for shadow map-
+ping. PCF can to a certain degree mask these artifacts, due to the
+fact that it is essentially blurring the output.
+Contact-hardening PCF is not practical to implement naively due
+to the size of the image kernel becoming too big. Therefore vari-
+ous optimizations have been developed, such as variance, [DL06]
+exponential [Ann+08] and moment shadow mapping. [PK15] Un-
+fortunately the approximations that are applied for these might
+cause light leaking. Generally speaking, these artifacts are of vary-
+ing acceptable degrees, but the fact of the matter is that they do not
+provide physically correct soft shadows, but rather simulate the
+phenomena.
+Rosen provides a method for changing the sampling rate based
+on various importance functions, which essentially warps the
+shadow map to provide a higher sampling rate for objects on screen
+and around edges. [Ros12] Unfortunately the changes in sam-
+pling rates causes some slight ﬂickering in the shadow edges and
+it is also not usable for area lights for the same reasons as normal
+shadow mapping.
+Story provides a very interesting method, which stores triangle
+indices in a shadow map rather than depth. [Sto15] These trian-
+gle indices are then looked up and ray traced against, providing
+geometry-level precision shadowing. While this has a large storage
+cost, so does a BVH. The downside is that their method requires
+hardware support for conservative rasterization, which is not sup-
+ported by AMD GPUs at the time of writing. As with other shadow
+mapping techniques, the method does not work with area light
+sources.
+Looking towards the ofﬂine rendering world, these issues are not
+apparent as ray tracing does not suffer from sampling issues and
+light type limitations. The downside is that ray tracing tends to be
+far more expensive computationally. Therefor this project will look
+into methods of accelerating the performance of ray tracing in a
+real-time context.
+A lot of research goes into making ray tracing fast, but these
+methods tend to be limited to ofﬂine rendering contexts. Further-
+more, the GPU-based methods mostly uses CUDA, while in a real-
+==PAGE:9==
+introduction
+9
+time context we would be far more interested in a compute shader
+based implementation, as that eases the integration with game en-
+gines as well as providing wider platform support than CUDA.
+This naturally means that assumptions based on NVIDIA hardware
+speciﬁcs has to be widened to take other hardware vendors into
+account. At the time of writing, the only hardware vendors that
+produce GPUs with the needed computational power is NVIDIA
+and AMD. While smartphone GPUs are also rapidly getting faster
+and more powerful, they simply do not compare to desktop GPUs
+yet and would greatly increase the complexity of the project. As
+such they will not be considered.
+A real-time context has a much different set of constraints than
+an ofﬂine context. For example, in ofﬂine rendering, spending
+a few seconds per frame on constructing acceleration structures
+might cause a huge speed-up in the total amount of time spend
+on rendering that frame. Whereas in real-time rendering those
+few seconds are simply not available. As such it either has to be
+a static pre-computation or very limited in the constant amount
+of time it adds per frame. The bounding volume hierarchy (BVH)
+acceleration structure is preferable due to its potential for handling
+dynamic scenes efﬁciently. This project will look into appropriate
+algorithms and structures for ray tracing in compute shaders.
+We also have to take a great deal of caution when writing com-
+pute shaders, due to the increased amount of manual control. It is
+easy to write code that doesn’t perform well and as such we will
+look into how compute shaders work and the general hardware of
+modern GPUs.
+While one way of making ray tracing fast is to improve on the
+core algorithms, another way is to reduce the amount of work that
+needs to be done. One such method is hybrid shadow rendering.
+The core idea is to use a shadow map for coarse-grained shadow
+computation and then a more expensive method is used for reﬁning
+the edges of the shadows. Chan and Durand used this technique
+to decrease the cost of shadow volume rendering. [CD04] [Cro77]
+Later, Hertel et al. used the technique in combination with kD-tree
+accelerated ray tracing. [HHW09]
+While the latter was performed on GPUs, it was prior to the ex-
+istance of compute shaders. Thus there might be certain efﬁciency
+gains in implementing a similar method using compute shaders
+and BVH accelerated ray tracing. While this project will not attempt
+to implement soft shadows using the technique, there is still value
+in evaluating the technique for hard shadows ﬁrst, as it has the po-
+tential to be used for physically correct soft shadowing due to the
+fact that ray tracing is used.
+==PAGE:10==
+==PAGE:11==
+Method
+As noted in the introduction we will validate the viability of hybrid
+shadow rendering using compute shaders rather than fragment
+shaders. As we will be using compute shaders as our program-
+ming platform, we look into what they are and how to efﬁciently
+use them. The latter requires us to look at how modern GPUs are
+architectured, as well as the features they provide, which might not
+be strictly speciﬁed by the compute shader speciﬁcations.
+We must also consider which construction and traversal methods
+to use for the bounding volume hierarchy. Common to the modern
+GPU construction methods are that they require one to construct all
+the leaf nodes of the tree and then sort them in Z-order. Therefore
+we explore a few parallel programming algorithms before look-
+ing into BVH algorithms. Afterwards we consider at a high level
+how these algorithms can efﬁciently be implemented in compute
+shaders. We then consider the available construction and traversal
+methods and evaluate which are appropriate for this project.
+Having BVH and parallel programmings algorithms in place, we
+explore the hybrid shadow rendering technique and consider how
+to efﬁciently use the technique with compute shaders and what
+difference that makes compared to fragment shaders. We must also
+consider methods of visualization for both debugging purposes as
+well as inspecting the results.
+Compute Shaders
+GPUs were originally introduced as specialized hardware for
+speeding up 3D graphics. They did so by implementing expen-
+sive parts of the software renderer in hardware. The most essential
+feature is the rasterizer and the surrounding pieces of function-
+ality required to make it work as well as the pieces that make it
+fast. In order to support a wide variety of graphics, the GPU sup-
+ported conﬁguring parts of the GPU pipeline, such as lighting and
+transformation. This is what we today know as the ﬁxed-function
+pipeline.
+Eventually the hardware became more ﬂexible in order to meet
+the ever increasing needs of graphics programs, and shaders were
+born. Strictly speaking, they were not introduced with GPUs, but
+rather by Pixar in 1988 for use in the RenderMan software. They
+were described as special procedures3 used to extend the Render-
+3 Declared in the RenderMan Shading
+Language.
+==PAGE:12==
+12
+efficient use of spatial data structures in gpu shaders
+Man Interface with additional functionality at speciﬁc places of the
+render pipeline, such as surface shading. [Pix88] Semantically, a
+shader can be seen as a mapping over an input set.
+These special procedures were adopted to the GPU pipeline,
+forming the basis of what is known as the programmable pipeline.
+Initially, GPUs only supported vertex and fragment shaders. [Shi01]
+For vertex shaders, the input set is the collection of vertices being
+rendered and the mapping might be a transformation between
+coordinate systems. For fragment shaders the input set is the frag-
+ments resulting from rasterization of a primitive, and the mapping
+could be a combination of lighting, texturing and more.
+A number of years went by as the two programmable pipeline
+stages became more powerful, while parts of the ﬁxed-function
+pipeline were deprecated. The ﬁxed-function pipeline is not com-
+pletely gone today, but certain parts such as lighting and transfor-
+mation do not remain.4 Blending, depth and stencil support is how-
+4 Or rather, are implemented in soft-
+ware for compatibility reasons, but the
+specialized hardware is gone.
+ever still provided through a ﬁxed-function interface. [SA17] Then
+in 2006, NVIDIA introduced the CUDA programming API, allow-
+ing GPUs to be used for general purpose computations. [NVI06]
+This sparked a ton of research on reﬁtting various algorithms to run
+on GPUs.
+Meanwhile, no equivalent API was available in any of the real-
+time graphics hardware APIs. Certain features have moved shaders
+closer, such as vertex transform output5 and geometry shaders6,
+5 Allows a buffer to be ﬁlled with an
+item per vertex processed.
+6 A shader stage that operates on ge-
+ometry such as triangles or quads as
+opposed to vertices. Has big perfor-
+mance implications.
+but they did not provide true general purpose computation capabil-
+ities. Eventually, compute shaders were introduced. Direct3D was
+the ﬁrst API to support this feature, as part of Direct3D 11 [Mic17]
+which launched with Windows 7 in 2009. [Jam08] OpenGL was a
+bit later to the party, with support for compute shaders arriving in
+OpenGL 4.3, which was released in 2012. [The12] Today, support
+for compute shaders is much wider. macOS has been the last major
+platform to not support compute shaders, but with Metal being
+released for macOS in 2015, all major platforms now have support.
+[App15]
+Compute shaders allow for more direct access to the programmable
+part of the pipeline. Relating to the sematics of shaders above, they
+allow us to deﬁne the input set we’re mapping over ourselves. In
+fact, there is no longer a strict input and output. We’re able to read
+and write to any memory location at any point in time.
+Execution Model & Scheduling
+A compute shader ﬁrst and foremost consists of a kernel function7,
+7 Similar to how vertex and fragment
+shaders map a function over an input
+set.
+which is the program that the GPU is going to run. As the GPU
+uses a cooperative multi-tasking model, only a single program can
+run at any time and cannot be temporarily paused. If it runs for
+longer than it is allowed, the GPU driver will forcibly stop it.8 This
+8 This typically results in a driver
+crash.
+means that the many threads that a GPU is capable of running
+must all run the same kernel.
+==PAGE:13==
+method
+13
+This execution model is referred to as SIMT9. The smallest unit
+9 Single instruction, multiple thread.
+executable by the GPU is a thread group, the size of which is speci-
+ﬁed in 3 dimensions as
+(nx, ny, nz) ∈N3
+along with the kernel function.10 As such the total number of
+10 In DirectCompute the size is pro-
+vided as an attribute to the kernel
+function.
+threads in a thread group is
+n1 = nxnynz .
+The fact that it is speciﬁed in 3 dimensions is merely an abstraction,
+which is useful for certain tasks.11 We refer to the 3-dimensional
+11 For example, in a kernel operating
+on a 2D image we might want to work
+on clusters of pixels.
+index of a thread within its thread group as
+(ix, iy, iz) ∈[0, nx[×[0, ny[×[0, nz[ .
+We can ﬁnd the 1-dimensional index i1 ∈[0, ng[ of a thread within a
+thread group as
+i1 = ix + iynx + iznxny .
+As such, the threads are laid out ﬁrst according to ix, then iy and
+ﬁnally iz. Note that the thread group size can be (1, 1, 1), i.e. a
+single thread, but we’ll see later why that is a horrible idea in most
+situations.
+Figure 1: A dispatch of (2, 2, 2) thread
+groups using a thread group size of
+(2, 2, 2). Each cube represents a thread
+group, while the subdivisions of it
+represents individual threads. The
+matrix of cubes make up the entire
+dispatch.
+In order to execute a compute shader, the user dispatches a num-
+ber of thread groups to run, either based on the amount of data to
+be processed or simply a static amount large enough to saturate the
+GPU. Once again, this is speciﬁed in 3 dimensions. This forms a
+hierarchy of threads as visualized in ﬁgure 1. The entire dispatch
+runs the same kernel.
+Hardware Architecture
+Before heading into the architecture of GPUs as well as the types
+of parallism supported, let’s take a look at what CPUs offer. Mod-
+ern CPUs have a certain number of cores, typically around 4, each
+of which practically executes as an independent CPU, enabling
+thread-level parallism. They also support instruction-level parallism
+through pipelining and simultaneous multi-threading12. Finally,
+12 Intel markets this as Hyper-
+threading.
+we have data-level parallism which is supported through SIMD13
+13 Single instruction, multiple data.
+in which e.g. the elements of two vectors can be added together
+in parallel. The limitation of this is that a single instruction must
+operate on multiple pieces of data in a certain structure. The AVX
+extensions to the x86 instruction set14 can operate on 256 bit reg-
+14 Which is one of the more modern,
+yet widely supported SIMD variants
+today.
+isters, or in other words 8 ﬂoats.15 We say that the SIMD width of
+15 AVX can also operate on 4 doubles,
+but we’ll stick to ﬂoats as they are of
+our interest.
+AVX is 8 lanes.
+A GPU also offers thread-level parallism through a number of
+vector units16 each of which offer both data- and instruction-level
+16 A vector unit corresponds to a CPU
+core. AMD refers to these as vector
+units, while NVIDIA refers to them as
+streaming multi-processors.
+parallism. But as we stated previously the entire dispatch has to
+execute the same kernel, and so a vector unit is not as indepen-
+dent as a CPU core. As the name suggests, a vector unit supports
+==PAGE:14==
+14
+efficient use of spatial data structures in gpu shaders
+vector instructions. In fact, that’s the only thing it can do and this
+is the key to the massive parallism offered by GPUs. Furthermore
+the SIMD width is far wider than on a CPU; NVIDIA uses 32-wide
+vector units, while AMD uses 64-wide. The kernel is actually ex-
+ecuted such that each SIMD lane is treated as a thread. This also
+implies that when a kernel is executed on a vector unit, each lane
+must execute the same instruction. NVIDIA refers to the unit of
+work executed by a lane as a thread, while AMD refers to it as a
+work item. Likewise NVIDIA refers to each lane as a CUDA core,
+which can cause a certain amount of confusion as the vector unit
+is more analogous to a CPU core than a lane is. Each terminology
+has a degree of truth to it, but the fact of the matter is that vector
+units provide a hierarchical structure in a way very similar to how
+CPU cores do. A number of vector units are grouped together in a
+compute unit, where they share certain resources.
+A very useful concept is the wave, which refers to a group of
+threads within a thread group executed simultaneously by a single
+vector unit. That is, the wave size is equal to the SIMD width of the
+device. NVIDIA refers to this as a warp. When a thread group is
+scheduled, it is divided into a number of waves. This distribution
+is completely static and predictable. The threads are indexed using
+the 1-dimensional index i1; the ﬁrst wave consists of the ﬁrst n
+threads, the second wave of the next n threads and so on. They
+are called waves as the threads within a single wave move forward
+together. Note that due to this, it is very important that the thread
+group size is a multiple of the device wave size. If the thread group
+is smaller than the wave front size, the thread group will never
+utilize the entire SIMD width. If it is larger, but not a multiple, it
+will have a similar effect.17 A vector unit provides simultaneous
+17 E.g. a thread group size of 65 means
+that 2 waves will run, but the second
+will only use 1 out of 64 lanes.
+multi-threading by internally scheduling waves, such that when
+a wave is waiting for e.g. an expensive instruction or a memory
+fetch, another wave will run instead. This is often referred to as
+swapping out waves; the vector unit begins to execute instructions
+from another wave. This can be seen as a multiplexing of various
+streams of instructions onto the same stream. As instructions often
+won’t execute in 1 clock cycle, this swapping happens all the time
+and thus gives the impression that multiple waves run at the same
+time. This is called latency hiding, as it hides the latency occuring
+from operations. Due to this we must make sure that enough waves
+are running, such that all the vector units can perform sufﬁcient
+latency hiding.
+Programs on the CPU tend to have branching18 and GPU kernels
+18 if-statements, loops and so on.
+are no different. Let’s imagine that inside a vector unit, some lanes
+take execution path A and some take execution path B due to an
+if-statement. We just said that a vector unit must execute the same
+instruction across all lanes, but that is clearly not possible here. So
+how do we even proceed? GPUs manage this by only executing
+a single path at a time. All lanes that are on the other execution
+path will perform no-ops in the meantime. This is called control
+==PAGE:15==
+method
+15
+ﬂow divergence and causes parts of the GPU to be unutilized. It is
+very important to keep this detail in mind when designing parallel
+algorithms to run on the GPU. Do note that different vector units
+can execute different instructions, so we only need to consider
+control ﬂow within a wave.
+Resources
+The GPU provides various memory resources that we can use. The
+largest one is global memory. This is the amount of RAM that is
+used for marketing of a GPU; it is typically in the order of several
+gigabytes. It is readable and writable from both the GPU and the
+CPU, and thus it is used by the CPU to feed data to the GPU.19 The
+19 Of course, it is also possible to
+simply generate data directly on the
+GPU instead.
+downside to the global memory is that it is rather slow compared
+to the other types of memory available. Each compute unit has
+an amount of registers which is distributed between all the active
+threads in the compute unit; i.e. the registers of one thread cannot
+be accessed by another thread. The total amount of memory avail-
+able in the registers is typically in the order of a few kilobytes. Each
+compute unit also has an amount of shared memory distributed be-
+tween all the active thread groups on the compute unit. OpenGL
+speciﬁes that each thread group must have access to at least 32 KiB
+of shared memory. [SA17] The shared memory is much faster than
+the global memory and is both readable and writable by all threads
+in a thread group.
+Thus a wave requires a certain amount of registers20 and shared
+20 The amount of registers required by
+each thread multiplied by the wave
+size.
+memory. A compute unit can only simultaneously run as many
+waves are there are registers and shared memory for. If we use too
+much memory per thread or thread group, the result is that the
+compute unit won’t be able to perform sufﬁcient latency hiding,
+which will cause a severe decrease in performance. While shared
+memory is explicitly allocated, the amount of registers that are
+used is a bit more loose. In the end, it is up to the driver’s shader
+compiler which we have no control over. Generally speaking, as
+long as a variable has a usage in the remaining part of the shader,
+it consumes a register. As such, it is possible to write shaders in
+a way that less registers are used and so it is not completely out
+of our hands. It is possible to use various utilities from hardware
+vendors to see how many registers a shader will use on speciﬁc
+platforms. This allows one to select a set of variety of platforms to
+target and optimize for.
+Memory reads and writes within a wave do not need any mem-
+ory barriers, as the threads are run in lock-step. This is important to
+keep in mind when striving for efﬁciency. But if we wish to write to
+shared memory from one wave and read it in another, we must use
+a memory barrier to ensure that all memory accesses has been com-
+pleted. The same is true for interaction between different thread
+groups through global memory. Often when shared memory is in-
+volved, we are interested in synchronizing the execution paths of all
+==PAGE:16==
+16
+efficient use of spatial data structures in gpu shaders
+the threads involved. We can choose to sync the entire thread group
+while we wait for a memory barrier. It is not possible to sync dif-
+ferent thread groups during a dispatch, and as such extra care must
+be taken when interacting between these. It is, however, possible
+to sync different thread groups by splitting the work into multiple
+dispatches. This should be used sparingly, as all threads must ﬁnish
+before the next dispatch can run.
+Parallel Programming
+As is evident, we can’t simply throw any kind of algorithm on the
+GPU and expect it to run well. We need to take care both in design
+as well as implemention of the algorithm. A lot of algorithms for
+GPUs can be described in terms of a number of parallel primitives,
+that is, more general algorithms that can be used as building blocks
+for building speciﬁc algorithms. In practice it is not plug-and-play
+due to efﬁciency, but it helps a lot to be able to break the mental
+model into pieces that can be veriﬁed and reasoned about indepen-
+dently. Furthermore, these general building blocks have existing
+solutions that are well thought out. In this section, I will go over
+various parallel programming algorithms that are needed for the
+project. More precisely we need the radix sort in order to construct
+a BVH on the GPU, and for that we need to be able to compute a
+preﬁx sum.
+Preﬁx Sum
+The preﬁx sum is a very useful building block for parallel program-
+ming. Given a sequence {Xi}n
+i=0 the preﬁx sum describes another
+set where each element is equal to the sum of all the preceding ele-
+ments of the sequence. It is often referred to as a scan, which is the
+generalization to any binary operation, rather than only addition.
+The inclusive preﬁx sum ips X includes the element itself in the
+sum, while the exclusive preﬁx sum eps X only contains the sum of
+the preceding elements. We can deﬁne the exclusive and inclusive
+preﬁx sums as
+eps X =
+(
+i−1
+∑
+j=0
+Xj
+ i ∈[0, n[
+)
+, ips X =
+(
+i
+∑
+j=0
+Xj
+ i ∈[0, n[
+)
+.
+Mapping between the 2 variants is very simple and thus, whether it
+is an inclusive or exclusive preﬁx sum, becomes an implementation
+detail:
+(eps X)i = (ips X)i −Xi ,
+(ips X)i = (eps X)i + ai .
+In fact, mapping between the two is mostly a shift of elements. Go-
+ing from inclusive to exclusive we shift all elements 1 to the right
+and put a 0 as the ﬁrst element. Going from exclusive to inclu-
+sive we shift all elements 1 to the left and set the last element to
+==PAGE:17==
+method
+17
+(eps X)n + Xn. Each does, however, serve it’s own purpose as some-
+times the inclusive preﬁx sum will describe the problem at hand,
+while at other times the exclusive will.
+This seems like an inherently sequencial problem,21 but it does
+21 Probably because the obvious solu-
+tion is inherently sequencial.
+in fact have several parallel solutions. Sengupta et al. provides an
+efﬁcient solution for CUDA that takes advantage of the hierarchi-
+cal architecture of GPUs. [SHG08] Each thread performs a preﬁx
+sum of a number of elements, which is then combined within each
+wave22, then combined within the thread group and ﬁnally com-
+22 Remember that synchronization is
+not needed inside a wave.
+bined across thread groups. We combine results by performing a
+preﬁx sum over the sum of each group, and then for each group
+adding the sum of all the previous groups.
+The algorithm can run over several dispatches to support larger
+input sizes. If each thread handles nt elements23, then each wave
+23 Multiple elements per thread is a
+good idea both for input size scalabil-
+ity as well as performance, as there is
+some amount of overhead per thread.
+can handle 32nt elements. Note that this is assuming an NVIDIA
+GPU with a wave size of 32. We can have up to 1024 threads per
+thread group, so each thread group can handle 1024nt elements.
+When the algorithm combines results across thread groups, each
+thread group writes the sum of the processed elements to a sep-
+arate buffer, which is then preﬁx summed. So, if the number of
+thread groups is larger than what a single thread group can handle,
+we need to combine across thread groups again. This is done until
+the work can be handled by a single thread group.
+But, do keep in mind that we can perform a preﬁx sum over
+(1024nt)2 elements without additional passes. In fact, it might be
+beneﬁcial to simply increase the number of elements handled per
+thread, if such a large input size is to be handled. As the input size
+that can be handled increases quadratically with the number of
+elements handled per thread, we can quickly reach very large input
+sizes. The only limitation is the execution time of the dispatch, as
+the GPU driver will halt if we take too long.
+While AMD GPUs theoretically can handle more elements per
+wave, due to a larger wave size of 64, we are limited by the maxi-
+mum number of threads per thread group. The results from each
+wave is combined in the same way as results from each thread
+group; thus after having all waves run, a single wave is used to
+combine the results. So, on an NVIDIA GPU we can have 32 waves
+of 32 threads each, resulting in 1024 threads. On an AMD GPU
+we would have 64 waves of 16 threads each. As such, the span of
+the algorithm remains the same. In fact, we can just treat the AMD
+GPU as the NVIDIA GPU and assume the same wave size. This
+simply means that each physical wave actually runs 2 logical waves,
+i.e. we do not take advantage of the implicit synchronization be-
+yond 32 threads.
+Radix Sort
+The idea of the LBVH is to ﬁrst bring the leaf nodes of the tree
+into correct order, by sorting them according to the Morton code.
+==PAGE:18==
+18
+efficient use of spatial data structures in gpu shaders
+The Morton code is a space-ﬁlling curve that maps a vector to an
+integer. It is used to map each leaf node into an integer, which
+can then be efﬁciently sorted using a radix sort. This is a counting
+sort, as opposed to a comparing sort,24 and thus it solves a more
+24 A counting sort ﬁnds the order by
+counting elements.
+restricted problem,25 which means that it should perform better.
+25 A comparing sort ﬁnds the order by
+comparing elements to one another.
+Using the preﬁx sum as a building block, it is fairly easy to real-
+ize a parallel radix sort on the GPU. The core idea of the radix sort
+is to sort in several passes, where each pass sorts part of the key.
+If the part of the key that is being sorted is identical for multiple
+elements, the original order is maintained. Thus if we start from the
+least signiﬁcant bits and move towards the most signiﬁcant bits, we
+are guaranteed to end up with a sorted output. [HH]
+The preﬁx sum is used to sort each part. Let’s ﬁrst assume
+that each part is 1 bit and that we want to sort an input sequence
+{X}n
+i=0. This gives us 2 possible values that each element part can
+take on. For each possible value c, we deﬁne a sequence26
+26 part(x) extracts the part of the
+element value that is currently being
+sorted.
+Xc = {if part(x) = c then 1 else 0 | x ∈X}
+such that each element contains a 1 if the part is equal to c and a 0
+otherwise. We can take the exclusive preﬁx sum of Xc to construct a
+counting bucket for value c
+Bc = eps Xc
+where each element contains the number of preceding elements
+of the same value. Using this sequence, we now know where each
+element should go alongside all other elements that also has that
+value, such that the original ordering is maintained. This is al-
+most identical to performing a compaction of Xc, removing all the
+zeros, except that we use it to compact the values of X for which
+part(x) = c.
+This leaves us with the question of where each group of values
+should go. We put all the elements where part(x) = 0 in the begin-
+ning of the ordered sequence and use B0 to determine the position.
+After that goes all the elements where part(x) = 1; we simply take
+the index provided by B1 and add to that the number of elements
+for which part(x) = 0, i.e. ∑X0.
+When our input elements consists of 32 bits, sorting 1
+bit per pass will take too long, partially due to increased global
+memory usage. Instead we can expand the above algorithm to
+sort b bits at a time. It simply means that we now have 2b possible
+values for the current part and as such 2b counting buckets. But
+what about the ﬁnal part, where we place each group of values? We
+can generalize that to handle b bits. First, we construct a counting
+bucket BΣ for the number of occurences of each possible value
+BΣ = eps
+n
+∑Xc
+ c ∈[0, 2b[
+o
+.
+Using this we can calculate the index in the sorted sequence for an
+==PAGE:19==
+method
+19
+element with value c and original index i:
+isorted = BΣ,c + Bc,i .
+This process is repeated until all bits are sorted. The choice of b
+is not a matter of more is better, but rather a compromise between
+the number of passes and counting buckets required. Sorting the
+whole value at once, i.e. b = 32, is clearly not feasible as we would
+need 232 counting buckets, each of which has the same length as
+the input sequence. On the other hand, 32 passes is a bit excessive.
+Table 1 shows the number of counting buckets and passes resulting
+from sorting b ∈{1, 2, 4, 8} bits per pass. 4 bits per pass seems
+like a reasonable compromise, but the best compromise should be
+found emperically. It is also worth considering how much is to be
+sorted; if we only need to sort 30 bits, we could sort 5 bits per pass,
+which would result in 32 counting buckets and 6 passes.
+Bits per pass
+Counting buckets
+Passes
+1
+1
+32
+2
+4
+16
+4
+16
+8
+8
+256
+4
+Table 1: The number of counting
+buckets (excluding BΣ) and passes
+resulting from sorting 32-bit elements
+with varying amounts of bits per pass.
+As can be seen, most of the actual work is performed by the
+preﬁx sum algorithm. There is, however, still the question of how
+to store the counting buckets. The naive approach is to store the
+counting buckets in the same way as the input. This means that
+our space requirements increases by bn. We need to perform b2b
+preﬁx sums over n elements. If each preﬁx sum needs to write n
+elements, then we will be performing a lot of read and writes to
+global memory.
+But just because we use the exclusive preﬁx sum to reason about
+the algorithm, doesn’t mean that we have to actually use it directly.
+Instead, we can specialize the preﬁx sum algorithm to ﬁt the needs
+of the radix sort algorithm. We know that we need to perform b
+preﬁx sums over almost the same input data. The transformation
+from X to Xc can be done using a bit-wise AND operation, i.e. it’s
+practically free compared to a global memory read. So, if we per-
+form the b preﬁx sums in the same kernel, we only need to read the
+input data once and perform b ANDs, rather than read it b times.
+But we still have an issue with the amount of data we write to
+global memory. Note, however, that when calculating the sorted
+index, we only use the result of 1 counting bucket for each index;
+meaning that the other counting buckets are not used at all. In fact,
+the only place where all values of all counting buckets are used
+is during the wave preﬁx sum calcuation. After that, to combine
+across waves, we only use the total sum of the elements of each
+wave. Likewise, to combine across thread groups, we only use the
+==PAGE:20==
+20
+efficient use of spatial data structures in gpu shaders
+total sum of the elements of each thread group. As such, we only
+need to write elements where Xc,i = 1 and since that is only true for
+a single combination of c and i, we can get away with storing all the
+preﬁx sums in the same sequence. Of course, we still need to store
+the count of each combination per thread group, but that is far less
+data on the whole.
+As a final optimization, we can reduce our resource usage a
+bit. The preﬁx sum algorithm stores the results of the preﬁx sum
+from each wave in shared memory. A preﬁx sum is then computed
+for the sum of the elements of each wave. Finally, each thread
+writes to global memory. Note that we only need to store the pre-
+ﬁx sum from each wave in shared memory, which might limits the
+largest possible value that can occur when used for a radix sort, as
+we only perform a preﬁx sum over zeros and ones. This means that
+the maximum possible integer will be 1024nt −1. As such, we need
+to be able to describe 1024nt different values, but anything more
+than that is a waste of data.
+As we don’t want banking conﬂicts between threads, each thread
+must use a multiple of 32 bits to store its data. Already at 2 ele-
+ments per thread, we need 11 bits per integer which implicates we
+can only pack 2 integers into the 32 bits. On the other hand it also
+means that we can go all the way to 64 elements per thread and
+still pack 2 into the 32 bits. The advantage of this is that we effec-
+tively reduce our shared memory usage by half, which should be
+advantageous for performance.
+Bounding Volume Hierarchies
+In real life, it is very intuitive to simply grab an object at a partic-
+ular point in space. In a computer, however, we tend to just store
+things in sequences, but we often have a need to look at a particu-
+lar region in space. For example, in ray tracing we perform a large
+amount of ray-primitive intersections and it simply doesn’t scale
+to test whether every single triangle of a huge triangle-soup lies in
+the ray’s path. This is where spatial data structures comes into play;
+they provide optimized access using spatial indexing at the cost
+of more memory and construction time. The result is that ﬁnding
+an element at a spatial location becomes less than O(n). Typically
+these data structures have O(log n) look-up time complexity.
+One such spatial data structure is the bounding volume hier-
+archy (BVH). It is a tree where the leaf nodes reference geometry
+primitives. All nodes are associated with a bounding volume that
+completely contains it’s children. Most commonly an internal node
+only has 2 children. It is possible to have more than 2 children per
+internal node, but that makes more sense to SIMD-based traversal.
+Although GPUs are also SIMD-based, we treat each SIMD lane as
+its own thread and thus it does not make sense to have more than 2
+children per node.
+==PAGE:21==
+method
+21
+Similarly it is possible to use anything as the bounding volume
+for nodes, but most commonly an AABB27 is used. Another popu-
+27 Axis-aligned bounding box.
+lar choice is a sphere, which has the advantage of being indepen-
+dent of the rotation of the coordinate system, but might not ﬁt the
+internal geometry as well as an AABB. While technically anything
+can be used, anything is not practical, as using the acceleration
+structure must be faster than simply iterating all primitives.
+Construction
+A BVH is far more ﬂexible than e.g. a BSP tree, but that ﬂexibility
+also means that the problem space for construction is far bigger. We
+have to decide how to pair all elements from the leaves to the root
+of the tree; in other words, the amount of combinations is huge and
+thus we have to be smart about it.
+Lauterbach et al. present two methods for constructing the hier-
+archy; [Lau+09] one that is very fast which produces an LBVH,28,
+28 Linear Bounding Volume Hierarchy.
+and another that produces hierarchies of better quality but is
+slower. The former works by ﬁrst constructing all leaf nodes of
+the hierachy and then sorting in Morton order, which is done by
+calculating the Morton code for the barycenter of the bounding
+box for each leaf node and then using a radix sort29 to sort them.
+29 Not required to be a radix sort, but it
+is the most optimal choice.
+Afterwards, the sorted leaf nodes are processed in order to pro-
+duce split lists indicating where node are joined/split in the tree.
+More speciﬁcally the splits are made at the ﬁrst differing bit in the
+Morton code, starting from the most signiﬁcant bit.
+The two algorithms are combined into a hybrid algorithm, where
+the fast algorithm is used for the top part of the tree and the slower
+algorithm for the bottom part. The advantage of this is that the
+second algorithm can be applied in parallel for groups of leaves,
+thus increasing the amount of parallelism possible.
+The LBVH was improved upon by Pantaleoni and Luebke [PL10]
+with the HLBVH by providing a faster method for constructing the
+BVH based on the sorted leaf nodes, as well as a new algorithm
+equivalent to the slower one of Lauterbach et al. They use the fast
+algorithm for the bottom part of the tree, and then the slow algo-
+rithm to combine the sub-trees. They argue that this method is
+better, as higher tree quality is most important in the top part of
+the tree. Garanzha et al. improved upon this further [GPM11] by
+reformulating the HLBVH using work queues and binary search.
+Finally, Karras improved upon these with an even faster method
+for constructing the LBVH, which allows for better parallism on the
+GPU by processing all levels of the tree at once. [Kar12]
+While one possibility is to use another method for the lower
+branches of the hierachy to improve quality, another is to generate
+an LBVH using one of the above methods and then optimize it to
+lower the SAH-cost. Karras and Aila [KA13] presents a fast method
+for optimizing an existing BVH on the GPU by re-arranging within
+subsets of the tree called treelets. As such the method is known as
+==PAGE:22==
+22
+efficient use of spatial data structures in gpu shaders
+Treelet Restructuring BVH. Afterwards, they improved upon the
+method by using a bottom-up agglomerative clustering approach
+for re-arranging within treelets, rather than evaluating all possible
+solutions. [AK14] This method is, however, patented by NVIDIA.
+Domingues and Pedrini independently provided a similar solution
+also using agglomerative clustering. [DP15]
+For this project we settle on the LBVH method by Karras [Kar12]
+as it generates an LBVH faster than the other methods, and due to
+the fact that the TRBVH methods must have a BVH to optimize on.
+If time had allowed for it, it would have been possible to implement
+the TRBVH methods on top of this.
+Traversal
+There are several methods available for traversing BVHs. They can
+be put into 2 categories; stackful and stackless. The former uses
+a stack to postpone nodes when there are multiple paths to take
+during traversal. The latter also has the same need, but as the name
+suggests manages to do so without a stack. The want of a stackless
+method comes from the fact that a stack takes up a lot of GPU
+resources. As discussed previously in the report, this means that
+less thread groups can be active at once. On the other hand, the
+stackless methods tend to have more overhead than the stackful.
+The state of the art in stackful traversal methods is presented by
+Aila and Laine in 2009. [AL09] Toczek et al. provides ones of the
+earlier stackless traversal algorithms, in which they alter the data
+structure by providing exit links at nodes, allowing the traverser
+to skip parts of the tree as well as backtrack without using a stack.
+[THM10] Laine provides a stackless traversal method that restarts
+from the root when it needs to backtrack. It does so by storing a bit
+of data per level which guides the traversal after the restart. [Lai10]
+Áfra and Szirmay-Kalos also provide a stackless traversal method
+[ÁS14] but unfortunately their results show that it is slower than
+the stackful algorithm from Aila and Laine. Murguía et al. uses a
+bit-trail to backtrack without a stack [Mur+13]. Binder and Keller
+improves on this by using a perfect hashing scheme to lookup
+where to backtrack to in constant time. [BK16]
+One crucial factor is that the stackful method is the most triv-
+ial to implement and yields good performance. The method by
+Binder and Keller yields roughly 20% more rays per second com-
+pared to the stackful method by Aila and Laine. While certainly
+important for a production implementation, it was determined to
+be non-essential for this project and as such the stackful method
+was chosen.
+Hybrid Shadow Rendering
+While there is also lots of work that can be done to make BVH con-
+struction and traversal more efﬁcient, another approach is to reduce
+==PAGE:23==
+method
+23
+the amount of work that is needed. Obviously we cannot simply
+make the work magically disappear, so to put it in more realistic
+terms, we’re interested in a method that allows us to solve part of
+the problem in a much faster way; a more coarse-grained, but fast
+method, similar to how the hybrid BVH construction algorithms
+work.
+That is exactly what hybrid shadow rendering allows us to.
+Before we head into that, let’s take a look at shadow mapping, as
+hybrid shadow rendering builds on top of that.
+Typically, in real-time graphics, a technique called shadow map-
+ping is used to calculate shadow for a scene. [Cro77] Given a light
+L, the idea is to render the scene from the point of view of L into
+a depth buffer, which we call the shadow map. We use a transfor-
+mation matrix VL to transform coordinates from world-space to
+light-space30 and then another matrix PL to project into clip space
+30 Light-space meaning that the origin
+and rotation of the coordinate system
+matches that of the light.
+seen from the light. Afterwards, we render the scene as usually.
+During that we can determine light visibility for a given fragment.
+We do so by taking the position of the fragment and projecting into
+light-space using the light matrices. Given a fragment with position
+pW in world space, the position in the clip-space of the light is
+pCL = PLVLpW .
+This corresponds to which fragment the position would have been
+rasterized into in the shadow map. We can use this to sample the
+depth value that was rasterized into that fragment of the shadow
+map and compare it to our position; if the fragment in the shadow
+map was closer to the light, then it must occlude our position and
+thus the fragment we’re rendering is in shadow. Otherwise it is not
+in shadow. pCL lies in the interval [−1, 1]2, so in order to sample the
+shadow map we must bring it into the interval [0, 1]2, which is as
+simple as dividing by 2 and adding a half to each component.
+The limitation of shadow mapping lies in the fact that we ras-
+terize the shadow map individually from the camera rendering.
+That means that we’re actually reconstructing the signal that was
+captured into the shadow map at each rendered fragment, and thus
+we’re prone to aliasing if the resolution of the shadow map is not
+high enough to capture the frequency of the geometry. This can be
+countered by increasing the resolution of the shadow map, but that
+presents other issues. We can only scale the shadow map resolu-
+tion uniformly, but we need varying resolutions for different parts
+of the shadow map. This is due to the fact that the shadow map is
+essentially projected onto the rendered scene, and so as the distance
+from the occluder to the occludee increases, so does the area that
+the fragment is projected onto.
+The aliasing typically presents itself in the edges of the shad-
+ows, while the insides and outsides of the shadows appear clean.
+When rendering shadows using shadow mappping, the 4 nearest31
+31 Or more, depending on the ﬁltering
+method.
+texels of the shadow map is sampled and combined to construct a
+visibility value in the interval [0, 1]. Unless the geometry is more
+==PAGE:24==
+24
+efficient use of spatial data structures in gpu shaders
+high frequent than what the shadow map can represent given its
+resolution, we can decide whether a fragment is deﬁnitely in or not
+in shadow if the 4 texels agree on the visibility. We can label the
+fragment as occluded, visible or undecided.
+This is exactly the coarse-grained method we’re looking for.
+If a fragment is labeled as undecided we ray-trace it for increased
+precision and to avoid artifacts, but otherwise we trust the shadow
+map to decide whether the fragment is in shadow or not. By using
+shadow mapping before tracing shadow rays with the BVH, we are
+effectively culling the fragments with a much cheaper method.
+Hertel et al. has used this method for kD-trees with success,
+but not in compute shaders. [HHW09] They use a conservatively
+rasterized shadow map, meaning that during rasterization, the
+pixel center does not have to lie within the triangle, but rather the
+triangle merely has to intersect the bounds of the pixel. The idea of
+this is to make sure that no geometry is missed, since no ray tracing
+will be performed if the shadow map does not successfully sample
+high-frequent geometry; e.g. if there is a small hole in the geometry
+between the 4 samples in the shadow map it will be falsely labeled.
+They circumvent this by storing a triangle ID at each shadow map
+texel for the triangle that was rasterized into it. They use this when
+sampling the shadow map to determine whether the texel was fully
+covered by the triangle. This is problematic if small triangles are
+used, as triangles smaller than the shadow map texel cannot fully
+cover a texel. As such, it would not produce incorrect results, but
+rather the optimization would not work.
+Unfortunately, hardware support for conservative rasterization
+is not wide, and implementing it through shaders requires the use
+of geometry shaders, which are known to have a large performance
+construct. We experiment with using a regular shadow map for
+this. The implication is that the shadow map resolution must be
+high enough to capture at least 1 sample of the geometry, such that
+the fragment can be marked as undecided and ray-traced. We do
+not need any precision in these samples, as they are only used for
+classiﬁcation and ray tracing takes care of the rest.
+We can verify the assumption visually by calculating shadowing
+using ray-tracing with our BVH for an entire buffer. We compute
+the label for each pixel using the above technique; if the label is
+undecided the pixel fulﬁlls the assumption no matter what, but if
+the label is occluded or visible and doesn’t match what we calculated
+using the BVH, then that pixel does not uphold the assumption.
+This is of course no deﬁnitive proof, but it tells us something about
+whether the technique works in practice for speciﬁc geometry.
+Like Hertel et al. we also restrict the ray interval using the depth
+values from the shadow map. We call this interval culling. Further-
+more, we also restrict the maximum of the ray. We add a constant
+value of 0.2 to each end of the interval. This value is not based on
+anything, and thus the result of using interval culling is not guaran-
+teed to be correct. The technique is advantageous because shadow
+==PAGE:25==
+method
+25
+rays often have to pass by other objects closely, before hitting the
+occluder. But when the interval is restricted, we’re able to immedi-
+ately skip a large part of the tree. The downside is that it increases
+our dependence on a high-resolution shadow map, and it is not
+guaranteed to provide correct results.
+Due to the fact that we are implementing this using compute
+shaders, we must consider how we make use of the additional
+control. We present 4 different methods that will be implemented
+and compared.
+Naive
+Dedicate a pixel per thread and let each thread
+1. sample the shadow map and consider whether ray tracing is
+needed,
+2. perform ray tracing if needed.
+We must also decide on a thread group size. As long as thread
+group size is above the wave size, it should be ﬁne. A good, generic
+choice is be 8 × 8 × 1, which is equal to the wave size of AMD
+hardware and double the wave size of NVIDIA hardware. Like
+Aila and Laine we use persistant traversal. [AL09] The idea is to
+launch a static number of thread groups, possibly depending on the
+hardware, such that the entire GPU is ﬁlled and then use a global
+atomic counter to distribute work from a pool.
+The issue with this method is that if only some threads inside
+a wave need ray-tracing, the rest of the threads will have to wait
+for those to ﬁnish. This is especially critical if only a single thread
+needs to ray-trace.
+Work distribution
+Using persistant traversal, we could let each
+thread group fetch a cluster of pixels, check if any needs ray-tracing
+and ray trace if all pixels need to. If not, fetch another cluster of
+pixels, check them and append to the previous pixels needing ray-
+tracing until the entire wave is ﬁlled with rays to be traced. We
+need a place to accumulate the rays, but would like to not increase
+our shared memory usage due to concurrency. Fortunately, as this
+only happens in-between traversal runs, we can simply repurpose
+the space used for the traversal stack. That does however mean that
+we cannot accumulate rays between traversal runs. We use an in-
+wave preﬁx sum to ﬁnd storage indices for rays. For this we also
+repurpose the traversal stack. We consider 2 approaches to ﬁnding
+new pixels:
+1. Only check new pixels in threads which do not yet have a ray.
+2. Use all threads to check new pixels, throw away pixels if we end
+up with too many.
+The ﬁrst approach has the advantage that we do not end up with
+too many pixels to be traced. On the other hand, if we’re missing a
+==PAGE:26==
+26
+efficient use of spatial data structures in gpu shaders
+single ray, we will have a single thread looping over pixels to ﬁnd a
+ray. For the second approach, we need a way to handle overspilling
+rays. As stated previously, we cannot save rays between traversal
+runs. Instead we save the pixel index of the ﬁrst ray that overspills.
+After traversal, we check pixels from that index on. While this
+means duplicated work, it is only duplicated in threads that would
+otherwise have been idle.
+Compact
+A simple method would be to separate the pixel check-
+ing and the ray tracing into different shaders. The pixel checking
+shader is then combined with a preﬁx sum shader, such that the
+entire screen is compacted. That is, put a 0 if a pixel does not need
+ray-tracing and a 1 if it does. Then perform a preﬁx sum over all
+pixels and use that to compute the new position. Thus we have a
+total of 4 steps32 for this method; intra thread group preﬁx sum
+32 Which means that 4 dispatches are
+required.
+over all pixels, inter thread group preﬁx sum over the sums of each
+thread group, compaction and ray-tracing.
+This requires us to allocate a structured buffer large enough
+to hold all pixels.33 First and foremost we would need to store
+33 If we have n pixels, needing ray-
+tracing or not, the structured buffer
+must be able to contain n elements.
+the indices of each remaining pixel. There is no point in storing
+additional data such as ray direction, as we would suffer from
+precision issues and/or increased memory bandwidth. If we use
+16 bit of precision each for x and y indices, we can represent buffers
+of up to 65536 × 65536, which should be enough for the foreseeable
+future. This gives us a storage requirement of 4 bytes per pixel. Our
+preﬁx sum algorithm can handle (1024n)2 items in a single pass,
+where n is the number of items handled per thread. Handling 4
+pixels per thread will allow for up to 8K resolutions and should
+provide plenty of work for the GPU.
+The downside of this method is that the preﬁx sum has a ﬁxed,
+upfront cost that we would pay even if the entire screen has to be
+ray-traced. In that event, the naive method is most likely faster. On
+the other hand, if that was the most usual case, there wouldn’t be
+much beneﬁt to hybrid shadow rendering in general. Also, a lot of
+data is being transferred from and to global memory, which might
+have a performance cost.
+Heatmap Visualization
+In order to make observations about the performance and other
+characteristics resulting from the render, it is helpful to create vari-
+ous visualizations. For instance, we might be interested in looking
+at the number of triangle intersections made per pixel for a render.
+We could display it as a grayscale value by mapping it to [0, 1] as
+in where xmax is the maximum number of triangle intersections we
+want to be able to visualize.
+g(x) =
+x
+xmax
+(1)
+But that wouldn’t take advantage of the bandwidth available in
+==PAGE:27==
+method
+27
+a color display. This becomes a problem when different parts of the
+render has highly varying numbers of intersection, as increasing
+the maximum value will decrease the precision. Instead we could
+display the values as a heatmap.
+We can do that by mapping the number into the HSV34 color
+34 Hue, Saturation, Value
+space: Hue represents the color on a color wheel and saturation
+represents the amount of color, i.e. for S = 1 the result is the color
+from the hue as is, while for S = 0 the result becomes grayscale.
+The third and ﬁnal component, value, scales the result towards
+black, i.e. for V = 0 the result is black, while for V = 1 the result is
+untouched.
+So how do we actually map the number into these 3 values? We
+want each value to represent part of the input number. First of all,
+if the input value is 0 we want the result to be black. If the input
+value is 1 we want the result to be white. I have chosen to let the
+result go from black to red, then change color from red to pink (i.e.
+on the color wheel) and ﬁnally from pink to white.
+Our initial values are then (H, S, V) = (0, 1, 0), such that the
+color is red, it is fully saturated and scaled all the way to black.
+The ﬁrst part is accomplished by letting the value go from 0 to
+1, the second part by letting the hue go from 0 to 1 and the third
+part by letting the saturation go from 1 to 0. Like we had xmax for
+transforming into a gray-scale value, we need 3 similar values for
+each part. In a way the three components are then bands of the
+input value and as such we can view their sizes as bandwidths
+B = (BH, BS, BV). We generally need a saturation function:
+sat(x) = max(0, min(1, x))
+It simply clamps a value x ∈Rn to [0, 1]n. We can use this to divide
+an input x into the 3 bands:
+V(x) = sat
+ x
+BV
+
+,
+(2)
+H(x) = sat
+ x −BV
+BH
+
+,
+(3)
+S(x) = sat
+ x −BV −BH
+BS
+
+(4)
+After doing so we can convert from the HSV color space to the RGB
+color space. Taylor provides a fast method for doing so that maps
+well to shaders: [Tay10]
+hue(H) = sat(|6H −3| −1, 2 −|6H −2|, 2 −|6H −4|),
+(5)
+rgb(H, S, V) = [(hue(H) −1)S + 1]V
+(6)
+==PAGE:28==
+==PAGE:29==
+Implementation
+The following will provide a short overview of the various parts
+and history of the implementation. Sections following will go into
+more detail.
+This project has been implemented and integrated into the ren-
+dering of the Unity game engine. The very ﬁrst part that was im-
+plemented was a basic ray tracer; only trace primary rays with no
+shading. This was not to provide any results, but rather to be able
+to get the integration of ray tracing and Unity working. This re-
+quired code for extracting geometry data from the loaded Unity
+scene into a format suitable for consumption in compute shaders.
+Following that, work started on the algorithms required for BVH-
+powered ray tracing. Unfortunately, the optimizations mentioned
+for radix sort were not implemented. However, as we’re not up-
+dating the BVH every frame, it does not affect the run-time perfor-
+mance of the system.
+Due to the amount of algorithms that had to play together for
+this to work, a method was needed to separately verify the correct-
+ness of the implementations. Unity provides built-in integration
+with the NUnit testing framework through a GUI in the editor.35
+35 While the tests can also be run
+through the command line without
+a GUI, this was not utilized in this
+project.
+For almost every compute shader, a test case was written using
+generated data. For most of the algorithms, it is fairly trivial to
+construct a correct output for an input on the CPU in an inefﬁcient
+manner. After the algorithms were implemented, they were used to
+implement BVH acceleration support in the basic ray tracer, in or-
+der to verify the implementation visually. It was then trivial to take
+the ray tracing code and use for shadowing rather than primary ray
+tracing.
+Initially the shadows were implemented as an image effect in
+Unity, but this proved to be too limiting for hybrid shadow render-
+ing. Therefore a custom render pipeline was implemented in Unity.
+This render pipeline uses deferred lighting with support for only
+a single light as no more was needed for the test scene. In order to
+implement hybrid shadow rendering, shadow mapping had to be
+implemented ﬁrst. Earlier in the project, the plan was that if time
+allowed for it, area light shadows would be pursued. Thus, in or-
+der to create something approximating an area light, a paraboloid
+mapping was used for the shadow map, capturing a hemisphere
+around the light source. Finally, the 4 methods for hybrid shadow
+rendering was implemented on top of this.
+==PAGE:30==
+30
+efficient use of spatial data structures in gpu shaders
+Basic Ray Tracer
+The ray tracer is implemented as a window in the Unity editor. Fig-
+ure 2 shows a picture of this after a rendering. It loads proﬁles from
+a custom asset type, which makes testing speciﬁc conﬁgurations
+a lot easier. It is implemented very naively as a single kernel and
+maps 1 thread to 1 pixel, tracing a single ray per pixel. It generates
+the camera rays using camera matrices provided by Unity (such
+that the output geometrically matches Unity) and then tests every
+triangle for a possible intersection using Möller–Trumbore triangle
+intersection. [MT05]
+Figure 2: Basic ray tracer inside Unity.
+Scene is lit by a single directional
+light using barycentric coordinates as
+albedo.
+More speciﬁcally, Unity exposes two relevant matrices for a cam-
+era: P, the projection matrix, and V, the world-to-camera matrix.
+To go from world to clip-space coordinates they are combined as
+PV. Each invocation of the compute shader knows which pixel it is
+in (the dispatch thread ID) and we want to turn this into a world-
+space point pw on the camera’s near-plane. The pixel position pp
+is essentially a 2D point in a space N ∈
+
+0, widthp
+ ×
+h
+0, heightp
+h
+,
+where widthp is the width of the screen in pixels. First of all we
+need to scale the coordinate to [−1, 1]2. We ﬁrst use a scaling ma-
+trix S, that scales by (
+2
+screenw ,
+2
+screenh ), afterwhich the coordinates lie
+in [0, 2]2. We then use a translation matrix T that translates by −1
+which puts the coordinates in [−1, 1]2. We now have the points in
+clip-space and thus we can simply use the inverse the provided ma-
+trices (PV)−1 to translate them into world space. The ﬁnal matrix
+is then M = (PV)−1 TS. The beneﬁt of this approach is that the
+rendering will match Unity’s rendering 1:1.
+The geometry is gathered from the currently active scene.
+Unity exposes an API for ﬁnding all game objects in the scene. Each
+==PAGE:31==
+implementation
+31
+of these game objects have a MeshFilter component that contains
+the mesh of the game object. The triangle data is harvested from
+the Unity scene graph and put into one big buffer. Each element
+of the buffer contains 3 vertices and a normal. This data format
+will not be sufﬁcient for the future, but the harvesting of data from
+the Unity scene graph will. In this implementation, the data is
+transformed into world-space coordinates in C#.
+Render Pipeline
+The shadow rendering was initially implemented as an image effect
+for prototyping reasons. While this approach was later dropped in
+favor of Scriptable Render Pipelines, the latter uses many of the same
+APIs.
+Image Effects
+An image effect36 is a way of applying effects to a rendered image.
+36 Often referred to as a post-processing
+effect.
+It doesn’t have to only use the color buffer as input, but typically it
+will write to the color buffer.
+There are two ways of implementing an image effect in Unity.
+Common to both is that it is implemented as a component that is
+attached to a camera. The ﬁrst method is the original way to write
+an image effect in Unity. The component can implement a callback
+method as follows:
+1
+void OnRenderImage(RenderTexture src, RenderTexture dest) {
+2
+Graphics.Blit(src, dest, mat); 37
+37 Copy source texture into target
+texture using the shader speciﬁed by
+the material. Internally, a full-screen
+quad is rendered to achieve this.
+3
+}
+This method is called after all rendering is complete. Internally,
+Unity maintains two render textures that it swaps as input and
+output. This works well for simple image effects, like tonemapping,
+but it only allows for using the color buffer as input and output.
+It also does not allow one to specify when the call occurs during
+rendering. For example, an SSAO38 image effect will want to run
+38 Screen-space ambient occlusion.
+before lighting so that it can write the occlusion into the G-Buffer
+and affect only ambient lighting.
+The second way is to use command buffers, which are a lower
+level abstraction available in Unity for executing graphics com-
+mands. They allow one to record commands into a buffer and then
+let the Unity rendering system execute those. They can be executed
+manually or hooked up to various points of the rendering path
+such as after lighting, before post-process etc. [Uni17c]. The method
+implemented above would look like the following:
+1
+var cmd = new CommandBuffer { name = 39
+39 The name given to the command
+buffer will be visible in various UI’s,
+which makes debugging much easier.
+2
+"A descriptive name" };
+3
+cmd.Blit(src, dest, mat); 40
+40 Record blit into command buffer.
+4
+camera.AddCommandBuffer(CameraEvent.AfterImageEffects, 41
+41 Register command buffer to be run
+at a certain point in rendering.
+5
+cmd);
+==PAGE:32==
+32
+efficient use of spatial data structures in gpu shaders
+As can be seen, this is a deferred execution model. Methods42
+42 Equivalents of the Graphics.*
+methods, such as Blit, as well as .
+are called on the CommandBuffer, which records them for later
+execution. The methods available consists of equivalents of the
+Graphics.* functions and various methods for managing render
+targets and global uniforms.
+Note that this does not take advantage of the ﬂexibility provided
+by command buffers at all. The downside to this ﬂexibility is that
+it is less simple to use. The above code is provided in a free-form,
+which leaves the question; when should it be called? There are sev-
+eral options. If what is recorded into the command buffer doesn’t
+depend on per-frame data, it simply has to be called after the com-
+ponent is enabled. Otherwise it can be added in the OnPreRender()
+callback method. But it also has to be removed again. If it is added
+when the component is enabled, it should likewise be removed
+when the component is disabled.
+Scriptable Render Pipelines
+While implementing the shadow rendering as an image effect al-
+lowed for getting a prototype up and running, it did not provide
+enough ﬂexibility. For example, the results of the shadow compu-
+tation could not be taken into account during lighting, resulting in
+incorrect output. Likewise, the shadowmap optimization requires
+more control over the shadowmap rendering. This could partially
+be achieved by modifying the built-in shaders used by Unity, but
+the deferred rendering path in Unity is not trivial and would likely
+affect implementation time a lot.
+Going one abstraction level lower, Unity presents us with an ex-
+perimental rendering feature called Scriptable Render Pipelines. This
+allows one to essentially provide a custom render loop, which calls
+into Unity API’s implemented in C++ for heavy tasks like frustum
+culling. The user implements a function that is called once per ren-
+dering, representing the body of the render loop. This function is
+passed a ScriptableRenderContext as argument, which contains
+methods for e.g. culling, drawing renderers and executing com-
+mand buffers. As with the CommandBuffer, a deferred execution
+model is used, so in a way it is also a command buffer.
+Unity provides a basic render pipeline, which draws opaque and
+transparent objects in a forward rendering style as well as a skybox.
+[Uni17a] A render pipeline exists as an asset in Unity, so there is an
+amount of code for managing that. The interesting part, however, is
+the render loop code:
+1
+public override void Render(ScriptableRenderContext
+renderContext, Camera[] cameras)
+2
+{
+3
+foreach (var camera in cameras) 43
+43 Perform rendering for each camera
+in the scene that needs rendering.
+4
+{
+5
+CullingParameters cullingParams; 44
+44 Perform culling of lights, probes and
+objects.
+6
+if (!CullResults.GetCullingParameters(camera, out
+==PAGE:33==
+implementation
+33
+cullingParams))
+7
+continue;
+8
+CullResults cull = CullResults.Cull(ref cullingParams,
+context);
+9
+10
+context.SetupCameraProperties(camera); 45
+45 Setup camera properties for
+rendering, such as sets render target,
+view/projection matrices and other
+per-camera built-in shader variables.
+11
+12
+SetupLightShaderVariables(cull.visibleLights, 46
+46 Setup global lighting shader
+variables – not included for brevity.
+13
+context);
+14
+15
+var settings = new DrawRendererSettings(cull, camera,
+new ShaderPassName("BasicPass")); 47
+47 Draw opaque objects using BasicPass
+shader pass.
+16
+settings.sorting.flags = SortFlags.CommonOpaque;
+17
+settings.inputFilter.SetQueuesOpaque();
+18
+context.DrawRenderers(ref settings);
+19
+20
+context.DrawSkybox(camera); 48
+48 Draw skybox.
+21
+22
+settings.sorting.flags = SortFlags.CommonTransparent; 49
+49 Draw transparent objects using
+BasicPass shader pass.
+23
+settings.inputFilter.SetQueuesTransparent();
+24
+context.DrawRenderers(ref settings);
+25
+26
+context.Submit();
+27
+}
+28
+}
+We are given control over what to render, when to render it
+and what the environment is when rendering. So while attaching
+command buffers to a camera would allow us to achieve most
+things50, it implies that we have to maintain compatibility with
+50 In combination with modiﬁying
+built-in shaders.
+existing graphics features. Implementing a new graphics feature is
+in itself a challenge, and prototyping such often requires one to be
+able to swiftly change the rendering setup, which can be a hassle if
+we need to make sure that we didn’t break any features not related
+to the project. Using scriptable render pipelines, we start more or
+less from scratch51 and thus we don’t have to worry as much about
+51 But still within the safe surroundings
+of Unity.
+compatibility with features of Unity that we do not need.
+Deferred Lighting
+We will use a deferred render pipeline for our solution. The naive
+way of implementing lighting and shading for a rasterization
+pipeline is called forward rendering; the lighting and shading is cal-
+culated right away in the fragment shader of each rendered object.
+This means that if another object is drawn on top of another,52 the
+52 That is, drawn in that order.
+results of the previous objects is discarded and thus the computa-
+tional cost is wasted. Deferred rendering circumvents this waste by
+writing the values needed for lighting calculation into temporary
+buffers; typically at least albedo, specular, normal and position.
+These buffers are collectively referred to as the G-Buffers, where the
+==PAGE:34==
+34
+efficient use of spatial data structures in gpu shaders
+G stands for geometry. Afterwards the lighting can be calculated
+as a screen-space effect that samples these values. Naturally, the
+lighting is only calculated once per fragment. Typically, the posi-
+tion is stored indirectly as the depth, which can then be used to
+re-construct the position.
+Another advantage is that it allows the developer to logically
+split shaders into several shaders, which potentially uses fewer
+registers. As we intend to implement the hybrid shadow rendering
+using compute shaders, we actually can’t use forward rendering at
+all, since compute shaders cannot be used as part of the traditional
+graphics pipeline on the GPU.
+While a key advantage of deferred rendering is the ability to
+handle many lights, we are not interested in doing so for our so-
+lution. Thus we calculate lighting for a single light for all pixels,
+and do not apply any techniques such as tiled or clustered lighting.
+[OA11] [OBA12]
+In order to easily switch shadowing techniques, we introduce
+another G-buffer that stores shadow value and use this during
+lighting calculations. For the lighting calculations, we use the built-
+in lighting shader functions in Unity and base the code on the built-
+in deferred rendering path. Summing up, the G-buffer consists of
+the same as the built-in deferred renderer of Unity except that we
+replace the last buffer with our shadow buffer:53 [Uni17b]
+53 In the built-in pipeline of Unity it is
+used for emission, lighting, lightmaps
+and reﬂection probes.
+1. (ARGB32) Diffuse (RGB), occlusion (A)
+2. (ARGB32) Specular (RGB), roughness (A)
+3. (ARGB2101010) World space normal (RGB), unused (A)
+4. (ARGB32) Shadow (R), unused (GBA)
+5. Depth & stencil
+The steps of the render pipeline are:
+1. Render shadow map
+2. Draw objects into G-buffer
+3. Compute shadows into shadow G-buffer
+4. Calculate lighting
+5. Blit to target buffer, possibly using debug shader
+==PAGE:35==
+Results
+All results were obtained on a laptop with a Intel Core i7 4980HQ
+CPU and an AMD Radeon R9 M370X GPU. The scene size that can
+be used is limited by the construction method we’ve implemented.
+The issue is that the C# code in our implementation that extracts
+the geometry from Unity takes too long to run for high polygon
+counts. The issue is not with the GPU code, as the GPU driver
+would crash if each step used more than a few seconds.
+Thread divergence occurs naturally while ray tracing as some
+rays will almost immediately hit a surface, while other rays must
+pass by a large amount of geometry. As the purpose of a shad-
+owing algorithm essentially is to prove whether or not a ray is
+occluded, every bounding box the ray hits must be tested for inter-
+section to see whether a primitive (e.g. a triangle) is hit. So while
+an occluded ray can exit early, a ray that actually hits the light
+source must test for intersections all the way to the light source.
+This is seen in ﬁgure 3 where a scene has been rendered with
+shadows ray-traced using a BVH. Box intersections, triangle inter-
+sections and stack pops are visualized using heatmaps. Note that
+the heatmaps shows values for shadow rays, and not for camera
+rays. In fact, the primary rays are rendered using rasterization and
+not ray tracing at all.
+First of all we see that the number of triangle intersections is
+generally rather low, meaning that the BVH does what it’s sup-
+posed to. On the other hand we see that the number of bounding
+box intersections varies a lot. The key observation here is that they
+vary the most around the edges of the shadows. This shows quite
+well why hybrid shadow rendering is a good idea; we effectively
+discard a large area of pixels that are expensive to trace. Of course,
+Setup
+Ray tracing
+Shadow mapping
+Total
+Relative
+Ray-tracing
+86.41 ms
+-
+86.41 ms
+100%
+HBR (2562)
+20.79 ms
+0.03 ms
+20.82 ms
+24.10%
+HBR (2562, I)
+13.32 ms
+0.03 ms
+13.35 ms
+15.45%
+HBR (5122)
+14.08 ms
+0.04 ms
+14.12 ms
+16.34%
+HBR (5122, I)
+9.23 ms
+0.04 ms
+9.27 ms
+10.73%
+HBR (10242)
+10.46 ms
+0.05 ms
+10.51 ms
+12.17%
+HBR (10242, I)
+7.10 ms
+0.05 ms
+7.16 ms
+8.28%
+Table 2: GPU execution times using
+ray tracing and hybrid shadow ren-
+dering with an 8 × 8 kernel, a stack
+size of 12 and a render resolution of
+1920 × 1080 on a AMD Radeon M370X.
+"I" indicates whether interval culling
+was enabled. The scene used contains
+7102 triangles.
+==PAGE:36==
+36
+efficient use of spatial data structures in gpu shaders
+(a)
+(b)
+(c)
+(d)
+Figure 3: A simple scene rendered
+with ray-traced shadows. The
+heatmaps are for shadow rays. (a)
+Normal render. (b) Heatmap of box
+intersections (100 range per band). (c)
+Heatmap of triangle intersections (10
+range per band). (d) Heatmap of stack
+pops (20 range per band).
+we still have the edges themselves which are the most expensive,
+but it is still a far lower amount of pixels to be ray-traced.
+This is also well reﬂected in the performance results in table 2
+(and ﬁgure 7). The rendering result for the same scene can be seen
+in ﬁgure 8. It should of course be noted that the increase in perfor-
+mance is dependent on the geometry and the size of the shadow
+map. The latter is clearly reﬂected in table 2. We see in ﬁgure 2 that
+it generally provides a bigger performance increase than doubling
+the shadow map resolution does. This performance gain should
+increase as the scene size and distance to light does, since more
+and more geometry would be discarded early. We also see that the
+cost of shadow mapping is negligible compared to the cost of ray
+tracing.
+Another observation is that the heatmaps for box intersections
+and stack pops have a very similar distribution, which makes sense
+as a pop generally means that more traversal and thus more box
+intersections will occur. The stack popping is the stack-based traver-
+sal algorithm’s way of backtracking.
+In ﬁgure 9 we see a debug output that visually tests the assump-
+tion that hybrid shadow rendering is based on. We see that the
+method works for all the tested shadow map resolutions. Inter-
+val culling, however, introduces error at a shadow map resolution
+of 2562. For shadow map resolutions above that, it produces cor-
+==PAGE:37==
+results
+37
+Figure 4: CodeXL output for shadow
+ray-tracing compute shader.
+rect results. All conﬁgurations have the same error around cer-
+tain edges. It is likely that this is due to small differences in the
+ray-tracing and shadow mapping implementations, or due to an
+incorrectly set depth state.
+The CodeXL tool from AMD allows one to inspect shader
+source code to see how many scalar and vector registers are used
+after the shader is compiled by the driver. As such it is speciﬁc
+to AMD GPUs based on the GCN architecture, but nevertheless
+it is very important for reasoning about performance. Running
+the shadow ray-tracing compute shader without hybrid shadow
+rendering through CodeXL gives us the output in ﬁgure 4, which
+shows that the shader uses 92 SGPRs and 34 VGPRs per thread.
+These numbers are per thread. GCN provides 65536 VGPRs per
+compute unit. GCN 1 and 2 provides 512 SGPRs per compute unit,
+while GCN 3 increases the amount to 800 per compute unit. [Aal17]
+Note that the tool also provides us with an maximum amount of
+waves that can be in-ﬂight on each vector unit given the register
+usage. This is calculated by rounding down the ratio between how
+many registers the architecture provides and how many the shader
+uses per wave. Since we have 2 kinds of registers, the one with the
+largest ratio sets the limit.
+We see that we can run 5 waves per vector unit.54 As GCN pro-
+54 In CodeXL it is referred to as a
+SIMD.
+vides 4 vector units per compute unit, this means that we can run
+20 waves per compute unit. As the thread group shared memory
+is per compute unit, we want to look at how our usage of shared
+memory affects us. Since the per-thread traversal stack is stored in
+shared memory, we can ﬁnd our shared memory usage per wave in
+bytes as
+shared memory per wave = threads per wave · stack size · 4 + 4 .
+We multiply the stack size by 4 as we’re storing a number of
+32-bit unsigned integers55 and add 4 bytes for the shared work
+55 I.e. 4 bytes per item.
+==PAGE:38==
+38
+efficient use of spatial data structures in gpu shaders
+counter. GCN provides 64 KiB of shared memory per compute unit
+and as such we simply take the down-rounded ratio between that
+and our usage per wave to ﬁnd the maximum number of waves
+that can be in ﬂight given our shared memory usage. Table 4 shows
+this calculated for a number of stack sizes. We see that if we want
+to use the 20 waves allowed by our register usage, we must restrict
+the stack size to 12 items. Table 5 shows execution times using
+a number of stack sizes. Stack sizes below 12 were too small to
+run the test scene. The timings are visualized in ﬁgure 5. We see
+immediately that the stack size has a huge impact on performance,
+due to the fact that increasing the stack size vastly increases the
+amount of shared memory that is used and thus decreases the
+amount of waves that can be in ﬂight.
+Method
+SGPR
+VGPR
+Waves per CU
+Naive
+94
+34
+20
+WD1
+90
+39
+20
+WD2
+92
+42
+20
+Compact (step 1)
+54
+21
+36
+Compact (step 2)
+36
+12
+40
+Compact (step 3)
+26
+9
+40
+Compact (step 4)
+38
+28
+36
+Table 3: Register usage for the 4
+HBR methods. Interval culling is not
+enabled for any of the shaders. Note
+that shared memory usage is not taken
+into account for the number of active
+waves per compute unit.
+The methods implemented to take advantage of the ﬂexibility
+of compute shaders have unfortunately failed to provide additional
+performance. Please note that the compact method implementation
+has stability issues when running under DirectX 12, which is the
+only API we have been able to proﬁle successfully, and as such the
+results for that method should be taken with a grain of salt. We see
+in ﬁgure 6 that the naive method provides the best performance,
+despite not utilizing the full SIMD width of the vector units. A
+plausible theory is that the stack sizes are limiting the concurrency
+to the point that additional SIMD utilization simply causes more
+memory operations that cannot be latency hidden successfully due
+to the amount of waves that can be in-ﬂight with the given register
+and shared memory usage. We see in table 3 that the ray-tracing
+step of the compaction method uses signiﬁcantly less registers than
+the other methods and that the shared memory usage becomes the
+bottleneck, meaning that traversal shader is only limited by the
+traversal stack. Not surprisingly, the work distribution methods
+do not lower the register count, as they do not split the shader into
+several shaders.
+As for the performance of the work distribution methods, it is
+likely that the atomic counter is updated too often while looking
+for pixels to trace. For persistant traversal using a global atomic
+counter, Aila and Laine state that "As long as the atomic counter does
+not cause signiﬁcant serialization, underutilization will not occur with
+this design." [AL09]. If the atomic counter is accessed too frequently,
+==PAGE:39==
+results
+39
+it is certainly possible that it causes signiﬁcant serialization. For
+the compaction method, it is also highly likely that the compaction
+itself takes up the time it saves. It is noteworthy that the work dis-
+tribution methods have a higher variance than both the compact
+and naive methods. This causes frame stutter, as the amount of
+time it takes to compute the shadows varies noticeably from frame
+to frame. This is most likely due to the global atomic counter being
+accessed too often, causing the distribution of work to be highly
+dependent on the order of execution.
+Stack size
+Waves per CU
+6
+40
+7
+36
+8
+31
+9
+28
+10
+25
+11
+23
+12
+21
+13
+19
+14
+18
+15
+17
+17
+15
+18
+14
+19
+13
+21
+12
+23
+11
+25
+10
+28
+9
+31
+8
+36
+7
+42
+6
+51
+5
+63
+4
+85
+3
+127
+2
+255
+1
+(a) 64-wide waves
+Stack size
+Waves per CU
+12
+40
+13
+39
+14
+36
+15
+34
+16
+31
+17
+30
+18
+28
+19
+26
+20
+25
+21
+24
+22
+23
+23
+22
+24
+21
+25
+20
+26
+19
+28
+18
+30
+17
+31
+16
+34
+15
+36
+14
+39
+13
+42
+12
+46
+11
+51
+10
+56
+9
+63
+8
+73
+7
+85
+6
+102
+5
+127
+4
+170
+3
+255
+2
+(b) 32-wide waves
+Table 4: Number of waves that can run
+concurrently on each compute unit on
+a GCN-based GPU. Register usage is
+not taken into account. The amount of
+waves is the maximum amount for that
+stack size. As such, if you increment
+the stack size by 1, you should go 1
+row down.
+==PAGE:40==
+40
+efficient use of spatial data structures in gpu shaders
+12 13 14 15 17 18 19 21 23 25 28 31 36 42 51 63 85 127
+Stack size
+0
+50
+100
+150
+200
+250
+300
+350
+400
+450
+500
+550
+Duration (ms)
+Figure 5: GPU execution times for
+ray-tracing shadows at a resolution
+of 1920 × 1080 using a number of
+stack sizes. A kernel size of 8 × 8 was
+used. The GPU was an AMD Radeon
+M370X. The scene used contains 7102
+triangles.
+Stack size
+Execution time
+Relative
+12
+86.38 ms
+100.00 %
+13
+87.27 ms
+101.03 %
+14
+88.69 ms
+102.67 %
+15
+90.75 ms
+105.05 %
+17
+97.78 ms
+113.19 %
+18
+102.78 ms
+118.98 %
+19
+108.96 ms
+126.13 %
+21
+116.35 ms
+134.69 %
+23
+125.33 ms
+145.09 %
+25
+136.19 ms
+157.66 %
+28
+149.71 ms
+173.31 %
+31
+149.72 ms
+173.32 %
+36
+191.96 ms
+222.22 %
+42
+226.34 ms
+262.03 %
+51
+277.98 ms
+321.81 %
+63
+277.98 ms
+321.80 %
+85
+551.42 ms
+638.35 %
+127
+551.40 ms
+638.33 %
+Table 5: GPU execution times for
+ray-tracing at 1920 × 1080 using a
+number of stack sizes. A kernel size
+of 8 × 8 was used. The GPU was an
+AMD Radeon M370X. The scene used
+contains 7102 triangles.
+==PAGE:41==
+results
+41
+Compact
+Naive
+WD1
+WD2
+0
+2
+4
+6
+8
+10
+12
+14
+16
+18
+20
+Duration (ms)
+Figure 6: GPU execution times for ray-
+tracing at 1920 × 1080 using different
+HSR methods. The stack size used was
+12. Interval culling was not enabled.
+The GPU used was an AMD Radeon
+M370X. The scene used contains 7102
+triangles.
+(0, False)
+(256, False)
+(256, True)
+(512, False)
+(512, True)
+(1024, False)
+(1024, True)
+Shadow Map Resolution,Interval Enabled
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+Duration (ms)
+Name
+        Ray tracing
+        Shadow mapping
+Figure 7: Comparison of GPU exe-
+cution times using ray tracing and
+hybrid shadow rendering with an
+8 × 8 kernel, a stack size of 12 and a
+render resolution of 1920 × 1080 on a
+AMD Radeon M370X. The scene used
+contains 7102 triangles.
+==PAGE:42==
+42
+efficient use of spatial data structures in gpu shaders
+(a) Ray-tracing
+(b) HBR (2562)
+(c) HBR (2562, I)
+(d) HBR (5122)
+(e) HBR (5122, I)
+(f) HBR (10242)
+(g) HBR (10242, I)
+Figure 8: Rendering results from ray
+tracing shadows with and without
+hybrid shadow rendering, with an
+8 × 8 kernel, a stack size of 12 and a
+render resolution of 1920 × 1080 on
+a AMD Radeon M370X. "I" indicates
+whether interval culling was enabled.
+The scene used contains 7102 triangles.
+==PAGE:43==
+results
+43
+(a) HBR (2562)
+(b) HBR (2562, I)
+(c) HBR (5122)
+(d) HBR (5122, I)
+(e) HBR (10242)
+(f) HBR (10242, I)
+Figure 9: Visual testing of whether
+hybrid shadow rendering computes
+the correct result or not. Red: The
+pixel was incorrectly labeled by the
+shadow map. Green: The pixel was
+labeled as undecided. Light gray: The
+pixel was correctly labeled as lit. Dark
+gray: The pixel was correctly labeled
+as in shadow. "I" indicates whether
+interval culling was enabled.
+==PAGE:44==
+==PAGE:45==
+Discussion
+It seems that the speed-ups we achieve from hybrid shadow ren-
+dering are greater than those achieved by Hertal et al. [HHW09] A
+very possible reason could be that their test scenes stress the opti-
+mization more than ours. E.g. rendering a solid grid would be close
+to the worst case scenario for the optimization. Likewise, our test
+scene does not contain a lot of polygons due to our implementation
+for extracting geometry data from Unity running too slow.
+Another factor is that they implement their ray tracer in a frag-
+ment shader rather than a compute shader and that GPUs have
+evolved quite a bit since their implementation, as almost 10 years
+have passed.
+While it would have been interesting to implement our solution
+using fragment shaders and see if any speed-up occurred merely
+from using compute shaders, such would not have been possible
+with the traversal method we used, due to the fact that it stores
+the stack in shared memory which is not available in fragment
+shaders. Therefore, one might want to implement hybrid shadow
+rendering using stackless traversal in both a fragment shader and
+a compute shader in order to compare the performance of each
+implementation.
+The amount of stack pops relative to the amount of triangle in-
+tersections in ﬁgure 3 shows us that we should be careful when
+selecting a stackless traversal method, as it affects a component
+of the ray-tracing that is responsible for a large part of the overall
+performance. For example, restarting from the top gets expensive
+very fast and might be more expensive than what is gained in la-
+tency hiding. Likewise, due to the number of box intersections it
+makes sense to optimize the box intersections to be faster in order
+to increase the overall speed of the ray tracing.
+It also would have been interesting to see how the other methods
+of BVH construction would have affected the performance. While it
+should deﬁnitely be positive, the question is how much.
+We have only tested our solution on AMD hardware, and thus
+it would have been interesting to see how it performs on NVIDIA
+hardware. This would require changing certain parts of the code
+to accommodate the 32-wide SIMDs of NVIDIA GPUs. The wave
+optimizations we have applied are not speciﬁc to AMD hardware.
+In the results, we see in table 4 that the stack size has great in-
+==PAGE:46==
+46
+efficient use of spatial data structures in gpu shaders
+ﬂuence over the traversal performance, and that we can achieve
+large speed-ups by lowering it. However, the size of the stack de-
+cides how large BVHs we can traverse. This means that our solu-
+tion does not scale very nicely for larger scenes, as the stack size
+would have to be increased. So, another option is to reduce the
+thread group size below the wave size. While this means that we
+won’t be taking full advantage of the SIMD width, it might yield
+better performance due to more waves being in ﬂight at once, such
+that the GPU can better hide the latency from memory reads.
+But even if this yields better performance, it is much more
+preferable to use the entire SIMD width and take advantage of
+sufﬁcient latency hiding. This is an extremely good argument for
+stackless traversal; if the stack does not have to be stored at all, the
+concurrency of the shader is only limited by its register usage.
+But that doesn’t mean that the shared memory should go
+to waste. This could allow for even greater speed-up by using the
+shared memory as a cache for parts of the BVH. Either the top part
+of the tree could be cached, or perhaps recently visited nodes in
+order to take advantage of coherent rays in the same wave.
+Caching part of the BVH means that we have to consider how we
+access the cached nodes. Storing the top part of the BVH would be
+trivial if the nodes were laid out breadth-ﬁrst, as we would simply
+use the same indices for the cache. That is unfortunately not the
+case for the construction method by Karras that was used in this
+project, as it stores the nodes in a depth-ﬁrst order. [Kar12] It would
+be trivial using the method by Murguía et al. [Mur+13] or García
+et al. [Gar+14]. If we instead look at caching recently visited nodes,
+an indexing scheme could be something as simple as the nodes
+index modulo the amount of nodes that can be cached, or perhaps
+something slightly more complex to avoid colissions.
+As each BVH node takes up 64 B, we can store just under half a
+node per thread56 if we do not want to compromise on concurrency.
+56 We need a single integer for the per
+thread group cluster index.
+Within an 8 × 8 thread group this would give us 21 cached nodes.
+On NVIDIA platforms we would use a 4 × 8 thread group size,
+limiting us to 15 nodes. But if we cannot come up with an implicit
+indexing scheme,57 then we also need to store the node index,
+57 E.g. if we were storing the top part
+of the tree.
+such that the user of the cache can check whether the element is
+relevant or not. There is some amount of padding in the BVH node
+layout we are using, which could be used to store this, meaning
+that the storage size of the BVH node does not change. While it
+might be tempting to increase the thread group size to beyond the
+platform’s wave size, that would require research into whether
+synchronization would be needed when reading and writing to the
+cache.
+In this implementation a naive approach has been taken in re-
+gards to geometry storage due to time and complexity constraints.
+In rasterization-based rendering, we store the geometry in vertex
+==PAGE:47==
+discussion
+47
+and index buffers. Ideally we would like to avoid duplicating that
+data for the BVH. Of course that still leaves us with the internal
+nodes for the BVH, but that is still far less data. It is not possible
+to access the vertex and index buffers in Unity from scripting code
+and as such it would require an engine-level change to support
+sharing of geometry data. The graphics APIs do, however, allow for
+compute shaders to read from vertex and index buffers.
+How this data would be used for the BVH is not trivial. In Unity,
+and most other game engines, vertex data is stored in object space.
+Only in the vertex shader is it transformed, and the result of that
+is not saved anywhere, except for a handful of vertices in a small
+cache used internally in the pipeline. This is to avoid too much
+memory trafﬁc, as the result is only used right after transform for
+rasterization. Typically, if multiple rasterizations occur, they are
+from different viewpoints.58 Likewise, that same memory trafﬁc
+58 E.g. render from light and camera.
+should be avoided for the BVH if updated every frame.
+As a lot of geometry changes in games are simply afﬁne transfor-
+mations, it makes sense to introduce transform nodes in the BVH,
+such that the geometry itself is stored in object space, which the ray
+is transformed into during traversal. This also means that the BVH
+does not have to be re-built every frame, but rather its transform
+node should simply be updated. The disadvantage is that there
+cannot be overlapping bounding boxes between different objects,
+which is likely to have a traversal cost. That is, the BVHs of objects
+are completely separate. If the object is not skinned and does not
+use vertex shader transformations,59 it is only subject to the afﬁne
+59 This could be something like a vertex
+shader for simulating grass movement
+due to wind.
+transformation caused by its transformation matrix. As such, the
+BVH of an object could be pre-computed using more expensive
+methods and thus achieve greater performance to offset the afore-
+mentioned traversal cost.
+If the object is skinned, its BVH must change in some way. A
+simple re-ﬁt might be sufﬁcient for such, but it might also deteri-
+orate to yield terrible traversal performance. We would prefer to
+build the BVH as a pre-computation, such that we can achieve a
+higher BVH quality. Another idea is to split the object based on the
+bones. The hypothesis is that vertices around a bone are likely to
+move coherently and as such would not deteriorate as much from
+a re-ﬁtting. At run-time it would still simply be a re-ﬁt. It is done
+by constructing the BVH of each part separately, thus disallowing
+primitives to be shared between the parts that we divide the object
+into.
+While not pursued in this thesis, hybrid shadow rendering
+has the potential to achieve physically correct soft shadows. Un-
+fortunately, it is not trivial to do so with hybrid shadow rendering,
+as it suffers from the same issue that other shadow mapping tech-
+niques do; the samples in the shadow map are all taken from the
+same origin. But non-trivial does not mean impossible. A possi-
+ble solution is as follows: Imagine a ray from a point on the area
+==PAGE:48==
+48
+efficient use of spatial data structures in gpu shaders
+light to a fragment rendered from the main camera. We only have
+a paraboloid shadow map in the center of the area light, so it does
+not directly correlate to the ray we’re trying to trace. However, if
+we consider all shadow map samples whose rays lie closest to the
+shadow ray we want to trace, we can check whether the shadow
+map samples ﬁnd an intersection close to the shadow ray. If that is
+the case, we use the depth information for hybrid shadow render-
+ing. Essentially, we would be ray-marching the shadow map and
+so it should be possible to use a hierarchical Z-buffer to speed up
+that step. As this step is deﬁnitely more expensive than the simple
+shadow map sampling normally done with hybrid shadow render-
+ing, we would like to avoid doing it for every shadow ray, since a
+screen fragment will require many shadow rays to be traced. An
+alternative could be to perform the step once per fragment and
+instead check all shadow map samples that intersect the volume
+spanned by the area light and the screen fragment.
+Since a far larger area will be covered by shadows when com-
+puting soft shadows, it is essential that a method similar to the
+interval culling is created. While we restricted the t-interval in this
+project, it would make more sense to use the shadow map values
+to traverse as far into the BVH as possible using the volume. The
+node reached can then be used as root for the individual rays to be
+traced.
+Perhaps it would make sense to implement the micro-rasterization
+method proposed by Woop [Woo10] on GPU instead of CPU. The
+argument here would be that we need samples covering the entire
+area light either way, so the rays will be hitting all geometry that
+lies within the volume anyway. Thus it might be faster to simply
+rasterize the volume instead of tracing individual rays.
+Comparing to imperfect shadow maps [Rit+08], using the BVH
+for an area-light shadowing solution would not have the same tem-
+poral stability issues, as the BVH ray-tracing provides geometry-
+level precision and is not dependent on the camera position. Even
+though a shadow map is used, and that is dependent on at least
+the light position, we only use it to accelerate the ray-tracing and as
+such it should not have an inﬂuence on the ﬁnal result. The micro-
+rasterization method might however have temporal stability issues.
+It would be interesting to combine it with temporal ﬁltering, such
+that we instead accumulate samples and see whether that removes
+the temporal instability.
+==PAGE:49==
+Conclusion
+We have successfully integrated ray-tracing of meshes with raster-
+ization in real-time rendering to provide an accurate shadowing
+solution in the Unity game engine. This has required an in-depth
+look at the available methods for parallel preﬁx sum, radix sort,
+bounding volume hierarchy construction and traversal. While we’re
+able to use geometry from Unity, our solution has issues with larger
+scenes. These issues, however, have no relation with the methods
+presented and is merely an implementation detail.
+We have successfully used hybrid shadow rendering without
+conservative rasterization, and shown that it greatly increases per-
+formance over ray-traced shadows. Furthermore we show that there
+are big performance increases to be gained from restricting the ray
+interval based on the depth values in the shadow map, although
+a better method able to guarantee correct results should be devel-
+oped.
+3 alternative methods of performing hybrid shadow rendering
+have been presented in order to take advantage of the ﬂexibility
+achieved by using compute shaders rather than fragment shaders.
+While the presented alternative methods have not borne fruit, they
+provide a point of reference on which future work can be based on.
+We have analyzed the performance of these methods in order to
+ﬁnd possible performance bottlenecks.
+One such bottleneck we have found is the size of the traversal
+stack. We have provided good evidence that stackless traversal is a
+natural pairing with hybrid shadow rendering due to the increased
+GPU concurrency. If large scenes are to be used for this approach,
+it is essential that shared memory or registers do not have to be
+wasted on a traversal stack. Stackless traversal would also be likely
+to allow for the 3 alternative methods to perform better due to the
+increased concurrency.
+Given a better solution for construction, storage and updating
+of the bounding volume hierarchy, this solution could be used
+practically in a real-time context. However, if hard shadows are
+desired, a better solution might be to use shadow volumes. [Cro77]
+The advantage of hybrid shadow rendering over shadow volumes
+and shadow mapping is the possibility of achieving physically
+correct and temporally stable soft shadows, which we have laid
+some of the groundwork for.
+This project has been an incredible learning experience. The au-
+==PAGE:50==
+50
+efficient use of spatial data structures in gpu shaders
+thor has gone from having approximately zero knowledge of com-
+pute shaders, bounding volume hierarchies and the inner workings
+of ray tracing to having a deep understanding of how GPUs work
+and how to design and implement efﬁcient algorithms for them, as
+well as knowledge of the current state of the art within GPU-based
+methods for bounding volume hierarchies.
+==PAGE:51==
+Bibliography
+[Aal13]
+F. P. Aalund. “A Comparative Study of Screen-Space
+Ambient Occlusion Methods”. Master thesis. 2013 (cit.
+on p. 7).
+[Aal17]
+S. Aaltonen. Optimizing GPU occupancy and resource
+usage with large thread groups. Apr. 2017. url: http:
+//archive.is/2017.07.01-121630/http://gpuopen.
+com/optimizing- gpu- occupancy-resource- usage-
+large-thread-groups/ (cit. on p. 37).
+[AK14]
+T. Aila and T. Karras. Agglomerative treelet restructuring
+for bounding volume hierarchies. 2014 (cit. on p. 22).
+[AL09]
+T. Aila and S. Laine. “Understanding the efﬁciency of
+ray traversal on GPUs”. In: Proceedings of the Conference
+on High Performance Graphics 2009. 2009, pp. 145–149
+(cit. on pp. 22, 25, 38).
+[Ann+08]
+T. Annen, T. Mertens, H. Seidel, E. Flerackers, and J.
+Kautz. “Exponential Shadow Maps”. In: Proceedings of
+Graphics Interface 2008. 2008, pp. 155–161 (cit. on p. 8).
+[App15]
+Apple. Apple Announces OS X El Capitan with Reﬁned
+Experience & Improved Performance. June 2015. url:
+http://archive.is/2017.07.02- 103851/https:
+//www.apple.com/newsroom/2015/06/08Apple-
+Announces - OS - X - El - Capitan - with - Refined -
+Experience-Improved-Performance/ (cit. on p. 12).
+[ÁS14]
+A. T. Áfra and L. Szirmay-Kalos. “Stackless multi-
+BVH traversal for CPU, MIC and GPU ray tracing”.
+In: Computer Graphics Forum. Vol. 33. 2014, pp. 129–140
+(cit. on p. 22).
+[BK16]
+N. Binder and A. Keller. “Efﬁcient Stackless Hierar-
+chy Traversal on GPUs with Backtracking in Constant
+Time”. In: Proceedings of High Performance Graphics.
+2016, pp. 41–50 (cit. on p. 22).
+[CD04]
+E. Chan and F. Durand. “An Efﬁcient Hybrid Shadow
+Rendering Algorithm”. In: Proceedings of the Fifteenth
+Eurographics conference on Rendering Techniques. 2004
+(cit. on p. 9).
+==PAGE:52==
+52
+efficient use of spatial data structures in gpu shaders
+[Cro77]
+F. C. Crow. “Shadow algorithms for computer graph-
+ics”. In: ACM SIGGRAPH Computer Graphics 11.2 (1977),
+pp. 242–248 (cit. on pp. 9, 23, 49).
+[DL06]
+W. Donnelly and A. Lauritzen. “Variance shadow
+maps”. In: Proceedings of the 2006 Symposium on Inter-
+active 3D Graphics and Games. 2006, pp. 161–165 (cit. on
+p. 8).
+[DP15]
+L. R. Domingues and H. Pedrini. “Bounding volume
+hierarchy optimization through agglomerative treelet
+restructuring”. In: Proceedings of the 7th Conference on
+High-Performance Graphics. 2015, pp. 13–20 (cit. on
+p. 22).
+[Fer05]
+R. Fernando. “Percentage-closer soft shadows”. In:
+ACM SIGGRAPH 2005 Sketches. 2005, pp. 35–35 (cit. on
+p. 8).
+[Gar+14]
+A. García, S. Murguia, U. Olivares, and F. F. Ramos.
+“Fast parallel construction of stack-less complete LBVH
+trees with efﬁcient bit-trail traversal for ray tracing”.
+In: Proceedings of the 13th ACM SIGGRAPH International
+Conference on Virtual-Reality Continuum and Its Applica-
+tions in Industry. 2014, pp. 151–158 (cit. on p. 46).
+[GPM11]
+K. Garanzha, J. Pantaleoni, and D. McAllister. “Simpler
+and faster HLBVH with work queues”. In: Proceedings
+of the ACM SIGGRAPH Symposium on High Performance
+Graphics. 2011, pp. 59–64 (cit. on p. 21).
+[GS16]
+M. Gjoel and M. Svendsen. “Low Complexity, High
+Fidelity: The Rendering of INSIDE”. Game Developers
+Conference Europe. 2016 (cit. on p. 7).
+[Hei+16]
+E. Heitz, J. Dupuy, S. Hill, and D. Neubelt. “Real-time
+polygonal-light shading with linearly transformed
+cosines”. In: ACM Transactions on Graphics (TOG) 35.4
+(2016), 41:1–48:8 (cit. on p. 8).
+[HH]
+T. Harada and L. Howes. “Introduction to GPU Radix
+Sort”. In: Heterogeneouscompute.Org (), pp. 3–5 (cit. on
+p. 18).
+[HHW09]
+S. Hertel, K. Hormann, and R. Westermann. “A hybrid
+GPU rendering pipeline for alias-free hard shadows”.
+In: Proceedings of Eurographics 2009 Area. April. 2009
+(cit. on pp. 7, 9, 24, 45).
+[Jam08]
+D. James. Everything you need to know about DirectX 11.
+Oct. 2008. url: http://archive.is/2017.07.02-
+102958/http://www.techradar.com/news/software/
+gaming/computing/everything-you-need-to-know-
+about-directx-11-475655 (cit. on p. 12).
+==PAGE:53==
+BIBLIOGRAPHY
+53
+[KA13]
+T. Karras and T. Aila. “Fast Parallel Construction of
+High-quality Bounding Volume Hierarchies”. In: Pro-
+ceedings of the 5th High-Performance Graphics Conference.
+2013, pp. 89–99 (cit. on p. 21).
+[Kar12]
+T. Karras. “Maximizing Parallelism in the Construction
+of BVHs, Octrees, and K-d Trees”. In: Proceedings of
+the Fourth ACM SIGGRAPH / Eurographics Conference
+on High-Performance Graphics. 2012, pp. 33–37. arXiv:
+9903011 [cs] (cit. on pp. 21, 22, 46).
+[Lai10]
+S. Laine. “Restart Trail for Stackless BVH Traversal”.
+In: Proceedings of the Conference on High Performance
+Graphics. 2010, pp. 107–111 (cit. on p. 22).
+[Lau+09]
+C. Lauterbach, M. Garland, S. Sengupta, D. Luebke,
+and D. Manocha. “Fast BVH construction on GPUs”.
+In: Computer Graphics Forum 28.2 (2009), pp. 375–384
+(cit. on p. 21).
+[Mic17]
+Microsoft. Direct3D 11 Features. July 2017. url: http:
+//archive.is/2017.07.02-103106/https://msdn.
+microsoft.com/en- us/library/windows/desktop/
+ff476342(v=vs.85).aspx (cit. on p. 12).
+[MM14]
+M. McGuire and M. Mara. “Efﬁcient GPU Screen-Space
+Ray Tracing”. In: Journal of Computer Graphics Techniques
+3.4 (2014), pp. 73–85 (cit. on p. 7).
+[MT05]
+T. Möller and B. Trumbore. “Fast, Minimum Storage
+Ray/Triangle Intersection”. In: ACM SIGGRAPH 2005
+Courses. 2005 (cit. on p. 30).
+[Mur+13]
+S. Murguía, F. Ávila, L. Reyes, and A. García. “Bit-
+trail traversal for stackless LBVH on DirectCompute”.
+In: GPU Pro 4: Advanced Rendering Techniques. 2013,
+pp. 319–336 (cit. on pp. 22, 46).
+[NVI06]
+NVIDIA Corporation. NVIDIA Unveils CUDA™-The
+GPU Computing Revolution Begins. Nov. 2006. url:
+http://archive.is/2017.07.02- 100324/http:
+//www.nvidia.com/object/IO_37226.html (cit. on
+p. 12).
+[OA11]
+O. Olsson and U. Assarsson. “Tiled shading”. In:
+Journal of Graphics, GPU, and Game Tools 15.4 (2011),
+pp. 235–251 (cit. on p. 34).
+[OBA12]
+O. Olsson, M. Billeter, and U. Assarsson. “Clustered
+deferred and forward shading”. In: Proceedings of
+the Fourth ACM SIGGRAPH / Eurographics Conference
+on High-Performance Graphics. 2012, pp. 87–96 (cit. on
+p. 34).
+[Pix88]
+Pixar. The RenderMan Interface. 3.0. May 1988 (cit. on
+p. 12).
+==PAGE:54==
+54
+efficient use of spatial data structures in gpu shaders
+[PK15]
+C. Peters and R. Klein. “Moment Shadow Mapping”.
+In: Proceedings of the 19th Symposium on Interactive 3D
+Graphics and Games. 2015, pp. 7–14 (cit. on p. 8).
+[PL10]
+J. Pantaleoni and D. Luebke. “HLBVH: Hierarchi-
+cal LBVH Construction for Real-Time Ray Tracing of
+Dynamic Geometry”. In: Proceedings of the Conference
+on High Performance Graphics. 2010, pp. 87–95 (cit. on
+p. 21).
+[Rit+08]
+T. Ritschel, T. Grosch, M. H. Kim, and H. Seidel. “Im-
+perfect Shadow Maps for Efﬁcient Computation of
+Indirect Illumination”. In: ACM Transactions on Graphics
+(TOG) 27.5 (2008), 129:1–129:8 (cit. on p. 48).
+[Ros12]
+P. Rosen. “Rectilinear texture warping for fast adap-
+tive shadow mapping”. In: Proceedings of the ACM
+SIGGRAPH Symposium on Interactive 3D Graphics and
+Games. 2012, pp. 151–158 (cit. on p. 8).
+[SA17]
+M. Segal and K. Akeley. OpenGL 4.5 Core Proﬁle Spec-
+iﬁcation. The Khronos Group Inc., June 2017 (cit. on
+pp. 12, 15).
+[SHG08]
+S. Sengupta, M. Harris, and M. Garland. Efﬁcient Paral-
+lel Scan Algorithms for GPUs. Tech. rep. NVIDIA Corpo-
+ration, 2008 (cit. on p. 17).
+[Shi01]
+A. L. Shimpi. NVIDIA’s GeForce3: "NV20" Revealed.
+Feb. 2001. url: http://archive.is/2017.07.01-
+122136/http://www.anandtech.com/show/726 (cit. on
+p. 12).
+[Sto15]
+J. Story. “Hybrid ray-traced shadows”. In: Game Devel-
+oper Conference. 2015 (cit. on p. 8).
+[Tat06]
+N. Tatarchuk. “Dynamic Parallax Occlusion Mapping
+with Approximate Soft Shadows”. In: Proceedings of the
+2006 Symposium on Interactive 3D Graphics and Games.
+2006, pp. 63–69 (cit. on p. 7).
+[Tay10]
+I. Taylor. RGB/HSV in HLSL. Nov. 2010. url: http:
+//archive.is/2017.07.01-121859/http://chilliant.
+blogspot.nl/2010/11/rgbhsv-in-hlsl.html (cit. on
+p. 27).
+[The12]
+The Khronos Group Inc. Khronos Releases OpenGL 4.3
+Speciﬁcation with Major Enhancements for the Standard
+in Open, Cross-Platform 3D Graphics. Aug. 2012. url:
+http://archive.is/2017.07.02- 103506/https:
+//www.khronos.org/news/press/khronos-releases-
+opengl-4.3-specification-with-major-enhancements
+(cit. on p. 12).
+==PAGE:55==
+BIBLIOGRAPHY
+55
+[THM10]
+T. Toczek, D. Houzet, and S. Mancini. “Efﬁcient stack-
+less ray traversal for bounding sphere hierarchies
+with CUDA”. In: Procedia Computer Science 1.1 (2010),
+pp. 1111–1118 (cit. on p. 22).
+[Uni17a]
+Unity Technologies. Basic Render Pipeline Tutorial. Apr.
+2017. url: https://github.com/Unity-Technologies/
+ScriptableRenderLoop/blob/1beb50ec8e6a349b7ded8a0df9844bde3f61f7b0/
+Assets/ScriptableRenderPipeline/BasicRenderPipelineTutorial/
+BasicRenderPipeline.cs (cit. on p. 32).
+[Uni17b]
+Unity Technologies. Deferred shading rendering path. June
+2017. url: http://archive.is/2017.07.02-132843/
+https://docs.unity3d.com/Manual/RenderTech-
+DeferredShading.html (cit. on p. 34).
+[Uni17c]
+Unity Technologies. Graphics Command Buffers. June
+2017. url: http : / / archive . is / 2017 . 07 . 01 -
+121801 / https : / / docs . unity3d . com / Manual /
+GraphicsCommandBuffers.html (cit. on p. 31).
+[Wil78]
+L. Williams. “Casting Curved Shadows on Curved
+Surfaces”. In: ACM SIGGRAPH Computer Graphics 12.3
+(1978), pp. 270–274 (cit. on p. 7).
+[Woo10]
+S. Woop. A Fast Scanline Micro-Rasterization Kernel and
+its Application to Soft Shadows. Tech. rep. Intel Corpora-
+tion, 2010 (cit. on p. 48).

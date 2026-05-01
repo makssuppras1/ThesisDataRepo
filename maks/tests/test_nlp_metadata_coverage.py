@@ -12,7 +12,9 @@ from thesisdatarepo.analysis.io_data import _txt_path_to_corpus_id
 from thesisdatarepo.analysis.paths_util import repo_root
 
 
-METADATA_PARQUET = "data/data_analysis_files/df_filtered_excl_grades_15042026.parquet"
+METADATA_PARQUET = (
+    "data/data_analysis_files/df_filtered_final_96pct_grades_excl_2026_20042026.parquet"
+)
 NLP_TXT_DIR = "maks/data/nlp_from_gcs_all"
 
 

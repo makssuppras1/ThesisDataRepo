@@ -1,0 +1,2244 @@
+==PAGE:1==
+Reliability via Active Connectivity
+for the Internet of Robotic Things
+(IoRT)
+Brynjar Örn Grétarsson (s202069)
+Kongens Lyngby 2022
+==PAGE:2==
+Technical University of Denmark
+Department of Applied Mathematics and Computer Science
+Richard Petersens Plads, building 324,
+2800 Kongens Lyngby, Denmark
+Phone +45 4525 3031
+compute@compute.dtu.dk
+www.compute.dtu.dk
+==PAGE:3==
+Abstract
+The number of autonomous robots is increasing every year.
+Many of these
+robots use wireless networks to communicate. Joining the networks in case of a
+disconnect can often take time which reduces the efficiency of the communica-
+tions. It can also be a safety hazard to lose connection since a robot might not
+be able to receive a message to for example halt operation or change its path.
+For that reason, it is very important for them to have a way to minimise this
+risk.
+This thesis proposes a way of predicting future signal properties of mobile robots.
+It uses the RSSI from received packets to predict if the signal is likely to degrade
+to a point where the network performance will be degraded.
+The model is
+lightweight enough to be easily run in real-time on low-power hardware with
+data rates of at least 1 transmission per second.
+This is done using a deep neural network which is trained on data gathered in
+the real world. The results achieved by the proposed model include a recall of
+86.38% and accuracy of 72.38% when predicting the signal quality 7 seconds
+into the future while only using the last 4 received RSSI values.
+A limitation of the proposed design is however that it only has two classifica-
+tion classes. Many of the packets reside in a "grey" area which results in the
+misclassification of many packets. This problem could be tackled by adding a
+third class where those problematic packets go. These packets could then be
+evaluated on other metrics such as PRR or other link quality estimators such as
+LQI in order to determine with higher confidence what action should be taken.
+==PAGE:4==
+ii
+==PAGE:5==
+Preface
+This thesis was prepared at DTU Compute in fulfilment of the requirements
+for acquiring an M.Sc. in Computer Science and Engineering. The project was
+carried out from February 7th 2022 to August 12th 2022 and is in total 32.5
+ECTS.
+Lyngby, 12-August-2022
+Brynjar Örn Grétarsson (s202069)
+==PAGE:6==
+iv
+==PAGE:7==
+Acknowledgements
+I would like to thank my supervisors Xenofon Fafoutis and Charalampos Orfani-
+dis for their feedback and guidance throughout the project. They were always
+very helpful when I got stuck somewhere and needed ideas or guidance. Letting
+the thesis project evolve naturally was also especially helpful when I found the
+thing I wanted to focus on.
+Special thanks also go to Carlos Ventura, Dagbjört Erla Kjartansdóttir, Char-
+alampos Orfanidis, Pálína Ragnhildur Hauksdóttir and Björn Grétar Ævarsson
+for proofreading this thesis.
+Lastly, I cannot forget to thank my family, especially my mom, Pálína, my
+dad Grétar and Dagbjört for helping with taking some of the measurements,
+listening to my rants when nothing was working as well as keeping me sane
+throughout this project.
+==PAGE:8==
+vi
+==PAGE:9==
+Contents
+Abstract
+i
+Preface
+iii
+Acknowledgements
+v
+1
+Introduction
+1
+1.1
+Goals
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+2
+Related work
+5
+2.1
+Signal quality . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+2.1.1
+Received signal strength indicator (RSSI) . . . . . . . . .
+6
+2.1.2
+Link Quality Indication (LQI) . . . . . . . . . . . . . . . .
+7
+2.1.3
+Signal to noise ratio (SNR) . . . . . . . . . . . . . . . . .
+8
+2.1.4
+Fuzzy link quality estimator (F-LQE)
+. . . . . . . . . . .
+8
+2.1.5
+Triangle metric . . . . . . . . . . . . . . . . . . . . . . . .
+9
+2.2
+Predicting signal properties . . . . . . . . . . . . . . . . . . . . .
+10
+2.3
+Active connectivity . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+3
+Data Gathering and Experimental setup
+15
+3.1
+Software . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+3.1.1
+Cooja . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+16
+3.1.2
+Smart RF Studio 7 . . . . . . . . . . . . . . . . . . . . . .
+16
+3.1.3
+Python and machine learning . . . . . . . . . . . . . . . .
+16
+3.2
+Experimental setup . . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+3.2.1
+Simulator setup . . . . . . . . . . . . . . . . . . . . . . . .
+17
+3.2.2
+Simulator real world calibration . . . . . . . . . . . . . . .
+20
+3.2.3
+Real world data gathering . . . . . . . . . . . . . . . . . .
+21
+==PAGE:10==
+viii
+CONTENTS
+4
+Model design and data pre-processing
+25
+4.1
+ML Model Design . . . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+4.2
+Data preprocessing . . . . . . . . . . . . . . . . . . . . . . . . . .
+30
+4.3
+ML model training . . . . . . . . . . . . . . . . . . . . . . . . . .
+32
+5
+Results and Evaluation
+35
+5.1
+Test results . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+35
+5.2
+Low power devices . . . . . . . . . . . . . . . . . . . . . . . . . .
+40
+6
+Discussion
+43
+7
+Future work
+47
+8
+Conclusion
+49
+Bibliography
+51
+==PAGE:11==
+Chapter 1
+Introduction
+As automation in many industries becomes more common, so do the require-
+ments for nodes to always stay connected to some network. The current methods
+used to assess the quality of links mainly do it for deciding how routing should
+be done in a network or to decide which link should be used for communica-
+tion. They do not try to predict if in the near future a node might disconnect
+from the network since it moves too far from the other nodes. This is where
+technology such as Active connectivity[OEPF21, OPF] comes into play where
+it detects a weak signal and tells the node to alter some physical aspect of its
+mobility pattern, such as to slow down, speed up or change direction in order to
+maintain the connection between devices. Dropping a connection might not be
+an option in safety-critical situations or may cause major network slowdowns
+due to nodes taking a long time to re-join the network such as a TSCH network
+where connections can take a couple of seconds to join a network[RLEG19].
+Most of the research thus far focuses on multiple nodes operating in an envi-
+ronment where it is possible to have static nodes which can be used for gauging
+the signal quality. It could however be very useful to be able to quickly and
+accurately get an estimate if some node will move out of the range of a network
+while only utilising processing done on the individual nodes.
+Active connectivity only uses a static threshold for making a decision on when
+to take action. This thesis focuses on creating a model that can predict if a
+==PAGE:12==
+2
+Introduction
+connection is likely to be dropped in the near future while not using a strictly
+static threshold. It rather looks at the recent trend of the signal and tries to
+predict if it will drop into a region where the packet reception ratio (PRR)
+drops and therefore action can be taken before packets are dropped or need to
+be retransmitted.
+The contributions of this thesis are the following. The first is a machine learning
+model which can be used to predict the signal quality in the near future. Another
+contribution is the method used to train the model along with the pre-processing
+pipeline used to clean the data and prepare it for being used in machine learning
+applications. The last contribution is a real-world outdoor mobility-based RSSI
+dataset. This dataset uses a mobile node travelling at varying speeds which is
+the only dataset I could find which is suitable for the work set out to be done
+by this thesis.
+1.1
+Goals
+The goal of this project is to propose a reliability mechanism which detects when
+the connection between two devices is degrading. When a certain threshold has
+been reached, the devices must make a decision to alter their path or speed in
+order to improve the connection between the devices. This decision must be
+able to be made on the fly, in real-time, and on devices with limited memory
+and processing power while doing it by using methods that use as little energy
+as possible. This is to make sure that the devices can still communicate quickly
+if needed and this reliability mechanism does not utilise too many resources of
+the device unnecessarily in order to have this technology run on as many classes
+of devices as possible.
+The first problem that needs to be addressed is to be able to quickly and ac-
+curately determine if a connection is going to degrade to a point that it can no
+longer be used as a communication channel. This is the main topic that this
+master thesis aims to tackle. Clear goals have been set to scope the research
+project. These goals were set up to be leading, where the aim is to come up with
+solutions to them in the order listed. This ensures that I am always working
+towards a single scoped goal at any point in time. These goals can be seen in
+the list below where they were tackled in the order listed:
+• Detect a degrading connection and predict if it is likely to drop in the near
+future
+==PAGE:13==
+1.1 Goals
+3
+• Make a decision whether or not to apply Active connectivity in order to
+keep the connection alive
+• Confirm that the created models can be used in the real world scenarios
+==PAGE:14==
+4
+Introduction
+==PAGE:15==
+Chapter 2
+Related work
+In this section related research will be discussed and evaluated for its relevance
+in solving the problems this paper sets out to address.
+2.1
+Signal quality
+Measuring and reporting the quality of a signal to the extent that it is possible
+to reliably determine that the signal is getting weaker or stronger is a non-
+trivial task. Factors that come into play are often caused by the environment.
+These can be everything from other devices using the same frequency band
+which causes interference or something as simple as an echo of an already sent
+message affecting subsequent transmissions. This causes some fluctuations in
+the reported values which makes it much harder to correctly estimate if the
+signal is getting weaker, stronger or the same as before [BKM+12, BKBJ+09].
+The communication uses the IEEE 802.15.4 standard which meant that the
+frequency band used, the 2.4GHz band, is the same as many other common
+devices use such as WiFi and Bluetooth. This increase the probability of random
+interference caused by for example mobile phones, garage door openers or wifi
+routers [93621].
+There are a couple of different ways to measure the signal quality. The simplest
+==PAGE:16==
+6
+Related work
+methods only use metrics directly from the hardware such as the received sig-
+nal strength indicator (RSSI) or the Link quality indicator (LQI). Other more
+complex ways to describe the signal quality, combine multiple hardware met-
+rics to create a software-based metric. The combined metric aims to be more
+stable and give a better representation of the link quality than can be gained
+from only using a single source of data. Those metrics also try to be not as
+one-dimensional as the hardware metrics which are only able to measure one
+aspect of the signal such as the signal strength or packet re-transmission. The
+field of measuring signal quality has been quite extensively researched, but there
+is still no consensus on which metric is the most accurate[BKM+12]. Though
+a majority of the work focuses on determining which link is best and should
+then be used for routing packets. This means that the current research is not
+focusing on trying to predict if a link will be usable in the near future. There are
+a couple of proposed methods that try to predict link properties in the future
+which will be discussed in this section.
+2.1.1
+Received signal strength indicator (RSSI)
+The Received signal strength indicator (RSSI) is a hardware level signal indica-
+tor. When requested, it returns the received signal strength in decibels (dB) no
+matter if a packet has been successfully received or not. Different radios have
+different minimum sensitivity thresholds where they can no longer distinguish
+the incoming signal from background noise. This indicator is often given as a
+negative number. This means that a number closer to 0 is a stronger signal
+and a large negative number such as -100 is near the limit of what a radio can
+receive.
+In [SL06] the authors compare the use of RSSI compared to a newer metric,
+the LQI in order to determine the signal quality of radios following the IEEE
+802.15.4 standard. They set up their experiment with micaZ motes nodes that
+are used for data transmission. They had a total of 100 nodes but chose 30 at
+random to use for the experiment and programmed them to send 200 packets
+to every other chosen node while avoiding any collisions and only using a single
+transmission channel. This experiment was then performed at 5 different power
+levels and all the experiments were done on the same day as close to each other
+as possible. Their results show that RSSI is a promising indicator for signal
+strength while its value is above the sensitivity threshold of the radio. It may
+therefore be suitable to be used as an indicator where the signal quality can
+change quickly.
+In [BKM+12, BKBJ+09] the authors look at multiple signal indicators, both
+hardware and software-based indicators.
+Their observations regarding RSSI
+==PAGE:17==
+2.1 Signal quality
+7
+point towards it possibly being too simple to accurately gauge the quality of
+connection since it only looks at the strength of the received signal. It does not
+take well into account packets that need to be retransmitted, even though the
+signal strength is still quite high. In [BKM+12] the authors however claim that
+it is possible to quickly tell if a link is of very good quality by only looking at
+a single packet. This comes from their observations that the PRR is very high
+when the RSSI value is above a certain threshold. But to get a better idea of
+intermediate link qualities, it is necessary to use an average measurement over
+some time frame.
+The authors of [CT10] introduce a way to calibrate the provided RSSI value
+from radios following the IEEE 802.15.4 standard. The standard only requires
+an accuracy of +-6dB but their experiments show that the PRR can fall from
+100% to 0% with a minor drop in the measured dB level. This means that there is
+not any single point that can be picked where packets need to be re-transmitted
+due to the variation between devices. They also propose a scheme that is able
+to calibrate the radios to a point where this variation is minimized, showing
+that this variance in reported values is likely coming from the chip used for
+the communication, in their case the Texas Instruments CC2420. Additionally,
+they also discover that the reported RSSI values could be both non-linear and
+non-injective which negatively impacts the ability to quickly tell the exact signal
+quality.
+Using only the RSSI might be possible, but it would likely only be able to give a
+rough estimate of how the signal quality is. All of the above studies however only
+tested using static nodes and the interference mostly came from environmental
+sources such as other devices using the same frequency or echos of signals from
+the network. More testing needs to be done using mobile nodes to see if the
+same assumptions can be made.
+2.1.2
+Link Quality Indication (LQI)
+The link quality indicator (LQI) is another hardware-based indicator. Its exact
+implementation is left to each vendor to implement their own implementation.
+The only guidance provided by the IEEE 802.15.4 standard is that it should
+be used to measure and quantify the strength of the signal, the quality of the
+received packet or any combination of the two aforementioned measurements. Its
+output should then be a uniform distribution where 0x00 is the minimum quality
+and 0xff is the maximum quality using hexadecimal notation [91420]. This
+then means that measurements between different vendors cannot be directly
+compared since their implementations differ. That means that models based
+purely on this metric likely have to be tweaked slightly to achieve the same
+==PAGE:18==
+8
+Related work
+results between devices made by different vendors.
+In [SDTL10] the authors observe that LQI can be used to detect if a signal
+is good or if it is not.
+It is however not a good indicator when the quality
+is between those points due to very high variance. It is however possible to
+determine with a single packet if a signal is very good. It would also be possible
+to use it as an indicator if averaged over a window of around 40 to 120 packets
+which would reduce the effect the variance has on the metric to a level such that
+it becomes usable [SL06]. This however slows down the responsiveness of the
+algorithm which in a mobile scenario is an issue when the signal strength can
+change very quickly making this method not very useful to the task at hand.
+Especially since this data is not made available by all radios.
+2.1.3
+Signal to noise ratio (SNR)
+The signal-to-noise ratio (SNR) metric reports the ratio between the information
+and the background noise received. It is therefore also a promising metric for
+distinguishing between two signals that are otherwise quite similar as discussed
+in [Ma05]. It is however quite unstable since it is heavily affected by nearby
+interference which can cause large abrupt changes in the reported value. This
+metric is also somewhat dependant on the temperature in the environment since
+it affects the noise readings in the hardware itself [SDTL10].
+Another factor that affects the SNR measurements is the hardware in the trans-
+mitters and receivers. It would need to be calibrated for each type of device
+using a metric that is purely based on using SNR to predict PRR which is
+used to estimate the link quality as shown in the following literature [SCL+07].
+Lastly, the SNR value is also only reported once a packet has been successfully
+received which compared to RSSI can be read at any time. This then biases the
+reading towards successful transmissions [LMH+03]. Therefore it could possibly
+be used as additional information in a combined metric but is not as useful when
+the metric is based on the SNR value. SNR is also dependant on each vendor’s
+implementation. Some might take background readings while others might just
+use a fixed value for noise which makes this metric more unpredictable than
+other metrics. This might make these readings vary a lot between devices.
+2.1.4
+Fuzzy link quality estimator (F-LQE)
+F-LQE is a software-based link quality indicator. It is primarily composed of
+4 quality metrics where each metric describes some part of the signal. First
+==PAGE:19==
+2.1 Signal quality
+9
+is the Packet delivery rate which is the smoothed PRR. The link asymmetry
+is the difference between sent and received packets. The stability of the link
+is represented by the coefficient-of-variation of the PRR in a sliding window
+of size 30. Lastly, there is the channel quality metric which uses SNR. These
+variables are then combined using fuzzy logic to create the final metric which
+ranges between 0 and 100 where a higher number indicates a better link quality
+[BKY+10].
+In [RBJD18] the authors proposed a slight change to F-LQE which they call
+Opt-FLQE. They omitted the stability since it is expensive and instead use a
+smoothed packet re-transmission as a replacement in the combined metric. This
+change improved the reactivity of the estimator while still keeping reliability
+high. They then evaluated their link quality indication algorithm in a smart grid
+environment where the source interference is mainly from a power substation
+located in the same small room as the experiment.
+Their results show that
+estimators that combine multiple data sources are more reliable than metrics
+such as PRR. In their testing, Opt-FLQE was the most reliable of the ones
+tested while also being one of the more reactive estimators.
+There has been very limited testing and evaluation done for these methods.
+Many of those methods have also as far as I know only been tested in static
+situations. They also use a large sliding window to average over which could
+cause issues where the signal can change drastically due to the movement of the
+nodes in the network since it will be quite slow to react to sudden changes. The
+above mentioned methods are also much more computationally and memory
+intensive than compared to using other hardware-only metrics such as RSSI,
+SNR or LQI.
+2.1.5
+Triangle metric
+The Triangle metric is a software-based metric as proposed in [BZV+10] and is
+a geometric way to report the quality of a signal. It uses quite a small window
+of only 10 packets where data from SNR and LQI is collected and the average is
+taken. This average can then be used to effectively place a dot in a coordinate
+system where one axis is the average SNR and the other axis represent the
+LQI. To find the signal quality, they simply calculate the distance from the
+origin which can then be used to classify links into four categories given some
+thresholds.
+According to their testing, this method of measuring the signal
+quality is more accurate than only relying on a single hardware metric while
+keeping the storage and processing requirements low.
+Their results showed that this metric works best for static scenarios but can also
+==PAGE:20==
+10
+Related work
+be used for mobile scenarios. Though this remains to be tested further as their
+testing used very slow-moving subjects, people that were walking. The authors
+did also not discuss the area used for testing, the exact paths taken by the
+moving subjects or the distances between the devices. One possible issue with
+this metric is that changes in the LQI measurement have much more effect on
+the final value than SNR since it has a wider range of possible values and is not
+normalised. This could however be looked at as putting weights on the different
+parts of the metric. Since SNR tends to have quite a bit of variance, this then
+reduces the influence it has on the final score. It also relies on SNR which is not
+available in all radios which limits the usability of this metric. They also claim
+to use a small window of only 10 packets which in low data rate situations, such
+as 1 packet per second, is still a 10 second window. When nodes are mobile,
+this 10 second window could prove to be too large.
+2.2
+Predicting signal properties
+The main issue with the detection methods above is that they try to measure
+the quality of the link at the current time. This does not work well with Active
+connectivity since its main goal is to maintain a strong connection between
+devices proactively. Therefore it would be much more useful to try to predict
+how the strength of the signal will be in the near future and use that as an
+indicator for Active connectivity.
+In [FHL+08] the authors propose a method to predict the expected signal
+strength of a link by applying pattern matching techniques.
+They use SNR
+as the only input to the metric and assume that the mobility patterns are pre-
+dictable.
+This method is mainly targeted at people which move throughout
+buildings or down a corridor at a slow and constant speed. They first train
+the algorithm by collecting data at each radio. They can then by taking new
+measurements calculate the cross-correlation between those new measurements
+and the collected data. They then use the result from this to predict the future
+signal quality. If there is no value above the minimum threshold to find a suit-
+able match, they use an autoregressive model built on the Kalman filter as a
+fallback. They then use this model to decide when to switch the travelling mo-
+bile device to a new access point. In real-world testing, their solution was able
+to recognise 85% of the presented patterns with 11.25% of the results having
+falsely identified the pattern and 3.75% not matching any pattern. This study
+expects indoor conditions as well as for patterns to be predictable which is not
+always the case. Especially if there are robots in a network working on different
+tasks but need to stay connected to the same network.
+==PAGE:21==
+2.2 Predicting signal properties
+11
+The authors of [LC11] propose a method to predict the probability of the next
+packet to be successfully transmitted and received by taking RSSI, LQI and
+SNR as input. They tried using three different predictor methods. One based on
+logistic regression, a Naive Bayes classifier and a standard feedforward artificial
+neural network but chose the one based on logistic regression due to its accuracy
+and low processing cost. The final estimator needed very little time with 5-7
+links to train the initial models for the environment. It does however not work
+well when the network traffic patterns are different from the configured one
+and would need other network models in order to fix this issue. The authors
+have shown that including the prediction for the next packet transmission can
+possibly improve packet flow through the network. This improvement can be
+more than 45% in some cases. This study only predicts one packet into the
+future and uses static nodes. The authors also have access to hundreds of static
+nodes that receive data and are utilised for the prediction.
+In [WSA+19] the authors create a machine learning-based predictor for the
+RSSI fading profile of an actual robot that moves after some given path. They
+performed their experiments in a small room which is only around 22.4 m2
+which housed 29 unique locations the robot could travel to. The test can be
+set up in one of two modes. First, there is a repetitive mode where the robot
+moves after a predefined circuit until the maximum number of samples have been
+collected or a random mode where it moves randomly between the 29 possible
+points. Tests were halted after 1764 different samples have been collected. The
+predictor they chose to use is a probabilistic neural network due to its simplicity
+in implementation and the low impact that outliers have. This is important for
+a case such as this one since RSSI tends to be unstable and measurements
+tend to vary. Using 4 to 8 sensors at fixed locations, they could predict the
+fading pattern of the moving node. The accuracy was better for the repetitive
+mode as the data looked more like the training data than the data from the
+random mode. This experiment was however made indoors in a small room
+with multiple static receiver nodes. This will not work in an outdoor setting
+where there could be only one receiver available. The distances and environment
+are also quite different as well as the movement patterns are not as limited as in
+this experiment where a robot must go to some finite number of locations using
+a predefined path.
+The authors of TALENT [LC12, LC14b] propose a method of link quality pre-
+diction by using machine learning methods for making routing decisions. TAL-
+ENT does not need any prior training to make it work in a specific situation
+but rather uses online learning methods to adapt to the environment. Their
+modelling method of choice is to use a logistic regression classifier with stochas-
+tic gradient descent as the online learning algorithm. This results in a method
+that only needs 2-3 seconds of data gathering to get predictions that are below
+5% prediction error. This is an improvement of 1.95 times on average when
+==PAGE:22==
+12
+Related work
+compared to 4B. This comparison was done with around 10 packets per second
+being transmitted. The TALENT method does however only work in high data
+rate scenarios as old packets may not represent the current network situations
+well and the model needs to come close to converging again. Another drawback
+is that their estimation is only valid for 1 second which is a very short time for
+networks with lower data rates.
+The method described in [FHL+08] might be possible to use in office buildings,
+or where the radios are always in the same place. But the major drawback
+of this method is that it requires data collection in the deployment location.
+This makes it ill-suitable for being used in situations where it is not possible to
+gather data or where the radio itself moves since it will make the data gathered
+unusable since the environment has changed. While the method in [LC11] suffers
+from similar issues where it is trained to a specific network and environmental
+conditions which cannot be assumed to stay unchanged in mobile scenarios. The
+TALENT [LC12, LC14b] link classifier tries to improve on the generality of the
+methods by removing the need for training. Instead, it only works well in high
+data rate scenarios which is not always common in all situations as with sensor
+networks.
+The method described in [WSA+19] is more general than the other methods, but
+it is still using only a few possible locations that the robot can choose to go to
+as well as doing tests in a small isolated room. It also expects many stationary
+receivers that can be used to make the prediction as well as still only predicting
+the signal properties 1 second into the future. It is better than 4C which only
+predicts one packet, but not nearly enough to be able to make a decision that
+can be used to change a path of a robot in time to not drop packets.
+2.3
+Active connectivity
+Active connectivity is a new method for mobile robots. As proposed, it allows
+the mobile robots to alter some physical characteristics in order to stay con-
+nected to other robots in a network. These characteristics can for example be
+their speed by slowing down or speeding up. They could also alter their direc-
+tion in order to keep the connection to the network. It is originally proposed
+and evaluated on a TSCH network using the Cooja simulator [OPF].
+In [OEPF21] the authors look at TSCH in a mobile scenario using three different
+schedulers, MSF, Alice and Orchestra. They design two mobility patterns, one
+repetitive pattern and one stochastic pattern. In the repetitive pattern, they
+have robots that simulate a pattern potentially used by autonomous agriculture
+==PAGE:23==
+2.3 Active connectivity
+13
+robots. The robots move across the field on the same trail where their starting
+position is randomized as well as their starting direction. For the stochastic
+pattern, the robots start at random positions and proceed to move a random
+distance where they then make a randomized decision to change direction, up,
+down, left or right and then move again. These experiments were done using the
+Cooja simulator while using PRR, downtime and initial join time to evaluate
+how well TSCH performs with mobility. All metrics showed that mobility can
+have a significant impact on these types of networks. For the worst case, the
+repetitive pattern, PRR could go below 10% as well as the downtime could be
+as high as 25% for some robots.
+The authors of [OPF] propose simple scenarios to evaluate on a basic level if
+active connectivity is worth exploring further using the Cooja simulator. The
+scenario involves two robots that move back and forth on the same path at
+different speeds. They then slow one robot down according to one of four pre-
+defined speed curves. There are two main scenarios, in the first scenario the
+robots know their position and there is no need to guess what action to take.
+In the second scenario, the robots do not know their position relative to the
+other robot so they have to guess which one should slow down and react to
+the case where a wrong robot is slowed down. The main metric used to gauge
+the signal quality is EWMA of the RSSI with a couple of different alpha values
+which control how much the previous measurements impact the evaluation of
+the current signal strength measurement. These tests show promising results
+that significantly improve network uptime and the network throughput at the
+cost of distance travelled and the speed of the robots.
+These two prior works mainly focused on testing if active connectivity is a viable
+method to improve network connectivity by maintaining a better connection
+between devices. They did however assume that EWMA of the RSSI value is
+adequate to be able to accurately tell if a device is going out of range. But
+as I have discussed above, the measured RSSI value varies quite a bit between
+subsequent measurements which is why they chose to use an EWMA filter to
+try to have a more stable measurement. It still suffers from the same issue as
+many other methods in the way that it measures the current signal weight with
+some previous measurements. It then uses a threshold to determine when to
+apply the Active connectivity instead of trying to proactively predict when the
+signal might drop.
+Being able to keep connectivity within a network of moving robots can also be
+a critical safety issue. It can be unacceptable to have a group of robots working
+on some task and not be able to stop all of them immediately due to some
+emergency if some are not connected to the network. Therefore being able to
+predict the signal properties in the near future could be a very useful tool to
+have.
+==PAGE:24==
+14
+Related work
+==PAGE:25==
+Chapter 3
+Data Gathering and
+Experimental setup
+In this section software that was used, methods of generating data and the
+experimental setup will be discussed. In order to obtain data that can be used
+to train the machine learning models, the data must either be created artificially
+or gathered in the real world. Methods that make the data generated in the
+simulator more similar to the real-world data will be discussed along with how
+the simulator was utilised. The methodology behind how the real-world data was
+collected will be explained along with some limitations of the created dataset.
+3.1
+Software
+There were numerous pieces of software used during this master’s thesis. In this
+section, the software and what it was used for will be discussed.
+==PAGE:26==
+16
+Data Gathering and Experimental setup
+3.1.1
+Cooja
+Cooja is a hardware network simulator for wireless sensor networks which uses
+the lightweight operating system Contiki-ng. For this thesis, I mainly used it to
+simulate two nodes that I could move in a predefined pattern while sending and
+receiving custom data packets. The simulator has a couple of different imple-
+mentations of the radio mediums but they are all quite simple when compared
+to the real world. This is still enough to quickly be able to create paths and get
+an estimation of the signal strength between the devices when conditions are
+very good [ODE+06].
+3.1.2
+Smart RF Studio 7
+Smart RF Studio 7 comes from Texas Instruments and is used for controlling
+microcontroller units (MCUs). The Smart RF Studio software is used to send
+custom packets as well as receive them. It extracts the received signal strength
+indicator (RSSI) from the transmission and logs everything into a log file. This
+software is also used to record the background noise before collecting data to
+check if there is high background interference. This interference might interfere
+with the data gathering when the MCUs are far away from each other and
+therefore skew the results. If there is a lot of interference, it might result in
+packets failing to be delivered due to collisions since the signal of the interference
+is stronger than the signal of the packet we want to receive.
+Therefore this
+information is also important to be able to measure.
+3.1.3
+Python and machine learning
+The python programming language is a language commonly used for data visu-
+alisation, data processing and machine learning. It was mainly used to process
+the data from the cooja simulator and the real-world data collected by Smart rf
+studio 7. Matplotlib was also extensively used to verify that the data generated
+and collected looked as expected as well as for generating many of the graphs
+and figures used in the thesis.
+Tensorflow 2.4.0 and Keras for python were the machine learning tools used to
+create the neural networks. Keras provides an API that can easily and quickly
+be used to create many different models that can then be validated. This helps
+with rapidly prototyping many models that can be trained and tested in order
+to pick good candidate models that are used in the final models.
+==PAGE:27==
+3.2 Experimental setup
+17
+3.2
+Experimental setup
+Three models will be evaluated on a real-world dataset.
+The first model is
+trained using data collected from the cooja simulator. The second model will
+be trained using data from cooja that has been altered to make it closer to
+real-world data. The final model that will be evaluated is trained only on the
+real-world data.
+The data generated by the simulator is based on a two-robot setup. One robot
+is static and only measures the received RSSI value. The other robot is a mobile
+robot which broadcasts a single packet per second while moving on a predefined
+path. The collected data can then be processed and used to train the machine
+learning (ML) models.
+Real-world data was also collected manually using a
+pair of TI CC2650 MCUs in a way that replicates the data generated by the
+simulator. The performance of the three models can then be compared using
+the real-world data.
+The MCU used in this thesis is as previously mentioned the Texas Instruments
+CC2650 and can be seen in Figure 3.1. It is a low-power MCU which supports
+both Bluetooth low energy and IEEE 802.15.4 operating modes which both use
+the 2.4 GHz band. It will be used in the IEEE 802.15.4 mode in this thesis
+which has a best case sensitivity of -97 dBm. Its main use will be to gather data
+and collect information on the congestion of the 2.4 GHz.
+3.2.1
+Simulator setup
+The simulator used for this thesis is the cooja simulator from the Contiki 4.7
+project. The simulations are using the unit disk graph medium with distance
+loss. This medium can be calibrated to use roughly the same transmission range
+as the real-world data that was gathered. This ensures that the data from the
+simulator is as close to real-world data as possible. The motes used for the
+experiment were base Z1 motes with some custom firmware to control their
+speed, direction, acceleration as well as the packet transmission and reception.
+It then logged all this information for later processing. The firmware used is
+a modified version of the firmware in the active connectivity papers [OEPF21,
+OPF]. It can be found in the following git repository1.
+The path generation was done in python.
+The mobile robot starts close to
+the static robot in order to have them start in the transmission range of each
+1https://github.com/brynjarorng/MSc-thesis-supplementary-data
+==PAGE:28==
+18
+Data Gathering and Experimental setup
+Figure 3.1: TI CC2650 launchpad development kit
+other. The mobile robot is then tasked with moving to some other randomly
+chosen location in the network. There are two simple movement patterns the
+robot follows. One pattern is moving first via the x-axis and then the y-axis
+or in reverse, first via the y-axis and then the x-axis. The other pattern is to
+move over both the y- and x-axis at the same time which results in diagonal
+movement compared to the first pattern. There is an equal chance of selecting
+either pattern. The robot also has a range of speeds that it can pick from. The
+minimum being 1 m/s and the maximum 3 m/s. The mobile robot picks its
+speed at the same time as the next destination. The speed can be changed at
+most 1 m/s either slower or faster than the previous speed. There is also the
+option of not changing the speed and just keeping the same speed used for the
+previous movement pattern. The movement patterns can be seen in Figure 3.2
+where the blue circles are the nodes, the green line represents the first movement
+pattern, the orange line represents the more direct second pattern and the red
+square is the destination.
+The size of the area chosen for the simulation was 80 by 80 meters2 with the
+stationary robot in the centre. This results in the maximum distance between
+the robots being 40 meters. The signal would therefore drop near that distance
+in order to not have the robot be spending a lot of time moving outside of the
+area where it is not collecting any meaningful data. This configuration resulted
+2This will be discussed in the next section
+==PAGE:29==
+3.2 Experimental setup
+19
+Stationary
+node
+Mobile
+node
+Random
+destination
+Path type 2
+Path type 1
+Figure 3.2: Movement patterns available.
+The green type one path where
+movement is done on only one axis at a time, in this example the
+y-axis path is first done then the x-axis path. The orange type
+two path is direct path which moves equally on the x- and y-axis
+at the same time
+in a total simulation length of around 950 minutes.
+This simulation does however assume that there is no interference, the noise
+floor is static, the antennas are omnidirectional as well as there are no obstacles
+which block signals or cause multipath propagation or fading. That means that
+there is no mechanism to randomly drop packets which happens in real-world
+situations where some packets are corrupted. There is also no mechanism which
+causes the signal measurements to fluctuate which can be seen in real-world
+measurements.
+==PAGE:30==
+20
+Data Gathering and Experimental setup
+3.2.2
+Simulator real world calibration
+In order to get an idea of the real-world range of the CC2650, some measure-
+ments were done utilising the Smart RF studio 7 software. A fixed distance of
+45 meters was chosen and then a couple of different transmission powers were
+tested. The transmission powers used were -21 dB, -12 dB, -6 dB, 0 dB and
++5 dB with the radios in the IEEE 802.15.4 mode. The measured background
+noise was minimal considering the location is near a residential building. The
+noise floor was close to -95 dB with occasional spikes up to -80 dB only lasting
+a very short time which should have minimal effect on the measurements. The
+resulting measurements can be seen in Figure 3.3. These measurements were
+done when the humidity was low and the temperature was rather high around
+20◦Celsius. The ground was also very dry and the grass was mowed short which
+results in one of the best-case conditions.
+Earlier attempts were made to take measurements on a paved surface. This
+resulted in much greater distances for the transmitted signal which makes data
+gathering harder due to more movement needed to get relevant data. This is
+also not a representative surface for vehicles operating outside of cities where
+most surfaces are not paved. An example of the greater distances needed is that
+with an offset of -21 dB and at a distance of 100 meters between the radios, the
+signal rarely dropped below -80 dB. Comparing that to the softer surface, the
+mean RSSI captured was -92 dB at only 45 meters.
+The reason for picking a distance of 40 meters between the devices is that
+this distance should be well achievable in real-world experiments. Even if the
+conditions change, resulting in longer or shorter possible transmissions, they
+could be counteracted by simply tuning the transmission power of the radios
+either up or down as is needed. This is a bit on the shorter side while still being
+a reasonably comparable distance based on the transmission power used for the
+radios.
+The distance the CC2650 MCUs were able to transmit depended on a couple of
+factors which can change day by day. To name a few there is the air temperature
+and humidity as well as how wet the ground was. This effect could be minimised
+by setting the transmission power so that when travelling the same distance, the
+RSSI measurements were similar. Those distances were around 45-60 meters
+which is slightly longer than what was chosen for the simulator which was a
+maximum distance away from the transmitter of 40 meters.
+In order to make the simulation data closer to the real-world data, some real-
+world data was collected and the mean squared error of the received signal
+was calculated. This was done at a distance of 30 meters for a relatively far
+==PAGE:31==
+3.2 Experimental setup
+21
+5
+0
+-6
+-12
+-21
+Transmission power offset (dB)
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+100
+dB
+-61
+-65
+-72
+-80
+-92
+Measured signal strength at 45 meters
+Figure 3.3: RSSI measurements with 45 meters between the radios
+away measurement, 20 meters and 10 meters. In all situations the radios were
+stationary and set to a transmission power of 0 dB. These signal measurement
+can be seen in Figure 3.4. The duration of the measurement was 70 seconds for
+each distance which resulted in a mean squared error of 3.99 for the 30 meter
+distance, 2.22 for the 20 meter distance and 2.19 for the 10 meter distance.
+Incorporating this error into the data was done by introducing a random offset
+to each measurement point from -2dB to +2dB, with both values included,
+which over a long time results in a mean squared error of around 2.00 which
+is a conservative estimate of the error since it seems to vary a lot more when
+the distance increases from what is measured when the radios are close to each
+other. A reasonable assumption would also be to assume that this error could
+be exaggerated by the movement since it is done by a human. This means that
+the radios will not be pointing exactly to the same point at all times. The result
+of adding this to the data will be evaluated further in Section 5.
+3.2.3
+Real world data gathering
+An important part of the training process is to have as much data as possible. It
+is however extremely important to have the data be as similar to real-world data
+as possible. Therefore I went outside in a couple of different locations and used
+==PAGE:32==
+22
+Data Gathering and Experimental setup
+0
+20
+40
+60
+seconds
+80
+75
+70
+65
+60
+55
+50
+45
+dB
+Error measurements
+30 meters
+20 meters
+10 meters
+Figure 3.4: MSE measurements at 10, 20 and 30 meters
+a pair of laptops with Texas instruments CC2650 launchpads. I then recorded
+the RSSI values of packets sent between these devices in multiple different con-
+figurations and movement patterns.
+The setup for the real-world data gathering was to have the transmitter station-
+ary while walking away and towards it with the receiver that logs the collected
+data. The minimum distance to the receiver was around 10 centimetres while
+the maximum distance was around 60 meters. The radios were always pointed
+directly toward each other to simulate an omnidirectional radio. This is most
+similar to the data generated by the simulator and is a simplification of the
+movement pattern used in the simulator. Since the radios in the simulator are
+omnidirectional, the most influential parameter is the distance to the radio.
+This distance is then the main parameter that needs to be varied to make the
+real-world data as similar to the data generated by the simulator as possible.
+Walking in the same pattern as in the simulator, around the stationary radio
+would generate data that is different from the simulator data due to the radio
+on the MCUs being directional contrasted by the omnidirectional antennas in
+the simulator. This means that when walking beside or behind the transmission
+direction would result in a measurably lower RSSI than expected when using
+an omnidirectional antenna. To simulate a movement pattern that keeps the
+distance between the radios the same, such as moving in a circle around the
+==PAGE:33==
+3.2 Experimental setup
+23
+transmitter is done by simply stopping. This makes it possible to perform the
+data collection in a smaller area while still generating similar data to the sim-
+ulator data. This setup can be seen in Figure 3.5 where special care was made
+that the trees seen in the picture taken further away, Figure 3.5b, never blocked
+the line of sight between the MCUs.
+The movement patterns themselves were composed of walking towards, away
+from the radio and stopping for some short period of time.
+These patterns
+could then be mixed together to create a pattern that for example starts with
+walking away from the transmitter for 10 meters, stopping for 2 seconds and
+then walking further away. Walking in as random manner as possible is also
+what was focused on so that the radio does not always go out of range when
+walking away as well as going out of range, shortly back into range and then out
+again. Speed was also a consideration where the slowest speed was a slow walk,
+around 1 km/h and the fastest speed was around 5 km/h. Speeds in-between
+were of course also used and are likely the most commonly used.
+The radio transmission power was also varied a bit to try to create conditions
+that made the connection drop near the 40 to 50 meter mark away from the
+transmitter. As previously discussed the signal strengths could vary quite a bit
+day by day which meant that the transmission powers were tuned to compensate
+for the decrease or increase in transmission. The lowest transmission power used
+was -21dB while the highest one used was +5dB. Most of the data collection
+was performed in Denmark on a grassy surface while one collection was done in
+Iceland where the ground was mostly sand and rocks.
+For the main data gathering, the Smart RF studio software was used to con-
+trol each of the radios. The transmission radio was set to transmit a packet
+with a packet containing the hex bytes 0xAA 0xBB 0xCC 0xDD 0xEE 0xFF on a
+300ms interval. This provides easily identifiable packets in the receiver logs that
+can later be parsed and used for training and validating the Machine learning
+models. It is very unlikely that a random packet from another source that is
+captured also contains exactly this message. The total data collected is around
+250 minutes of usable data which is available online in a github repository3 along
+with short recordings of the background interference collected right before each
+data gathering session.
+3https://github.com/brynjarorng/Rssi-mobility-measurements
+==PAGE:34==
+24
+Data Gathering and Experimental setup
+(a) Transmitter and receiver close
+(b) Transmitter and receiver far
+Figure 3.5: Main data collection setup
+==PAGE:35==
+Chapter 4
+Model design and data
+pre-processing
+In this section, the machine learning model design will be discussed and all major
+design choices will be substantiated. Then the data pre-processing pipeline will
+be explained in detail along with the training of the ML model.
+4.1
+ML Model Design
+Using artificial neural networks, specifically deep neural networks, to solve com-
+plex tasks has over the past couple of years exploded in popularity due to its
+success. These tasks can be in many different fields such as natural language
+processing, image processing [PYH+18] or even beating humans at games such
+as Go [CHW+18]. These neural networks do however require lots of data to
+be trained successfully and relatively powerful hardware to do the training in a
+reasonable time. This training process also consumes a lot of energy which for
+large models can additionally be very expensive.
+As previously discussed, there currently does not exist a quick way to estimate
+if a transmitter will leave the transmission range of a network with mobile
+endpoints. Therefore machine learning techniques such as deep learning could
+==PAGE:36==
+26
+Model design and data pre-processing
+help with the task of finding patterns which indicate a robot might be going out
+of range in the near future.
+Designing the neural network was done by taking inspiration from other mod-
+els and recommendations around which activation functions and layers to use
+[Sza21, AM21]. Trial and error also played a big role in getting a functional
+model where multiple different depths, activation functions and the number of
+neurons per layer were tested. The design I decided to use is based on a feed-
+forward network.
+The network contains 10 layers where each layer contains
+between 5 and 300 neurons except the output which contains only one neuron.
+The activation function used in the input and hidden layers is a Leaky ReLU
+function while the output activation function is a sigmoid function. The network
+takes in some input with four features and outputs a single variable with a value
+between 0 and 1 where the value represents the probability of the first class. In
+this case, I only have two possible classes. Either the connection will drop be-
+neath a threshold where the signal strength is considered not good enough or
+the connection will not drop beneath the chosen threshold.
+Selecting a threshold that is indicative of when a signal is getting worse and
+close to dropping out or needing many re-transmissions was done by looking at
+other related literature. The relevant literature pointed towards PRR dropping
+rapidly around -87db which can be seen in [SL06] in Figure 2 on page 3, which
+was then chosen as the threshold to classify a packet as "disconnecting" or get-
+ting close to a situation where the link is not usable due to low PRR. Other
+literature also pointed towards a steep drop in PRR at around the selected
+threshold, -87db which is why it was selected as the cutoff point in the classi-
+fication. The experiments in the literature were most however using the same
+radio chip, the Texas Instruments CC2420 which means that the threshold se-
+lected might not be optimal for all devices [SL06, SDTL10, GQL+17, BKM+12,
+LC14a, BKYA15].
+As previously discussed, the designed model is using quite many layers compared
+to the number of neurons that are in each layer. When testing multiple designs
+where some of them were shallow, containing only two or three hidden layers
+but had between 400 and 600 neurons per layer, the training took substantially
+longer while giving a comparable performance to the one chosen. They also
+took around two times longer to execute when measured using the systems wall
+clock. This is of course because the total number of parameters needed to be
+tuned is much greater than in the deeper model which contains fewer tunable
+parameters which will be evaluated in section 5.
+Using some regularisation techniques is quite important in neural networks to
+try to combat overfitting. A common technique used is using dropout layers. A
+dropout layer removes some number of units and their inputs and outputs from
+==PAGE:37==
+4.1 ML Model Design
+27
+the network. This effectively creates a slimmed-down version of the network.
+The units that are removed are randomly chosen each iteration. This technique
+can both reduce overfitting while at the same time improving the performance
+of the network by performing the training on many slightly different models
+that get created. There is however a drawback of this which causes the training
+time to become much longer due to each iteration effectively training a new
+architecture [SHK+].
+There were multiple dropout layers used in the model. These layers were posi-
+tioned between all of the fully connected dense layers except for the first and
+last layers. This means that there is a total of 7 dropout layers in the model.
+The dropout percentage was set to 30% for all layers except the layer that comes
+between the 300 neuron and the 30 neuron layer. There the dropout was set to
+50% [SHK+].
+Another influential decision for the models’ design is picking the activation func-
+tions. The Leaky ReLU function is a slight variation of the ReLU activation
+function which is one of the most common activation functions [Sza21]. The
+mathematical notation for the ReLU function is y = max(0, x) while the Leaky
+ReLU function allows a small negative number to be passed through when x < 0.
+This can be represented by the following formula (4.1):
+f(x) =
+ αx
+for x < 0
+x
+for x ≥0
+(4.1)
+where α is 0.3 in the trained model. The difference between these two activation
+functions can also be seen in Figure 4.1. The Leaky ReLU solved an issue that
+kept happening in the training phase when using the normal ReLU function,
+where sometimes the model being trained kept getting worse until it got stuck
+and only predicted one class, the false class where no disconnects were predicted.
+The output activation function is a sigmoid function, or more precisely, the
+logistic sigmoid function. It would also have been possible to use a SoftMax
+function but since this task is a binary classification problem using the sigmoid
+function does not come with any drawbacks in this case as it is equivalent to
+the SoftMax since it is a binary classification task. Its output is then a value
+between 0 and 1 which indicates the learned probability of the first class in the
+model. The logistic sigmoid function has the following formula:
+S(x) =
+1
+1 + e−x
+(4.2)
+==PAGE:38==
+28
+Model design and data pre-processing
+Figure 4.1: ReLU and Leaky ReLU
+The optimizer chosen for the model was the Adam optimizer. It is a stochastic
+gradient descent method that is computationally inexpensive and deals well
+with problems that have noisy or sparse gradients [KB14]. In testing, it was
+much faster than other optimizers that were tried such as gradient descent or
+AdaDelta to reach an acceptable model which allows for faster model training
+and more types of models that can be tested within the limited time frame of
+this masters thesis.
+The last decision regarding the model is picking a suitable cost function. Since
+this problem is a binary classification problem, the cost function chosen is the
+binary cross entropy loss function.
+This model was implemented using python 3 and Keras with Tensorflow 2.4.0
+as the backend. The trained model can be found on my github page1 and the
+full model diagram can be seen in Figure 4.2. Nodes have been left out for
+simplifying the diagram, therefore the number of neurons can be seen above
+each layer. All layers are fully connected but this has also been left out in the
+diagram to simplify it. There has also been applied dropout for all nodes in the
+1https://github.com/brynjarorng/MSc-thesis-supplementary-data
+==PAGE:39==
+4.1 ML Model Design
+29
+hidden layers.
+c
+4
+10
+20
+30
+300
+10
+5
+1
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+20
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+30
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+Sigmoid
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+Input layer
+Hidden layers
+Output layer
+ReLU
+Figure 4.2: Neural network design with inputs on the left and output on the
+right. All layers are otherwise fully connected and using the acti-
+vation function specified in each node
+Lastly, the model expects an input containing 4 packets. These packets should
+be sampled one packet per second with as even spacing as possible. This was
+done to have the algorithm work in low data rate situations as well as higher data
+rate situations while also working in real-time. This means that it is possible
+to sample from the packet stream in higher data rate situations as well as have
+the model lightweight enough to not need very powerful hardware in order to
+complete the computation before the model is scheduled to run again.
+==PAGE:40==
+30
+Model design and data pre-processing
+4.2
+Data preprocessing
+Preparing the data for the machine learning process is a crucial step in order
+to be able to train the machine learning model effectively. The entire pipeline
+from generating and collecting data to the finished model will be discussed as
+well as it can be seen in Figure 4.5.
+Some assumptions about the environment and data transmission are made. The
+assumptions associated with the environment are that the ground material is
+a softer material, such as sand, grass or dirt. Hard surfaces such as pavement
+or rocks greatly influence the range of the transmission as discussed above in
+Section 3.2.2 and the model has not been trained, validated or tested on these
+surfaces nor a mix of different types of surfaces. This means that the perfor-
+mance of the model will be worse on those types of surfaces. It is also assumed
+that the two radios have a direct line of sight and no obstructions which could
+have a great influence on the measured RSSI values. Another assumption is that
+the data transmission rate is greater than 1 packet per second so it is possible to
+pick a new packet that arrived close to the last transmission in case of a packet
+is missed. The speed of the devices was also at a minimum stopped for a short
+time and at a maximum 5 km/h.
+Processing data from the simulator is done by extracting the first message that
+arrived every second. From that message, the RSSI value is taken and stored in
+a buffer to be further processed for the ML training. If there are any missing
+values for any second, a value of -100 representing a very bad signal is added.
+As discussed previously, the data from the simulator was much smoother than
+real-world data. Therefore some randomness was added to the simulator data
+to mimic the real-world data better. The effect of this can be seen in Figure 4.3.
+This makes the generated data look a little closer to the real-world data but
+it is still much smoother and does not contain as large jumps in the measured
+RSSI.
+0
+50
+100
+150
+200
+sample number
+100
+80
+60
+40
+20
+0
+RSSI
+Simulator data without error
+0
+50
+100
+150
+200
+sample number
+100
+80
+60
+40
+20
+0
+RSSI
+Simulator data with error
+0
+50
+100
+150
+200
+sample number
+100
+80
+60
+40
+20
+0
+RSSI
+Real world data
+Figure 4.3: Comparison between generated data and collected data
+==PAGE:41==
+4.2 Data preprocessing
+31
+Pre-processing the real-world data was done by parsing through each log file
+and picking the first packet that arrived every second.
+It would have been
+possible to take an average of the data that arrived every second since there are
+multiple transmissions done per second, but that means that the output is not
+a representation of a real transmission but something that is smoother than can
+be seen in real life situations with lower data rates. There will also be situations
+where the packet arrival rate varies which would also affect the value.
+Generating the input data for the ML model is done by creating two buffers.
+The first buffer represents the packets that have arrived and has a size of 4
+packets, 1 packet for each second totalling around 4 seconds of data. This is the
+"pre" window. Then to set the prediction window which has a size of 7, the next
+7 packets are set as the "post" or prediction window. To get the binary classes
+used for the prediction in the ML training, each RSSI value in the prediction
+window is checked and if any value is below the threshold, the class gets the
+value 1 else it gets a 0. This process is the same for both the measured real-world
+values as well as the generated values.
+-37
+-40
+-40
+-45
+-50
+-57
+-63
+-75
+-82
+-89
+-88
+Current packet
+Received packets
+Future packets
+Figure 4.4: ML packet buffer with received packet rssi and packets to predict
+if they go out of range
+In Figure 4.4 a buffer of received packets can be seen as the first four packets
+where the fourth packet with the arrow is the newest received packet. These
+packets would be put into a list as the "pre" buffer. When used in the classifier,
+the algorithm would look at the next 7 packets in the captured stream and
+check if any packet contains a value that is below the allowed threshold. In this
+example, there are two packets below the threshold which is -87. Those packets
+are the last two packets in the buffer and have a red background. Therefore in
+this case the given "pre" buffer would get the class label 1. If all values were
+above the threshold the class would receive the label 0.
+==PAGE:42==
+32
+Model design and data pre-processing
+Parse RSSI and
+time from data
+Fill in missing
+RSSI values
+Collect real
+world data
+Generate
+simulation data
+Train
+simulation-
+based model
+Validate model
+performance
+Tune model parameters
+Filter and
+reduce samples
+Randomise and
+split data
+Validation data
+(15%)
+Testing data
+(10%)
+Training data
+(75%)
+Generate input,
+output and
+result sets
+Model with
+randomness
+Test model
+performance
+Real world
+based model
+Test model
+performance
+Mass generation of simulation data
+Collection of real world RSSI data
+Data pre-processing
+pipeline
+Preparation of real world data for model
+tuning, testing and validating
+Model parameter tuning using generated data
+Simulation generated models tested
+Real world model training and testing
+Real world data
+Simulator data
+With
+random
+Without
+random
+Model without
+randomness
+Test model
+performance
+Train
+simulation-
+based model
+Validate model
+performance
+Tune model parameters
+Figure 4.5: [Inspired by [Fre20]]Model training pipeline
+4.3
+ML model training
+Training the network was done by first using only the data generated from the
+simulator. This training was stopped when the model drastically stopped im-
+proving based on the AUC and Accuracy measurements which took 10 iterations
+while the evaluation was done with some more of the data generated by the sim-
+ulator. This process was done to create two models. One model is based on the
+"raw" data from the simulator and another model is created using the same data
+but with the error introduced in Section 3.2.2. They will be later referenced as
+the raw model and the model with errors.
+For the model that is based on real-world data, it was first trained with 75%
+of the collected real-world data. Validating the model is then done with 15%
+additional of the real-world data.
+When the hyperparameters in the model
+have been tuned satisfactorily, the remainder 10% of the data is used as testing
+data to get results on how well all of the three trained models perform.
+It
+is important to note that the testing set is only used once to get the final
+performance numbers and this data is never used to train or validate any of the
+models. This in combination with the dropout layers in the model means that
+problems with overfitting should be minimized. It would also be a possibility to
+use a technique such as K-fold cross-validation but it was deemed unnecessary
+due to the aforementioned measures taken to combat overfitting.
+It was however necessary to create weights for the data due to imbalance in the
+classes used for the prediction. This imbalance is shown in Figure 4.6 where
+the total number of samples for the simulator training is 46243 (simulator), the
+==PAGE:43==
+4.3 ML model training
+33
+Simulator
+Training
+Validation
+Testing
+0
+20
+40
+60
+80
+Percentage
+93.42
+83.49
+85.05
+84.14
+6.58
+16.51
+14.95
+15.86
+Class balance by dataset
+False class
+True class
+Figure 4.6: Class distributions for all data sets
+samples used for training were 10070 (training), samples used for validation 2014
+(validation) and lastly the number of samples used for testing the performance
+of the algorithm is 1343 (testing).
+The graph then shows a large inequality
+in number of samples between the true and false classes for all datasets. The
+blue bars which represent the number of false classes, where a disconnect has
+not happened, is much greater than the number of true classes. In the case
+of the the simulator data, the number of false classes is 14 times greater than
+the number true classes. It is a little better for the real-world data which only
+has around 5 times the number of false samples compared to the true samples.
+This means that the false class is much more represented in the model which
+sometimes leads to the trained model only predicting the false class. The weights
+were tuned experimentally and the final configuration used a three-tiered weight
+system.
+The tiered system works in the following way. If there is no value beneath the
+threshold specified in 4.2 in the buffer containing the future packets, the sample
+gets a weight of 1. If there is only one weight below the threshold the sample
+gets a weight of 5. Lastly, the final step which contains multiple values below
+the threshold gets a value of 7. This system allowed the model to predict both
+classes with fewer misclassifications. This system was also tuned on trial and
+error where this configuration worked well.
+==PAGE:44==
+34
+Model design and data pre-processing
+==PAGE:45==
+Chapter 5
+Results and Evaluation
+In this section results of testing the model performance will be discussed. The
+focus is on evaluating the models’ performance in safety-critical situations where
+miss classifying a drop in connection is not well tolerated. The different steps in
+the pipeline proposed in Section 4.2 will be evaluated on how they improve the
+classification performance of the model. Some experiments will be performed on
+low-power devices that do not include any specialised hardware machine learning
+accelerators. These experiments can then be used to show that the proposed
+technique can be used to detect imminent signal loss with good accuracy while
+also being able to perform the calculations in real-time before the next packet
+arrives. Lastly, some power testing will be done to evaluate if this technique
+can be used in more power-constrained situations.
+5.1
+Test results
+To get a good overview of how a classifier performs it can be useful to look at
+a confusion matrix. There it can be quickly seen if the classifier for example
+does not classify some class due to it being ill-represented in the data and could
+therefore achieve a relatively high score without classifying classes correctly.
+The confusion matrices display the percentage of the total of each class in each
+quarter. Since the confusion matrices have been normalised, each row represents
+==PAGE:46==
+36
+Results and Evaluation
+the total for each class. The top row represents the true class, where disconnec-
+tion events are predicted and the bottom row represents the false class where
+the model does not predict a disconnect event. The top left quarter represents
+the True negatives (TN), the top right represents the false positives (FP), the
+bottom left are the false negatives (FN) and the bottom right are the true pos-
+itives (TP) where we want to maximise the true positive rate and true negative
+rate.
+Since the output from the model is a confidence value, it was decided to tune the
+models to have a similar percentage of false negatives and true positives. Then
+the main difference is in how many true negatives the models catch correctly.
+This was done since the most important task is to capture as many cases of the
+signal dropping as possible, represented by the true positives. This can then be
+compared between the models.
+As previously discussed, the data generated by the simulator is too perfect
+to accurately represent real-world data.
+Therefore some artificial error was
+introduced into it to improve the performance on real-world use cases. When
+evaluated on the validation data, it shows that this error does improve the
+prediction accuracy slightly as can be seen in Figure 5.1. This improvement
+comes both from the reduction of false positives from 51.15% down to 45.46%
+and false negatives from 25.35% to 15.02%. This reduction in false negatives is
+very important in a safety critical case as missing a detection is bad. It must
+however also be stated that the reduction in false positives does reduce the noise
+produced by the system from false alarms.
+False
+True
+Predicted Values
+False
+True
+Actual Values 
+TN
+69.73%
+FP
+30.27%
+FN
+13.62%
+TP
+86.38%
+Real world model
+False
+True
+Predicted Values
+False
+True
+Actual Values 
+TN
+54.34%
+FP
+45.66%
+FN
+15.02%
+TP
+84.98%
+Model with errors
+False
+True
+Predicted Values
+False
+True
+Actual Values 
+TN
+48.85%
+FP
+51.15%
+FN
+25.35%
+TP
+74.65%
+Model without errors (Raw)
+0%
+25%
+50%
+75%
+100%
+0%
+25%
+50%
+75%
+100%
+0%
+25%
+50%
+75%
+100%
+Figure 5.1: Confusion matrix comparing the finished model, model with vari-
+ance and the model without adding error to the data (raw model)
+When looking at the model trained on the real world data, it’s performance is
+again significantly better than the other models. On the real world test dataset,
+it managed to have 342 false positives (30.27%) and only 29 false negatives
+(13.62%).
+==PAGE:47==
+5.1 Test results
+37
+When evaluating the accuracies achieved by the models, it is useful to add two
+additional models into the comparison. One model predicts classes randomly
+with about 50% chance for each class and the other model only predicts the more
+common, false class. It can then be seen that the raw model is on par with just
+randomly taking a guess. This can be seen in Figure 5.2. The false model scores
+the highest in this metric since there is a heavy imbalance in favour of the false
+class. The best trained model by far, excluding the random and false models,
+when looking at the accuracy is the real-world model. It still only has around
+72% accuracy. This is mainly because of the large number of false positives
+predicted by the model. It is possible to have a higher accuracy score but that
+would increase the number of false negatives which the goal is to minimize with
+acceptable levels of false positives.
+Real world model
+Error model
+Raw model
+Random guesses
+False only
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+100
+Percentage
+72.38
+59.20
+48.99
+52.20
+84.14
+86.38
+84.98
+84.04
+54.46
+0.00
+Model accuracy and recall
+Accuracy
+Recall
+Figure 5.2: Accuracy and recall of all models
+Looking at the recall, which ignores the false positives, gives the three models
+very similar scores as expected since they were tuned to get a similar number
+of true positives. The highest score is marginally in favour of the real-world
+model which scores 86.38%. The random model only scores 54.46% which is in
+line with randomly guessing while the false model gets a score of 0%. This is
+of course because the recall is checking how many correct true predictions the
+model makes, which the false model never guesses.
+These results show that all the trained models can predict when the signal is
+likely to drop below acceptable levels. They however all produce quite a bit
+of false alarms, see Figure 5.3. The real-world model produces the fewest false
+==PAGE:48==
+38
+Results and Evaluation
+alarms at just over half compared to the raw model. It is however not good
+that the raw model has a higher probability of false alarms than the random
+model. The model with errors sits right between the raw model and the real-
+world model only by adding the slight error which is quite interesting. The
+number of false alarms is still quite high, in the best case 30.27%, but this will
+be discussed further in the Discussion section 6. Lastly as expected, the false
+only model produces no false alarms because it never predicts the true class,
+therefore it does not have any true positives or false positives.
+Real world model
+Error model
+Raw model
+Random guesses
+False only
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+100
+accuracy
+30.27
+45.66
+57.61
+48.23
+0.00
+False alarm probability of the models
+Figure 5.3: False alarm probability of all models
+In Figure 5.4 the receiver operating characteristics curve (ROC curve) for all
+the models are shown as well as the threshold used for this evaluation visible as
+dots on each of the curves. This curve shows the performance of the classifier at
+all of the possible classification thresholds where the x-axis is the false positive
+rate and the y-axis the true positive rate. The threshold values selected are
+0.2 for the real-world model, 0.17 for the error model, 0.15 for the raw model
+and 0.5 for the random model and the false only model. Those values result in
+the models giving a similar number of true positives while the true negatives
+differ between the models. The only model without a curve is the false only
+model. This is expected as the true positive rate and the false positive rate is
+0% for all threshold values which only results in a dot in the lower left corner of
+the figure. The red curve for the random model also closely follows a straight
+diagonal line which is expected if the random function uniformly distributes the
+values. By moving the threshold up, the model stops only predicting one class
+and starts predicting both classes until the maximum threshold value is reached
+==PAGE:49==
+5.1 Test results
+39
+again where it starts only predicting the other class resulting in the maximum
+true positive rate and false positive rate.
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+False Positive Rate
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+0.9
+1.0
+True Positive Rate
+ROC curve of models on the test dataset
+Real world model
+Error model
+Raw model
+Random guesses
+False only
+Figure 5.4: ROC curves for all models including the random and false models
+where dots correspond to each threshold value used in the testing
+The threshold value chosen for the real-world model is close to optimal for max-
+imising true positives while still letting as few false positives through. Changing
+the threshold value to eliminate more false negatives greatly increases the num-
+ber of false positives while changing it to better eliminate the false positives
+quite sharply drops the true positive rate. The same goes for both the other
+models but they simply perform worse in the majority, if not all cases. If the
+threshold is changed to 0.4 the accuracy rises to 86.22% due to the number
+of true negatives going up much more than the number of true positives goes
+down. This is again due to the imbalance of the classes in the dataset. There
+are indeed much fewer false negatives but when we look at the recall it drops
+down to 38.97% which is a huge decrease. If the threshold is lowered on the
+other hand the opposite happens. When the threshold is at 0.1 the recall is
+100% but the accuracy is only at 26.58% due to most of the classifications being
+false positives.
+==PAGE:50==
+40
+Results and Evaluation
+5.2
+Low power devices
+Being able to run the model on as many devices as possible is also good, es-
+pecially if the devices do not need any specialised hardware. In order for the
+system to work in real-time, each prediction must take less than a second to
+complete. Therefore these tests were run on two low-power devices. Those de-
+vices are the Raspberry Pi 1, 3 and 4 model B running at 0.7 GHz, 1.2 GHz and
+1.8 GHz respectively with all the data and models fitting in the available RAM
+on the devices. The oldest and slowest of the devices is the Raspberry Pi 1 from
+2012. Considering its age and only having a single core it is not surprising it is
+the slowest of the ones tested. On the other end of hardware, I also tested the
+algorithm on an RTX 3070 GPU which can use up to 200 Watts of power. It
+is not specifically designed for machine learning but represents how quickly this
+task can be solved with more capable hardware.
+Mean
+Median
+Max
+Min
+0
+500
+1000
+1500
+2000
+Milliseconds
+2106.4
+2089.6
+2249.4
+2055.2
+261.6
+257.7
+278.2
+253.2
+140.3
+138.4
+147.3
+136.4
+22.3
+22.0
+28.1
+19.8
+Execution time compared on multiple devices
+Raspberry Pi 1B
+Raspberry Pi 3B
+Raspberry Pi 4B
+RTX 3070
+Figure 5.5: Exported model execution time evaluated on three Raspberry PI
+computers and an NVIDIA RTX 3070 graphics card
+The model used to test was the real-world model with 200 samples from the
+test dataset.
+There were consistently two outliers in the data which always
+occurred at the same location in the index but were not related to the input
+value. They are likely related to some cleanup happening in Keras or python
+and are therefore removed from the data. This leaves 198 samples in the test
+dataset. These results can be seen in Figure 5.5. There it can be seen that
+the GPU is by far the fastest where it finishes running the model in just 22.3
+milliseconds on average and its maximum in 28.1 milliseconds is faster than the
+fastest time achieved by any of the Raspberry Pi computers. The slowest by far
+is the Raspberry Pi 1 where its mean execution time is 2106.4 milliseconds with
+a maximum of 2249.4 milliseconds.
+==PAGE:51==
+5.2 Low power devices
+41
+The Pi 4 is about 1.9 times faster on average in completing these tasks compared
+to the Pi 3 and 15 times faster than the pi 1. Looking at the most powerful
+device, the GPU, it is about 6.3 times faster than the Pi 4 and 94.5 times faster
+than the Pi 1.
+These results were the only application running on the devices and would take
+longer to run if the device also had to process some other tasks. Though this
+only loads up a single core, it can still be an issue since low-power devices often
+also have limited resources available. For the best case, this prediction only
+takes around 140.3 milliseconds for the Pi 4 on average. Even if the outliers
+were included, the worst case on the Raspberry Pi 3 took 278.2 milliseconds
+which would still put it comfortably into the prediction window. The raspberry
+Pi 1 was way too slow to be close to being able to perform the calculations in
+real-time. This is due to it being quite a bit older and using an older microar-
+chitecture for the soc compared to all the other devices while also containing
+much less cache which could also have impacted performance significantly.
+These tests were done by using the exported model and running tensorflow 2.4.0
+in python 3.7 on each of the devices except for the older Raspberry pi 1 where
+the python version used was 3.5. The execution was measured inside the python
+script. The time measurements were using the wall-clock of the system to get
+an accurate estimate of running the programs.
+To get an estimate of how efficiently each device runs these calculations some
+power measurements were taken. These measurements were done at the wall,
+before power adapters and power supplies, directly at the outlet. These measure-
+ments were done in Watts and are shown in Table 5.1. To get an approximation
+of how much energy each device used to perform the calculation each devices idle
+power consumption was measured and then the power consumption while doing
+the calculations was measured. This delta should then be the upper threshold of
+power usage of each of the devices. This number will be higher than only doing
+a single calculation as the application is intended to be used and therefore the
+loop that loops over all the 200 values also consumes some energy but it should
+be minimal in comparison with running the calculations on the model. The last
+column in the table shows the calculated energy used for the mean case taken
+from Figure 5.5. The measurements are only rough estimates for the power used
+as it is likely that they used some more power than only the difference between
+the idle state and the fully loaded state. This is because the processors will
+always consume some minimum power even when idle. It cannot be ruled out
+that if the processor could go to a lower power state, the measured delta would
+be the same. The most exaggerated case of this was the raspberry Pi 1 which
+always had very high power consumption even when idle. The same concept
+applies to the GPU as it can only idle at some minimum power state even when
+doing very little or even nothing.
+==PAGE:52==
+42
+Results and Evaluation
+The formula used for calculating the energy used is to take the measured wattage
+(W) and convert them to Joules (J) in order to get the total energy consumed.
+This is a simple process as Watt can also be expressed as Joules per second
+(J/s) and is the following formula was used for this calculation:
+Energy(J) = W ∗t
+(5.1)
+These measurements were taken a couple of times for each device with wifi and
+bluetooth disabled on devices that support those features. Turning off other
+things such as status LEDs and display outputs did not have an impact on
+the results since they brought down both the measurements while at idle and
+under load the same amount.
+This indicates that the Pi computers are not
+power supply limited and the CPU gets all the power it asks for which is what
+is desired. For the measurements made on the computer, they were done on a
+fresh boot with all programs closed and only one display connected. As many
+background programs as possible were killed as well as turning off wifi, bluetooth
+and disconnecting the ethernet cable to isolate the machine from the internet
+which can cause spikes in power usage. Then before taking the measurements,
+some time was allowed pass while waiting for the power consumption to stabilise.
+When it had stabilised, multiple measurements were done while making sure
+that the power consumption stabilised between test passes.
+Device
+Idle
+Load
+Delta
+Energy consumed
+Raspberry Pi1 B
+3.0 W
+3.3 W
+0.3 W
+0.6319 J
+Raspberry Pi3 B
+2.3 W
+3.1 W
+0.8 W
+0.2093 J
+Raspberry Pi4 B
+2.6 W
+3.5 W
+0.9 W
+0.1263 J
+RTX 3070
+114 W
+133 W
+19 W
+0.4237 J
+Table 5.1: Power measurements from running the model on the three discussed
+systems
+==PAGE:53==
+Chapter 6
+Discussion
+The main focus of this report was to analyse if RSSI could be used to create a
+prediction scheme that could give an indication if nodes are likely to disconnect
+in the near future. The nodes would be mobile and could also process everything
+in real-time without any slowdown to normal operations. This requires a dataset
+made for mobility which was also created and made public.
+The use case focused on when creating the model was a safety-critical application
+where connection drops should not happen. The model only caught 86.38% of all
+measured drops while having 30.27% false positives which does cause quite a bit
+of noise. When diving deeper into the data and looking better at the items in the
+false positive there are 134 items there that are within 3 dB from the threshold.
+If we accept those items as true positives, the results look much more promising
+as is displayed in the confusion matrix in Figure 6.1. Accepting these values as
+being near the threshold can be a reasonable assumption as at range, the RSSI
+values tend to fluctuate more than when the radio is close. Fluctuations of 3db
+could well happen as was previously discussed in Figure 3.4. This does however
+ignore values that the classifier correctly classified as true negative, not classified
+as having a bad connection. This is a drawback which is caused by having the
+classifier be a binary classifier instead of classifying three classes which will be
+discussed further in Section 7. The signal strength is in a grey area close to the
+threshold where it is close to the point where PRR falls off as well as it is very
+susceptible to other interference which was not considered in this study.
+==PAGE:54==
+44
+Discussion
+With this change, the true negatives go from 69.73% up to 79.12% and the
+true positives go from 86.38% to 91.64%. This change in classification also has
+an effect on the accuracy and the precision of the model. The accuracy rises
+to 82.35% and the recall is now 91.64%. These changes also improve the false
+alarm rate from 30.27% down to 20.89%.
+False
+True
+Predicted Values
+False
+True
+Actual Values 
+TN
+79.12%
+FP
+20.88%
+FN
+8.36%
+TP
+91.64%
+Real world model (Adjusted)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Accuracy
+Recall
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+100
+Percentage
+82.35
+91.64
+72.38
+86.38
+Model accuracy and recall (Adjusted)
+Normal
+Accept +3
+Figure 6.1: Real world model where false positives close to the threshold are
+also accepted
+When looking at some of the data in the incorrectly classified categories, some-
+times it looks like packets are dropped when the signal is still quite strong. This
+causes the classifier to incorrectly classify them as true negatives which causes
+the false negatives class to grow. An example of this is a couple of classes where
+the buffer containing the history of received packets contains values in the -60s
+and -70s and suddenly in the future window, the signal is lost. This is possibly
+caused by some interference that caused some packets not to be gathered. It
+could also have happened during the data gathering that the radios were not
+pointed at each other which caused the sharp fall in the RSSI value. This could
+have been removed during pre-processing of the data, but since this is a real-
+world dataset, it would also assume that this could easily happen in normal
+usage since the real world is often very messy.
+When tuning the model, multiple window sizes were tried. Both for the window
+used for the pre buffer, how many received packets were used, as well as the size
+of the prediction window. Going for a prediction window that was longer than
+chosen, 7 seconds, caused quite a bit of a drop in the predictors’ capability which
+could not be offset by simply changing the size of the window which contains the
+history of received packets. Going for a shorter prediction window did not either
+greatly improve the predictors’ ability until it was brought down to around 3
+seconds. On the other hand, when trying to improve the performance of the
+algorithm by including more data in the pre buffer this also had a minimal effect
+on performance. Even when gradually going up to 15 packets from 4 did not
+==PAGE:55==
+45
+improve performance by a significant amount. Therefore the decision was made
+to rather have a slightly worse predictor that predicts more than twice as long
+into the future than compared to the other predictors. Changing the complexity
+of the machine learning model did also very little to improve this, it mainly just
+made the execution take a longer time and therefore consume more energy which
+would put a more strict limit on where this classifier could be used.
+Possible ways to improve the model would be to have increased data rates. This
+could then be used in multiple different ways such as to create some average
+over some period which effectively smooths out the incoming signal. Another
+possibility would be to train the model with this additional data directly which
+could also have some improvement. Other ways to improve the model would be
+to add other indicators to the algorithm such as LQI or utilise some other metric
+in addition such as the triangle metric. This would however add additional com-
+putational requirements as well as make the assumption that the radio makes
+the LQI metric available to use which is not always the case. Utilising LQI
+can also be a bit tricky since the implementation varies between manufactur-
+ers and possibly even between products from the same manufacturer since the
+specifications don’t specify exactly how this metric should be implemented.
+The real-world dataset created1 during this thesis is quite large and the first
+that I could find that focuses on providing RSSI values from mobile nodes in
+an outdoor setting. This dataset is however limited in the way that the surface
+material was quite soft grass and there were no obstructions in the collection
+area. This means that the data is quite different from data collected on for
+example pavement which causes the distances needed to travel to get outside
+the transmission range to grow by quite a lot. It is also limited in the sense
+that the speed of movement between the nodes is limited to a minimum being
+stopped (distance not growing, moving in a circular path around the other
+node) and going up to a slow jog. The dataset also assumes an omnidirectional
+antenna which is not always possible in the real world. It is possible to expand
+the dataset to include more surface types, more speeds and different types of
+antennas but that was not done since all the different combinations of the setups
+would cause the collection time needed to be exponentially larger which could
+not be achieved within the provided time of this thesis.
+Some experiments regarding the execution time of the model were done on four
+different hardware platforms. Three were using the ARM architecture running
+on three separate raspberry pi computers while the last hardware platform was
+an RTX 3070. These experiments show that even relatively slow hardware can
+run the model comfortably within a second when the next execution should be
+scheduled. The only system that was not able to achieve this was the oldest
+1https://github.com/brynjarorng/Rssi-mobility-measurements
+==PAGE:56==
+46
+Discussion
+system from 2012. This shows that the model is lightweight enough to be used on
+pretty much any autonomous system that is otherwise doing some computations
+from data provided by other sensors such as cameras or lidar with minimal
+impact on its performance.
+A rough measurement of the power consumed was also done to get an idea of
+how much power each device consumes while running the model. It could be
+seen there that while the GPU ran the fastest, it consumed more energy than
+the other computers. None of those tests used dedicated ML accelerators which
+should perform well in this area as they should both minimize the execution
+time as well as the power used. This would then results in lower total power
+consumption for performing this task. This hardware is becoming much more
+prevalent and many phone SOCs have this dedicated hardware built in meaning
+that running these types of models on low-power hardware is becoming much
+more commonplace.
+==PAGE:57==
+Chapter 7
+Future work
+The generated data and the algorithms created were made as generalizable as
+possible within the given time frame. This still means that there are quite a
+few things that can be expanded, changed or explored further than was done in
+this thesis.
+First of all, adding obstacles into the area where data is generated would help
+make the data collected as well as the machine learning model that was created
+more useful in more situations. Another possible avenue regarding the data is
+to collect data where the surface materials are different or where height also
+comes into play which was not evaluated in this study. This dataset is also
+only meant for outdoor usage which likely makes it not work well for indoor
+situations which could be further evaluated. It would also be needed to consider
+many more things when collecting indoor data for this purpose such as room
+size, objects in the room, number of walls, their thickness and material also
+matter quite a lot. This also greatly increases the complexity when gathering
+data which is why this was not done. It also makes sense to test if this prediction
+is possible before adding more complex variables to the mix.
+Adding more dimensions to the machine learning model is also something that
+could be explored further. Something such as utilising the time between mes-
+sages or different signal indicators such as LQI could be explored in order to
+both make the classifier better in general as well as increase the tolerance for
+==PAGE:58==
+48
+Future work
+missing messages.
+An avenue that could be taken regarding the model is to change from a binary
+classification to classifying signals into three groups. This model would include
+the two classes from the binary classification where one group is that the signal
+will stay strong and the second group is where it predicts when the signal will
+get worse. The new group then represents a grey area between the two original
+classes where the signal might drop or might be fine. This could then be eval-
+uated based on other factors such as current packet re-transmissions or other
+external factors which could help build a system that makes smarter decisions
+on a case-by-case basis.
+The current model is static but it would also be possible to train a general
+model that is then periodically re-trained in the field using data collected at the
+location of operation. This could help combat both different surface types as
+well as day-to-day differences caused by weather conditions such as fog, rain,
+snow or heat. It is also possible that in climates where the ground freezes that
+this change could drop the performance of the current model which would also
+need to be explored further.
+==PAGE:59==
+Chapter 8
+Conclusion
+Self-navigating robots which make their own decisions are becoming more preva-
+lent and will likely become much more commonplace in the not too distant fu-
+ture. Some of these robots will need to be connected to a network in order to
+effectively communicate with other robots. Therefore it is vital that they stay
+connected to the network as much as possible.
+In order to satisfy this requirement to stay connected, this thesis designed a
+method that predicts future signal properties up to 7 seconds into the future.
+It has lax requirements on data rate and processing requirements which allows
+many devices to run this model in real-time with minimal impact on their normal
+operation. The resulting implementation has a recall of 86.38% and an accuracy
+of 72.38%. If we accept an error of 3 dB to be included in the measurements,
+the calculated accuracy is 82.35% and the recall is 91.64%.
+Ideally, the accuracy and recall would be higher even without including the 3 dB
+error. Some future work which could address these shortcomings would be to
+change to a three class classifier. Therefore classifying into disconnection events,
+non-disconnection events and the third new class, which consists of gray area
+events. Those new events could then be further evaluated using other methods
+to decide if a disconnect is imminent.
+To achieve this, a new dataset had to be created. The dataset contains two
+==PAGE:60==
+50
+Conclusion
+nodes, one static and one mobile.
+The static node transmitted data to the
+mobile node. The mobile node recorded the response along with the RSSI value
+of the data packet while travelling at variable speeds over a distance of 60
+meters. This dataset is composed of 49047 packets recorded over 247 minutes
+and is available on github1.
+There are three main driving goals for this thesis which are stated in Section
+1.1. The first goal has been satisfied with the proposed deep neural network
+model. It was able to predict if the link between two nodes would likely drop
+beneath a threshold in the near future. The second goal has therefore also been
+satisfied by being able to apply the current model in active connectivity as it
+is a direct replacement for the threshold previously used. The third goal was
+also achieved by testing the performance of the model on real-world data which
+additionally was created and made public.
+1https://github.com/brynjarorng/Rssi-mobility-measurements
+==PAGE:61==
+Bibliography
+[91420]
+Ieee standard for low-rate wireless networks. IEEE Std 802.15.4-
+2020 (Revision of IEEE Std 802.15.4-2015), pages 1–800, 2020.
+[93621]
+Ieee standard for information technology–telecommunications and
+information exchange between systems - local and metropolitan
+area networks–specific requirements - part 11: Wireless lan medium
+access control (mac) and physical layer (phy) specifications. IEEE
+Std 802.11-2020 (Revision of IEEE Std 802.11-2016), pages 1–4379,
+2021.
+[AM21]
+Saeed Amer Alameri and Masnizah Mohd. Comparison of fake news
+detection using machine learning and deep learning techniques. In
+2021 3rd International Cyber Resilience Conference (CRC), pages
+1–6, 2021.
+[BKBJ+09] Nouha Baccour, Anis Koubâa, Maissa Ben Jamâa, Habib Youssef,
+Marco Zuniga, and Mario Alves. A comparative simulation study
+of link quality estimators in wireless sensor networks.
+In 2009
+IEEE International Symposium on Modeling, Analysis Simulation
+of Computer and Telecommunication Systems, pages 1–10, 2009.
+[BKM+12]
+Nouha Baccour, Anis Koubâa, Luca Mottola, Marco Antonio
+Zúñiga, Habib Youssef, Carlo Alberto Boano, and Mário Alves. Ra-
+dio link quality estimation in wireless sensor networks: A survey.
+ACM Trans. Sen. Netw., 8(4), sep 2012.
+[BKY+10]
+Nouha Baccour, Anis Koubaa, Habib Youssef, Maissa Jamâa, Denis
+Rosário, Mário Alves, and Leandro Becker.
+F-lqe: A fuzzy link
+==PAGE:62==
+52
+BIBLIOGRAPHY
+quality estimator for wireless sensor networks. pages 240–255, 02
+2010.
+[BKYA15]
+Nouha Baccour, Anis Koubâa, Habib Youssef, and Mário Alves.
+Reliable link quality estimation in low-power wireless networks and
+its impact on tree-routing. Ad Hoc Networks, 27:1–25, 2015.
+[BZV+10]
+Carlo Alberto Boano, Marco Antonio Zúñiga, Thiemo Voigt, An-
+dreas Willig, and Kay Römer. The triangle metric: Fast link quality
+estimation for mobile wireless sensor networks. In 2010 Proceed-
+ings of 19th International Conference on Computer Communica-
+tions and Networks, pages 1–7, 2010.
+[CHW+18] Yutian Chen, Aja Huang, Ziyu Wang, Ioannis Antonoglou, Julian
+Schrittwieser, David Silver, and Nando de Freitas. Bayesian opti-
+mization in alphago, 2018.
+[CT10]
+Yin Chen and Andreas Terzis. On the mechanisms and effects of
+calibrating rssi measurements for 802.15.4 radios. pages 256–271,
+02 2010.
+[FHL+08]
+Károly Farkas, Theus Hossmann, Franck Legendre, Bernhard Plat-
+tner, and Sajal K. Das. Link quality prediction in mesh networks.
+Computer Communications, 31(8):1497–1512, 2008. Special Issue:
+Modeling, Testbeds, and Applications in Wireless Mesh Networks.
+[Fre20]
+Henning Tau Frederiksen.
+Anomaly-based ids for iot gateways.
+Master’s thesis, Technical university of Denmark - DTU, 2020.
+[GQL+17]
+Ruan D. Gomes, Diego V. Queiroz, Abel C. Lima Filho, Iguatemi E.
+Fonseca, and Marcelo S. Alencar. Real-time link quality estimation
+for industrial wireless sensor networks using dedicated nodes. Ad
+Hoc Networks, 59:116–133, 2017.
+[KB14]
+Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic
+optimization, 2014.
+[LC11]
+Tao Liu and Alberto E. Cerpa. Foresee (4c): Wireless link pre-
+diction using link features. In Proceedings of the 10th ACM/IEEE
+International Conference on Information Processing in Sensor Net-
+works, pages 294–305, 2011.
+[LC12]
+Tao Liu and Alberto E. Cerpa. Talent: Temporal adaptive link esti-
+mator with no training. In Proceedings of the 10th ACM Conference
+on Embedded Network Sensor Systems, SenSys ’12, page 253–266,
+New York, NY, USA, 2012. Association for Computing Machinery.
+==PAGE:63==
+BIBLIOGRAPHY
+53
+[LC14a]
+Tao Liu and Alberto E. Cerpa. Data-driven link quality prediction
+using link features. ACM Trans. Sen. Netw., 10(2), jan 2014.
+[LC14b]
+Tao Liu and Alberto E. Cerpa.
+Temporal adaptive link quality
+prediction with online learning. ACM Trans. Sen. Netw., 10(3),
+may 2014.
+[LMH+03]
+Dhananjay LaI, A. Manjeshwar, F. Herrmann, E. Uysal-Biyikoglu,
+and A. Keshavarzian.
+Measurement and characterization of link
+quality metrics in energy constrained wireless sensor networks. In
+GLOBECOM ’03. IEEE Global Telecommunications Conference
+(IEEE Cat. No.03CH37489), volume 1, pages 446–452 Vol.1, 2003.
+[Ma05]
+Yunqian Ma. Improving wireless link delivery ratio classification
+with packet snr. In 2005 IEEE International Conference on Electro
+Information Technology, pages 6 pp.–6, 2005.
+[ODE+06]
+Fredrik Osterlind, Adam Dunkels, Joakim Eriksson, Niclas Finne,
+and Thiemo Voigt.
+Cross-level sensor network simulation with
+cooja. In Proceedings. 2006 31st IEEE Conference on Local Com-
+puter Networks, pages 641–648, 2006.
+[OEPF21]
+Charalampos Orfanidis, Atis Elsts, Paul Pop, and Xenofon Fafoutis.
+Tsch evaluation under heterogeneous mobile scenarios.
+IoT,
+2(4):656–668, 2021.
+[OPF]
+Charalampos Orfanidis, Paul Pop, and Xenofon Fafoutis. Active
+connectivity fundamentals for tsch networks of mobile robots.
+[PYH+18]
+P. Jonathon Phillips, Amy N. Yates, Ying Hu, Carina A. Hahn,
+Eilidh Noyes, Kelsey Jackson, Jacqueline G. Cavazos, Géraldine
+Jeckeln, Rajeev Ranjan, Swami Sankaranarayanan, Jun-Cheng
+Chen, Carlos D. Castillo, Rama Chellappa, David White, and Al-
+ice J. O’Toole.
+Face recognition accuracy of forensic examiners,
+superrecognizers, and face recognition algorithms. Proceedings of
+the National Academy of Sciences, 115(24):6171–6176, 2018.
+[RBJD18]
+Sana Rekik, Nouha Baccour, Mohamed Jmaiel, and Khalil Drira.
+Experiencing low power wireless links in distribution smart grid en-
+vironments. In 2018 IEEE/ACS 15th International Conference on
+Computer Systems and Applications (AICCSA), pages 1–8, 2018.
+[RLEG19]
+Saleem Raza, Tim van der Lee, George Exarchakos, and Mesut
+Güneş. A reliability analysis of tsch protocol in a mobile scenario. In
+2019 16th IEEE Annual Consumer Communications & Networking
+Conference (CCNC), pages 1–6, 2019.
+==PAGE:64==
+54
+BIBLIOGRAPHY
+[SCL+07]
+Murat Senel, Krishna Chintalapudi, Dhananjay Lal, Abtin Ke-
+shavarzian, and Edward J. Coyle. A kalman filter based link quality
+estimation scheme for wireless sensor networks. In IEEE GLOBE-
+COM 2007 - IEEE Global Telecommunications Conference, pages
+875–880, 2007.
+[SDTL10]
+Kannan Srinivasan, Prabal Dutta, Arsalan Tavakoli, and Philip
+Levis. An empirical study of low-power wireless. ACM Trans. Sen.
+Netw., 6(2), mar 2010.
+[SHK+]
+Nitish Srivastava, Geoffrey Hinton, Alex Krizhevsky, Ilya Sutskever,
+Ruslan Salakhutdinov, and Yoshua Bengio.
+Dropout: A simple
+way to prevent neural networks from overfitting. The Journal of
+Machine Learning Research, page 2014.
+[SL06]
+Kannan Srinivasan and Philip Alexander Levis. Rssi is under ap-
+preciated. 2006.
+[Sza21]
+Tomasz Szandała.
+Review and Comparison of Commonly Used
+Activation Functions for Deep Neural Networks, pages 203–224.
+Springer Singapore, Singapore, 2021.
+[WSA+19]
+Julian Webber, Norisato Suga, Susumu Ano, Yafei Hou, Abolfazl
+Mehbodniya, Toshihide Higashimori, Kazuto Yano, and Yoshinori
+Suzuki. Machine learning-based rssi prediction in factory environ-
+ments. In 2019 25th Asia-Pacific Conference on Communications
+(APCC), pages 195–200, 2019.

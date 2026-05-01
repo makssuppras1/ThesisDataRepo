@@ -1,0 +1,3934 @@
+==PAGE:1==
+Float-zone Process Modelling Using
+Machine Learning
+Technical University of Denmark
+Master’s Thesis in Human-Centered Artificial Intelligence
+Asger Laurits Schultz
+Supervisors
+Tue Herlau, DTU Compute
+Nico Werner, Topsil GlobalWafers A/S
+11 January 2024
+==PAGE:2==
+Abstract
+The production of silicon crystals for use in semi-conductors is crucial to the modern
+world. Topsil GlobalWafers A/S is one the world’s leading manufacturers of silicon
+grown with the float-zone method. The multiple hour long growth process requires
+careful control of several parameters and is currently modelled by a set of differential
+equations [Wer14]. However, such analytical modelling does not always provide accurate
+control which causes crystals to not grow properly, costing both time and money. This
+report presents a control method using an ensemble of neural networks in a Model
+Predictive Control (MPC) setting which are trained using only observed data with
+no domain knowledge required. The networks are trained on and validated against
+a simulated float-zone system, proving that the approach can provide accurate and
+robust control, and ablation studies are conducted to investigate the effect of network
+architectures, control estimation methods, and controller settings. Finally, networks
+are trained on historical data provided by Topsil to ensure that the training procedure
+allows the networks to accurately learn the real system dynamics, but implementation
+is left outside the scope of this project. All code is open-sourced under the MIT License
+to encourage reproducibility and further work.
+==PAGE:3==
+Preface
+This project was carried out in collaboration with Topsil GlobalWafers A/S to complete
+the requirements for the master’s degree in Human-Centered Artificial Intelligence at
+the Technical University of Denmark. Work on the project was started 21 June 2023
+and ended 11 January 2024.
+The project was assigned 35 ECTS points equivalent
+to around 1,000 hours of work. All code produced for it is available at github.com/
+asgerius/frozone.
+A large thank you must go to Topsil for all the help and resources they have provided
+to make this project a reality. This includes both data collected from their growth
+machines and an implementation of their crystal growth simulation.
+A mandatory
+mention must go to Nico Werner of Topsil, whose guidance and expert knowledge on
+the float-zone process has been vital in informing many important choices along the
+way. A further thank you goes to my old friend Nicolai Mikkelsen who pitched the
+project to me in the first place and got me in contact with Topsil. Finally, a special
+thank you goes out to Tue Herlau from DTU Compute for his everlasting insight into
+the world of control theory and his incredibly useful feedback on both the report and
+the technical aspects of the project.
+Page 1 of 75
+==PAGE:4==
+Acronyms
+AMP
+Automatic Mixed Precision
+. . . . . . . . . . . . . . . . . . . . . . . .
+43
+CI
+Confidence Interval . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+45
+CNN
+Convolutional Neural Network . . . . . . . . . . . . . . . . . . . . . . .
+33
+DCP
+Direct Control Prediction
+. . . . . . . . . . . . . . . . . . . . . . . . .
+39
+GELU
+Gaussian Error Linear Unit . . . . . . . . . . . . . . . . . . . . . . . .
+41
+GP
+Gaussian Process . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+16
+LQR
+Linear Quadratic Regulator . . . . . . . . . . . . . . . . . . . . . . . .
+14
+LSTM
+Long Short-Term Memory . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+MAE
+Mean Absolute Error . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+MLP
+Multilayer Perceptron
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+33
+MPC
+Model Predictive Control
+. . . . . . . . . . . . . . . . . . . . . . . . .
+1
+MSE
+Mean Squared Error . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+NLP
+Natural Language Processing
+. . . . . . . . . . . . . . . . . . . . . . .
+34
+NMPC Non-linear Model Predictive Control . . . . . . . . . . . . . . . . . . .
+10
+ODN
+Optimization against Dynamics Network . . . . . . . . . . . . . . . . .
+39
+ReLU
+Rectified Linear Units
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+41
+RNN
+Recurrent Neural Network . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+Page 2 of 75
+==PAGE:5==
+Contents
+1
+Introduction
+5
+1.1
+The Float-zone Process . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+1.2
+The Goal of this Project . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+2
+Control Methods
+12
+2.1
+Crystal Melting as a Control Problem . . . . . . . . . . . . . . . . . . .
+12
+2.2
+The PID Controller . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+2.3
+Model Predictive Control . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+2.4
+Non-linear Model Predictive Control
+. . . . . . . . . . . . . . . . . . .
+16
+2.5
+Summary of Relevant Methods
+. . . . . . . . . . . . . . . . . . . . . .
+18
+3
+Data
+21
+3.1
+Float-zone Process Data . . . . . . . . . . . . . . . . . . . . . . . . . .
+22
+3.2
+Simulation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+24
+4
+Methods
+27
+4.1
+Feature Engineering . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+29
+4.2
+Network Design . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+30
+4.2.1
+Fully-connected . . . . . . . . . . . . . . . . . . . . . . . . . . .
+33
+4.2.2
+Transformer . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+34
+4.2.3
+Gated Transformer . . . . . . . . . . . . . . . . . . . . . . . . .
+35
+4.3
+Training Details . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+4.4
+Evaluation and Control . . . . . . . . . . . . . . . . . . . . . . . . . . .
+37
+4.4.1
+Evaluation Metrics . . . . . . . . . . . . . . . . . . . . . . . . .
+38
+4.4.2
+Methods for Estimating Optimal Control . . . . . . . . . . . . .
+39
+4.4.3
+Handling of Constraints
+. . . . . . . . . . . . . . . . . . . . . .
+41
+4.5
+Hyperparameter Search . . . . . . . . . . . . . . . . . . . . . . . . . . .
+41
+4.6
+Implementation Details . . . . . . . . . . . . . . . . . . . . . . . . . . .
+43
+Page 3 of 75
+==PAGE:6==
+Contents
+Technical University of Denmark
+5
+Results
+45
+5.1
+Model Architecture . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+46
+5.2
+Model Size . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+47
+5.3
+Window Sizes . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+48
+5.4
+Controller Settings . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+49
+5.5
+Execution Time . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+51
+6
+Experiments and Discussion
+52
+6.1
+Training Variation and Model Selection . . . . . . . . . . . . . . . . . .
+52
+6.2
+Control Performance Outside Training Data . . . . . . . . . . . . . . .
+55
+6.3
+Managing Growth Phases
+. . . . . . . . . . . . . . . . . . . . . . . . .
+58
+6.4
+Runtime Considerations
+. . . . . . . . . . . . . . . . . . . . . . . . . .
+60
+6.5
+Future Work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+62
+6.5.1
+Data . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+63
+6.5.2
+Modelling . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+64
+7
+Conclusion
+66
+Bibliography
+67
+A Appendix
+71
+A.1 Smoothing . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+71
+A.2 Loss
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+73
+A.3 Learning Rate . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+75
+Page 4 of 75
+==PAGE:7==
+1.
+Introduction
+Silicon has become one the most critical elements in the modern world.
+Its status
+as a semiconductor makes it well suited for use in a wide variety of electronics, as
+the flow of electricity can be controlled with high fidelity. The first silicon transistor
+was invented in 1949 [Zul00]. The combining of transistors allows for advanced logic
+circuits to be constructed by combining transistors in different ways. Transistors have
+been developed using other materials, such as germanium, but these designs have rarely
+left the laboratory, and none have seen more than a tiny fraction of the adoption of
+the silicon transistor. The invention of the silicon transistor roughly coincides with
+the advent of the Information Age, marked by the digitalization of society. The silicon
+transistor has been at the heart of this transformation, allowing for the ever improving
+performance of microchips. Already in 1965, Gordon Moore, co-founder of Fairchild
+Semiconductor and later Intel, predicted that the number of transistors possible on
+an integrated circuit would double every year [Moo06]. He later revised it down to a
+doubling every other year, which has largely held true ever since.
+Though obviously most known for its role in computers and integrated circuits,
+silicon is also used in several other electrical applications such as photo-sensors and
+power semiconductor devices, which control the flow of power in both small and very
+large scale applications [Sze08].
+Common for all applications is that the silicon needs to have very few impurities
+for its desirable properties to manifest themselves.
+Semiconductors are made from
+monocrystalline silicon, meaning that the silicon from which the wafers are cut forms
+one single crystal.
+Today, two primary methods are used for growing the crystals:
+Czochralski and float-zone. Of the two, the Czochralski method is by far the most
+common. The silicon from this process is largely used for relatively low-power devices
+such as integrated circuits and computers. On the other hand, the float-zone technique,
+the focus of this project, produces silicon crystals with fewer impurities, making sili-
+con from this process more common in devices with high performance and reliability
+requirements [Zul00].
+Page 5 of 75
+==PAGE:8==
+1. Introduction
+Technical University of Denmark
+1.1
+The Float-zone Process
+In simple terms, the float-zone process works by slowly melting a polycrystalline silicon
+rod and letting it re-solidify. The polycrystalline rod is slowly lowered through a coil,
+which heats the silicon to its melting point. When the material re-solidifies below the
+coil, it does so on top of an existing monocrystalline crystal, forming one continuous
+crystal. Unlike the Czochralski process, this method is crucible-free, causing to the
+resulting silicon to have relatively fewer impurities.
+The polycrystalline silicon is typically referred to as the poly or feed material, of
+which poly will be used here.
+Further, the monocrystalline silicon is often simply
+referred to as the crystal, which will also be the case from here on out.
+The full melting process, or a run for short, goes through multiple phases, a full list
+of which is provided in table 1.1. The melting process is initialized by heating the tip
+of the poly. A low diameter silicon crystal is needed on top of which the larger, final
+crystal can be formed. When the molten silicon has connected with the starting crystal,
+more poly material is slowly melted. When the crystal has reached a sufficient length,
+its diameter is slowly increased until it reaches its target size, which is typically 4, 6,
+or 8 inches. Growing crystals beyond this diameter presents huge technical challenges
+in the float-zone process, so 8 inches is the largest diameter seen at industrial scale.
+Once the crystal reaches it target diameter, it is again grown only in the vertical
+direction, until it reaches it full length of a few metres, after which the process is
+stopped, and the crystal is sliced into wafers and sent along for further processing. The
+whole processing takes many hours. Figure 1.1 shows a sketch of the system shortly
+after the crystal has reached its full diameter as well as an image of the process courtesy
+of Topsil.
+The whole process is automated from start to finish. At set time intervals, a number
+of variables describing the current state of the system are observed, which are fed to the
+controller. These are illustrated on fig. 1.2. The system dynamics are quite finicky and
+highly non-linear. Two of the observed variables (the crystal diameter and full zone
+height) have predefined target curves which, if followed to sufficient accuracy, result in
+a successfully grown crystal.
+There are several parameters which can be controlled to get the system to follow
+the target values, here among how quickly the crystal and poly are lowered (the pull
+rates), the voltage in the generator, and the speed and direction of the rotation of the
+crystal and poly. Only the voltage and poly pull rate are determined by the controller,
+Page 6 of 75
+==PAGE:9==
+1. Introduction
+Technical University of Denmark
+Growth phase
+Description
+Inactive
+The melting process has not yet started.
+All ready
+The melting process is ready to start.
+Preheating
+The coil is powered up, and the poly and crystal tips are heated to silicon’s
+melting point.
+Drop
+The rod ends become molten. The controller takes over in this phase.
+Start
+A thin neck is grown to eliminate dislocation, reducing the crystal diameter
+to around 3 mm.
+Cone
+The crystal gradually expands to its full diameter.
+Full diameter
+The crystal has reached full diameter. This is the simplest phase modelling-
+wise and also the longest.
+Fast closing
+The diameter of the crystal is decreased before separating the poly rod
+from the crystal.
+Closing
+If the crystal is losing the monocrystalline structure, the closing is sped up
+to save poly material.
+Cooling
+The crystal and remains of the poly solidify.
+Table 1.1: The different crystal growth phases as defined by Topsil. The melting process
+itself begins in the preheating phase, and the controller takes over in the drop phase.
+Figure 1.1: Sketch (left) and image (right) of the float-zone process. © Topsil Global-
+Wafers A/S.
+while the crystal pull rate follows a predefined trajectory.
+An example of how the different variables behave is shown on fig. 1.3. The crystal
+was successfully grown, despite the obvious deviance between the observed and target
+Page 7 of 75
+==PAGE:10==
+1. Introduction
+Technical University of Denmark
+Figure 1.2: An image taken during the cone phases illustrating observable features of
+the system. © Topsil GlobalWafers A/S.
+0
+1
+2
+3
+4
+Time [h]
+50
+100
+150
+Poly diameter [mm]
+0
+1
+2
+3
+4
+Time [h]
+100
+200
+Crystal diameter [mm]
+Observed
+Target
+0
+1
+2
+3
+4
+Time [h]
+3
+4
+5
+Upper zone height [mm]
+0
+1
+2
+3
+4
+Time [h]
+4
+6
+8
+10
+Lower zone height [mm]
+0
+1
+2
+3
+4
+Time [h]
+25.0
+27.5
+30.0
+32.5
+Full zone height [mm]
+Observed
+Target
+0
+1
+2
+3
+4
+Time [h]
+0
+100
+200
+300
+Melt volume [cm3]
+0
+1
+2
+3
+4
+Time [h]
+0
+20
+40
+Poly angle [deg]
+0
+1
+2
+3
+4
+Time [h]
+0
+20
+40
+Crystal angle [deg]
+0
+1
+2
+3
+4
+Time [h]
+6
+8
+Generator voltage [kV]
+0
+1
+2
+3
+4
+Time [h]
+1.5
+2.0
+2.5
+Poly pull rate [mm/min]
+0
+1
+2
+3
+4
+Time [h]
+2.0
+2.5
+3.0
+Crystal pull rate [mm/min]
+Figure 1.3: Observable variables during the cone phase of a growth of an 8 inch crystal.
+8 inches equal 203.2 mm, the final value of the crystal diameter here. The eight variables
+plotted on the upper and centre rows are the same as are displayed on fig. 1.2, while
+those plotted on the lower row are control variables. The target trajectories for the
+crystal diameter and full zone height are also shown. An example of a failed cone phase
+is available on fig. 3.1.
+full zone height, showing that the system does allow for some amount of error.
+Historically, these were manually controlled by operators, who would watch the
+crystal growth at all times and make adjustments as needed. However, this approach
+Page 8 of 75
+==PAGE:11==
+1. Introduction
+Technical University of Denmark
+was both error-prone and labour-intensive. PID controllers have also seen use, but
+these present various challenges such as the extensive tuning needed to account for
+differences between machines, growth phases, and crystal sizes. They also struggle to
+model the slow impact of changing control inputs. These issues will be further explored
+in section 2.2.
+The current control system used at Topsil instead relies on a model-based approach.
+In the early 2010’s, a set of differential equations were developed which describe the
+system. When controls are calculated, the historical and present observations are fed to
+a numerical optimizer, which uses the differential equations to calculate which control
+inputs best make the crystal diameter and full zone height follow their target paths.
+This is done continually throughout the process in an MPC manner to always have
+recent updates to the control variables.
+This is only a superficial overview of the
+current controller, which has been refined multiple times since its original development.
+For further details, the reader is referred to the original paper [Wer14].
+The issue with the current model is that the differential equations represent only an
+approximation of the true system. Such an analytical model of the system also requires
+tuning to account for machine differences.
+MPC’s ability to continually correct for
+model inaccuracies allows the current controller to work well for especially the final part
+of the crystal growth. However, some of the earlier growth phases before the crystal
+reaches its full diameter exhibit much more complicated dynamics, so the inaccuracies
+are larger. Often these are too severe to allow for successful control, making the growth
+fail. Each failed run wastes both time and expensive poly material.
+1.2
+The Goal of this Project
+This project seeks to demonstrate the feasibility of a machine learning-based controller
+able to generate control inputs which allows the crystal diameter and full zone height to
+closely follow their targets. A controller for the real system will be built and presented,
+but implementing and testing it on a real machine is outside the scope of this project.
+For this reason, the focus will primarily be on building a controller for a simulated
+version of the system to demonstrate the usefulness of the approach. A large emphasis
+will be placed on reproducibility by describing design choices and methods to a degree
+which allows this report to serve as an engineering guide.
+This point is especially
+relevant in the context of float-zone’s status in the world of silicon crystal growth.
+Because it makes up such a small fraction of the world’s silicon production, relatively
+Page 9 of 75
+==PAGE:12==
+1. Introduction
+Technical University of Denmark
+little research on automated crystal growth exists, and much is proprietary trade secrets
+or protected by patents. All code is open-sourced under the MIT license to allow the
+reader to reproduce presented results.
+The methods in this report use neural networks to estimate optimal control in an
+MPC setting. While a large amount of real data from Topsil’s growth machines has been
+provided, it will play only a minor role. The majority of the focus will be on controlling
+a simulated version of the growth system. Comprehensively validating a controller in
+a simulated environment is relatively straightforward compared to implementing it on
+a growth machine, which would require both much work and money for very little
+validation data. Specifically, the project seeks to answer the following questions:
+1. Can a learning framework be constructed which allows a neural network-based
+MPC controller to effectively steer a simulated float-zone environment along pre-
+defined target trajectories?
+2. How do different network architectures and methods of estimating optimal control
+impact the controller’s performance?
+3. How well does the controller generalize to different target trajectories, and how
+stable is it?
+All three questions will be answered on the basis of the simulated system. After having
+selected network architecture, optimization techniques, and other hyperparameters, a
+model will be trained on the real data. While this model will not be validated as a
+controller for the aforementioned reasons, it will demonstrate that it is able to model
+the real system dynamics to a high degree.
+Chapter 2 gives a formal introduction to the control problem, including the proper-
+ties that make float-zone crystal growth stand out from other control problems. This is
+followed by a review on different control methods and how they deal with the properties
+of the float-zone system. This results in the selection of Non-linear Model Predictive
+Control (NMPC) using neural networks as the method of choice going forward.
+Chapter 3 then introduces the data sources and elaborates on data cleaning, target
+trajectories, and variable properties. This is followed by Chapter 4 which elaborates on
+how this data is used to train networks, how optimal control can be estimated in different
+ways, and how the neural networks will be set up.
+Different network architectures
+are discussed along with feature engineering and pre and post-processing steps before
+introducing the evaluating metrics and hyperparameter selection. The chapter after
+this contains the results of a number of experiments to determine the architecture,
+Page 10 of 75
+==PAGE:13==
+1. Introduction
+Technical University of Denmark
+control settings, and other hyperparameters.
+Chapter 6 contains a discussion of these results and further experiments to answer
+the still-open question regarding performance, stability, model selection, and generaliz-
+ability before the report is concluded in the final chapter.
+Page 11 of 75
+==PAGE:14==
+2.
+Control Methods
+This chapter introduces a number of methods for controlling dynamical systems, such
+as the float-zone crystal growth process. The goal is to give the reader an introduction
+to a subset of the methods present in control theory.
+Namely, the PID controller
+and variations of MPC methods will be presented and their strengths and weaknesses
+discussed. The result of this chapter is then a ”wish list” of properties for a control
+method which guide the decisions behind the final model introduced in Chapter 4.
+Hence, most of this chapter is not required reading for the continued understanding of
+the report. Only the introduction (section 2.1) and conclusion (section 2.5) are strictly
+necessary for the reader to follow.
+2.1
+Crystal Melting as a Control Problem
+To understand what makes certain properties of various control methods desirable or
+not, a formal introduction to float-zone crystal melting from a control perspective is
+needed.
+In general, the state of any control system can be described in terms of dependent
+and independent variables. The controller directly sets the independent variables which
+in this report will be referred to as control variables and associated with the letter
+u. These should be set to achieve the desired values for the dynamics variables, an
+observable subset of the dependent variables denoted by the letter x. Another subset
+of the dependent variables are the hidden variables which will be referred to with z.
+A final subset are the static variables and referred to with s.
+These variables are
+categorical and carry additional information the system which influence the system but
+is not directly a part of it. The growth phase and growth machine number are the two
+static variables modelled in the float-zone system here. The crucial distinction between
+the dynamics and static variables is that static variables are assumed to be known into
+the future. Full lists of the dynamics, control, and static variables are available in tables
+3.1, 3.2, and 3.3, respectively.
+The letter d is used to indicate the number of variables, or data dimensionality.
+Page 12 of 75
+==PAGE:15==
+2. Control Methods
+Technical University of Denmark
+With the presented notation, the full, Markovian state of the float-zone system can be
+represented using the four vectors listed in table 2.1.
+Variable category
+Vector notation
+Dimension
+Observable
+Dynamics
+x
+dx = 9
+✓
+Control
+u
+du = 3
+✓
+Static
+s
+ds = 2
+✓
+Hidden
+z
+dz
+Table 2.1:
+Different categories of variables which together make up a Markovian
+description of a system. The dimensions are given for the float-zone system as used
+in this project. The full list of dynamics variables is available in table 3.1, while the
+control variables are listed in table 3.2 and the static variables in table 3.3.
+To guide the controller, some dynamics variables have an assigned target trajectory.
+Dynamics variables with associated targets use the letter r and will also be known as
+target variables. As such, r ∈Rdr where dr ≤dx, as the target variables are a subset
+of the dynamics variables. In case of the float-zone system, two of the nine dynamics
+variables are also target variables (see table 3.1). The targets are calculated ahead of
+time and tells the controller what values the variables ideally should have at any given
+time. The more accurately the realised values follow the the targets, the better the
+chances of successfully growing a crystal.
+Because it cannot be assumed that a single observation of the variables constitute
+a Markovian system description, a history of observations is kept. The length of this
+record is known as the history window and has a length of H time steps, where each time
+step has length ∆t. A critical assumption is that the hidden variables will be carried
+in the historical information through their interactions with the observable variables.
+Further, this history ideally also carries information about the current dynamics of the
+system itself, as this can change somewhat over time as machine parts wear and are
+replaced, or if there are small differences in the poly material between melting processes.
+The goal of a controller can then be formulated as: Given a list of observed variables
+over the past H time steps and a list of target values for certain dynamics variables
+F time steps into the future, estimate the optimal control values over the next F time
+steps which make the target variables most closely follow their targets over that period.
+The time step at which control is calculated, or the current time step, is then time H.
+Before diving into the world of different control paradigms, some final properties
+of the float-zone process need mention. First, everything happens quite slowly in the
+melting process where even small changes take minutes if not hours. For this reason,
+Page 13 of 75
+==PAGE:16==
+2. Control Methods
+Technical University of Denmark
+a controller should not be prone to attempt overcorrections, as changes to the control
+input cannot be expected to quickly be reflected in the dynamics variables. There is
+also a varying degree of measuring noise on the variables, and because the process is
+so slow, the signal-to-noise ratio can be quite high when looking at even relatively long
+time sequences up to several minutes. A lot of thought has been put into developing an
+analytical model of the system [Wer14]. While this model describes parts of the system
+to a fairly high degree, the very necessity of this project indicates that application of
+this model in a new controller cannot be expected to achieve notably better results than
+what Topsil currently achieve. This constraint, apart from the inherent non-linearity
+of the system, rules out methods such as a Linear Quadratic Regulator (LQR) [SLT21],
+which otherwise have desirable properties such as the ability to optimize over an infinite
+time horizon.
+The ability to optimize over longer time horizons is preferable to a controller, as
+optimal solutions over consecutive shorter horizons do not in general lead to optimal
+solutions on infinite horizons [BGW90]. Naturally, predicting optimal control on longer
+horizons will better predict the infinite horizon optimal control, especially on a slow
+system like float-zone crystal growth, where the effects of control will only be felt far
+into the future.
+2.2
+The PID Controller
+Automated process control has for decades seen application across a large array of use-
+cases. Several control methods exist, with the previously mentioned PID controller
+being one of the most well known and widely applied ones. Despite the first formal
+description of the PID controller being more than a century old [Min22], its simplicity
+has meant that it is still widely in use today.
+A simple example is cruise control
+in a car, where it can continuously adjust engine power to maintain a target speed
+despite changes in road conditions, weather, slope etc. The PID controller is in its
+basic form model free, which is a significant selling point for many applications, but it
+also comes with notable drawbacks. The control is applied based on three terms; the
+proportional (P), integral (I), and differential (D). These three terms go into a weighted
+sum. Optimal weights here are process specific, hence the required tuning. A modern
+version of the PID controller, the PID Neural Network, attempts to solve this by using
+a neural network to perform on-line tuning, lowering tuning demands and improving
+performance [Din+22].
+Page 14 of 75
+==PAGE:17==
+2. Control Methods
+Technical University of Denmark
+Another issue is the lack of a control horizon, which means that it cannot take
+into account target states beyond the next time step, which, as mentioned, can lead
+to suboptimal infinite horizon solutions. This makes the PID controller vulnerable in
+systems with slow responses, especially when the measuring noise is high, and it also
+prevents the system from taking actions that not only optimize for the next time step,
+but also for states further into the future. In the float-zone process, crystals take hours
+to grow, making the lack of a control horizon one of the reasons that PID controllers
+have fallen out of favour in this setting.
+2.3
+Model Predictive Control
+MPC is one of the most widely applied control paradigms in industrial settings. It
+does not refer to one single control algorithm, but rather to a set of control strategies
+with common characteristics. As implied by its name, MPC requires a model of the
+system dynamics.
+Using the current state of the system and control inputs over a
+prediction horizon, the model predicts the evolution of the system’s state over the
+full horizon. Typically, a numerical optimizer is used to optimize control input w.r.t.
+an objective function, which will typically be an integral of the distance between the
+predicted and target states over the prediction horizon. The control is recalculated
+at intervals at most as long as the prediction horizon. This interval is known as the
+control horizon, or recalculation interval, and is determined by model accuracy and
+computational complexity, with a trade-off between correcting often for model errors
+and limiting calculation time to keep up with the system [Cam+07].
+Here we see a stark contrast to the PID controller. Whereas the PID controller is
+relatively simple and model free, MPC requires a model of at least reasonable accuracy
+over the span of the prediction horizon. However, MPC performs finite time horizon
+optimization, allowing it to consider the system state far into the future, which was one
+of the major drawbacks of the PID controller for slow systems such as float-zone crystal
+growth. The longer the prediction horizon, the less discrepancy there will naturally be
+between finite and infinite horizon optimization.
+When implementing MPC, the model is naturally the most important piece. It can
+either be achieved through system identification, that is learning the system dynamics
+empirically, or a mathematical model can be used if equations describing the system to
+sufficient accuracy can be derived. Few real systems have the luxury of being linear, but
+linear models have for decades been a favourite in MPC implementations. The reason
+Page 15 of 75
+==PAGE:18==
+2. Control Methods
+Technical University of Denmark
+is simple: Even non-linear systems are typically fairly well approximated by piecewise
+linear functions over sufficiently short horizons. Linear models are easily achievable, as
+linear regression is fast, trivial, and robust. The speed of linear models means that the
+optimization loop is fast enough to allow for short control windows, compensating for
+relatively poor model accuracy. For these reasons, linear models have been popular as
+far back as the 80’s [ML99].
+2.4
+Non-linear Model Predictive Control
+The field of NMPC is the subset of MPC methods that deals with modelling the system
+dynamics in a non-linear fashion. Compared to linear models, non-linear models have
+the potential to accurately predict non-linear system dynamics over a longer prediction
+horizon, allowing for better infinite horizon solutions.
+Topsil’s current automation
+method is an example of this, where a system of non-linear differential equations is
+used [Wer14]. However, the major shortcoming of mathematical system models is that
+complex systems are simply hard to analytically derive accurate models for, hence why
+the automation at Topsil sometimes results in system states so far from the targets that
+the growth process fails.
+The too simple nature of linear models and difficulty in deriving analytical models
+has led to extensive research into using non-linear regression models for MPC. One
+such type of model is a Gaussian Process (GP), which allows probabilistic modelling of
+the state [Bec21]. Unlike their linear cousins, many non-linear regression models can be
+unstable once they leave the data manifold on which they were fitted, in turn leading
+to NMPC generally being considered less robust [FA02]. The GP does not suffer from
+this, and it has the added benefit of estimating the variance of each state feature which
+can be used as a proxy for uncertainty. The GP is also fairly easy to tune, having few
+hyperparameters. These properties are ideal for NMPC, and GP has been shown to
+allow robust and cautious control, especially in low-certainty regions [Koc+04; HKZ19].
+However, GPs also posses some properties that make them less suited for certain tasks.
+For one thing, they do not learn from data but instead draw the necessary knowledge
+from the given data at runtime.
+This is done with a kernel function, which gives
+the covariances between data points under the assumption that all data is smooth
+and follows a multivariate normal distribution with the calculated covariances [BN06;
+Wan20].
+The most common kernel is the squared exponential kernel, which models
+points closer to each other as more strongly correlated. As fig. 1.3 demonstrates, these
+Page 16 of 75
+==PAGE:19==
+2. Control Methods
+Technical University of Denmark
+modelling assumptions do not hold at all for some variables, especially the poly diameter
+and angle, and to some extend also for the crystal pull rate.
+Because GPs do not learn from data, they cannot apply knowledge from other runs.
+Only the history from the current session would be available (at least without additional
+modelling) which naturally challenges the control ability of the system as it moves to
+states which have not yet been sufficiently explored.
+Artificial neural networks, or neural networks for short, ideally solve many of the
+issues exhibited by linear and the hitherto described non-linear models. Neural net-
+works are universal function approximators [Cyb89; HSW89], meaning that for any
+continuous real-valued function f : Rm →Rn, there exists a neural network which
+can approximate f to any desired degree. This property theoretically allows accurate
+modelling of arbitrarily complex systems. Furthermore, as long as sufficient empirical
+data about a system’s behaviour is available, training a network for system modelling
+does not require any domain knowledge. For these reasons, neural networks have been
+used in control settings for decades [Hun+92; GEK88], and it is still an area attracting
+significant research.
+One potential issue with neural networks is their potentially highly complex, irreg-
+ular, and over-confident behaviour on data sufficiently unlike the distribution of their
+training data [And21]. This risks unstable behaviour in an MPC setting, if a system
+states ventures to far from what the network has learned to accurately model. In 2006,
+Ahmad and Zhang [AZ06] described the application of neural networks in NMPC us-
+ing an ensemble of networks. They found that using the ensemble outperformed using
+single networks in both setpoint tracking and, notably, disturbance rejection – a case
+under which unstable behaviour more easily rears its ugly head. This should not be
+surprising as neural networks in general benefit in their generalization ability when
+running in ensembles [HS90].
+In fact, neural networks have found applications in a large variety of practical MPC
+settings. In 2000, Piche et al. [Pic+00] described multiple such applications, including
+controlling a gas phase polyethylene reactor, milk evaporators, and toluene diamine
+purification. Back then, available software and hardware did not allow for large neural
+networks, demonstrating the capabilities of even small networks when applied to highly
+non-linear control problems in an MPC setting.
+A modern example is the control
+of a diesel engine using a Long Short-Term Memory (LSTM) based model was used
+[HS97; Gor+22]. Under a variety of set-point tracking tasks and varying conditions, the
+model lowered both fuel consumption and particle emissions compared to the industry
+Page 17 of 75
+==PAGE:20==
+2. Control Methods
+Technical University of Denmark
+standard controller. Similar examples of practical applications include improving energy
+efficiency in buildings [JK21], steam quality control of thermal power units [WPL20],
+and motion planning for autonomous vehicles [Tan+21].
+Practical implementations of control methodologies demonstrate applicability, but
+they require much work in setting up, testing, and data gathering, hence why much
+research focus only on simulated environments. Johari et al. demonstrate the usage of a
+hyper chaotic diagonal recurrent neural network in an MPC setting to provide effective
+(simulated) Stewart platform control, which is important in several industrial applica-
+tions [JYK+22]. Similarly, Doncevic et al. demonstrate a reduced-space formulation
+for global optimization with a Recurrent Neural Network (RNN), allowing real-time
+control of the van de Vusse CSTR problem [MJ01; GHZ04; Don+20].
+This array of both real and simulated control problems solved with neural network
+based MPC controllers clearly demonstrate that despite their aforementioned chal-
+lenges, neural networks can be highly useful in control settings, so long as they are
+trained in a sufficiently robust manner. The attentive reader will also notice that the
+modern methods all rely on some neural architecture which specifically model sequen-
+tial data, which is ideal in the MPC setting, where predictions are made over a whole
+window at a time, rather than step by step.
+2.5
+Summary of Relevant Methods
+The previous sections describe three control methodologies – PID controllers, linear
+MPC, and non-linear MPC – along with relevant properties of the float-zone system
+from a control perspective. A controller needs to effectively deal with
+• Highly non-linear behaviour
+• Slow responses to control inputs
+• Subtle changes in system dynamics over time and between machines
+• High signal-to-noise ratio in short time windows
+• No known analytical model of sufficient accuracy
+• Observable variables do not constitute a Markovian system description
+• Some variables do not exhibit smooth behaviour, even when ignoring noise
+PID controllers do struggle with multiple of these points, ruling them out. As men-
+tioned earlier, they have also already been tried in the industry but were found to be
+suboptimal.
+Page 18 of 75
+==PAGE:21==
+2. Control Methods
+Technical University of Denmark
+An MPC approach, however, allows potentially accommodating all points. MPC
+itself makes few assumptions about the problem, but it is a control paradigm rather
+than a specific algorithm, so its suitability depends on the specific implementation. In
+short, MPC works by optimizing control inputs over some future horizon, the prediction
+window, to most closely follow the target for the system state in that horizon. This
+requires a model of the system which predicts future states given future control input
+and previous observations. Algorithm 1 shows a general MPC implementation. Linear
+Algorithm 1: General MPC pseudocode
+Input:
+H: Length of history window
+F: Length of prediction window
+C ≤F: Length of control window
+Model : XH, UH, UF →XF: Given state variables and control inputs from the
+history window, XH and UH, respectively, and future control inputs UF, the
+model produces future state variables, XF
+L : R, X →R: Cost for achieving state variables X with target R
+t ←H
+while Controller is active do
+XH ←past H observations
+UH ←past H control inputs
+RF ←next F targets for the state variables
+Find UF which minimizes L(RF, Model(XH, UH, UF))
+for i ←1 to C do
+t ←t + 1
+Apply next control input from UF
+MPC is here problematic because of the dual property of non-linear behaviour and slow
+responses to control input. Neither rules out a linear model by itself, but together they
+are problematic for linear models. The slow responses and high noise in short windows
+means that the prediction window has to be fairly long. Linear models can work for
+a non-linear system when it can be assumed that the system is well approximated by
+piecewise linear functions. The longer the windows, the weaker the assumption, casting
+doubt on the usefulness of linear models here.
+This leaves the subset of MPC methods relying on non-linear models, known as
+non-linear MPC or simply NMPC. The reason why linear models are often preferred
+is their robustness and ease of acquiring. Analytical models of sufficient precision have
+Page 19 of 75
+==PAGE:22==
+2. Control Methods
+Technical University of Denmark
+not been developed, hence the necessity of this project. Gaussian processes models
+have some clear benefits; they are non-linear, robust to outliers, require no training,
+have few hyperparameters, and even produce uncertainty estimates. However, they
+rely on the smoothness assumption which clearly does not hold as fig. 1.3 illustrates.
+They also cannot learn from existing data, so much knowledge is left out when making
+predictions.
+Neural networks are the only model with a potential to check all the listed points.
+They can model highly non-linear dynamics, including the long-term time dependencies
+present in the float-zone system. Some architectures (such as the RNN, LSTM, and
+transformer [Vas+17]) explicitly model data sequentiality. Because they can learn from
+data, they should be able to learn and account for small differences in the system
+dynamics between runs. The also make no assumptions about the data, so sudden
+changes in variables can be learned.
+While larger networks can be slow, the float-
+zone system equally has very slow dynamics, making a real-time controller likely not
+a problem time-wise. Their only major, obvious downside is that they are often not
+robust outside the distribution of the training data.
+This might make convergence
+hard for numerical optimizers and control unstable, especially in cases when the system
+dynamics are outside the usual states. However, as the rich literature on the subject
+demonstrates, this issue is far from always large enough to prevent effective control.
+Page 20 of 75
+==PAGE:23==
+3.
+Data
+This chapter introduces the two datasets which will be used in this project – one for
+each of the systems investigated; the real float-zone system and the simulated one. Con-
+siderations concerning usage of the data and feature engineering are kept to Chapter 4.
+A float-zone dataset consists of a set of runs, each of which is a multivariate time-
+series containing measurements of all observable variables at discrete time steps. A run
+here refers to the whole crystal melt process from the first to final phase. As such, we
+define the dataset as
+D = {T, X, U, S, R}i, i = 1 . . . n
+where T ∈N is the number of recorded time steps for run i and n the number of
+recorded runs. The data matrices for run i have the properties
+X ∈RT×dx
+U ∈RT×du
+S ∈ZT×ds
+R ∈RT×dr
+The observations are recorded every six seconds (∆t = 6 s), so for instance T = 100
+means that the data matrices cover 600 s.
+A major challenge is controller evaluation, as deploying it on a real machine is
+outside the project’s scope. To approach this, two datasets have been procured. The
+first is from close to 20,000 runs on Topsil’s machines going back to 2016. The second is
+artificially constructed by simulating the differential equations used by Topsil’s current
+controller under various conditions tuned to generate data mimicking the cone phase
+(see table 1.1 and fig. 1.3). The simulated data is also generated with ∆t = 6 s.
+Each dataset is split into 90 % training runs and 10 % test runs, as this was found
+to be a good ratio in pilot experiments.
+Page 21 of 75
+==PAGE:24==
+3. Data
+Technical University of Denmark
+3.1
+Float-zone Process Data
+The data provided by Topsil is a collection of 19,677 CSV files takng up 23,2 GB of
+disk space in uncompressed form, with each file containing the data from a single run.
+The data cleaning consisted of three main parts:
+1. Removing corrupt data files
+2. Filtering failed runs
+3. Discarding unused data
+On the first point, a few data files had been corrupted or contained invalid data data in
+one way or another. This generally took the form of a subset of lines containing more
+values than headers, or some columns containing instances of NaN. To filter the files,
+any files which could not be read by Pandas’ read csv function were discarded, as with
+any files containing one or more instances or NaN.
+The provided data covered all runs, including those which failed. Failed runs are
+not explicitly marked in the data, but it is trivial to build a highly effective filter. As
+fig. 3.1 demonstrates, failed runs can be clear to a human eye, but one should be careful
+using outlier detection to filter them, as single point outliers are relatively common as
+well, which are a result of measurement errors rather than indicative of failed runs.
+Failed runs also manifest themselves in quite different ways, with the only common
+denominator being fairly quick changes in the variables, so tuning an outlier detection
+algorithm is bound to be error-prone without significant effort.
+A better, and more consistent way of filtering, is instead to inspect the phases. Each
+phase has an expected next phase, so a phase is only considered complete if the next
+phase is present immediately after in the data. As such, the data used from each file
+is the longest consecutive section of where all phases are complete, though everything
+after the cone phase was always removed, as the final few phases are not of interest
+to this project. After all filtering, 11,183 data files remained containing a total of 25
+million data points, or 150 million seconds of observations.
+The variables in the raw data did not correspond 1 to 1 to those present in x, u, s,
+and r. Topsil has, over time, changed and increased the number of observed variables,
+for which reason not all data files contain the same variables. Only relevant variables
+present in all data files were included. One example of changing variables is found in
+the crystal angle. Early data files contain only a single measurement, the average of
+the angle of the left and right sides of the crystal, while later ones contain both the
+Page 22 of 75
+==PAGE:25==
+3. Data
+Technical University of Denmark
+0.00
+0.25
+0.50
+0.75
+Time [h]
+0
+50
+100
+150
+Poly diameter [mm]
+0.00
+0.25
+0.50
+0.75
+Time [h]
+50
+100
+Crystal diameter [mm]
+Observed
+Target
+0.00
+0.25
+0.50
+0.75
+Time [h]
+2
+4
+6
+Upper zone height [mm]
+0.00
+0.25
+0.50
+0.75
+Time [h]
+4
+6
+8
+Lower zone height [mm]
+0.00
+0.25
+0.50
+0.75
+Time [h]
+22.5
+25.0
+27.5
+30.0
+Full zone height [mm]
+Observed
+Target
+0.00
+0.25
+0.50
+0.75
+Time [h]
+0
+25
+50
+75
+Melt volume [cm3]
+0.00
+0.25
+0.50
+0.75
+Time [h]
+0
+20
+40
+Poly angle [deg]
+0.00
+0.25
+0.50
+0.75
+Time [h]
+25
+0
+25
+Crystal angle [deg]
+0.00
+0.25
+0.50
+0.75
+Time [h]
+5
+6
+7
+Generator voltage [kV]
+0.00
+0.25
+0.50
+0.75
+Time [h]
+10
+5
+0
+Poly pull rate [mm/min]
+0.00
+0.25
+0.50
+0.75
+Time [h]
+2.00
+2.25
+2.50
+2.75
+Crystal pull rate [mm/min]
+Figure 3.1:
+An example of a run which failed during the cone phase. The sudden
+changes across the variables make it clear, especially when comparing to the successful
+run shown on fig. 1.3.
+Variable
+Unit
+Has target
+Poly diameter
+mm
+Crystal diameter
+mm
+✓
+Upper zone height
+mm
+Lower zone height
+mm
+Full zone height
+mm
+✓
+Melt volume
+cm3
+Poly angle
+◦(deg)
+Crystal angle
+◦(deg)
+Full poly diameter
+mm
+Table 3.1: Dynamics variables in the float-zone system. Further variables exist in more
+recent data files, but to keep the data consistent, only the variables present in all data
+files have been kept. The full poly diameter is constant within each run and defined
+as the maximum of the poly diameter. It exists to let a model figure out when in the
+prediction window the poly should stop increasing in diameter, but since it is constant
+and otherwise uninteresting, it is not shown in plots.
+average and individual measurements. There are different ways of handling this, but
+because the crystal in general is nearly symmetrical, only the average angle was used.
+Page 23 of 75
+==PAGE:26==
+3. Data
+Technical University of Denmark
+Variable
+Unit
+Predefined control
+Generator voltage
+V
+Poly pull rate
+mm/s
+Crystal pull rate
+mm/s
+✓
+Table 3.2: Available control variables in the float-zone system. As with the dynamics
+variables, some control variables which only exist in newer data files have been dis-
+carded. Further, the current system at Topsil only controls the generator voltage and
+poly pull rate, while the crystal pull rate follow a predefined curve.
+Variable
+Possible values
+Growth phase
+3
+Machine number
+12
+Table 3.3: Available static variables in the float-zone. Only three of the ten growth
+phases defined in table 1.1 are modelled in this project. Some of the early phases do
+not require a controller, and the in final phases, the current controller performs at a
+sufficient level.
+3.2
+Simulation
+The differential equations used in Topsil’s current controller, if not always accurate,
+do present a useful way of solving the main challenge with the real data: That it is
+not practical to test a controller in the scope of this project. The code for these has
+been provided by Topsil and adjusted to work within the code framework developed
+for this project. It uses the fourth order Runge-Kutta method [CK98, Chapter 10.2]
+to simulate the differential equations to great accuracy. The differential equations will
+not be covered here. The interested reader can find them described in great detail in
+Nico Werner’s PhD thesis on the subject [Wer14].
+The dynamics variables present in the differential equations are the same as those
+listed in table 3.1 with the addition of the target-less melt neck diameter. The control
+variables are the same as those listed in table 3.2. The crystal pull rate is kept constant
+within each run. Only a single, binary static variable is present, which is not part of the
+simulations themselves. It is 1 for data which has been generated by simulation and 0
+if not. To be able to test a controller’s accuracy from the start of the run, 10 minutes
+of constant data is prepended to each run using the initial values of the simulation.
+This allows for a controller to take over at the start of the simulated data, as long as
+the history window is at most 10 minutes, which will always be the case throughout
+Page 24 of 75
+==PAGE:27==
+3. Data
+Technical University of Denmark
+the report. The differential equations also model two hidden variables which allows
+testing how the model handles partially observable states and the effect of the size of
+the history window.
+0
+2
+4
+6
+Time [h]
+50
+100
+150
+Poly diameter [mm]
+0
+2
+4
+6
+Time [h]
+100
+200
+Crystal diameter [mm]
+Observed
+Target
+0
+2
+4
+6
+Time [h]
+8
+10
+Upper zone height [mm]
+0
+2
+4
+6
+Time [h]
+15
+20
+Lower zone height [mm]
+0
+2
+4
+6
+Time [h]
+20
+25
+30
+Full zone height [mm]
+Observed
+Target
+0
+2
+4
+6
+Time [h]
+100
+200
+Melt volume [cm3]
+0
+2
+4
+6
+Time [h]
+20
+0
+20
+Melt neck diameter [mm]
+0
+2
+4
+6
+Time [h]
+0
+20
+40
+Poly angle [deg]
+0
+2
+4
+6
+Time [h]
+0
+20
+40
+Crystal angle [deg]
+0
+2
+4
+6
+Time [h]
+3
+4
+5
+Generator voltage [kV]
+0
+2
+4
+6
+Time [h]
+1.5
+2.0
+2.5
+Poly pull rate [mm/min]
+0
+2
+4
+6
+Time [h]
+1.35
+1.40
+1.45
+Crystal pull rate [mm/min]
+Figure 3.2:
+A simulated run with a target crystal diameter of 8 in. The short, straight
+sections at the start of the run do not come from the simulation but have been prepended
+to serve as an initial history window to allow a controller to take over immediately at
+the start of the simulation. The oscillations are common in the simulated data, and
+presents an interesting challenge to the controller: Can it follow the straight target lines
+when trained on mostly oscillating data?
+The model parameters and control values have been tuned to produce cone-like
+trajectories. The initial values are then perturbed within ±10 % to create variation
+in the data. The controller trajectories are similarly perturbed at six selected points
+throughout the run, with in-between points being linearly interpolated. This creates
+different controller trajectories which all follow similar but distinct trajectories tuned
+for simulating the cone phase. The resulting trajectories result in crystals that are
+mostly between 7.5 in and 9 in. An example of a simulated run is shown on fig. 3.2.
+The dynamics variables all have a variable amount of white noise added to demonstrate
+a controller’s resistance to it.
+The target variables are, as with the real float-zone data, the crystal diameter and
+full zone height. Three sets of targets are created, one for each target crystal diameter
+Page 25 of 75
+==PAGE:28==
+3. Data
+Technical University of Denmark
+of 4 in, 6 in, and 8 in. The 8 in target values will be used as the primary benchmark,
+as most training data ends with crystals around that size. The 4 in and 6 in target sets
+will be used to test the models robustness to targets outside the range of the training
+data.
+Each run was simulated for 20,000 seconds, or just over 51/2 hours.
+Page 26 of 75
+==PAGE:29==
+4.
+Methods
+We have spent the past chapters exploring the problem, the challenges it presents, and
+a number of methods which inspire the approach to solving it, which will be presented
+here. Going back to section 2.1, the most promising approach was a neural network
+ensemble in an MPC setting.
+This offers a large amount of flexibility and has the
+potential to effectively deal with all challenging properties of the float-zone system.
+This chapter introduces in detail how such a controller works and how the networks
+are trained. First, the control objective is introduced in terms of optimal control fol-
+lowed by an overview of the feature engineering applied. Section 4.2 introduces the
+construction of the neural network and the operations (linear interpolation, smoothing,
+and shifting) used for pre and post-processing of network input and output. This is
+followed by a walk-through of the training procedure, after which section 4.4 describes
+how controllers will be evaluated as well as different ways of estimating optimal control.
+Finally, an explanation of hyperparameter search and details of the implementation are
+given.
+Consider the implementation of the controller; at time step H, H observations of the
+dynamics variables x, the control variables u, and the static variables s are known.
+These are organized into three matrices, Xh, Uh, and Sh.
+The controller should then predict control over the the next F time steps to best
+make the target variables, a subset of the dynamics variables, match their defined
+targets. Future control input is organized in the matrix Uf, while future targets are
+contained in Rf and future static variables in Sh. These are part of the six matrices
+which describe the full MPC horizon, from history start (time step 1) to prediction end
+(time step H + F).
+Xh =
+
+
+xT
+1
+xT
+2...
+xT
+H
+
+
+∈RH×dx
+Rf =
+
+
+rT
+H+1
+rT
+H+2
+...
+rT
+H+F
+
+
+∈RF×dr
+Page 27 of 75
+==PAGE:30==
+4. Methods
+Technical University of Denmark
+Uh =
+
+
+uT
+1
+uT
+2...
+uT
+H
+
+
+∈RH×du
+Uf =
+
+
+uT
+H+1
+uT
+H+2
+...
+uT
+H+F
+
+
+∈RF×du
+Sh =
+
+
+sT
+1
+sT
+2...
+sT
+H
+
+
+∈ZH×ds
+Sf =
+
+
+sT
+H+1
+sT
+H+2
+...
+sT
+H+F
+
+
+∈ZF×ds
+The controller’s task is to estimate optimal control over the prediction window, U∗
+f,
+such that
+ˆUf ≈U∗
+f = arg min
+Uf
+L(Rf, r(Uf))
+where L is a scalar loss function (as in algorithm 1) and r a function returning future
+values of the target variables given future control Uf. The ˆ symbol is used to indicate
+estimates.
+This is the standard formulation for optimal control. The common approach is to
+construct a model, Mr, which predicts how the target variables behave given future
+control:
+ˆRh = Mr(Xh, Uh, Sh, Uf, Sf) ≈r(Uf)
+This estimate is then used to minimize the loss:
+ˆUf = arg min
+Uf
+L(Rf, ˆRf)) = arg min
+Uf
+L(Rf, Mr(Xh, Uh, Sh, Uf, Sf)
+This optimization problem is typically solved using a numerical optimizer. Depending
+on the model, this can be a slow ordeal and is often a challenge in real-time implemen-
+tations.
+One of the advantages of neural networks is their versatility. There is no obvious
+reason a network should not be able to estimate optimal control directly:
+ˆUf = Mu(Xh, Uh, Sh, Rf, Sf)
+Page 28 of 75
+==PAGE:31==
+4. Methods
+Technical University of Denmark
+This would skip the optimization step completely, making predictions faster and the
+code simpler.
+Both approaches will be explored here. Networks implementing Mr will be known as
+dynamics networks, and networks implementing Mu will be known as control networks.
+The networks will be trained in ensembles, following Ahmad et al.’s [AZ06] research
+describing the improved robustness and performance of ensembles in NMPC, with the
+number of network in each ensemble being denoted with the letter m.
+4.1
+Feature Engineering
+In any data science task, feature engineering should be considered to make the model’s
+life easier. Angles are a good example of how feature engineering can be important. If
+an angle, θ, is given to a model directly, the model has to learn that 0 and 2π are the
+equal, despite them being far removed from each other in the realm of R. Typically
+this is solved by replacing θ with two features, cos θ and sin θ, which encode the cyclic
+nature of angles such that the model does not need to learn it.
+Given this example of common practice, it needs explicit mentioning that it is not
+employed here. This is because the two angles present, the poly and crystal angles,
+rarely leave the interval [−10◦, 50◦]. If the crystal angle ever were to leave this range
+by a significant margin, something would already have gone wrong. The poly angle
+will, except for noisy measurements, only have the values 0◦or 45◦, so it is effectively
+one-hot encoded. For these reasons, the angles are sufficiently constrained to where the
+cyclic effects do not play a major role, and so this encoding has not been implemented.
+One piece of common feature engineering which has been applied is one-hot encoding
+of the static variables. Each static variable is one-hot encoded individually, and these
+encodings are then concatenated to form a full s vector.
+Further, all variables bar the static ones are standardized which is a necessity for
+useful and stable learning given the vastly different ranges of the different features. It
+is done feature-wise using means and empirical standard deviations calculated across
+the whole training data set. This also includes the training targets for the networks,
+such that both inputs and outputs to the networks are in the standardized domain.
+One-hot encoding and standardization are the only two pieces of feature engineering
+applied. This is relatively light, but it is important to point out that the ”raw” data
+is already heavily processed, as it largely contains values calculated from video feeds,
+which in the strictest sense of the word is the only real raw data. This is not the case
+Page 29 of 75
+==PAGE:32==
+4. Methods
+Technical University of Denmark
+for the simulated data, as it comes directly from the simulation and so is strictly raw.
+However, it simulates the real data, and so the feature engineering has been kept the
+same as for the real data.
+4.2
+Network Design
+Going back Chapter 2, a wish list was made for properties which needed special at-
+tention. These properties influence the design of the network architecture, which so
+far has not been considered. One assumption was that a full, Markovian description
+of the system is attainable from observed data over the history window. Under this
+assumption, a network can be trained to convert the history into a present Markovian
+representation of the system, zH ∈Rdz, where dz is a hyperparameter and the dimen-
+sionality with which the full system state is modelled. This subnetwork will be called
+the history encoder, or Eh for short, with the signature
+zH = Eh(Xh, Uh, Sh)
+Similarly, a future encoder is employed. This processes future variables by mapping
+them into the latent space Rdz, independently of the history. A latent representation is
+produced for each time step in the prediction window, and each representation can use
+the context of the rest of the window. The future is obviously not observable, so these
+representations are not Markovian. The future encoder of the dynamics network, Eu,
+and of the control network, Er, vary slightly in their signatures, which are
+Zu = Eu(Uf, Sf)
+Zr = Er(Rf, Sf)
+Finally, the representation of the current state, zH, and the future states are given to
+a decoder, Dr in the dynamics network and Du in control network, which produces the
+desired output. These are given as
+ˆRf = Dr(zH, Zu)
+ˆUf = Du(zH, Zr)
+Page 30 of 75
+==PAGE:33==
+4. Methods
+Technical University of Denmark
+This presented formulation of a network is quite versatile, allowing end-to-end modelling
+of the data’s sequential nature, while consisting of three blocks whose architectures can
+be independently changed to optimize for accuracy and speed. Three architectures will
+be presented later in this chapter, which can be used in the different blocks.
+What is missing from this formulation are the pre and post-processing steps ap-
+plied. Figure 4.1 shows the full architecture of both the dynamics and control network,
+including these steps. The preprocessing consists of two operations: Linear interpola-
+tion and smoothing, while the post-processing shifts the predictions followed by a final
+smoothing operation and linear interpolation.
+Linear Interpolation
+Linear interpolation is here used to change the number of time
+steps in a sequence. The operation, Lt, converts a single-channel time series to t time
+steps by linear interpolating between points.
+In the preprocessing, L is applied feature-wise to reduce the number of time steps.
+The float-zone data has a resolution of six seconds, which is much too low to not
+be dominated by noise in a system as slow as here. However, such a high resolution
+massively increases the compute needed in the network. Reducing the number of time
+steps thus speeds up both training and inference, while loosing little, if any, accuracy.
+Two hyperparameters are introduced to control the application of linear interpola-
+tion: λh and λf, both of which are real numbers in ]0, 1]. We define
+Hi = ⌊λhH⌋
+∧
+Fi = ⌊λfF⌋
+where Hi and Fi are the numbers of interpolated time steps in the history and pre-
+diction windows, respectively. Setting either λ = 1 disables the interpolation for the
+corresponding window. The decoder outputs Fi time steps which are re-interpolated to
+F time steps using LF.
+Linear interpolation between two points is differentiable through both points, mak-
+ing L differentiable, as long as every point in the input sequence is used. This is the case
+when the output has more than half as many points as the input sequence – assuming
+the points are evenly spaced, which is the case here. Because the decoder output is of
+length Fi and Fi ≤F, LF in the post-processing will be fully differentiable, but this is
+not in general the case with LHi and LFi in the preprocessing.
+Linear interpolation is implemented on the GPU using PyTorch which both improves
+execution speed and allows gradients to be tracked through the operation automatically.
+Page 31 of 75
+==PAGE:34==
+4. Methods
+Technical University of Denmark
+Input
+Output
+Neural network
+Latent
+representation
+History encoder
+Future encoder
+Static operation
+Decoder
+Dynamics network
+History encoder
+Future encoder
+Decoder
+Control network
+Figure 4.1:
+Overview of the network architecture for both the dynamics and control
+network. The process network uses future control input to predict the future values
+of the target variables, while the control network uses future target values to predict
+the control that will lead to the system state matching them. The L operator performs
+feature-wise linear interpolation, while the sm operator smooths the signal, also feature-
+wise. Everything after the first layer of interpolations is differentiable, allowing joint
+training of all three subnetworks in each model.
+Smoothing
+Smoothing as used here refers to a feature-wise low-pass filter which re-
+duces noise and is an effective way of dealing with the odd outlier, sometimes present
+in the data. There are multiple ways to implement such a filter. The method chosen
+here relies on exponential smoothing applied in both directions and averaged. This
+Page 32 of 75
+==PAGE:35==
+4. Methods
+Technical University of Denmark
+is achieved using matrix multiplication. The smoothing is parametrized by the pa-
+rameter α ∈]0, 1], where lower values means more aggressive smoothing and α = 1
+disables smoothing altogether. For a sequence of length T, the smoothing kernel is
+denoted Aα(T) ∈RT×T. The construction of Aα is described along with examples in
+appendix A.1, but for now it suffices to say that each row in the kernel sums to one,
+and for α = 1, Aα(T) is the identity matrix. The smoothing operator is defined as
+smα(D) = Aα(T) · D
+where the data matrix D ∈RT×d is a time series of length T with d features.
+Implementing a low-pass filter with matrix multiplication is not in general the most
+effective method by runtime complexity or memory usage. However, the relatively short
+sequences present here makes this a non-issue, especially since GPU implementation is
+trivial.
+Shifting
+The last operator to be mentioned is the shift operator, which in fig. 4.1
+has been marked with a humble +. This operator takes as input the final point from
+the relevant history sequence after preprocessing and adds it to the output of every
+point in the output sequence from the decoder. This makes the decoder predict future
+variables relative to their current values. Pilot experiments showed a slight performance
+improvement after the addition of the shift operator.
+4.2.1
+Fully-connected
+The fully-connected architecture, also known as feed-forward or Multilayer Perceptron
+(MLP), is arguably the most basic type of neural network. It consists of a number of
+affine transformations joined by a non-linear activation function, batch normalization
+[IS15], and dropout [Sri+14].
+As mentioned in section 2.4, fully-connected networks are universal function approx-
+imators [HSW89]. Theoretically, then, no other architecture should be needed for any
+modelling problem. Training such a model is in practice difficult, as fully-connected net-
+works do not explicitly model spatial structure in data, making them struggle with tasks
+such as time-series and image analysis. This issue was what allowed the Convolutional
+Neural Network (CNN) architecture [LeC+89] to burst into the mainstream in 2012,
+when AlexNet handedly outperformed any other model on the ImageNet Large Scale
+Visual Recognition Challenge [KSH12].
+Page 33 of 75
+==PAGE:36==
+4. Methods
+Technical University of Denmark
+The major advantage of the fully-connected architecture is that it is easy to imple-
+ment and quick to train, so it makes for an effective baseline.
+In this implementation, inputs to a fully-connected block are first concatenated
+along the feature axis. The time and new feature axis are then flattened. The reverse
+operation is performed on the output. For instance, consider then future encoder in
+the dynamics network, Eu. The input to this block is
+LFi(smα(Uf)) ∈RFi×du
+LFi(smα(Sf)) ∈ZFi×ds
+The concatenated and flattened input vector then lies in RFi·(du+ds). The output layer
+of the network is defined to have Fi · dz features, which is reshaped to Zu ∈RFi×dz. If
+used for the history encoder, the final layer directly outputs zH ∈Rdz with no reshaping
+required.
+To simplify experiments, each hidden layer, of which there are l, has the same size,
+df. The dropout probability between each layer is denoted p.
+4.2.2
+Transformer
+The transformer architecture has seen widespread adoption since its introduction in
+2017 [Vas+17], with variations of it achieving state-of-the-art in many different types of
+tasks, including Natural Language Processing (NLP), computer vision, and time series
+analysis. Its strength in this variety of tasks comes from adding an understanding of the
+data’s spatial structure through positional encodings and calculating the importance, or
+attention, of each input point to every other point. Crucially, in the calculation of these
+attention scores, every point is directly available, which means that the transformer
+is much stronger at modelling long-term dependencies than earlier architectures such
+as RNNs and LSTMs. This was especially a problem in NLP, where information can
+suddenly become important only pages later, seriously challenging older architectures.
+NLP was therefore also the original motivation for the development of the transformer,
+but it not should be hard to see how its properties are also desirable when it comes to
+the float-zone system. Similar to text, which is a sequence of words, float-zone data
+is a sequence of observations, and since changes can propagate through the slowly,
+long-term dependency modelling is clearly advantageous.
+The original introduction was a sequence-to-sequence model, which used an encoder-
+Page 34 of 75
+==PAGE:37==
+4. Methods
+Technical University of Denmark
+decoder structure. For this task, however, the encoder is the interesting part. The
+transformer encoder takes in a sequence of dz dimensional representations and produces
+a similar sequence of dz dimensional representations, in which each representation en-
+codes relevant information from the rest of the sequence. This is perhaps most intuitive
+in the context of NLP, where the meaning of words can change significantly depending
+on context. From here on out, transformer will be used to specifically refer to the
+transformer encoder, unless otherwise mentioned.
+Each data point in the sequence of float-zone data is an incomplete description of
+the system consisting only of observable values. The hope is that the hidden variables
+can be inferred by their influence on the observable variables over time. The observable
+variables have a lower dimensionality than dz. Therefore, in the implementation, an
+affine transformation mapping each point in the sequence from the number of input
+variables to dz is applied. This transformation is also known as an embedding. Consider
+again the future encoder in the dynamics network. The embedding here maps from
+RFi·(du+ds) to Rdz. As with most transformer implementations, a positional encoding is
+added here. The result is then fed to the transformer, which produces Zu directly.
+When used as a decoder, the output is an Fi long sequence of dz dimensional rep-
+resentations. These are fed to a single dense layer, which maps the representations to
+the desired output dimension, e.g. du for the control network.
+The transformer consists of a series of stacked blocks, the output of each being given
+as input to the next. Within each block, the self-attention mechanism is employed,
+which calculates the attention scores using h heads. The number of blocks is denoted
+b. Each block also contains a dense residual layer, the size of which is denoted dt.
+4.2.3
+Gated Transformer
+The gated transformer [Liu+21] is an extension of the standard transformer encoder
+architecture introduced to improve multivariate time series classification. The gated
+transformer not only explicitly models time dependencies, but also the feature-wise
+dependencies. This is done by adding a second encoder, or tower in the nomenclature
+of the authors, which considers the sequence of channels with each time step being
+a feature; essentially transposing the input. The outputs of The Two Towers [Tol54]
+are merged using a gate followed by a dense layer and a softmax function. As such,
+the output is, unlike the transformer described before, not a sequence, but a single
+probability distribution over classes.
+Page 35 of 75
+==PAGE:38==
+4. Methods
+Technical University of Denmark
+Here, the goal of the gated transformer is not classification, so the softmax is skipped.
+Because it does not output a sequence, the gated transformer is suited neither for the
+future encoder nor the decoder. However, the output, being a single vector, makes it
+well suited for the history encoder, which is how it will be used.
+4.3
+Training Details
+The training of the networks is approached in a fairly standard way. Each batch consist
+of a number of sequences containing a history window of Xh, Uh, and Sh and a predic-
+tion window containing Uf, Sf, and Rf. Here, Rf does not contain the target values
+themselves, but the values of the dynamics values which have assigned targets. The
+sequences are sampled by first sampling a random run and then sampling a sequence
+of length H + F within the sampled run.
+The goal for the dynamics network is to predict Rf given Uf while the control
+network attempts to predict Uf given Rf. The loss is calculated before applying LF
+(refer to fig. 4.1). The output of the decoder is smoothed being passed to the loss
+function. Therefore, the targets were subject to the same smoothing operation.
+On the topic of loss, Mean Absolute Error (MAE) is used. Several regression loss
+functions exist for time series forecasting, which this learning task closely resembles
+[JPJ22]. The most obvious choices are MAE, Mean Squared Error (MSE), and Huber
+loss, which uses MSE for small loss and MAE for larger loss, scaled to create a continuous
+loss function.
+MSE can be unstable because large errors get amplified, which can
+cause gradients to balloon. Pilot experiments revealed this to be a significant problem
+in this learning task.
+However, it punishes small errors less than MAE, which can
+be advantageous. Huber loss ideally solves this by mixing the two, but it comes at
+the cost of introducing yet another hyperparameter, the Huber δ. Since the loss is
+calculated between a smoothed network output and a smoothed target, this advantage
+becomes less pronounced, hence why MAE was chosen. Pilot experiments also showed
+no improvements using Huber loss over MAE.
+MAE also has the nice property that it is given in the same units as the inputs,
+opening the door for interpreting the loss as a physical property.
+The training is performed using the AdamW optimization algorithm [LH17]. The
+only differences between the networks in the ensemble are their initializations and the
+sequences sampled. The learning rate follows a one cycle policy [ST19]. This policy
+initializes the learning rate at a low level, after which it is raised to a peak followed
+Page 36 of 75
+==PAGE:39==
+4. Methods
+Technical University of Denmark
+by a a slow reduction to final value much lower than the initial. Figure A.4 shows
+a graphing of the learning rate throughout the training. This policy allows fast and
+efficient training by not overfitting to early data points, then taking large steps in the
+middle of the training, after which it drops to tiny steps to allow squeezing out the final
+bit of optimization. The learning rate curve, which was kept constant over all trainings
+in the report, is shown on fig. A.4.
+Model checkpoints are saved throughout training, but this is mostly to safeguard
+against unexpected interruptions. In practice, the test loss keeps falling until conver-
+gence, never diverging from the test loss. Not in any of the countless trainings made
+for this project has a training shown signs of overfitting, so all models used are simply
+those saved after the final batch. Examples of loss curves for different trainings are
+available in appendix A.2.
+4.4
+Evaluation and Control
+As has been alluded to earlier, evaluating a float-zone controller is a comprehensive
+assignment. Topsil’s control framework is written C++, so the model must be exported
+to a language agnostic format and the control code rewritten and tested extensively in
+C++. These tasks are individually not insurmountable, but then time and resources
+also have to be dedicated from Topsil’s side to make a test run of a brand new controller,
+only to gain a single sequence of evaluation data. While all of these things will have to
+be done in order to eventually implement a controller like the one developed here, they
+are far outside the scope of the project.
+Instead, we turn to the simulated environment described in section 3.2. Here we
+get an idealized, but still challenging, version of the real system which poses mostly the
+same challenges as the float-zone system. If the controller works well on the simulated
+system, it is reasonable to assume that it would also work well on the real system.
+Hyperparameters are therefore also optimized on the simulated system.
+A second simulated system, which hitherto has not been mentioned, has also been
+implemented. By considering every dynamics variable to be a target variable, a dy-
+namics network was trained to simulate the system dynamics. Ideally, this would be
+more accurate than the simulations. Figure 4.2 shows a sample of data simulated with
+a neural network. The network was trained with a prediction window of one hour, so
+the simulation was forwarded one hour at a time. This causes some variables to have
+noticeable jumps at one hour intervals. The full zone height and crystal diameter also
+Page 37 of 75
+==PAGE:40==
+4. Methods
+Technical University of Denmark
+drift far from their respective targets, making it doubtful if a controller could ever learn
+the behaviour needed to follow the targets.
+0
+1
+2
+3
+4
+Time [h]
+60
+80
+100
+120
+Poly diameter [mm]
+0
+1
+2
+3
+4
+Time [h]
+50
+100
+150
+200
+Crystal diameter [mm]
+Observed
+Target
+0
+1
+2
+3
+4
+Time [h]
+6.0
+6.5
+7.0
+7.5
+Upper zone height [mm]
+0
+1
+2
+3
+4
+Time [h]
+2.5
+5.0
+7.5
+10.0
+Lower zone height [mm]
+0
+1
+2
+3
+4
+Time [h]
+25
+30
+Full zone height [mm]
+Observed
+Target
+0
+1
+2
+3
+4
+Time [h]
+0
+100
+200
+Melt volume [cm3]
+0
+1
+2
+3
+4
+Time [h]
+0
+20
+40
+Poly angle [deg]
+0
+1
+2
+3
+4
+Time [h]
+20
+0
+20
+40
+Crystal angle [deg]
+0
+1
+2
+3
+4
+Time [h]
+4
+5
+6
+7
+Generator voltage [kV]
+0
+1
+2
+3
+4
+Time [h]
+2
+3
+Poly pull rate [mm/min]
+0
+1
+2
+3
+4
+Time [h]
+2.6
+2.8
+3.0
+Crystal pull rate [mm/min]
+Figure 4.2:
+A cone phase simulated using a dynamics network trained to predict all
+dynamics variables.
+Data from the initial ten minutes, the length of the network’s
+history window, were copied from the real data, with the remaining being simulated by
+forwarding with the network one hour at a time, the length of the prediction window,
+using the provided control inputs.
+These artefacts also pose a question for how to even define the forward method;
+for generating the data, the system was forwarded one hour at a time as that was the
+output length of the neural network. However, controllers would have different control
+windows, which would make predictions not aligned with the jumps in the data. The
+jumps could be prevented by forwarding one time step at a time, but this is arguably
+even worse; pilot experiments revealed the resulting behaviour to be unstable, not to
+mention how unbearably slow forwarding the system would be. As such, this approach
+presented too many issues for it to be pursued any further.
+4.4.1
+Evaluation Metrics
+To quantify the performance of controllers and compare them against each other, a
+performance measurement is needed. Since there are two target variables, the crystal
+Page 38 of 75
+==PAGE:41==
+4. Methods
+Technical University of Denmark
+diameter and the full zone height, two numbers will be presented for each experiment:
+For each target variable, the MAE will be calculated over the whole simulated sequence
+between the target values and the values achieved by the controller after 10 minutes
+(time step 100), which is when the controller takes over. The error l in a single run of
+T time steps for a given target variable with value xt at time step t and target rt is
+then
+l =
+1
+T −100
+T
+X
+t=101
+|rt −xt|
+Because MAE is used, the numbers will be presented in mm and represent the average
+physical distance between the targets and achieve values.
+The obvious issue of this approach is that the system starts in a very different state
+from where it settles, and these different parts of the simulation may not be equally easy
+to control. For instance, if the early part generally exhibits higher loss, the loss could
+be artificially lowered by letting the simulation simply run for longer. However, every
+simulated is equally long, so the numbers are comparable between experiments, even if
+one should be careful to read too much into their meanings as physical properties.
+4.4.2
+Methods for Estimating Optimal Control
+The controller was implemented using an MPC approach. MPC is described in de-
+tail in Chapter 2 with pseudocode given in algorithm 1. The algorithm itself is fairly
+straightforward, but it does leave one crucial step up the user: How to estimate the
+optimal control over the prediction window, ˆUf ≈U∗
+f. A normal method is to de-
+velop some model of the system dynamics and use a numerical optimizer. However,
+this can both be slow and struggle to converge when dealing with neural networks.
+Instead, two methods will here be presented which take advantage of the properties of
+neural networks: Direct Control Prediction (DCP) and Optimization against Dynamics
+Network (ODN).
+Direct Control Prediction
+DCP is the simpler method. Because a network has
+been trained to directly estimate optimal control, the dynamics network is discarded.
+The control networks in the ensemble are denoted Nc,i, i = 1 . . . m. Letting pre and
+post-processing be implicit, control is estimated as
+Page 39 of 75
+==PAGE:42==
+4. Methods
+Technical University of Denmark
+ˆUf = 1
+m
+m
+X
+i=1
+Nc,i(Xh, Uh, Sh, Rf, Sf)
+This approach will be tested for both individual models and the ensemble as a whole.
+Optimization against Dynamics Network
+ODN is an approach more akin to
+traditional MPC in that optimal control is optimized against a model of the system
+dynamics. At the core of all deep learning is the fact that neural networks are differ-
+entiable. In the simple-most case, a neural network N parametrized by w would work
+something like ˆy = N(x; w). Then using gradient descent, a large number of steps
+w ←w −η · ∇wL(y∗, N(x; w))
+are made, where η is the step size or, more commonly, learning rate. Of course, modern
+deep learning, as in this project, adds more spice using methods like weight decay and
+momentum as in the AdamW optimization algorithm.
+ODN works by flipping this method around. The dynamics network is assumed to
+sufficiently well trained. The goal is to get the input, the control, to produce the desired
+output, the target values. Because we are dealing with an ensemble, a gradient descent
+step would take the form of
+ˆRf,i = Nd,i(Xh, Uh, Sh, ˆUf, Sf)
+ˆUf ←ˆUf −η · 1
+m
+m
+X
+i=1
+∇ˆUfL(Rf, ˆRf,i)
+where the dynamics networks in the ensemble are denoted Nd,i, i = 1 . . . m.
+In the implementation, the AdamW optimizer is used as in the training. The initial
+value of ˆUf is calculated using DCP. This ensures that the initial guess is close to the
+global optimum in the loss landscape, reducing both the number of steps needed and
+the chance that the optimization will get stuck in local minimum. Again considering
+the full model architecture, as displayed on fig. 4.1, the optimization is not done on
+directly on ˆUf, but instead on LHi( ˆUf). This is necessary as LHi cannot be assumed
+to be differentiable through all inputs as described earlier. Only after all optimization
+steps is LH applied. The number of optimization steps is denoted nopt.
+Page 40 of 75
+==PAGE:43==
+4. Methods
+Technical University of Denmark
+4.4.3
+Handling of Constraints
+All control variables must fall within defined bounds. For instance, the generator voltage
+must of course be positive and is upper bounded by how much power the system can
+deliver and manage.
+This challenge is common in control scenarios, and there are
+multiple ways of handling it.
+Neural networks do not naturally lend themselves well to constrained regression,
+as the prediction heads in general are unbounded.
+One way around this is to use
+a bounded activation, such as sigmoid or tanh, as the second-to-last operation in the
+network followed by an affine transformation into the bounds of the prediction variable.
+This guarantees correctly bounded predictions, but comes at the cost of making the
+learning tasks harder. One reason activation functions like sigmoid have fallen out of
+favour to alternatives such as Rectified Linear Units (ReLU) and Gaussian Error Linear
+Unit (GELU) is that their derivates quickly go to zero when the input strays from 0.
+This property means gradients have a hard time propagating back through the network,
+especially if applied near the end of the network, as would be the case here, causing
+vanishing gradients.
+An alternative is to simply cap the predictions to the defined bounds. If the control
+variable u is bounded by [ulower, uupper], then the the estimated value, ˆu, is set as
+ˆu ←
+
+
+
+
+
+
+
+ulower
+if ˆu < ulower
+uupper
+if ˆu > uupper
+ˆu
+otherwise
+This arguably the simplest approach, and the one applied here.
+It is of course important to mention that for the float-zone case, the constraints are
+far wider than what is needed to successfully grow a crystal, so these considerations are
+more a fail-safe than an algorithmic choice.
+4.5
+Hyperparameter Search
+The presented method has a long list of attached hyperparameters for both influencing
+the training and control. The most important are listed in table 4.1 along with their
+default values. The default values were chosen based on informal pilot experiments.
+Testing a single set of hyperparameters is expensive in both time and compute, so a
+Page 41 of 75
+==PAGE:44==
+4. Methods
+Technical University of Denmark
+grid search over even a modest amount of combinations is infeasible. For the same
+reason, cross validation is also out of the picture. Instead, an adaptive approach is em-
+ployed. Four categories of hyperparameters are selected. Within each category a small
+number of hyperparameters are tuned using a coarse grid search. The next category
+is then be optimized using the best hyperparameters from the previous category. This
+naturally incurs some amount of selection bias, and it assumes orthogonality between
+hyperparameters. However, the test dataset is rather large (2,048 runs), so the accuracy
+estimates should be very accurate, making this compromise more acceptable.
+Hyperparameter
+Symbol
+Value
+Batches
+30,000
+Batch size
+1,200
+Peak learning rate
+10−5
+Activation function
+GELU
+Control window steps
+C
+100 (∼600 s)
+History window steps
+H
+100 (∼600 s)
+Prediction window steps
+F
+600 (∼3,600 s)
+History interpolation
+λh
+0.2
+Prediction interpolation
+λf
+0.15
+Smoothing factor
+α
+0.8
+Dropout
+p
+0
+Full state representation size
+dz
+120
+Models in ensemble
+m
+3
+Hidden layers in fully-connected
+l
+4
+Hidden layer size
+df
+756
+Transformer blocks
+b
+4
+Transformer self-attention heads
+h
+4
+Transformer dense layer size
+dt
+384
+ODN steps
+nopt
+15
+ODN step size
+η
+10−3
+Table 4.1:
+Default training and control hyperparameters based on pilot experiments.
+All experiments are defined in terms of changes to these. The selected network archi-
+tectures will always be listed explicitly, hence why they are not present here. Other
+hyperparameters are also not listed here, such as weight decay and momentum in the
+AdamW optimizer or the learning rate scheduler annealing strategy. For such hyperpa-
+rameters, default values in the PyTorch implementations are used. Symbols are listed
+for hyperparameters which have had symbols introduced at any point in the text.
+Page 42 of 75
+==PAGE:45==
+4. Methods
+Technical University of Denmark
+The tuned hyperparameter categories in order are
+1. Network architecture: Which of the presented network architectures should be
+used in the different network blocks?
+2. Network size: How large should the network blocks be?
+3. Window sizes: How large should the history and prediction windows be?
+4. Controller settings: How long should the control window be, and how many
+optimization steps are optimal in ODN?
+The first three all relate to training the model behind the controller while the final
+category focuses on tuning the controller itself.
+4.6
+Implementation Details
+The code for the project is all written in Python relying heavily on data science and
+machine learning libraries such as NumPy and PyTorch.
+It has been open-sourced
+under the MIT license. While the data from Topsil is not published, all results based
+on the simulation can be recreated using the published code.
+A major focus of this report is reproducibility, hence the publication of the code.
+This focus is also reflected in the code, where significant effort has been made to or-
+ganize experiments and make sure that no doubt would exist as to how results were
+achieved. This included standard good practice such as saving the configuration with
+all hyperparameters in an easily accessible format (JSON was used here). All experi-
+ments in this report are configurable from configuration files which are also available
+on the repository. Further, detailed log files are produced with each training and con-
+troller evaluation with information on hardware, the dataset, the model architecture,
+and importantly, the checked out commit of the git repository.
+All produced data such as loss values at every batch and states achieved under
+different controller settings were saved to allow additional analysis to be performed
+without having to rerun the experiments.
+The low-overhead pelutils profiler [SH] was always active to quickly identify perfor-
+mance bottlenecks while measuring controller speed at the same time. An example of a
+bottleneck found was long windows in the training, which seriously hampered execution
+speed for the transformer architectures and was the primary motivation for introducing
+linear interpolation. All training was done with PyTorch’s Automatic Mixed Preci-
+sion (AMP) module.
+Deep learning has traditional always relied on 32-bit floating
+Page 43 of 75
+==PAGE:46==
+4. Methods
+Technical University of Denmark
+point precision, but some operations like matrix multiplication run much faster with
+16-bit precision with little precision loss on newer hardware. The AMP module au-
+tomatically changes to 16-bit precision for the relevant operations, which significantly
+speeds up both training and inference. This general focus on code speed resulted in
+code which in general was quite efficient, allowing quicker iteration on both methods
+and experiments. The one exception to this is the simulation code, which is sequential
+in nature and thus not easy to accelerate using a library like NumPy. This code quickly
+proved to be a bottleneck when running the controller, with the simulation taking up
+the overwhelming majority of the runtime compared to control calculations. The one
+major optimization which was possible was reducing the number of Runge-Kutta iter-
+ations to 2 iterations per time step, which was found to be the lowest number possible
+without impacting the simulation accuracy in any meaningful way. While still slow,
+this took the sting out of the problem. The next major optimization step would be to
+rewrite the simulation in faster language like C, but this was deemed too much effort
+for the potential gains.
+From an architectural perspective, the code was built to be as agnostic to the system
+as possible to prevent system-specific rules being spread throughout the code. Instead,
+all systems were implemented as extensions to an abstract base class defining a com-
+mon system API. This allowed significant code reuse following the DRY (don’t repeat
+yourself) principle, while also keeping system implementations clearly separated and
+making new environments easy to implement. In fact, early in the project, a simple
+simulation which has nothing to do with float-zone at all was implemented to test and
+build much of the codebase. This simulation still exists and works in the codebase just
+as the float-zone simulation, demonstrating versatility and robustness of both the code
+and methods.
+Page 44 of 75
+==PAGE:47==
+5.
+Results
+This chapter presents the results of testing controllers on each of the 2,048 simulated
+runs using 8 in crystal diameter targets. For the two target variables, the crystal di-
+ameter and full zone height, the MAE is calculated for each run, producing 2 × 2,048
+error numbers for each experiment and control method. The mean and 95 % Confidence
+Interval (CI) calculated over the 2,048 runs are then presented for each target variable,
+as described in section 4.4.1.
+The chapter is divided into five sections. The first four contain experiments for each
+hyperparameter category listed in section 4.5 with the results from each section guiding
+the experiments in the next. The final section is dedicated not to measuring control
+ability but solely the calculation time requirements of the controller.
+Page 45 of 75
+==PAGE:48==
+5. Results
+Technical University of Denmark
+5.1
+Model Architecture
+The model has three network blocks, which each can use any (with exceptions) of the
+three architectures presented. A total of 12 combinations are possible, of which three
+are tested, each focusing on one of the three presented architectures.
+Experiment name
+Fc
+Tn
+Gtn
+History encoder
+Fully-connected
+Transformer
+Gated transformer
+Future encoder
+Fully-connected
+Transformer
+Transformer
+Decoder
+Fully-connected
+Transformer
+Transformer
+Parameter count
+2.2 · 107
+1.8 · 106
+2.9 · 106
+Table 5.1:
+Trained models for the first category of hyperparameter optimizations
+focusing on model architecture.
+Control method
+Fc
+Tn
+Gtn
+Crystal diameter [mm]
+Model 1 DCP
+4.55 ± 0.06
+4.99 ± 0.10
+3.47 ± 0.15
+Model 2 DCP
+4.30 ± 0.10
+3.89 ± 0.11
+3.48 ± 0.16
+Model 3 DCP
+11.6 ± 0.14
+3.11 ± 0.08
+3.63 ± 0.12
+Ensemble DCP
+6.98 ± 0.07
+4.04 ± 0.09
+3.42 ± 0.14
+Ensemble ODN
+7.14 ± 0.08
+4.06 ± 0.08
+3.48 ± 0.13
+Full zone height [mm]
+Model 1 DCP
+0.364 ± 0.019
+0.492 ± 0.008
+0.194 ± 0.005
+Model 2 DCP
+0.494 ± 0.018
+0.331 ± 0.007
+0.651 ± 0.005
+Model 3 DCP
+0.865 ± 0.014
+0.871 ± 0.011
+0.219 ± 0.007
+Ensemble DCP
+0.490 ± 0.017
+0.313 ± 0.007
+0.279 ± 0.006
+Ensemble ODN
+0.428 ± 0.019
+0.314 ± 0.006
+0.256 ± 0.006
+Table 5.2:
+Average control errors including 95 % CIs for the experiments listed in
+table 5.1.
+The best result has been marked in bold for ensemble DCP and ODN.
+For the individual models, the architecture with the best average result has had all
+individual model results marked in bold.
+As the results in table 5.2 demonstrate, Gtn seems the superior model of the three and
+will be the basis for experiments in the following sections.
+Page 46 of 75
+==PAGE:49==
+5. Results
+Technical University of Denmark
+5.2
+Model Size
+Experiment name
+Gtn-T(iny)
+Gtn-S(mall)
+Gtn-L(arge)
+Full state representation size (dz)
+40
+60
+180
+Transformer blocks (b)
+2
+2
+5
+Transformer self-attention heads (h)
+2
+2
+6
+Transformer dense layer size (dt)
+64
+128
+512
+Parameter count
+1.5 · 105
+3.7 · 105
+7.4 · 106
+Table 5.3:
+Trained models for the second category of hyperparameter optimizations
+focusing on model size. All experiments here use Gtn as their base, the parameters of
+which are listed in table 5.1.
+Control method
+Gtn-T
+Gtn-S
+Gtn
+Gtn-L
+Crystal diameter [mm]
+Model 1 DCP
+3.73 ± 0.12
+2.89 ± 0.09
+3.47 ± 0.15
+4.12 ± 0.09
+Model 2 DCP
+3.62 ± 0.11
+2.70 ± 0.08
+3.48 ± 0.16
+4.40 ± 0.15
+Model 3 DCP
+5.77 ± 0.12
+4.42 ± 0.14
+3.63 ± 0.12
+3.76 ± 0.12
+Ensemble DCP
+3.15 ± 0.12
+3.25 ± 0.10
+3.42 ± 0.14
+3.12 ± 0.12
+Ensemble ODN
+3.25 ± 0.10
+3.09 ± 0.19
+3.48 ± 0.13
+2.84 ± 0.11
+Full zone height [mm]
+Model 1 DCP
+0.247 ± 0.008
+0.175 ± 0.005
+0.194 ± 0.005
+0.403 ± 0.005
+Model 2 DCP
+0.492 ± 0.011
+0.337 ± 0.009
+0.651 ± 0.005
+0.297 ± 0.008
+Model 3 DCP
+1.069 ± 0.009
+0.468 ± 0.014
+0.219 ± 0.007
+0.672 ± 0.008
+Ensemble DCP
+0.476 ± 0.008
+0.264 ± 0.011
+0.279 ± 0.006
+0.169 ± 0.008
+Ensemble ODN
+0.461 ± 0.006
+0.233 ± 0.010
+0.256 ± 0.006
+0.168 ± 0.007
+Table 5.4:
+Average control errors including 95 % CIs for the experiments listed in
+table 5.3. Gtn results are also listed with the performance numbers from table 5.2, as
+that experiment is also a part of the model size optimization.
+Unlike in the previous section, there is no clear cut winner here. The Gtn-S models
+individually perform the best, but Gtn-L is better able to leverage noise reduction
+provided by ensembles. Moving forward, Gtn-S will be used for the simple reason that
+it is much faster to run and there make experiments with, having only a twentieth the
+parameter count of Gtn-L.
+The loss curves from training Gtn-S are shown on fig. A.3.
+Page 47 of 75
+==PAGE:50==
+5. Results
+Technical University of Denmark
+5.3
+Window Sizes
+Experiment name
+Gtn-S-LowH
+Gtn-S-LowF
+Gtn-S-LowHF
+History window steps (H)
+5 (∼30 s)
+100 (∼600 s)
+5 (∼30 s)
+Prediction window steps (F)
+600 (∼3,600 s)
+200 (∼1,200 s)
+200 (∼1,200 s)
+History interpolation (λh)
+1
+0.2
+1
+Prediction interpolation (λf)
+0.15
+0.3
+0.3
+Parameter count
+3.2 · 105
+3.7 · 105
+3.2 · 105
+Table 5.5:
+Trained models for the third category of hyperparameter optimizations
+focusing on the sizes of the history and prediction windows. All experiments here use
+Gtn-S as their base, the parameters of which are listed in table 5.3.
+Control method
+Gtn-S
+Gtn-S-LowH
+Gtn-S-LowF
+Gtn-S-LowHF
+Crystal diameter [mm]
+Model 1 DCP
+2.89 ± 0.09
+6.19 ± 0.13
+21.1 ± 0.31
+5.54 ± 0.12
+Model 2 DCP
+2.70 ± 0.08
+4.71 ± 0.10
+6.96 ± 0.10
+3.56 ± 0.14
+Model 3 DCP
+4.42 ± 0.14
+3.92 ± 0.15
+5.02 ± 0.14
+5.23 ± 0.09
+Ensemble DCP
+3.25 ± 0.10
+3.21 ± 0.14
+3.80 ± 0.14
+3.50 ± 0.13
+Ensemble ODN
+3.09 ± 0.19
+3.36 ± 0.12
+3.63 ± 0.13
+3.23 ± 0.12
+Full zone height [mm]
+Model 1 DCP
+0.175 ± 0.005
+0.597 ± 0.007
+0.272 ± 0.010
+0.200 ± 0.008
+Model 2 DCP
+0.337 ± 0.009
+0.478 ± 0.010
+0.366 ± 0.005
+0.182 ± 0.008
+Model 3 DCP
+0.468 ± 0.014
+0.298 ± 0.011
+0.456 ± 0.005
+0.729 ± 0.010
+Ensemble DCP
+0.264 ± 0.011
+0.231 ± 0.011
+0.314 ± 0.005
+0.355 ± 0.006
+Ensemble ODN
+0.233 ± 0.010
+0.188 ± 0.011
+0.201 ± 0.005
+0.328 ± 0.006
+Table 5.6:
+Average control errors including 95 % CIs for the experiments listed in
+table 5.5. Gtn-S from the model size selection is also listed here with the performance
+numbers from table 5.4, as that experiment is also a part of the model size optimization.
+Here again there is no clear best model. These, and the previous experiments, demon-
+strate a high degree of inter-model variance, which makes it hard to judge which set
+of hyperparameters are superior when only three models have been trained have been
+trained for each set. However, training and evaluating a sufficient number of models to
+make proper comparisons is impractical with the compute available. For now, Gtn-S
+is chosen again for the next section due to its superior individual model performance
+with the promise that this variability will be explored in more detail in section 6.1.
+Page 48 of 75
+==PAGE:51==
+5. Results
+Technical University of Denmark
+5.4
+Controller Settings
+Experiment name
+Gtn-S-L(ow)C
+Gtn-S-B(ig)C
+Gtn-S-M(ore)S(teps)
+Control window steps (C)
+50 (∼300 s)
+200 (∼1,200 s)
+100 (∼600 s)
+ODN steps (nopt)
+15
+15
+30
+Parameter count
+3.7 · 105
+Table 5.7:
+Trained models for the third category of hyperparameter optimizations
+focusing on the sizes of the history and prediction windows. All experiments here use
+Gtn-S as their base, the parameters of which are listed in table 5.3.
+Control method
+Gtn-S
+Gtn-S-LC
+Gtn-S-BC
+Gtn-S-MS
+Crystal diameter [mm]
+Model 1 DCP
+2.89 ± 0.09
+2.86 ± 0.06
+3.60 ± 0.08
+2.89 ± 0.09
+Model 2 DCP
+2.70 ± 0.08
+3.61 ± 0.04
+2.35 ± 0.08
+2.70 ± 0.08
+Model 3 DCP
+4.42 ± 0.14
+4.02 ± 0.08
+4.20 ± 0.14
+4.42 ± 0.14
+Ensemble DCP
+3.25 ± 0.10
+3.14 ± 0.08
+3.22 ± 0.10
+3.25 ± 0.10
+Ensemble ODN
+3.09 ± 0.19
+2.81 ± 0.08
+3.01 ± 0.09
+2.95 ± 0.09
+Full zone height [mm]
+Model 1 DCP
+0.175 ± 0.005
+0.152 ± 0.005
+0.157 ± 0.006
+0.175 ± 0.005
+Model 2 DCP
+0.337 ± 0.009
+0.362 ± 0.007
+0.239 ± 0.009
+0.337 ± 0.009
+Model 3 DCP
+0.468 ± 0.014
+0.421 ± 0.013
+0.426 ± 0.020
+0.468 ± 0.014
+Ensemble DCP
+0.264 ± 0.011
+0.230 ± 0.009
+0.276 ± 0.012
+0.264 ± 0.011
+Ensemble ODN
+0.233 ± 0.010
+0.191 ± 0.007
+0.259 ± 0.010
+0.206 ± 0.008
+Table 5.8:
+Average control errors including 95 % CIs for the experiments listed in
+table 5.7. Gtn-S from the model size selection is also listed here with the performance
+numbers from table 5.4, as that experiment is also a part of the model size optimization.
+While losing by a small margin in individual model performance, Gtn-S-LC takes a
+clear lead in ensemble performance. It will therefore be the model chosen for all fu-
+ture experiments unless otherwise noted. Figure fig. 5.1 shows the control inputs and
+resulting target variables under the different control methods.
+Page 49 of 75
+==PAGE:52==
+5. Results
+Technical University of Denmark
+0
+2
+4
+Time [h]
+50
+100
+150
+200
+Crystal diameter [mm]
+Target
+Individual DCP
+Ensemble DCP
+Ensemble ODN
+0
+2
+4
+Time [h]
+20
+22
+24
+26
+28
+30
+Full zone height [mm]
+Target
+Individual DCP
+Ensemble DCP
+Ensemble ODN
+0
+2
+4
+Time [h]
+3.0
+3.5
+4.0
+4.5
+5.0
+Generator voltage [kV]
+Individual DCP
+Ensemble DCP
+Ensemble ODN
+0
+2
+4
+Time [h]
+1.25
+1.50
+1.75
+2.00
+2.25
+2.50
+2.75
+3.00
+Poly pull rate [mm/min]
+Individual DCP
+Ensemble DCP
+Ensemble ODN
+Figure 5.1:
+A sample control run using Gtn-S-LC showing the development of the
+target variables and the given control inputs. In this experiment, control is recalculated
+every 300 s, which is clearly visible in the jagged control inputs. The crystal pull rate
+is not shown, as that is constant over the whole run.
+Page 50 of 75
+==PAGE:53==
+5. Results
+Technical University of Denmark
+5.5
+Execution Time
+In implementation, the controller would operate on a single run at a time. This means
+that inference (and backwards propagation in the case of ODN) uses a batch size of
+1. With models of the sizes presented here, this will not remotely utilize the power of
+modern GPUs. However, since that is how the controller would be used in practice,
+the average time to forward a single sequence through the control network will be the
+reported benchmark.
+Three methods of inferencing through the control network will be used:
+• Default PyTorch forward calls with torch.inference mode() active and the con-
+trol model set in evaluation mode.
+• The same as 1. but with PyTorch’s AMP module enabled. This casts some oper-
+ations to 16-bit floating point precision rather than the default 32-bit precision.
+On newer NVIDIA GPUs with tensor cores, such as the V100, this can yield
+significant speed-ups.
+• Compiling the model with torch.compile using the inductor backend.
+The reported numbers are averages of 10,000 forward calls on randomly sampled se-
+quences. 10 warm-up calls were made prior to each set of measurements. The mea-
+surements were performed on a NVIDIA V100 GPU [NVIa] using Python 3.11.4 and
+PyTorch 2.2.0 running CUDA 11.8.
+Method
+Fc
+Tn
+Gtn-T
+Gtn-S
+Gtn
+Gtn-L
+Default
+2.0
+3.5
+2.7
+2.6
+4.6
+5.5
+AMP enabled
+2.5
+6.6
+4.8
+4.7
+8.7
+11
+Compiled
+1.4
+2.9
+2.4
+2.3
+3.8
+4.3
+Table 5.9:
+Average inference time of control models given in milliseconds using a batch
+size of 1. Models are used from experiments presented earlier in this chapter to test
+effects of model architecture and size.
+The average time to perform an optimization step with the ODN method was measured
+to 13 ms for Gtn-S using default PyTorch settings.
+Page 51 of 75
+==PAGE:54==
+6.
+Experiments and Discussion
+The previous chapter presented the results of the main experiments for this report.
+These primarily focused on optimizing hyperparameters for controlling the simulated
+system, leaving questions about performance on the real system unanswered.
+The
+results also present new questions regarding the inherent stochasticity in the training
+(namely data sampling and model initialization). The experiments also do not test the
+stability of the control approach for targets far from the training data. The goal of this
+chapter is to discuss the presented results and make further experiments to attempt to
+answer these so far open questions before suggesting next steps to improve the results
+of this project.
+6.1
+Training Variation and Model Selection
+One of the main takeaways from the hyperparameter selection results is that while
+a specific controller’s performance is known to fairly large accuracy, there is a large
+variance between controllers when retraining the the networks, sometimes to an extent
+where controllers using individual models handily outperform the ensembles. When a
+simulation is available, this is no problem, as multiple networks can be trained and their
+control performance measured, after which the best few can be selected for an ensemble.
+However, in the case of the float-zone system, testing new models to a sufficient degree is
+expensive and time consuming. One number that might indicate how good an individual
+model is the test loss from the training. This number only tells how well the model has
+learned the system dynamics within the confines of its prediction window and not how
+it will perform as a controller where the target trajectory does not look like training
+data. If there is a clear correlation between the test loss and control performance in
+the simulated case, it should be reasonable to assume that this also holds for the real
+float-zone control, allowing the test loss to be used to select the best subset of trained
+models.
+To test this, Gtn-S is retrained with m = 15 models in the ensemble. Figure 6.1
+shows the test loss for the control models plotted against the control errors using DCP
+Page 52 of 75
+==PAGE:55==
+6. Experiments and Discussion
+Technical University of Denmark
+for the two target variables. All experiments in this section are performed using Gtn-S-
+BC, which, while not quite as good as Gt-S-LC, has a much longer control window which
+makes evaluation significantly faster – an important factor considering the large number
+of models.
+As the figure makes clear, there is unfortunately no strong correlation
+between the loss and control errors. The correlation coefficient between the loss and
+crystal diameter error was calculated to 0.04 with a 95 % CI of [−0.48, 0.54].
+The
+correlation was marginally stronger between the loss and full zone height error with a
+correlation of 0.25 and a CI of [−0.31, 0.67].
+0.015
+0.016
+0.017
+0.018
+Test loss
+3.0
+3.5
+4.0
+4.5
+5.0
+5.5
+6.0
+6.5
+Avg. crystal diameter error [mm]
+0.015
+0.016
+0.017
+0.018
+Test loss
+0.2
+0.4
+0.6
+0.8
+1.0
+1.2
+Avg. full zone height error [mm]
+Figure 6.1:
+Test loss for the control models in Gtn-S trained with m = 15 models
+plotted against the average control errors for DCP using the individual models.
+With such statistically insignificant correlations, using this method for selecting the
+best models seems a folly.
+In float-zone process, however, average error is not necessarily indicative of whether
+a controller is good at growing crystals, as the target values do not have to be followed
+exactly. Often what causes runs to fail is the actual of values drifting too far from
+their targets in a short time rather than a long-term, accumulating errors. Selecting
+models based on the test loss may still work if there is a strong correlation between the
+loss and a high-percentile error. For this experiment, the eightieth percentile is used.
+It is calculated by at each time step calculating the eightieth percentile of the errors
+across all 2,048 runs and then averaging those over all time steps. As fig. 6.2 shows,
+there is still no sign of a strong correlation, with the correlation between the test loss
+Page 53 of 75
+==PAGE:56==
+6. Experiments and Discussion
+Technical University of Denmark
+and crystal diameter eightieth percentile error being 0.04 in a CI of [−0.48, 0.54]. The
+correlation for the full zone height is 0.26 and the CI [−0.29, 0.68].
+0.015
+0.016
+0.017
+0.018
+Test loss
+4
+5
+6
+7
+8
+80 %-ile crystal diameter error [mm]
+0.015
+0.016
+0.017
+0.018
+Test loss
+0.4
+0.6
+0.8
+1.0
+1.2
+80 %-ile full zone height error [mm]
+Figure 6.2:
+Test loss for the control models in Gtn-S trained with m = 15 models plot-
+ted against the average eightieth percentile control errors for DCP using the individual
+models.
+These results present a clear challenge for implementing the presented control method
+in production. Due to the large variance between network trainings and the lack of a
+good way to select the best networks, an ensemble should undoubtedly be used for the
+provided stability. As fig. 5.1 exemplifies, the oscillations which feature in the training
+data, carry over to the controller which has a hard time preventing them. Two of the
+individual models running in DCP mode show especially heavy oscillations, whereas
+the ensembles manage considerable dampening in both DCP and ODN modes.
+These results relate only to DCP. A common theme across the many experiments
+presented in Chapter 5 is that ODN almost universally performed better than DCP. The
+performance of ODN depends much more on the quality of the dynamics network than
+of the control network. Rerunning the experiments using the test loss of the dynamics
+networks and the errors achieved under ODN yields similarly inclusive results, as fig. 6.3
+demonstrates. The respective correlations are −0.33 and 0.41, and the 95 % CIs are
+[−0.721, 0.219] and [−0.125, 0.764].
+Page 54 of 75
+==PAGE:57==
+6. Experiments and Discussion
+Technical University of Denmark
+0.016
+0.017
+0.018
+0.019
+Test loss
+3.0
+3.5
+4.0
+4.5
+5.0
+5.5
+6.0
+Avg. crystal diameter error [mm]
+0.016
+0.017
+0.018
+0.019
+Test loss
+0.2
+0.4
+0.6
+0.8
+1.0
+Avg. full zone height error [mm]
+Figure 6.3:
+Test loss for the control models in Gtn-S trained with m = 15 models
+plotted against the average control errors for ODN using the individual models.
+6.2
+Control Performance Outside Training Data
+The controllers have all so far been tested in their ability to grow 8 in crystals. The
+simulated training data contains growths of crystals in mostly the 7.5 to 9 in range.
+While the dynamics variables in the training data have a tendency to oscillate, the
+targets are composed of straight line segments. These oscillations do show up when
+using the controller, but they are in general dampened quite well, and the controllers
+mostly achieve reasonably low control errors on the target variables.
+One of the major questions posed early in the report regarding neural networks
+was if they were able to provide stable control when leaving the distribution of the
+training data.
+As the targets do not oscillate, there is a major difference between
+their distributions and the training data’s, proving that they indeed can provide stable
+control.
+To test this even further, additional sets of target variables are constructed for 4
+and 6 in crystals, respectively. Gtn-S-LC, Gtn-S, and Gtn-S-BC were all tested on both
+of these target sets.
+The 4 in targets were found to be too aggressive. Of the three, only Gtn-S managed
+to complete any runs using all control methods, and even that only completed a single
+one of the 2,048 test runs with average crystal diameter errors in the 20 −50 mm range
+Page 55 of 75
+==PAGE:58==
+6. Experiments and Discussion
+Technical University of Denmark
+and full zone height errors in the 1−8 mm range across control methods. Runs fail if the
+control drive some of the values to a point where invalid computations are attempted.
+The most common failure mode was the crystal diameter going below 0 which should
+not be hard to imagine causing problems.
+Unlike with the 4 in targets, the controllers showed some success with the 6 in targets,
+despite them also being well outside the training data’s distribution. The results are
+shown in table 6.1.
+Control method
+Gtn-S-LC
+Gtn-S
+Gtn-S-BC
+Crystal diameter [mm]
+Model 1 DCP
+16.2 ± 0.37
+20.1 ± 0.46
+24.5 ± 0.47
+Model 2 DCP
+46.0 ± 1.62
+23.7 ± 0.71
+6.73 ± 0.26
+Model 3 DCP
+8.40 ± 0.33
+6.56 ± 0.36
+12.3 ± 0.34
+Ensemble DCP
+6.54 ± 0.12
+8.51 ± 0.18
+13.1 ± 0.26
+Ensemble ODN
+4.45 ± 0.11
+7.22 ± 0.17
+11.5 ± 0.23
+Full zone height [mm]
+Model 1 DCP
+1.37 ± 0.04
+2.05 ± 0.05
+1.78 ± 0.04
+Model 2 DCP
+5.77 ± 0.15
+3.75 ± 0.08
+1.89 ± 0.02
+Model 3 DCP
+0.88 ± 0.03
+0.68 ± 0.03
+1.11 ± 0.03
+Ensemble DCP
+0.94 ± 0.01
+1.10 ± 0.01
+1.57 ± 0.02
+Ensemble ODN
+0.73 ± 0.01
+1.06 ± 0.01
+1.41 ± 0.01
+Runs without failure
+Count
+283
+2,045
+1,570
+Proportion [%]
+13.8
+99.9
+76.7
+Table 6.1:
+Average control errors including 95 % CIs for Gtn-S operating under differ-
+ent size control windows when using 6 in targets for the crystal diameter. The methods
+were tested over 2,048 runs. A run is marked as a failure if any of the five methods
+would result in invalid values or calculations at any point during a run. In practice, all
+failures where caused by controllers relying on a single model.
+Figure 6.4 shows an example control run with Gtn-S using a 6 in target. The three
+models in the ensemble show a large variation in their control performances when
+running in DCP mode, with one model stabilizing far from the target, one seemingly
+on its way to diverging, and one being directly on target. Running in the ensemble, the
+three models do produce a stable trajectory, although it is quite far from the target,
+both when running in DCP and ODN mode. The stability of the ensemble approach was
+a general theme in this set of experiments. For the 6 in targets, not a single run failure
+was observed from an ensemble model, and for the 4 in targets, where most runs failed,
+Page 56 of 75
+==PAGE:59==
+6. Experiments and Discussion
+Technical University of Denmark
+failure from single model control was observed before failure from ensemble control in
+the overwhelming majority (> 99 %) of cases. The length of the control window is also
+strikingly obvious.
+0
+2
+4
+Time [h]
+20
+40
+60
+80
+100
+120
+140
+160
+Crystal diameter [mm]
+Target
+Individual DCP
+Ensemble DCP
+Ensemble ODN
+0
+2
+4
+Time [h]
+20
+25
+30
+35
+Full zone height [mm]
+Target
+Individual DCP
+Ensemble DCP
+Ensemble ODN
+0
+2
+4
+Time [h]
+3.0
+3.5
+4.0
+4.5
+5.0
+5.5
+6.0
+Generator voltage [kV]
+Individual DCP
+Ensemble DCP
+Ensemble ODN
+0
+2
+4
+Time [h]
+1.0
+1.1
+1.2
+1.3
+1.4
+1.5
+1.6
+Poly pull rate [mm/min]
+Individual DCP
+Ensemble DCP
+Ensemble ODN
+Figure 6.4:
+An example of Gtn-S attempting to achieve a 6 in crystal diameter target.
+Despite all three models in the ensemble being trained with identical configurations,
+the performance difference is not hard to spot, highlighting yet another instance of the
+large variation between trainings caused by randomness.
+The results make it clear that the controllers cannot be expected to be stable too
+far outside the safe confines of the training data’s domain. With that said, some of the
+models do still provide stable control for the 6 in targets, despite never having had a
+chance to learn the system’s dynamics in this range of crystal diameters. The ensemble
+models in fig. 6.4 even manage to absorb the unstable control of one of the models,
+Page 57 of 75
+==PAGE:60==
+6. Experiments and Discussion
+Technical University of Denmark
+providing stable, albeit not terribly accurate, control. This is quite encouraging for
+the general robustness of the approach, as it indicates that the controller can handle
+dynamics quite far from the usual values, on which it would be trained, before there is
+a risk of it getting unstable.
+6.3
+Managing Growth Phases
+The simulated float-zone environment as used here is tuned to mimic the cone phase.
+The cone phase, however, is not the only phase for which the controller would be
+intended.
+The start phase, coming directly before the cone phase, is also of high
+interest. As mentioned earlier, the phase is encoded into the model as a one-hot encoded
+variable, so ideally, one single model should be able to model all phases with no changes
+required. Figure 6.5 shows a float-zone run starting in the drop phase, which is when
+the controller is activated, up to the end of the cone phase. Some of the challenges
+with modelling different growth phases should be clear from that figure; the earlier
+phases are significantly shorter, so having a model for each phase will be limited by a
+short prediction horizon. There are also sudden jumps in some variables at the phase
+transitions.
+This is caused by a change in how they are measured.
+All dynamics
+variables are calculated based on a video feed of the process, but when the camera
+providing the feed changes, such as when transitioning from the pre-cone to the cone
+phase, some of the calculations change as well. This means that these calculations are
+both machine and phase dependant, but since both are given as input to the model, a
+single model should hopefully be sufficient across all machines and phases, begin able
+to properly model the phase transitions.
+Actually evaluating this is, again, not possible to do properly within the scopes of
+this project. What is possible is to train one ensemble using both the drop, start, and
+cone phases, and one each for the start and cone phases. While problematic, the loss
+should hopefully give some ballpark idea of how well the networks model each phase.
+Table 6.2 shows the final test loss split across phases for models trained on all phases
+and only on specific phases. The parameters for Gtn-S were used.
+One important caveat here is that the models trained only the start phase have had
+to have their history and prediction windows shortened to 90 s and 450 s respectively
+to adequately fit into those much shorter phases. The interpolation constants were set
+to 0.75 and 0.5, respectively. It is also important to be aware that all other hyperpa-
+rameters were tuned for the simulated cone phase, where the system dynamics behave
+Page 58 of 75
+==PAGE:61==
+6. Experiments and Discussion
+Technical University of Denmark
+0
+1
+2
+3
+Time [h]
+0
+50
+100
+150
+Poly diameter [mm]
+0
+1
+2
+3
+Time [h]
+0
+50
+100
+150
+Crystal diameter [mm]
+0
+1
+2
+3
+Time [h]
+0
+5
+10
+15
+20
+Upper zone height [mm]
+0
+1
+2
+3
+Time [h]
+0.0
+2.5
+5.0
+7.5
+10.0
+Lower zone height [mm]
+0
+1
+2
+3
+Time [h]
+0
+10
+20
+30
+Full zone height [mm]
+0
+1
+2
+3
+Time [h]
+0
+50
+100
+150
+Melt volume [cm3]
+0
+1
+2
+3
+Time [h]
+0
+20
+40
+Poly angle [deg]
+0
+1
+2
+3
+Time [h]
+50
+25
+0
+25
+Crystal angle [deg]
+0
+1
+2
+3
+Time [h]
+4
+6
+8
+Generator voltage [kV]
+0
+1
+2
+3
+Time [h]
+0
+2
+4
+Poly pull rate [mm/min]
+0
+1
+2
+3
+Time [h]
+0
+5
+10
+Crystal pull rate [mm/min]
+0
+1
+2
+3
+Time [h]
+Growth phase
+Drop
+Start
+Cone
+Figure 6.5: A float-zone run from the drop phase to the cone phase.
+a fair bit slower than in the start phase. Models that are supposed to handle the start
+phase should probably use less aggressive smoothing and linear interpolation to better
+capture the system dynamics. However, with that said, the losses are comparable to
+those achieved with the simulated system, despite large variation across phases.
+Interestingly, there is no one-sided conclusion as to which approach yields the lowest
+loss; per-phase models or models for handling all phases. Unlike the controller experi-
+ments, there is little variation between trainings, so these numbers give a much better
+indication of the expected performance when retraining models. The models trained
+on all phases achieve the lowest loss by a wide margin in all cases except for control
+Page 59 of 75
+==PAGE:62==
+6. Experiments and Discussion
+Technical University of Denmark
+Phase for loss
+Phase(s) in training data
+calculation
+Drop – Cone
+Start
+Cone
+Start
+0.022 ± 0.001
+0.076 ± 0.002
+3.166 ± 0.039
+Cone
+0.021 ± 0.000
+0.774 ± 0.008
+0.053 ± 0.001
+Start
+0.094 ± 0.002
+0.112 ± 0.003
+1.138 ± 0.011
+Cone
+0.047 ± 0.001
+0.922 ± 0.002
+0.026 ± 0.001
+Table 6.2:
+Final test loss with 95 % CIs for models trained on different subsections of
+the float-zone dataset. The loss is calculated for each of the two listed phases. The top
+half is the loss for the dynamics model, and the lower half is for the control model. The
+loss is averaged across all three models in the ensemble. The lowest loss for each case
+is marked in bold.
+models in the cone phase.
+Again, one should be careful reading too much into the loss, as was clearly demon-
+strated in section 6.1, especially when the hyperparameters have been optimized against
+a simulated system representing only the cone phase. The differences in loss here are,
+however, much larger than those previously investigated. They at least seem to suggest
+that a good approach to managing different phases would be to train both models on
+all phases and models for individual phases and use whichever achieved the lowest test
+loss in each phase.
+Figure 6.6 demonstrates forward predictions from the networks. It is clear that the
+networks have learned the system dynamics to a reasonable degree, but they struggle
+with sudden changes, especially in control, which again may suggest that the smoothing
+should be less aggressive for the real system than for the simulated one.
+6.4
+Runtime Considerations
+As the measurements from section 5.5 demonstrate, runtime would not be a concern
+in implementation. Even using the slowest model presented, Gtn-L, single model DCP
+predictions are made in a handful of milliseconds with the default PyTorch implemen-
+tation. To run in Topsil’s C++ setup, it would have to be compiled to a static graph.
+There exist several deep learning compilers which all promise varying degrees of speed-
+ups. PyTorch’s built-in compile function with the inductor provides a speed-up of
+around 10 −30 % as measure here.
+The measurements were made only for single control models, so running an ensemble
+of e.g. three models would triple execution. Adding the optimization steps in ODN
+Page 60 of 75
+==PAGE:63==
+6. Experiments and Discussion
+Technical University of Denmark
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+Time [h]
+0
+25
+50
+75
+100
+125
+150
+175
+Crystal diameter [mm]
+Observed (Drop)
+Observed (Start)
+Observed (Cone)
+Predicted
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+Time [h]
+0
+5
+10
+15
+20
+25
+30
+Full zone height [mm]
+Observed (Drop)
+Observed (Start)
+Observed (Cone)
+Predicted
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+Time [h]
+3
+4
+5
+6
+7
+8
+9
+Generator voltage [kV]
+Observed (Drop)
+Observed (Start)
+Observed (Cone)
+Predicted
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+3.5
+Time [h]
+1
+0
+1
+2
+3
+4
+Poly pull rate [mm/min]
+Observed (Drop)
+Observed (Start)
+Observed (Cone)
+Predicted
+Figure 6.6:
+Forward predictions on the the real float-zone data. Three independent
+predictions are shown, with the three black lines showing each prediction the predictions
+over the full prediction window. The predictions for the crystal diameter and full zone
+height are made using the ensemble of dynamics networks given the observed generator
+voltage and poly pull rate.
+Similarly, the generator voltage and poly pull rate are
+predicted using the ensemble of control networks using the observed crystal diameter
+and full zone height values as targets.
+further increases the runtime, as these steps require both forward and backward passes.
+Take for instance Gtn-S, which uses three models in the ensemble. Making a control
+prediction in ODN mode with 15 optimization steps would take 3·(2.7 ms+15·13 ms) =
+0,59 s using the default PyTorch implementation.
+Considering how slow the float-zone system develops, this leaves copious room for re-
+ducing the control window, increasing model size, or raising the number of optimization
+steps if found to be advantageous in implementation, even on the slower P2000 GPUs
+Page 61 of 75
+==PAGE:64==
+6. Experiments and Discussion
+Technical University of Denmark
+in Topsil’s control computers. Especially increasing model size could be preferable as
+indicated by the results in table 5.4, where the largest networks performed the best in
+ensemble – of course bearing in mind the large variation between trainings. The real
+system is arguably also more complex than the real system and so would need larger
+networks for accurate modelling. The size of the ensemble could also be increased,
+which, as has been shown, improves robustness.
+One curiosity of the measurements is that enabling AMP increased prediction time
+significantly. This is generally not the case, and there are several plausible explanations.
+Likely, the wrong gemm function is called [SH21], but since runtime is of no practical
+concern, and the P2000s [NVIb] do not have the tensor cores to support it regardless,
+it is not investigated any further.
+6.5
+Future Work
+The results presented in this report are, in my estimation, solid and promising for
+building a robust system for controlling the growth of crystals in the float-zone process.
+Worth mentioning is the largely process-agnostic nature of all the described methods.
+Going back to Chapter 2 and Chapter 4, many of the design choices were made to
+accommodate the properties of the float-zone system, but none limit the controller to
+this system, as would be the case with for instance analytical modelling. For this reason,
+the presented control method could be relevant for many control systems, especially in
+the wider process industry for systems with traits similar to the float-zone process
+which is characterized by its complicated, non-linear dynamics and delayed responses
+to control inputs, while also being hard to model analytically – and of course where a
+significant amount of data on system is available.
+Stepping back to the float-zone system, the very obvious next step towards moving
+this research into production is to export a model and code into a format that can be
+used within Topsil’s C++ framework. The export itself contains no obvious time sinks,
+with PyTorch providing tools for exactly this task [Con]. This also entails rewriting
+the MPC setup in C++ and doing sufficient testing, which must be expected to be a
+more laborious task.
+Apart from the natural next step, a number of changes and additions will be pro-
+posed which could help improve performance.
+Page 62 of 75
+==PAGE:65==
+6. Experiments and Discussion
+Technical University of Denmark
+6.5.1
+Data
+Echoing more or less every machine learning engineer and researcher who has ever
+lived, more data would likely make the model better. While obvious, it makes for an
+important consideration here; Topsil always collects data from their crystal growth, so
+the available data grows over time with no work required. A model trained a year from
+now would likely outperform the ones trained for this project. This would make an
+iterative approach of continuously retraining models ideal. Data variation is equally
+important to data quantity; more data is not better, if it looks too much like existing
+data. To increase the variation of future data, one idea is to add a small amount of
+smooth noise to the controller – not enough to impact performance, but enough to
+subtly increase data variance. The viability of this idea of course assumes that such a
+balance could be found. The noise could be generated using a Gaussian process, which
+can produce smooth, correlated values over a time sequence.
+However, this approach of course only works if the data is any good. As the machine
+learning adage goes, garbage in, garbage out. Hopefully the results of this report make
+a convincing argument to the reader that the provided data is of sufficient quality to
+produce a good controller. There are still plenty of ways to improve it, though. As
+mentioned back in Chapter 3, newer data files contain observations of more variables,
+such as the rotation of the poly and the crystal. Incorporating these into the training
+should allow the models to learn the system dynamics more accurately, but it would
+also pose the challenge of dealing with parts of the dataset containing features missing
+in other parts. A variety of methods to deal with this exist. A simple way is to add
+a binary, static variable for each feature that might be missing, which encodes the
+feature’s presence. Alternatively, a model could be trained to estimate missing values,
+essentially a case of imputation. Transformers support attention masks which allow for
+ignoring certain parts of a sequence. Specifically for the gated transformer, this could
+be used to ignore missing features in the channel tower.
+A much larger change in the features would be using the raw camera feeds themselves
+as inputs to the models. Currently, all dynamics variables are calculated using the raw
+feeds.
+However, using the feed directly may allow the model to more easily learn
+other useful features, which are harder to implicitly learn from the presently available
+features.
+A model implementing this could have a vision backbone (e.g.
+CNN or
+transformer based), the features of which are concatenated to the existing features and
+given to the model used here. Topsil does not save the video feeds as of now, which
+Page 63 of 75
+==PAGE:66==
+6. Experiments and Discussion
+Technical University of Denmark
+would have to change for this to become a reality in the future.
+Finally, more thought could be put into feature transformations. Since the prop-
+erties all represent physical quantities, this could be done in a semi-informed manner.
+For instance, the squared poly and crystal diameters could be added, which would be
+directly proportional to the respective cross sectional areas.
+6.5.2
+Modelling
+As with any project, a balance had to be struck between exploring different avenues
+and exploring the selected ones thoroughly. The choices of design and experiments are
+a reflection of this. One case of this was which network architectures to explore. Here,
+three architectures were implemented. However, many neural architectures suitable
+for time series analysis are available.
+A more traditional example is the use of 1D
+CNNs [Tan+20], whereas other approaches transform the time series into 2D images by
+calculating the Gram matrix [Wan+22], which is then fed to a vision model. The blocks
+themselves could also be augmented, independently of the selected architectures. For
+instance, running identical blocks in parallel and aggregating the results in a ResNeXt-
+like manner [Xie+17] could improve performance.
+Apart from exploring new architectures, more research into the existing architectures
+could be useful. Unless the training objective is carefully designed to prevent it, neural
+networks learn correlations rather than causations. We know that in this case, variables
+only affect each other in the future, but the networks could be thought to learn that
+certain future event correlate with past events and draw wrong conclusions about the
+system’s behaviour. Specifically for the transformer, the attention mechanism could
+be altered by zeroing out attention scores for how time points attend to future time
+points, essentially nullifying these correlations back in time. In general, the field of
+active learning contains rich literature on specifically modelling causations which could
+be highly relevant to tackling this issue.
+One of the artifacts of making predictions over a horizon is that it leads to natural
+jumps at the start of each horizon relative to current values. This was strikingly clear
+on fig. 4.2 and one of the main reasons for cancelling the idea of using a float-zone
+simulation based on a neural network. The loss function used in every experiment was
+classical MAE. A more involved loss function could incorporate the derivative of the
+predicted series, particularly for the first time step, encouraging smoother transitions.
+A practical consideration not addressed in this report is the handling of new growth
+Page 64 of 75
+==PAGE:67==
+6. Experiments and Discussion
+Technical University of Denmark
+machines. The number of machines has been considered a static property, but Topsil is
+in the process of adding several new machines. A way of handling this would be to add
+a fake machine and assign a random subset runs from all machines to this. This would
+teach the network the behaviour of an ”average” machine. New machines could then be
+controlled as such until enough data has been collected to retrain the model specifically
+for them. This would work nicely in conjunction with the iterative updating of models
+proposed in the data paragraph.
+The method presented in this report relies on regression models learning system
+dynamics. However, this approach forced the exclusion of a large amount of data from
+failed runs, robbing the model of knowledge of what control inputs lead to a run failing.
+This critically reduces the variation of the data, as the model only learns what control
+inputs to give but not what inputs to avoid. This knowledge could be incorporated by
+training a classifier (or probabilistic regressor) to estimate whether or not a run will fail
+under some control input and only accept control which the classifier expects to not
+cause failures.
+Page 65 of 75
+==PAGE:68==
+7.
+Conclusion
+This project presents a method for building a controller for the float-zone process, a
+system characterized by non-linearity, slow responses to control inputs and an unknown
+number of hidden variables. The controller uses a neural network ensemble running in
+an MPC setting. The networks are trained using historical process data, requiring no
+domain knowledge. They are made from blocks which can be independently swapped
+out with different architectures. Several architectures were tested, demonstrating the
+merits of the transformer [Vas+17], and in particular the gated transformer [Liu+21].
+Two approaches of estimating optimal control were also presented. The first directly es-
+timates optimal control, while the second optimizes control via gradient descent through
+a model of the system dynamics. The second method in general performed the best.
+Significant variation in control performance was found between network caused by
+training stochasticity. This makes hyperparameter selection difficult, as control evalu-
+ation is time consuming in the simulated case and impractical for the real case. This
+presents a challenge in expanding control to the real float-zone system. Methods of
+estimating models’ relative control performance without using them in control settings
+were attempted with no conclusive results. Experiments did prove that the training
+successfully taught networks to fit to the real float-zone dynamics, hinting at control
+ability.
+Experiments were also carried out to test the control performance on target values
+outside the distribution of the training data. In general, stable and fairly accurate
+control could be achieved as long as the targets where not too far from the training data,
+though this was highly hyperparameter dependent. These experiments highlighted the
+stabilizing effect of ensemble networks.
+While not always controlling as accurately
+as the best single models, using an ensemble would provide significantly more stable
+control outside the comfort of the training data’s distribution.
+In all, the results are very promising for using machine learning based control ap-
+proaches in the float-zone system with the proposed methods demonstrating both high
+control accuracy and robustness on a simulated version of the float-zone system. Several
+paths also exist for further enhancing control ability.
+Page 66 of 75
+==PAGE:69==
+Bibliography
+[And21]
+Michael Riis Andersen. Lecture notes for 02477 Bayesian machine learning. Technical
+University of Denmark, 2021.
+[AZ06]
+Zainal Ahmad and Jie Zhang. “A nonlinear model predictive control strategy using
+multiple neural network models”. In: International Symposium on Neural Networks.
+Springer. 2006, pp. 943–948.
+[Bec21]
+Thomas Beckers. An Introduction to Gaussian Process Models. 2021. arXiv: 2102.05497
+[eess.SY].
+[BGW90]
+Robert R Bitmead, Michel Gevers, and Vincent Wertz. “Adaptive optimal control the
+thinking man’s GPC”. In: (1990).
+[BN06]
+Christopher M Bishop and Nasser M Nasrabadi. Pattern recognition and machine learn-
+ing. Vol. 4. 4. Springer, 2006.
+[Cam+07]
+Eduardo F Camacho, Carlos Bordons, Eduardo F Camacho, and Carlos Bordons. “In-
+troduction to model predictive control”. In: Model Predictive Control (2007), pp. 1–
+11.
+[CK98]
+Ward Cheney and David Kincaid. Numerical mathematics and computing. Sixth edition.
+International Thomson Publishing, 1998.
+[Con]
+PyTorch Contributors. Loading a TorchScript Model in C++. url: https://pytorch.
+org/tutorials/advanced/cpp_export.html (visited on 01/06/2024).
+[Cyb89]
+George Cybenko. “Approximation by superpositions of a sigmoidal function”. In: Math-
+ematics of control, signals and systems 2.4 (1989), pp. 303–314.
+[Din+22]
+Yan-Xiang Ding, Stone Cheng, Yu-Ting Huang, and De-Yu Hong. “Deep PID Neu-
+ral Network Controller for Precise Temperature Control in Plastic Injection-moulding
+Heating System”. In: IFAC-PapersOnLine 55.27 (2022), pp. 114–119.
+[Don+20]
+Danimir T Doncevic et al. “Deterministic global nonlinear model predictive control with
+neural networks embedded”. In: IFAC-PapersOnLine 53.2 (2020), pp. 5273–5278.
+[FA02]
+Rolf Findeisen and Frank Allg¨ower. “An introduction to nonlinear model predictive
+control”. In: 21st Benelux meeting on systems and control. Vol. 11. Veldhoven. 2002,
+pp. 119–141.
+[GEK88]
+Allon Guez, James L Eilbert, and Moshe Kam. “Neural network architecture for con-
+trol”. In: IEEE control systems Magazine 8.2 (1988), pp. 22–25.
+Page 67 of 75
+==PAGE:70==
+Bibliography
+Technical University of Denmark
+[GHZ04]
+K Graichen, V Hagenmeyer, and M Zeitz. “Van de Vusse CSTR as a benchmark problem
+for nonlinear feedforward control design techniques. 6th IFAC–Symp”. In: Nonl. Contr.
+Syst., Stuttgart (Germany) (2004).
+[Gor+22]
+David C Gordon et al. “End-to-end deep neural network based nonlinear model pre-
+dictive control: experimental implementation on diesel engine emission control”. In:
+Energies 15.24 (2022), p. 9335.
+[HKZ19]
+Lukas Hewing, Juraj Kabzan, and Melanie N Zeilinger. “Cautious model predictive
+control using gaussian process regression”. In: IEEE Transactions on Control Systems
+Technology 28.6 (2019), pp. 2736–2743.
+[HS90]
+Lars Kai Hansen and Peter Salamon. “Neural network ensembles”. In: IEEE transactions
+on pattern analysis and machine intelligence 12.10 (1990), pp. 993–1001.
+[HS97]
+Sepp Hochreiter and J¨urgen Schmidhuber. “Long short-term memory”. In: Neural com-
+putation 9.8 (1997), pp. 1735–1780.
+[HSW89]
+Kurt Hornik, Maxwell Stinchcombe, and Halbert White. “Multilayer feedforward net-
+works are universal approximators”. In: Neural networks 2.5 (1989), pp. 359–366.
+[Hun+92]
+Kenneth J Hunt, D Sbarbaro, R ˙Zbikowski, and Peter J Gawthrop. “Neural networks
+for control systems—a survey”. In: Automatica 28.6 (1992), pp. 1083–1112.
+[IS15]
+Sergey Ioffe and Christian Szegedy. “Batch normalization: Accelerating deep network
+training by reducing internal covariate shift”. In: International conference on machine
+learning. pmlr. 2015, pp. 448–456.
+[JK21]
+Byung-Ki Jeon and Eui-Jong Kim. “LSTM-based model predictive control for optimal
+temperature set-point planning”. In: Sustainability 13.2 (2021), p. 894.
+[JPJ22]
+Aryan Jadon, Avinash Patil, and Shruti Jadon. “A Comprehensive Survey of Regression
+Based Loss Functions for Time Series Forecasting”. In: arXiv preprint arXiv:2211.02989
+(2022).
+[JYK+22]
+Samira Johari, Mahdi Yaghoobi, Hamid R Kobravi, et al. “HCDRNN-NMPC: A New
+Approach to Design Nonlinear Model Predictive Control (NMPC) Based on the Hyper
+Chaotic Diagonal Recurrent Neural Network (HCDRNN)”. In: Complexity 2022 (2022).
+[Koc+04]
+Juˇs Kocijan, Roderick Murray-Smith, Carl Edward Rasmussen, and Agathe Girard.
+“Gaussian process model based predictive control”. In: Proceedings of the 2004 American
+control conference. Vol. 3. IEEE. 2004, pp. 2214–2219.
+[KSH12]
+Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. “Imagenet classification with
+deep convolutional neural networks”. In: Advances in neural information processing sys-
+tems 25 (2012).
+[LeC+89]
+Yann LeCun et al. “Backpropagation applied to handwritten zip code recognition”. In:
+Neural computation 1.4 (1989), pp. 541–551.
+[LH17]
+Ilya Loshchilov and Frank Hutter. “Decoupled weight decay regularization”. In: arXiv
+preprint arXiv:1711.05101 (2017).
+Page 68 of 75
+==PAGE:71==
+Bibliography
+Technical University of Denmark
+[Liu+21]
+Minghao Liu et al. “Gated transformer networks for multivariate time series classifica-
+tion”. In: arXiv preprint arXiv:2103.14438 (2021).
+[Min22]
+Nicolas Minorsky. “Directional stability of automatically steered bodies”. In: Journal of
+the American Society for Naval Engineers 34.2 (1922), pp. 280–309.
+[MJ01]
+Larry R Medsker and LC Jain. “Recurrent neural networks”. In: Design and Applications
+5.64-67 (2001), p. 2.
+[ML99]
+Manfred Morari and Jay H Lee. “Model predictive control: past, present and future”.
+In: Computers & chemical engineering 23.4-5 (1999), pp. 667–682.
+[Moo06]
+Gordon E Moore. “Cramming more components onto integrated circuits, Reprinted
+from Electronics, volume 38, number 8, April 19, 1965, pp. 114 ff.” In: IEEE solid-state
+circuits society newsletter 11.3 (2006), pp. 33–35.
+[NVIa]
+NVIDIA. NVIDIA V100 TENSOR CORE GPU. url: https://images.nvidia.com/
+content/technologies/volta/pdf/volta-v100-datasheet-update-us-1165301-
+r5.pdf (visited on 01/09/2024).
+[NVIb]
+NVIDIA. NVIDIA® QUADRO® P2000. url: https://www.nvidia.com/content/
+dam/en- zz/Solutions/design- visualization/documents/Quadro- P2000- US-
+03Feb17.pdf (visited on 01/09/2024).
+[Pic+00]
+Stephen Piche, Bijan Sayyar-Rodsari, Doug Johnson, and Mark Gerules. “Nonlinear
+model predictive control using neural networks”. In: IEEE Control Systems Magazine
+20.3 (2000), pp. 53–62.
+[SH]
+Asger Schultz and Søren Holm. pelutils. url: https : / / github . com / peleiden /
+pelutils (visited on 01/09/2024).
+[SH21]
+Asger Schultz and Søren Holm. “DaLUKE: The Knowledge-enhanced, Danish Language
+Model”. In: (2021).
+[SLT21]
+Shankar Sastry, Forrest Laine, and Claire Tomlin. Optimal control and the linear quadratic
+regulator. University of California, Berkeley, 2021.
+[Sri+14]
+Nitish Srivastava et al. “Dropout: a simple way to prevent neural networks from over-
+fitting”. In: The journal of machine learning research 15.1 (2014), pp. 1929–1958.
+[ST19]
+Leslie N Smith and Nicholay Topin. “Super-convergence: Very fast training of neural
+networks using large learning rates”. In: Artificial intelligence and machine learning for
+multi-domain operations applications. Vol. 11006. SPIE. 2019, pp. 369–386.
+[Sze08]
+Simon Min Sze. Semiconductor devices: physics and technology. John wiley & sons, 2008.
+[Tan+20]
+Wensi Tang et al. “Rethinking 1d-cnn for time series classification: A stronger baseline”.
+In: arXiv preprint arXiv:2002.10061 (2020), pp. 1–7.
+[Tan+21]
+Xiaolin Tang et al. “Motion planning framework for autonomous vehicle with LSTM-
+based predictive model”. In: 2021 5th CAA International Conference on Vehicular Con-
+trol and Intelligence (CVCI). IEEE. 2021, pp. 1–5.
+Page 69 of 75
+==PAGE:72==
+Bibliography
+Technical University of Denmark
+[Tol54]
+John RR Tolkien. The Lord of the Rings. Part 2: The Two Towers. 1954.
+[Vas+17]
+Ashish Vaswani et al. “Attention is all you need”. In: Advances in neural information
+processing systems 30 (2017).
+[Wan+22]
+Junlu Wang et al. “A T-CNN time series classification method based on Gram matrix”.
+In: Scientific Reports 12.1 (2022), p. 15731.
+[Wan20]
+Jie Wang. “An intuitive tutorial to Gaussian processes regression”. In: arXiv preprint
+arXiv:2009.10862 (2020).
+[Wer14]
+Nico Werner. Analysis and automation of the crucible-free Floating Zone (FZ) growth
+of silicon crystals. epubli GmbH, 2014.
+[WPL20]
+Qianchao Wang, Lei Pan, and Kwang Y Lee. “Improving Superheated Steam Tempera-
+ture Control Using United Long Short Term Memory and MPC”. In: IFAC-PapersOnLine
+53.2 (2020), pp. 13345–13350.
+[Xie+17]
+Saining Xie et al. “Aggregated residual transformations for deep neural networks”. In:
+Proceedings of the IEEE conference on computer vision and pattern recognition. 2017,
+pp. 1492–1500.
+[Zul00]
+Werner Zulehner. “Historical overview of silicon crystal pulling development”. In: Ma-
+terials Science and Engineering: B 73.1-3 (2000), pp. 7–15.
+Page 70 of 75
+==PAGE:73==
+A.
+Appendix
+A.1
+Smoothing
+The smoothing operator smα applies feature-wise smoothing to an input sequence D ∈
+RT×d with T time steps and d features (or channels).
+This is done by defining a smoothing kernel Aα(T) ∈RT×T.
+The dot product
+between the t’th row in A and the i’th column in D computes the smoothed value of
+the i’th feature at time step t. This leads to the formula for the smoothing operator:
+smα(D) = Aα(T) · D
+The t’th row in A, at, is calculated in two parts. The first part, a:t, contains the first
+t −1 entries, while the second part, at: contains the final T −t + 1 entries.
+a:t =
+ (1 −α)t−i, i = 1 . . . t −1
+
+at: =
+ (1 −α)i, i = t . . . T
+
+Once at is computed, it is divided element-wise by its sum such that all rows in Aα(T)
+will sum to 1.
+Figure A.1 shows an example of a smoothing kernel and its effect on a noisy data
+sequence.
+Page 71 of 75
+==PAGE:74==
+Bibliography
+Technical University of Denmark
+0
+10
+20
+30
+0
+5
+10
+15
+20
+25
+30
+35
+0.05
+0.10
+0.15
+0.20
+0.25
+0.30
+0.35
+0.40
+0
+10
+20
+30
+40
+Time step
+1.0
+0.5
+0.0
+0.5
+1.0
+y
+sm0.4(y)
+Figure A.1:
+Left: Smoothing kernel A for T = 40 and α = 0.4. Right: A noisy,
+sinusoidal sequence and the smoothed version.
+Page 72 of 75
+==PAGE:75==
+Bibliography
+Technical University of Denmark
+A.2
+Loss
+0
+5000
+10000
+15000
+20000
+25000
+30000
+Batch
+10
+1
+2 × 10
+2
+3 × 10
+2
+5 × 10
+2
+7 × 10
+2
+2 × 10
+1
+3 × 10
+1
+5 × 10
+1
+7 × 10
+1
+Loss
+Test loss X
+Test loss U
+Train loss X
+Train loss U
+Figure A.2:
+The loss curves from training on the real float-zone data using the pa-
+rameters of Gtn-S. The test loss is split into each of the three models in the ensemble,
+while the train loss is reported as an average. The blue lines represent the dynamics
+networks, while the orange ones represent the control networks.
+Page 73 of 75
+==PAGE:76==
+Bibliography
+Technical University of Denmark
+0
+5000
+10000
+15000
+20000
+25000
+30000
+Batch
+10
+1
+100
+2 × 10
+2
+3 × 10
+2
+5 × 10
+2
+7 × 10
+2
+2 × 10
+1
+3 × 10
+1
+5 × 10
+1
+7 × 10
+1
+Loss
+Test loss X
+Test loss U
+Train loss X
+Train loss U
+Figure A.3:
+The loss curves from training Gtn-S on the simulated float-zone data.
+The test loss is split into each of the three models in the ensemble, while the train loss
+is reported as an average. The blue lines represent the dynamics networks, and the
+orange ones represent the control networks.
+Page 74 of 75
+==PAGE:77==
+A. Appendix
+Technical University of Denmark
+A.3
+Learning Rate
+0
+5000
+10000
+15000
+20000
+25000
+30000
+Batch
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Learning rate
+1e
+5
+Figure A.4:
+The one cycle learning rate [ST19] used for all trainings presented in the
+report.
+Page 75 of 75

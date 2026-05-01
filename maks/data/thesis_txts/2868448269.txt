@@ -1,0 +1,3055 @@
+==PAGE:1==
+A domain specific model checker for AMMs
+pathfinding & reachability analysis
+Master Thesis
+DTU Compute
+Department of Applied Mathematics and Computer Science
+==PAGE:2==
+==PAGE:3==
+A domain specific model checker for AMMs
+pathfinding & reachability analysis
+Master Thesis
+February, 2025
+By
+Aleksander Junge
+Copyright:
+Reproduction of this publication in whole or in part must include the cus-
+tomary bibliographic citation, including author attribution, report title,
+etc.
+Cover photo:
+Vibeke Hempler, 2012
+Published by:
+DTU, Department of Applied Mathematics and Computer Science, Build-
+ing 324, 2800 Kgs. Lyngby Denmark
+www.compute.dtu.dk
+ISSN:
+[0000-0000] (electronic version)
+ISBN:
+[000-00-0000-000-0] (electronic version)
+ISSN:
+[0000-0000] (printed version)
+ISBN:
+[000-00-0000-000-0] (printed version)
+==PAGE:4==
+Approval
+This thesis has been prepared over six months at DTU compute, Department of Applied
+Mathematics and Computer Science, at the Technical University of Denmark, DTU, in
+partial fulfilment for the degree Master of Science in Computer Science and Engineering.
+It is assumed that the reader has a basic knowledge in the areas of temporal logic & model
+checking.
+Aleksander Junge - s223125
+Signature
+Date
+ii
+A domain specific model checker for AMMs
+==PAGE:5==
+Abstract
+In this thesis, we construct a model checker1 that enables queries on properties of AMMs
+with a constant product swap rate trading function.
+The model checker operates on a transition system where state variables consist of user
+wallets, AMM reserves as well as an optional fee level on each AMM. State variables may
+be either concrete or symbolically constrained. Transitions between states are enabled by
+swap transactions.
+The model checker supports both temporal logic formulae, as well as a maximization query
+”ϵ-max υ” that returns ϵ-tight bounds around the max value of an expression υ (where
+ϵ ∈R]0;1[ is a parameter of our model, which allows tuning the tradeoff between execution
+time and precision).
+From the initial state space, a bounded search for a witness to the satisfiability of the
+formulae is launched. Upon finding a witness, the model checker returns in addition to
+the concrete witness a fully concretized initial state from which the transactions contained
+in the witness can be executed, to arrive at a state leading to a satisfied formula.
+As our tool conducts its search on incrementally longer transaction sequences, any witness
+returned by our model checker has the property that it is the shortest possible witness to
+the formulae.
+The model checker also permits constraining the set of transactions that can be used to
+search for a witness. Permitting a potentially empty subset of users to transact freely,
+while requiring transactions from other users to be marked as either required or available
+for inclusion. This enables more realistic, complex and adversarial scenarios to be checked
+on the solver.
+The semantics of our AMM model permits the execution of transactions that fail. I.e.
+transactions whose premise for execution on the AMM-contract are invalid, and which
+hence are reverted by the blockchain state machine - leaving the state unchanged. While
+this may seem an odd choice, taking this approach allows modeling scenarios where a
+block builder might be forced to include a set of transactions X (e.g. through an inclusion
+list), and thus being required to provide an execution ordering for X without necessarily
+caring if a subset of these fail, the block builder might still want to optimize the ordering
+of X as to maximize some utility.
+The results obtained through querying our solver are sound, i.e. if the formulae is unsat-
+isfiable it won’t return a witness to the satisfiability of the formula (with the exception of
+the ϵ-max operation where Z3 rounding may result in false positives). For completeness,
+we say that our solver is relatively k-complete, i.e. if the formula is satisfiable within the
+bound of k transactions, it will find a witness - but ”relative” because it is only as complete
+as the underlying SMT-solver.
+1The model checker can be found at: https://github.com/aleksanderJunge/AMM-model-checker
+A domain specific model checker for AMMs
+iii
+==PAGE:6==
+Acknowledgements
+A handful of people deserve a special mention, as they greatly contributued to make this
+project possible.
+My advisor Prof. Alberto L. Lafuente, for providing guidance and helpful recommendations
+throughout the project. Astrid Christensen - for allowing me to take several weeks off from
+work in a busy time to work on this project. Roberto Pettinau, for challenging my ideas and
+providing constructive criticism. And of course, my mother Listbeth Junge for stopping
+by with a meal every now and then, when I was busy writing.
+iv
+A domain specific model checker for AMMs
+==PAGE:7==
+Contents
+Preface
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ii
+Abstract . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iii
+Acknowledgements . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iv
+1
+Introduction
+1
+1.1
+Contributions . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+1
+1.2
+Related Work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+2
+Background
+5
+2.1
+AMM preliminaries . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+3
+A domain specific solver for AMMs
+11
+3.1
+Formalization of supported queries . . . . . . . . . . . . . . . . . . . . . . .
+11
+3.2
+Incremental BMC approach . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+3.3
+Implementation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+3.4
+Constraining transactions . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+3.5
+Maximizing a utility function . . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+3.6
+Adding fees . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+3.7
+Summary
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+27
+4
+Analysis
+29
+4.1
+Theoretical Guarantees
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+29
+4.2
+Completeness thresholds . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+30
+4.3
+Search space . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+35
+4.4
+Search space reductions
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+37
+4.5
+Summary
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+39
+5
+Examples
+41
+6
+Future work
+49
+7
+Conclusions
+51
+Bibliography
+53
+A Query Language
+55
+A domain specific model checker for AMMs
+v
+==PAGE:8==
+vi
+A domain specific model checker for AMMs
+==PAGE:9==
+1
+Introduction
+Automated market makers (AMMs) are a type of Decentralized Exchange (DEX) deployed
+on public blockchain networks that enables non-custodial transfer of digital assets. Trans-
+actions are executed atomically and settled on-chain, making them publicly accessible. In
+contrast to traditional finance, an AMM does not rely on an order book with bid/ask
+entries, rather, asset-pricing is based on a simple algorithmic relationship between the
+AMM’s liquidity pool and the input amount of a transaction [1].
+Most popular AMMs, such as Uniswap & Curve implement their pricing function, as a
+relation between the pre-trade and post-trade values of the reserves, accepting trades only
+if the post-trade reserves are in a given relation to the reserves prior to executing the
+trade. An example is the constant product function, which requires the product between
+AMM reserves be preserved following a trade.
+As of January 2025, AMMs such as Uniswap & Curve had a combined liquidity locked of
+$6B in on-chain liquidity pools, with daily transaction volume of $1B and $0.4B respec-
+tively [2, 3, 4, 5].
+Despite the relative simplicity of the economic mechanisms underlying AMMs, a few non-
+trivial issues still remain to muddy the picture.
+Firstly, is the contentious issue of Maximal Extractable Value (MEV). As swaps are exe-
+cuted atomically against a stateful contract - any swap executed in one direction will leave
+the state of the AMM contract relatively more advantageous to swaps in the opposite di-
+rection. This means that transaction ordering is a primary concern for execution-price.
+Actors such as block builders with the ability to determine the transaction order of newly
+mined blocks, utilize this to profit through arbitrage - ”sandwiching” user transactions [6].
+Secondly, with the widespread adoption of DEXs, there are many different AMMs to choose
+from, each supporting swaps between different sets of tokens at varying prices, creating
+complexity and fragmentation. Another concern is thus how best to route a transaction
+through this network of AMMs to maximize the utility for the sender.
+In this project we develop a tool that can be used to model, query and examine properties
+pertaining to AMMs.
+We will exemplify how the tool can be used, by modeling and
+attempting to solve the aforementioned two problems, as well as a handful of others.
+1.1
+Contributions
+Our contributions can be summarized as:
+1. The creation of a domain specific model checker or ”solver”1, based on the formal-
+ization of AMMs in [7]. This solver allows the user to instantiate an arbitrary initial
+state with any combination of concrete and symbolic values (if any variable is left
+symbolic, the initial state may be considered as a set of possible initial states, rather
+than a single state). From this initial set of state(s), a query can be made to see
+if a state with certain (desirable or undesirable) properties is reachable, and if so
+the solver will return a fully concrete trace for how to get there. This also implies
+concretizing the initial state space to a single starting state from which the sequence
+of transactions is fired to arrive at the desired state. This means the solver can be
+1https://github.com/aleksanderJunge/AMM-model-checker
+A domain specific model checker for AMMs
+1
+==PAGE:10==
+used to produce actionable transactions to execute, to achieve highly customizable
+user-defined goals.
+2. We add a maximization-query that constructs a sequence of transactions, to max-
+imize the value of a utility-function. The max value returned lies in a tight range
+of [ψ −ϵψ; ψ + ϵψ] where ψ is the ’true’ max value, and ϵ is a parameter of our
+model. We provide an eﬀicient algorithm for obtaining these ϵ bounds around the
+maximal value. Additionally, we show how this maximization-query can be used
+to launch sandwich attacks in example 10, or find optimal routes through a set of
+AMMs in example 11.
+3. We provide an option to constrain the set of transactions the model can choose from
+when searching for a solution, such that e.g. only users A and B are allowed to
+transact freely, or a specific transaction from C must be included, while another set
+of transactions from D are available but not required. This allows for modeling of
+more adversarial scenarios, such as the study of sandwich attacks where an actor
+may observe the mempool (the pool of pending unvalidated transactions) and choose
+to include and order transactions as he sees fit to maximize his own gain.
+4. We include a term in our model to set the fee on each AMM, this allows for analysis
+of the cost of transacting on AMMs, such as comparing the cost of slippage vs the
+cost of fees in example 6.
+5. We show how our tool can be used to do induction-style proofs, by leaving the initial
+state entirely symbolic it may represent the universe of valid states. From such an
+unconstrained set of initial states, properties can be checked - such as verifying it is
+impossible to make a swap to arrive in a state where the reserves on an AMM are
+depleted (example 12).
+6. We provide an analysis on the required number of steps to be complete based on the
+number of users and AMMs in the state. However, we conclude that as we support
+infinite precision numbers, there are ways to vary the numbers in the query to make
+the threshold for completeness arbitrarily large - and hence bounds can only be given
+for a very limited set of combinations of users and AMMs.
+7. We provide an explicit formula for the size of the search space, and show that it
+grows exponentially in the depth k. However, we provide a set of remedial results,
+as there is an element of redundancy in certain transaction sequences that can hence
+be removed from consideration.
+1.2
+Related Work
+Many of the sub-problems described above have been studied extensively, and analytical
+solutions found to certain classes of problems. Two examples include;
+• In [8], the authors consider the routing problem, where a user seeks to maximize a
+utility function Ψ. They show that in the absence of fixed-transaction costs, the
+routing problem can be formulated as a convex optimization problem where finding
+a global solution is computationally feasible.
+The way we solve the maximization problem is fundamentally different, as we rely on
+an iterative approach, narrowing down on a concrete solution through multiple SMT-
+queries, arriving at a close but approximate value. Another point of divergence is that
+they study the problem for a network of n AMMs, and 1 user - where we consider a
+more general model, permitting more than 1 user. A final point of divergence is that
+2
+A domain specific model checker for AMMs
+==PAGE:11==
+we permit solutions containing more than a single transaction per AMM, whereas
+they assume the user has access to suﬀicient capital (e.g. through a flash-loan) to
+fund a single transaction on every AMM from the initial state.
+• In [9], the authors lay out an analytical solution to the problem of determining the
+optimal transaction ordering for extracting maximal value from a set of available
+transactions. They construct a ”multi-layered sandwich”, showing exactly how each
+layer is constructed. Our tool can be used for similar ends, by using a suitable utility
+function that maximizes the net worth of the arbitrageur while marking certain
+transactions available for the solver to include as it sees fit. Although our solution is
+less eﬀicient (as we rely on an iterative approximate method) it can be used to gain
+intuition and construct novel scenarios to check for MEV.
+Outline
+The remainder of this work is organized as follows:
+• In chapter 2 we provide preliminary knowledge on AMMs and a brief formalization
+of the transition system our solver works on.
+• In chapter 3 we describe the implementation of the solver in detail, as well as what
+sort of queries it is capable of answering.
+• Next, in chapter 4, we look at more theoretical topics, such as; soundness & com-
+pleteness, the size of the search space as well as how to reduce the size of this search
+space.
+• In chapter 5 we provide examples that showcase how the solver can be used to
+check both adversarial scenarios (exemplified by a sandwich attack), collaborative
+scenarios (how can users transact to achieve a common goal), an example of how to
+best ”route” a transaction across a network of AMMs, and finally an induction proof.
+• Finally, in chapter 6 we lay out a road map for future work, to show where develop-
+ment on this tool can be taken to further its scope.
+• We leave the language-specification used for interacting with the solver in appendix A.
+A domain specific model checker for AMMs
+3
+==PAGE:12==
+4
+A domain specific model checker for AMMs
+==PAGE:13==
+2
+Background
+2.1
+AMM preliminaries
+In this section we provide preliminary knowledge of AMMs, which will be useful to under-
+stand the remainder of this work.
+Tokens
+Tokens are the blockchain-native currency used as a store of wealth and medium of ex-
+change, examples include ETH, the native cryptocurrency of Ethereum, but also token
+types such as WBTC, which is an ERC20-standard wrapped bitcoin[10]. However, in this
+exposition we will simply use τ0 . . . τn to range over the universe of token types T. We use
+v : τ to denote an amount v ∈R≥0 of some token τ ∈T.
+Users
+We assume a universe of users A ranged over by A, B... Associated with each user A is a
+map representing a wallet σA : T →R≥0, also denoted A[σ]. If A has no tokens of type τ,
+then σA(τ) = 0. We permit increasing/decreasing the balance of A through the operations
++ and −, where A[σ±v : τ] = σA ±v : τ = σA[σA(τ)±v/τ] (where σ[v/x] means updating
+the map σ at point x to the value v).
+AMMs
+We also assume a universe of AMMs, denoted M. An AMM is a an unordered pair {r0 :
+τ0, r1 : τ1}, τ0 ̸= τ1, where ri : τi ∈R>0 indicates the AMM reserves of token type τi.
+The AMMs we choose to model all have a ”constant product swap rate” function. This
+means that following a swap, the product r0r1 must be preserved. The product r0r1 can
+be represented as a curve, where trades on the AMM moves the reserves to a new point
+along the curve. As an example consider fig. 2.1 where a user swaps 4 : τ0 for 6 : τ1.
+Figure 2.1: The evolution on the AMM curve after A swaps 4 : τ1 for 6 : τ0, the line
+represents the constant product swap rate invariant that r0r1 = 144
+A domain specific model checker for AMMs
+5
+==PAGE:14==
+States
+We model the interactions between users and AMMs as a transition system, where the
+states Γ, Γ′, ... are given as the composition of finite non-empty sets of users A and AMMs
+M:
+Γ = A | M = A | B | . . . | {r0 : τ0, r1 : τ1} | . . . | {r′
+0 : τ ′
+0, r′
+1 : τ ′
+1}
+with the condition that no users share the same wallet: ∀A, B ∈A : A ̸= B, and secondly
+that all AMMs in M have reserves of different pairs of tokens: {τ0, τ1} ̸= {τ ′
+0, τ ′
+1}.
+Symbolic states
+As we want our solver to be able to work on symbolic states, where a subset of the state
+variables aren’t concrete but rather constrained to lie in some range of values - we introduce
+notation Γs to denote that a state is symbolic. Thus Γs is not a single state, but can be
+seen as a set or family of states. An example could be a set of states such that all users
+have less than 10 : τ, i.e.: Γs = {Γ | ∄A ∈Γ : σA(τ) ≥10}.
+Transitions
+State transitions are triggered through swap1 transactions x, x′, . . . we use Γ x−→Γ′ to denote
+a state transition from Γ to Γ′ on the transaction x. We use λ to denote a sequence of
+transactions ⟨x . . . x′⟩, and subscript i ∈N to indicate the length of the sequence, e.g.
+λ3 = ⟨x, x′, x′′⟩is a sequence of 3 consecutive transactions for i = 3. For states Γ, we use
+subscript i ∈N to indicate the ”depth” of the state, i.e. how many transitions from the
+initial state Γ0 it took to reach Γi.
+For sequences λi we shorten Γ0
+λi[0]
+−−−→Γ1 . . . Γi−1
+λi[i−1]
+−−−−→Γi to simply Γ0
+λi
+−→Γi
+We denote by →∗the reflexive and transitive closure of the transition relation →. Thus
+we say that a state Γ′ is reachable iff Γ0 →∗Γ′.
+Paths
+While λ is used to denote a sequence of transactions ⟨x, x′ . . .⟩, the execution of such a
+sequence λ entails a sequence of state-transitions, we use ”paths” to talk about the states
+visited along such an execution.
+A path π = Γ0Γ1Γ2 . . . can thus be seen as a trace or sequence of states, such that each
+Γi = π[i] is connected to Γi+1 = π[i + 1] through a single transition. We will often use
+Paths(Γ) to mean the set of all paths starting at Γ.
+We will use πk to mean a path Γ0 . . . Γk of length k (also called a ”k-path”). Similarly
+Pathsk(Γ) denotes all paths starting at Γ of length k.
+Swaps
+The transitions in our transition system are made using the swap function. In a swap
+transaction, x = A : swap(v0 : τ0, v1 : τ1), A attempts to swap v0 : τ0 in exchange for at
+least v1 : τ1, which means the transaction will revert if less than v1 : τ1 is returned by the
+AMM (here revert simply means that it’s a ”no-op” - nothing happens).
+We formalize the swap transition using the two rules below:
+[Swap_success]
+σA(τ0) ≥v0
+v∗
+1 = r1 · v0
+r0 + v0
+0 ≤v1 ≤v∗
+1
+A[σ]| {r0 : τ0, r1 : τ1}| Γ
+A: swap(v0:τ0,v1:τ1)
+−−−−−−−−−−−−→A[σ −v0 : τ0 + v∗
+1 : τ1]| {r0 + v0 : τ0, r1 −v∗
+1 : τ1}| Γ
+1AMMs also support liquidity provider transactions such as deposit/redeem which allows for depositing
+tokens into, and redeeming tokens from an AMM. However for the sake of simplicity we choose to implement
+& model the swap transition only.
+6
+A domain specific model checker for AMMs
+==PAGE:15==
+the rule swap_success gives the state-transition following a successful swap, where A has
+suﬀicient funds σA(τ0) ≥v0 to execute the swap. On the other hand, swap_failure shows
+what happens if A executes a swap without having suﬀicient funds (nothing as it is re-
+verted).
+[Swap_failure]
+σA(τ0) < v0
+A[σ]| {r0 : τ0, r1 : τ1}| Γ
+A: swap(v0:τ0,v1:τ1)
+−−−−−−−−−−−−→A[σ]| {r0 : τ0, r1 : τ1}| Γ
+We say that a swap x is ”enabled” in Γ, if Γ
+x−→Γ′ results in an application of the
+swap_success rule as opposed to swap_failure.
+We use tok(x) to refer to the tokens involved in a swap x, e.g.:
+tok(x) = {τ0, τ1}
+if
+x = A : swap(v0 : τ0, v1 : τ1)
+while wal(x) refers to the wallet affected by x (i.e. the sender):
+wal(x) = A
+if
+x = A : swap(v0 : τ0, v1 : τ1)
+Prices, exchange rates and worth
+The definitions outlined below are not crucial to the implementation of our solver, but
+will be helpful to understand some of the examples.
+We assume the existence of an external price oracle P : T →R>0, which provides a price
+on every token τ ∈T.
+We use the function $ : (T →R≥0) →R≥0, as a wealth function, such that:
+$(σA) =
+X
+τ∈σA
+Pτ · σA(τ)
+The exchange rate between a pair of tokens X(τ0, τ1) is defined as the ratio between their
+value:
+X(τ0, τ1) = Pτ0
+Pτ1
+we also call this the oracle exchange rate.
+An AMM also implicitly provides a view on the exchange rate, given by the ratio between
+it’s reserves. In a state Γ, we define the internal exchange rate as
+XΓ(τ0, τ1) = r1
+r0
+if
+{r0 : τ0, r1 : τ1} ∈Γ
+As we will see momentarily, if the AMM’s internal exchange rate is not aligned with the
+oracle exchange rate X(τ0, τ1) ̸= XΓ(τ0, τ1), an arbitrage opportunity exists on the AMM.
+Indeed, in [7], the authors show that the optimal swap on an AMM is one that leaves the
+internal exchange rate aligned with the oracle.
+Example 1. As an example consider a state:
+Γ = A[4 : τ0, 2 : τ1, 2 : τ2] | {18 : τ0, 8 : τ1}| {18 : τ1, 8 : τ2}| {18 : τ2, 8 : τ0}
+Given this state Γ, suppose we are interested in maximizing the net worth of A, $(σA).
+A domain specific model checker for AMMs
+7
+==PAGE:16==
+Figure 2.2: Interaction with the solver at a high level
+First, we need to establish a price on each token. Let’s assume the price oracle assigns
+tokens an equal value of:
+∀τ ∈{τ0, τ1, τ2} : Pτ = 1
+Then, since we know optimal swaps leave the AMM’s exchange rate aligned with the oracle,
+following an optimal transaction A : swap(x : τ0, y : τ1) it must hold that r0 = r1, since
+Pτ0 = Pτ1. Intuitively, an arbitrage opportunity is thus present on the AMMs as none of
+their reserves are in equilibrium. However, we may wonder how A can best capitalize on
+this opportunity?
+To answer this question, we will give a small demonstration of what the solver developed
+in this project can do. Let’s encode the problem into our solver and see what happens. We
+will use the constraint that we are searching for a state where r0 = r1 for all three AMMs
+(i.e. we do arbitrage on all the AMMs). Then we will run the solver to see if it can find
+a witness, i.e. a sequence of transactions that leads to a state satisfying our constraint.
+In fig. 2.2 this process is highlighted.
+As the figure suggests, it is in fact possible for A to align all the AMMs’ internal exchange
+rate with the oracle’s, by executing the sequence of swaps in fig. 2.3.
+The three transactions are as follows:
+1. Firstly, since τ0 is the only token A has at least 4 of - and 4 tokens are required
+to move the AMMs back into equilibrium - the first swap is A: swap(4 : τ0, 6 : τ2),
+leaving A with 8 : τ2.
+2. A can now afford to realign the exchange rate on the AMM between τ1 and τ2 in the
+second swap A: swap(4 : τ2, 6 : τ1).
+8
+A domain specific model checker for AMMs
+==PAGE:17==
+3. Finally A’s balance of τ1 increases to 8, and she can thus afford to align the internal
+exchange rate on the last AMM to a 1 : 1 ratio as well, with; A: swap(4 : τ1, 6 : τ0).
+From this example we note how, not only does the solver return a swap to execute on each
+AMM, but also the specific interleaving of the transactions, which were important to reach
+the final state (in fact no other interleaving of 3 transactions could satisfy the proposition).
+User A
+[4 : τ0, 2 : τ1, 2 : τ2
+AMM t2t0
+{18 : τ2, 8 : τ0}
+AMM t1t2
+{18 : τ1, 8 : τ2}
+AMM t0t1
+{18 : τ0, 8 : τ1}
+s1 = A: swap(4 : τ0, 6 : τ2)
+A[0 : τ0, 8 : τ2]|{12 : τ2, 12 : τ0}
+s2 = A: swap(4 : τ2, 6 : τ1)
+A[4 : τ2, 8 : τ1]|{12 : τ1, 12 : τ2}
+s3 = A: swap(4 : τ1, 6 : τ0)
+A[4 : τ1, 6 : τ0]|{12 : τ0, 12 : τ1}
+User A
+[6 : τ0, 4 : τ1, 4 : τ2
+AMM t2t0
+{12 : τ2, 12 : τ0}
+AMM t1t2
+{12 : τ1, 12 : τ2}
+AMM t0t1
+{12 : τ0, 12 : τ1}
+Figure 2.3: Example: multi-AMM arbitrage, executed by A
+Remark. We will occasionally see transaction traces that contain numbers containing a
+’?’ such as 0.32?. This simply means that the number has been rounded to 2 decimal places.
+In section 3.3.1, we cover numeric precision more generally, as we also support an output
+mode which isn’t subject to rounding (except when doing maximization where the output
+must be decimal).
+A domain specific model checker for AMMs
+9
+==PAGE:18==
+10
+A domain specific model checker for AMMs
+==PAGE:19==
+3
+A domain specific solver for AMMs
+In this chapter we cover the formalization, design and implementation of the solver, start-
+ing at a high level, before boring into implementation details. In section 3.1 we provide
+a formalization of the temporal logic queries our tool can answer, section 3.2 covers the
+approach we take to solve queries at a high level before going into greater details of the
+implementation in section 3.3. In section 3.4 we see what can be accomplished by adding
+constraints on the transition relation (i.e. restricting the legal set of swaps), section 3.5
+describes how we implement our maximization query, before rounding off the chapter
+in section 3.6 by adding transaction fees to our model.
+To interact with the solver we have developed a small scripting language, we refer the
+interested reader to appendix A for an outline of this language and how to write valid
+programs.
+3.1
+Formalization of supported queries
+In this section we will provide a formalization of which queries the solver is capable of
+answering, with the exception of maximization which we expand upon in section 3.5.
+What we want is to be able to check properties on the states Γ of the transition system
+described in section 2.1. As Γ is spanned by AMMs (M) and users (A), the queried
+properties necessarily pertain to the values these can take. As a simple example of a query
+in a state Γ:
+Γ |= σA(τ) > 10
+?
+asserting that user A has more than 10 : τ in her wallet.
+Rather than asking if the
+proposition holds in the specific state Γ, we may wonder if it holds in a future state,
+reachable from an initial state Γ0.
+∃Γ . Γ0 →∗Γ and Γ |= σA(τ) > 10
+or equivalently
+∃♢(σA(τ) > 10)
+i.e. is there a reachable state that would satisfy the formula? And a related question; how
+would we go about constructing a sequence of swaps to get to this state?
+As we will see in a moment, the answer to the second question of how to construct a
+sequence of transactions to arrive at this state, is returned as a by-product of our technique
+for answering the first question about whether such a state is reachable.
+The grammar below shows the state formulae supported by our tool.
+Φ ::= ∃φ
+|
+α ∧∃φ
+where α contains atomic propositions that can be used to constrain the initial state space,
+and φ is path formulae. Note that our state formulae requires path formulae to be exis-
+tentially quantified.
+The supported operators for φ are given below:
+A domain specific model checker for AMMs
+11
+==PAGE:20==
+φ ::= ♢α
+| α1 U α2
+Finally, the atomic propositions gives the propositions that can be made on variables in a
+state:
+α ::= ¬ α
+|
+α1 ∧α2
+|
+α1 ∨α2
+|
+α1 = α2
+|
+α1 ̸= α2
+|
+α1 =⇒α2
+|
+υ1 > υ2
+|
+υ1 ≥υ2
+|
+υ1 < υ2
+|
+υ1 = υ2
+|
+υ1 ̸= υ2
+υ ::= r
+|
+υ1 + υ2
+|
+υ1 −υ2
+|
+υ1 · υ2
+|
+υ1 / υ2
+where v are expressions made on values r ∈Q≥0, which may refer to either a user’s
+holdings of some τ ∈T, the value of the reserves r0 or r1 in an AMM{r0 : τ0, r1 : τ1}, or
+simply any rational number input as part of the query. Note that we only support input
+variables as rational numbers (Q), as opposed to reals (R) - the reason for this is discussed
+in detail in section 3.3.1.
+3.2
+Incremental BMC approach
+In this subsection, we outline at a high-level the approach taken to solve queries. Before
+diving into implementation details in the next section.
+The approach we take is based on bounded model checking [11], where the model and a
+proposition is encoded into an SMT formula (we translate the transition system into an
+smtlib2.6[12] compliant set of variables and constraints). Once encoded, an SMT-solver
+is invoked on the formula to check whether a satisfying assignment of variables to values
+can be found, if so - we know that the proposition holds in the model, and can return the
+variable assignments made by the SMT-solver as a witness.
+Symbolic states
+As we work with potentially symbolic initial states Γs, we lift ’|= ∃φ’ to work on sets of
+states Γs as follows:
+Γs |= ∃φ
+iff
+∃Γ ∈Γs . Γ |= ∃φ
+i.e. it’s enough to find a single state Γ ∈Γs to satisfy ∃φ.
+Similarly, by Pathsk(Γs) we mean S
+Γ∈Γs Pathsk(Γ)
+12
+A domain specific model checker for AMMs
+==PAGE:21==
+Witness search
+To check the satisfiability of state formulae Γs |= Φ using bounded model checking, we
+note that since we only support the existential quantifier over paths, the problem can be
+reduced to the search for a witness πk ∈Pathsk(Γs
+0) . πk |= φ since
+Γs
+0 |= ∃φ
+iff
+∃π ∈Paths(Γs
+0) . π |= φ
+for path formulae φ, where φ is some formulae of interest, e.g. ♢σA(τ) > 10.
+We recall the definitions of the path formulae operators as:
+π[0] |= ♢α
+iff
+∃i ∈N . π[i] |= α
+π[0] |= α1Uα2
+iff
+∃i ∈N : π[i] |= α2 ∧∀j < i : π[j] |= α1
+In both cases, we note that the search for a witness can be terminated upon encountering
+the state π[i] |= α or π[i] |= α2 on the path respectively (assuming π[j] |= α1∀j < i for
+the U operator). Thus we choose to employ an incremental approach, starting from the
+initial state we check the satisfiability of the path formula with ever-increasing sequences
+of transactions until a witness πi, i ≤k has been found, or alternatively we have reached
+a depth k deemed suﬀicient to terminate the search.1
+Encode transition system & proposition
+To do an iteration of this at some depth i ≤k we replicate the state variables i times
+to create vectors γ0...γi, such that at each time step 0 ≤i′ ≤i the vector γi′ contains
+a copy of every state variable. Secondly, we encode the constraints that represents the
+initial state(s) Γs
+0 as SMT-constraints denoted I(γ0) = [Γs
+0]0 (where we use [x]i to denote
+the SMTencoding of x at depth i), as well as the transition relation T(γj, γj+1), which
+ensures that the state vector γj+1 can be reached with a single swap from γj.
+Thus without further constraints than the transition relation the variables contained in γi
+represents the set of states reachable after i swaps.
+To direct the search to find a witness for φ, we use the fact that our search is done
+incrementally to avoid having to recheck the satisfiability of the propositions at earlier
+depths. I.e. when checking depth i, we already know that no solution was found at depth
+i −1: and hence ∄πi−1 ∈Pathsi−1(Γs
+0) . πi−1 |= φ, meaning the encoding at the current
+depth i of φ can be done as follows:
+[φ]i
+encoding
+[♢α]i
+[α]i
+[α1Uα2]i
+(∧k−1
+j=0[α1]j) ∧( [α2]i)
+skipping the encoding of cases where the formula φ is sat before depth i.
+Iterate
+The satisfiability of the formula is checked with progressively longer sequences of transac-
+tions. In the first iteration, of checking at depth 0 this gives the formula:
+I(γ0) ∧[φ]0
+if this returns unsat we know the initial state doesn’t satisfy φ so we can check the states
+reachable at depth 1:
+I(γ0) ∧T(γ0, γ1) ∧[φ]1
+1In section 4.2 we look at how (or if) we can determine a completeness threshold for various combinations
+of users and AMMs.
+A domain specific model checker for AMMs
+13
+==PAGE:22==
+and more generally, at depth i ≤k:
+I(γ0) ∧T(γ0, γ1) ∧... ∧T(γi−1, γi) ∧[φ]i
+What we end up with is either a satisfied formula ...T(γi−1, γi) ∧αi = sat =⇒Γs
+0 |= ∃φ,
+which also has the property that i is the least amount of steps required to satisfy φ, or
+alternatively after checking the formula at a suﬀiciently large depth k, we may be able to
+say that a satisfying state is unreachable.
+Interpretation of sat result
+As the witness returned by the SMT-solver is given by an assignment of the state variables
+to values, it provides a concrete trace satisfying the formula (as opposed to a symbolic
+range of values). Similarly the potentially symbolic initial state Γs
+0 materialize to a concrete
+initial state Γ0 ∈Γs
+0 from which the sequence λ is fired, arriving at a state satisfying the
+proposition.
+3.3
+Implementation
+The tool consists of a ’high level’ solver implemented in Haskell, which is responsible
+for translating the query into sub-cases to check on the SMT-solver, and returning an
+appropriate sat/unsat response to the user.
+For the solver to be complete it needs to exhaustively consider all possible sequences of
+transactions of length ≤k. A first iteration implementation of this project discovered that
+when encoding the transition system into SMT, the SMT-solver had a hard time solving
+the problem, especially for large states or long sequences of transactions where the number
+of combinations of transaction sender, input and output tokens quickly grew very large.
+In a second iteration implementation we switched to a divide-and-conquer approach of
+splitting the problem into subproblems, where the shape of every transaction was assumed
+(i.e. sender, input & output token) which led to significant speedups.
+Our approach is outlined below:
+1. We enumerate all possible combinations of sender, input token and output token:
+{(A, τin, τout)|A ∈A, τin ∈T, τout ∈T}
+Naturally, not all combinations of (A, τin, τout) make up a valid transaction, for
+instance we require swaps to be made between different pairs of tokens
+τin ̸= τout
+another constraint is that transactions should only be made on AMMs that exist in
+the state Γ:
+{τin, τout} ∈x =⇒∃{r0 : τ0, r1 : τ1} ∈Γ . {τin, τout} = {τ0, τ1}
+Thus the set of transactions to check are taken from the set:
+X =
+
+(A, τin, τout)
+
+A ∈A, τin, τout ∈T, τin ̸= τout
+∃{r0 : τ0, r1 : τ1} ∈Γ . {τin, τout} = {τ0, τ1}
+
+2. From the set of valid transactions, we generate the set of possible sequences at depth
+i as the product X i:
+Li = {⟨x1...xi⟩| x ∈X}
+14
+A domain specific model checker for AMMs
+==PAGE:23==
+We will use λs
+i ∈Li to denote a sequence drawn from this set, with the superscript
+s indicating that v0 and v1 are still free variables.2
+3. For each sequence λs
+i ∈Li, we create an SMT-formula, where we for each transition
+T(γj, γj+1) assert the shape (A, τin, τout) given in λs
+i[j]. The only free parameters
+left to solve for on the swap are thus the input amount v0 and minimum payout v1.
+This procedure is outlined in algorithm 1.
+Algorithm 1 SMT-check-seq (checking ’guess’: λs
+k )
+Input: φ, Γs
+0, k, λs
+k
+1: for i ∈{0..k}:
+2:
+γi ←R(|T|·|A|)·(2·|M|)
+▷Create k state vectors
+3: for i ∈{0..k −1}:
+4:
+T(γi, γi+1) ←[λs
+k[i]]i
+▷Encode k −1 transitions
+5: I(γ0) ←[Γs
+0]0
+▷Encode initial state space
+6: sat? ←SMT(I(γ0) ∧T(γ0, γ1) ∧... ∧T(γk−1, γk) ∧[φ]k)
+▷Invoke solver on encoding
+7: return sat?
+4. Finally, we iteratively invoke the SMT solver on the constructed formula for every
+λs
+i ∈Li, returning the first sequence λ that returns sat, or alternatively report
+unsat for depth i. This is repeated for every depth up to k, where if no solution
+is found, the final answer to the query will be unsat. This algorithm is displayed
+in algorithm 2.
+Algorithm 2 SMT-check
+Input: Φ = ∃φ, Γs
+0, k
+Initialization: sat ←⊥
+1: i ←0
+2: while i ≤k ∧sat = ⊥do
+3:
+Li ←{⟨x1...xi⟩| x ∈X}
+▷sequences of swaps λs
+i ∈X i as described above
+4:
+while Li ̸= ∅∧sat = ⊥do
+5:
+λs
+i ←select λs
+i ∈Li
+▷select sequence to check
+6:
+Li ←Li \ λs
+i
+▷Mark as visited
+7:
+sat ←SMT-check-seq(φ, Γs
+0, i, λs
+i)
+▷Check satisfiability of formula
+8:
+end while
+9:
+i ←i + 1
+▷continue in depth i + 1
+10: end while
+11: return sat
+Quantifier-free non-linear real arithmetic logic
+As a byproduct of our approach, we will show that each subproblem can easily be contained
+in the quantifier-free non-linear real arithmetic logic (QF_NRA), which is a decidable logic.
+The key, is to show that there are essentially only real-valued variables left to solve for.
+First, we consider transactions:
+x ∈A x T x T x R x R
+Since we don’t have to solve for sender, input token and output token: A x T x T we are
+only solving for:
+x ∈R x R
+2The cardinality of this set Li is: |X|i, in section 4.4 we consider how to reduce the size of the search
+space by reducing this cardinality
+A domain specific model checker for AMMs
+15
+==PAGE:24==
+which is contained in QF_NRA. Next, we show how the state variables γi are reduced to
+variables of type real :
+• A user wallet: σ : T →R≥0 is essentially a mapping from tokens to reals, if we
+’flatten’ the map, i.e. introduce |T| new variables, we have a separate variable for
+each τ ∈T.
+• For AMMs {r0 : τ0, r1 : τ1}, we first observe that the tokens τ0, τ1 are essentially only
+needed to determine swap direction, however since we have this information already
+through our knowledge of the transaction shape, we are only left with r0, r1 ∈R≥0.
+Thus for each γi we create a total of |T| · |A| variables to hold the balance of each τ in
+every user wallet, as well as 2 · |M| for AMM reserves.
+So far we have shown how to contain the problem in R (accounting for the ”R” in
+QF_NRA). Secondly, as we don’t need quantifiers to encode the problem we are quantifier
+free (QF), and lastly we need the operators / and · as division and multiplication are used
+in the problem, making it non-linear (N). Thus, QF_NRA.
+3.3.1
+Numeric precision
+A great concern in an implementation like this is the accuracy of the types involved. For
+instance, if the high-level solver relied on 32-bit floats, a lot of values received from the
+user as well as replies from Z3 would be subject to some form of truncation or rounding
+when parsed into the solver as a float.
+Luckily, Haskell supports infinite precision rational numbers (the division of two infinite
+precision integers). However, Q ⊂R, and by only allowing rational numbers as input we
+are slightly limiting the input range, for instance
+√
+2 is not rational.
+The Z3 logic we use supports numbers contained in Q (algebraic reals) [13]. An algebraic
+real is a number which can be expressed as the root of a non-zero polynomial with rational
+coeﬀicients. This set contains Q, i.e Q ⊂Q, which means that any input from our high-
+level solver to Z3 will be well understood - however the reverse is generally not true - as
+algebraic numbers includes irrational numbers not contained in Q. This is however not
+a great limitation, as we usually print solutions from Z3 directly without parsing them
+into Haskell rationals first (with the exception of the iterative maximization described
+in section 3.5).
+Notably, as Z3 supports algebraic numbers, queries whose solution is expressed in terms
+of e.g. a square root (such as the solution to the MEV game of [9]) can be answered
+accurately, in its analytical form as the root of a polynomial, as opposed to a truncated
+decimal number (although this is also supported).
+However, it should be noted that the domain we are modeling itself doesn’t support infinite
+precision numbers, nor irrational numbers, for instance the ethereum virtual machine
+(EVM) has a word size of 256 bits [14].
+Example 2. With so much covered, let’s briefly revisit the example from fig. 2.3. We saw
+how A was able to construct three transactions to earn 2 of each token through arbitrage.
+Say we want to verify that the three transactions from fig. 2.3 are optimal in the sense
+that no other sequence of length 3 makes A more wealthy.
+Adding up A’s token holdings in the final state of A[6 : τ0, 4 : τ1, 4 : τ2] gives A a net worth
+of $(σA) = 14.
+To check whether this is optimal, we will query our solver with:
+16
+A domain specific model checker for AMMs
+==PAGE:25==
+∃♢
+ σA(τ0) + σA(τ1) + σA(τ2)
+
+> 14
+at depth ≤3:
+1
+TOKENS (t0, t1, t2)
+2
+DEPTH 3
+3
+4
+AMM t0t1 (18 : t0,
+8 : t1)
+5
+AMM t1t2 (18 : t1,
+8 : t2)
+6
+AMM t2t0 (18 : t2,
+8 : t0)
+7
+USER A (4 : t0, 2 : t1, 2 : t2)
+8
+9
+EF A.t0 + A.t1 + A.t2 > 14
+Which returns unsat.
+Thus using 3 transactions there’s no way to improve on the sequence from fig. 2.3.
+However, suppose another user B submits a transaction B : swap(v0 : τ0, v1 : τ1) for some
+amounts v0 and v1 - how would an ideal transaction ordering look for A then? Could she
+earn more? First we need to find a way of telling the solver that such a swap from B is
+at its disposal, without allowing it to construct other arbitrary transactions from B.
+3.4
+Constraining transactions
+The model we have considered so far is one where only the state space has been constrained.
+In some sense the model checker has relied on users ”cooperating” when solving constraints,
+as it has been free to fire any transaction from any user to arrive at a goal state.
+In the real world, users don’t necessarily ”cooperate” in this way, but rather often submit
+transactions without knowledge of other user transactions. To enable our solver to reason
+about such scenarios, we will need to constrain the transition function. More specifically,
+we introduce three types of transaction constraints that lets the solver know how it is
+permitted to transact:
+1. Available transactions: a transaction can be marked as ”available” for the solver to
+use, which means that it is free to include it when looking for a solution - but it
+doesn’t have to include it.
+2. Required transactions: by marking a transaction as required the solver must include
+it in all sequences λs
+i ∈Li, i.e. no witness can be found that doesn’t contain this
+transaction.
+This also entails that if there are e.g.
+5 required transactions, no
+sequence λs
+i for i < 5 is legal.
+3. Free, users can be marked as free, which means the solver has freedom to construct
+any transaction from this user to arrive at the goal.
+When specifying a transaction using the available/required statements, the amounts v0, v1
+may be either concrete, or alternatively they can be left unspecified (but user, input and
+output token must be specified).
+An important (but secondary) consequence of constraining transactions is a reduction in
+the search space - as the set of sequences Li that we must consider, is usually more limited
+than if we had to consider all combinations. In section 4.3 we look at the size of the search
+space in detail.
+Example 3. Returning to the previous example, let’s see if A can somehow earn more
+than the previous max of $(σA) = 14 if B submits a transaction; B : swap(v0 : τ0, v1 : τ1),
+A domain specific model checker for AMMs
+17
+==PAGE:26==
+and what the ideal transaction ordering would look like, as to maximize $(σA). For now we
+will not impose any constraints on σB nor the amounts v0, v1 on the available transaction,
+and still only consider ≤3 transactions. Let’s encode the problem into our solver:
+1
+TOKENS (t0, t1, t2)
+2
+DEPTH 3
+3
+4
+AMM t0t1 (18 : t0,
+8 : t1)
+5
+AMM t1t2 (18 : t1,
+8 : t2)
+6
+AMM t2t0 (18 : t2,
+8 : t0)
+7
+USER A (4 : t0, 2 : t1, 2 : t2)
+8
+USER B (_ : t0, _ : t1, _ : t2)
+9
+10
+AVAILABLE (B, _ : t0, _ : t1)
+11
+FREE (A)
+12
+13
+EF A.t0 + A.t1 + A.t2 > 14
+In this case the solver returns the trace seen in fig. 3.1. B swaps 126 : τ0 for 7 : τ1 in
+return, which leaves the AMM very favorable for swaps in the other direction, which A can
+readily reap the rewards of - swapping 1 : τ1 for 72 : τ0 to reach a net worth of $(σA) = 79,
+which is clearly larger than 14. Naturally this is a somewhat contrived example, where B
+can almost be said to donate money to A through the AMM.
+User A
+[4 : τ0, 2 : τ1, 2 : τ2
+AMM t0t1
+{18 : τ0, 8 : τ1}
+User B
+[126 : τ0, 1 : τ1, 2 : τ2
+s1 = B: swap(126 : τ0, 0 : τ1)
+B[0 : τ0, 8 : τ1]|{144 : τ0, 1 : τ1}
+s2 = A: swap(1 : τ1, 0 : τ0)
+A[1 : τ1, 76 : τ0]|{72 : τ0, 2 : τ1}
+User A
+[76 : τ0, 1 : τ1, 2 : τ2
+AMM t0t1
+{72 : τ0, 2 : τ1}
+User B
+[0 : τ0, 8 : τ1, 2 : τ2
+Figure 3.1: How A can benefit from a user B’s transaction
+Remark. The output returned by the solver leaves the minimal required return v1 at
+0, this trivially means the transaction won’t fail. The value of v1 matters primarily on
+transactions made available to the solver from the user as we will see now.
+Let’s consider what happens if the transaction amounts are fixed on B’s transactions:
+B : swap(6 : τ0, 2 : τ1), i.e. B expects to get at least 2 : τ1 in return for 6 : τ0. First we
+encode this into our solver:
+18
+A domain specific model checker for AMMs
+==PAGE:27==
+1
+TOKENS (t_0, t_1, t_2)
+2
+DEPTH 3
+3
+4
+AMM t0t1 (18 : t_0,
+8 : t_1)
+5
+AMM t1t2 (18 : t_1,
+8 : t_2)
+6
+AMM t2t0 (18 : t_2,
+8 : t_0)
+7
+USER A (4 : t_0, 2 : t_1, 2 : t_2)
+8
+USER B (_ : t_0, _ : t_1, _ : t_2)
+9
+10
+AVAILABLE (B, 6 : t_0, 2 : t_1)
+11
+FREE (A)
+12
+13
+EF A.t_0 + A.t_1 + A.t_2 > 14
+User A
+[4 : τ0, 2 : τ1, 2 : τ2]
+AMM t0t1
+{18 : τ0, 8 : τ1}
+AMM t1t2
+{18 : τ1, 8 : τ2}
+User B
+[6 : τ0, 1 : τ1, 0 : τ2]
+s2 = A: swap(1 : τ2, 0 : τ1)
+A[1 : τ2, 4 : τ1]|{16 : τ1, 9 : τ2}
+s1 = B: swap(6 : τ0, 2 : τ1)
+B[0 : τ0, 3 : τ1]|{24 : τ0, 6 : τ1}
+s3 = A: swap(3.5 : τ1, 0 : τ0)
+A[0.5 : τ1, 12.84? : τ0]|{15.15? : τ0, 9.5 : τ1}
+User A
+[12.84? : τ0, 0.5 : τ1, 1 : τ2]
+AMM t0t1
+{15.15? : τ0, 9.5 : τ1}
+AMM t1t2
+{16 : τ1, 9 : τ2}
+User B
+[0 : τ0, 3 : τ1, 0 : τ2]
+Figure 3.2: Example showing how A can earn more than 14 when a transaction B :
+swap(6 : τ0, 2 : τ1) is made available to the solver.
+Which returns the trace shown in fig. 3.2.
+1. A makes an initial transaction on the AMM ”t1t2” to increase her balance of τ1
+(which will be needed in the final transaction).
+2. then B swaps 6 : τ0 for 2 : τ1 on the AMM ”t0t1” bringing it further ”out of
+equilibrium” (assuming 1:1 token price)
+3. A can now exploit the favorable internal exchange rate on the AMM ; {24 : τ0, 6 : τ1},
+by swapping in the direction τ1 →τ0 (using the τ1 picked up in the first transaction).
+A domain specific model checker for AMMs
+19
+==PAGE:28==
+This brings A’s balance to: A[12.84 : τ0, 0.5 : τ1, 1 : τ2] and $(σA) = 14.34 > 14. However,
+although greater than the previous max of 14 this is clearly not the optimal solution, as
+A could still afford to bring the AMMs reserves further towards equilibrium on both her
+swaps, and hence obtain a greater gain.
+To find a more optimal sequence we can invoke the solver once more:
+∃♢
+ σA(τ0) + σA(τ1) + σA(τ2)
+
+> 14.34...
+Which returns another trace, yielding $(σA) = 14.48, however this is still not the max
+value that A could reach given the constraints - in fact we could continue to invoke the
+solver in this fashion, each time requiring the value to be greater than in the previous
+iteration. Figure fig. 3.3 plots such a strategy, showing $(σA) (y-axis) as a function of the
+number of invocations of the solver (x-axis).
+We note that after 8 invocations, the improvements start to become increasingly small,
+with the first 8 invocations yielding a total increase of 1.47 the last 6 invocations only gave
+an increase of 0.035 - and thus we might suspect we are close to the max.
+Figure 3.3: net worth of A, as a function of invocations - each invocation requiring a
+strictly larger net worth than in the prior.
+Querying the solver iteratively in this fashion is a tedious endeavor, and determining when
+to stop the search a hard question to answer (when can we be sure that we have converged
+to a value close to the ’true’ max?). Thus in the next chapter we will present a new
+”ϵ-max υ” operation to our solver to maximize expressions υ.
+3.5
+Maximizing a utility function
+In this section we present the ϵ-max operator. Firstly, we define the semantics of the query,
+before describing how it is implemented.
+Remark. We use υ(Γ) to evaluate the value of the expression υ in a state Γ.
+We start by giving a definition of the true max value of υ:
+Definition 1. We define the maximal value of expression υ at depth i as maxi υ:
+maxi υ = sup{υ(πi[i]) | πi ∈Pathsi(Γs
+0)}
+i.e. it’s the least upper bound on the set of values attained for υ at the end of the paths
+πi ∈Pathsi(Γs
+0). If some πi[i] doesn’t contain an upper bound on υ, this will be ∞.
+20
+A domain specific model checker for AMMs
+==PAGE:29==
+Remark. The definition of maxi υ allows for multiple paths to attain this max value.
+Next, we define the meaning of an approximate max value ϵ-maxi at depth i in relation to
+this true maximal value.
+Definition 2. We say that a path πi |= ϵ-maxi υ iff
+υ(πi[i]) ∈[ψ −ϵψ; ψ + ϵψ],
+for
+ψ = maxi υ
+which holds iff
+∄π′
+i ∈{Pathsi(Γs
+0) \ πi} . υ(π′
+i[i]) > υ(πi[i])(1 + ϵ)
+where ϵ ∈R]0;1[ is a parameter of our model.
+i.e., on the initialized path πi for it to hold that πi |= ϵ-maxi υ, no other path π′
+i ∈
+{Pathsi(Γs
+0) \ πi} reaches a state π′
+i[i] where υ is more than at most a fraction ϵ higher
+than the value of υ in πi[i]. Shortly, we will see why we need this error term ϵ.
+Finally, we use ϵ-maxi to give a definition for the ϵ-max operator, supported by our solver.
+Definition 3. Given a bound k, the ϵ-max υ operator returns for each depth i ≤k an
+interval ϵ-maxi υ around the max value at depth i.
+Remark. The set of intervals returned by ϵ-max are monotonically increasing in the length
+of the path, as maxi υ ≥maxi−1 υ for all i (unless using constrained transactions). Thus
+the max value is never found at a depth i < k, however we return a max value for each
+depth up to k, both because it is illuminating to see how it changes as a function of depth,
+but also because it could be equal, in which case one might prefer a shallower depth solution.
+Remark. It is also possible to minimize values by maximizing 0 −υ:
+ϵ-min υ = ϵ-max (0 −υ)
+Remark. We allow the combination of the ϵ-max υ query along with state formulae, for
+instance ∃♢α. When used in conjunction with such state formulae Φ the maximal value
+of υ is taken over states Γ ⊆Sat(Φ).
+Maximization implementation
+Firstly we note that our SMT-solver of choice Z3, does not support non-linear optimiza-
+tion[15].
+Thus we implement our own approach to maximization. For simplicity, we only describe
+how we find ϵ-maxi υ, at a depth i - from there, the solution to finding ϵ-max υ is simply
+to repeat the approach for all i ≤k and return the interval obtained for each depth.
+Our approach iteratively queries the SMT-solver for values that gets progressively closer
+to maxi υ, until we can be sure we are within an ϵ fraction of it. The approach relies on
+a few heuristics, so we will start by introducing a more simple approach to solving the
+problem and work our way towards the final solution.
+Naive approach
+In algorithm 3 we show how to find maxi υ (not ϵ-maxi) at some depth i using a simple
+approach.
+This algorithm differs from the other temporal queries - rather than returning the first
+witness λ leading to sat, it keeps checking all λs
+i ∈Li to search for greater values of υ.
+A domain specific model checker for AMMs
+21
+==PAGE:30==
+Algorithm 3 Naive maximization implementation
+Input: i, υ, Φ = ∃φ, Γs
+0
+1: Li ←{⟨x1...xi⟩| x ∈X}
+▷sequences of swaps λs
+i ∈X i of length i
+2: hiCollection ←∅
+▷will hold collection of local max
+3: while Li ̸= ∅do
+▷iterate over paths
+4:
+λs
+i ←select λs
+i ∈Li
+▷Select sequence
+5:
+Li ←Li \ λs
+i
+▷Mark as visited
+6:
+sat ←SMT-check-seq(φ, Γs
+0, i, λs
+i)
+▷check sat
+7:
+while sat = ⊤do
+8:
+hi ←υ(πi[i])
+▷update hi (πi[i] final state from SMT query)
+9:
+sat ←SMT-check-seq(φ ∧(υ(Γi) > hi), Γs
+0, i, λs
+i)
+▷check sat
+10:
+end while
+11:
+hiCollection ←hiCollection ∪hi
+▷add to global set
+12: end while
+13: return max hi ∈hiCollection
+Each time a higher value of υ is found for a path λs
+i , we update the SMT-query made to
+Z3, requiring υ to be greater in the next query on this path.
+This algorithm suffers notably from two issues:
+• It may not terminate; as we work with infinite precision numbers (section 3.3.1),
+and don’t have a minimum requirement on the step-size (i.e. the constraint υ > hi
+doesn’t set a lower bound on how much higher υ should be) we could take increasingly
+(infinitesimally) small step sizes towards the real maximal value, without reaching
+it.
+• Secondly, it is very slow - we maximize υ in all states at depth i before combining
+these local solutions - it would be better to prune off the ”bad” paths as we learn
+more about the local maxima given by each path’s end state.
+Let’s solve problem number two first;
+Adding early pruning
+In algorithm 4 we add early-pruning of paths by using a breadth-first approach, checking
+each λs
+i ∈Li once before setting a new hi threshold, which if a sequence λs
+i fails to surpass
+it will be removed from consideration in the next iteration. This way paths are weeded
+out gradually, as opposed to the depth-first exhaustive search of algorithm 3.
+Yet, algorithm 4 still suffers from the issue of non-termination, due to the absence of a
+minimum step size.
+Final solution: ϵ approximate, but terminating
+The final solution presented in algorithm 5 (on p.
+28), takes a different approach.
+Rather than try to reach the exact max value ψ = maxi υ, we are satisfied with an
+ϵ-approximation, i.e. we return an approximate max value ϵ-maxi υ ∈[ψ −ϵψ; ψ + ϵψ].
+The approach we take is based on two subroutines.
+1. getBounds seeks to quickly establish loose bounds around the maximal value, it does
+so by looking for progressively larger values of υ until the SMT-solver returns unsat
+- in which case an upper bound is established. We note that if
+maxk υ = ∞
+this step will run indefinitely.
+22
+A domain specific model checker for AMMs
+==PAGE:31==
+Algorithm 4 Naive maximization - with early pruning
+Input: i, υ, Φ, Γs
+0
+1: Li ←{⟨x1...xi⟩| x ∈X}
+▷sequences of swaps λs
+i ∈X i of length i
+2: hiGlobal ←−∞
+▷initialize global max
+3: while Li ̸= ∅do
+4:
+hiCollection ←∅
+▷initialize temporary max set
+5:
+for each λs
+i ∈Li do
+▷iterate over paths left in working set
+6:
+sat ←SMT-check-seq(Φ ∧(υ(Γi) > hiGlobal), Γs
+0, i, λs
+i)
+▷check sat
+7:
+if sat = ⊥then
+8:
+Li ←Li \ λs
+i
+▷remove sequence from consideration
+9:
+else
+10:
+hi ←υ(πi[i])
+▷update hi (πi[i] final state from SMT query)
+11:
+hiCollection ←hiCollection ∪hi
+▷add to temporary max set
+12:
+end if
+13:
+end for
+14:
+hiGlobal ←max hi ∈hiCollection
+▷Update global high
+15: end while
+16: return hiGlobal
+2. binSearch then does a binary search on this interval, halving the size of the interval
+at each step until we can say with certainty we are between the interval endpoints
+of ψ ± ϵψ.
+Remark. The ϵ-approximate maximization in algorithm 5 returns a set of paths Li that
+leads to a max value in the interval ψ ± ϵψ - to return a concrete λ trace leading to this
+approximate max value, we invoke the SMT-solver one last time on each sequence λs
+i left
+in the solution set, and return the trace λ leading to the highest υ among these (ties broken
+arbitrarily).
+Theorem 1. If maxk υ ̸= ∞then algorithm 5 invokes the SMT-solver at most O
+ |Li|(lgψ+
+lg 1
+ϵ)
+
+times, for ψ = maxi υ.
+Proof. In the proof that follows, we assume the worst-case holds, namely that all λs
+i ∈Li
+can achieve the same max value (meaning that the path-pruning has no effect).
+1. The procedure getBounds terminates in O(|Li|lg ψ) invocations, as every step dou-
+bles the lower bound, the number of steps required to reach ψ is O(lg ψ), this is
+done on all paths λs
+i ∈Li.
+2. The procedure binSearch runs in O(|Li|lg 1
+ϵ) steps, as the interval endpoints must
+be within a (1−ϵ) ratio of each other to terminate, and every step halves the interval
+size, it will be within this ratio after O(lg 1
+ϵ) halvings, potentially doing this for each
+λs
+i ∈Li.
+Thus the total number of invocations is O
+ |Li|(lg ψ + lg 1
+ϵ)
+
+.
+Remark. The effect of |Li| on execution time is most notable when the max value ψ can
+be attained through a lot of paths λs
+i ∈Li, as this minimizes the effect of path-pruning
+- and vice versa, if only few λs
+i ∈Li has a max value of ψ, path-pruning helps a lot in
+bringing down the execution time.
+Remark. (Numeric precision) As discussed in section 3.3.1, Z3 uses algebraic reals while
+the high-level solver in Haskell only supports rational numbers - and since Q ⊂Q some
+A domain specific model checker for AMMs
+23
+==PAGE:32==
+numbers returned by Z3 can’t be understood by Haskell (e.g. solutions involving roots).
+Thus we cast the potentially irrational number from Z3 to a decimal number before it is
+parsed into the high-level solver - which necessarily entails loss of precision (this is only
+an issue for this maximization operation, as the other operators don’t rely on reading
+responses from Z3).
+Example 4. With this new maximization operation on our hands, the problem from ex-
+ample 3 of determining the maximal net worth attainable for A becomes comparatively
+simpler. Making the transaction B : swap(6 : τ0, 2 : τ1) available to the solver as before,
+and setting ϵ at 0.001 (i.e. we return bounds of ±0.1% maxk υ), we query the solver with:
+ϵ-max $(σA)
+and a max depth of k = 3, which yields solutions for depths ≤3:
+Solution found at depth 0 with max value in interval: [8.00; 8.00]
+Solution found at depth 1 with max value in interval: [10.00; 10.00]
+Solution found at depth 2 with max value in interval: [12.00; 12.00]
+Solution found at depth 3 with max value in interval: [15.58; 15.59]
+User B
+[6 : τ0, 1 : τ1, 2 : τ2]
+AMM t1t2
+{18 : τ1, 8 : τ2}
+AMM t0t1
+{18 : τ0, 8 : τ1}
+User A
+[4 : τ0, 2 : τ1, 2 : τ2]
+s1 = A: swap(2 : τ2, 0 : τ1)
+A[0 : τ2, 5.6 : τ1]|{14.4 : τ1, 10 : τ2}
+s2 = B: swap(6 : τ0, 2 : τ1)
+B[0 : τ0, 3 : τ1]|{24 : τ0, 6 : τ1}
+s3 = A: swap(5.6 : τ1, 0 : τ0)
+A[0 : τ1, 15.58? : τ0]|{12.41? : τ0, 11.6 : τ1}
+User B
+[0 : τ0, 3 : τ1, 2 : τ2]
+AMM t1t2
+{14.4 : τ1, 10 : τ2}
+AMM t0t1
+{12.41? : τ0, 11.6 : τ1}
+User A
+[15.58? : τ0, 0 : τ1, 0 : τ2]
+Figure 3.4: Trace for k = 3 returned after running ϵ-max $(σA)
+The solutions before depth 3 are similar to the setting where no transaction from B was
+made available. However, we notice a jump at depth 3 as A now is able to capitalize on
+the transaction from B, this trace has been expanded in fig. 3.4.
+The sequence of swaps is similar to the previous solution in fig. 3.2, only the amounts have
+changed. The net worth of $(σA) ≃15.58 aligns well with our intuition from fig. 3.3 that
+24
+A domain specific model checker for AMMs
+==PAGE:33==
+we were approaching a maximum around 15.5.
+3.6
+Adding fees
+So far we have considered a model of AMMs with no transaction fees.
+However, it is
+unlikely anyone would deposit liquidity into an AMM, if they didn’t earn some reward.
+In this section we will describe and formalize how we add fees to our model. Secondly,
+we define another type of cost implicit when transacting on any AMM - slippage - before
+investigating how the cost of fees compares to the cost of slippage through our solver in
+an example.
+Fees
+By withholding a small fraction of every swap, fees increase the size of the pie for all who
+have a stake in the liquidity pool, incentivizing liquidity providers to deposit liquidity into
+the AMM.
+As our model without fees on a swap A : swap(v0 : τ0, v1 : τ1) means getting as much of
+τ1 as possible for a fixed input v : τ0, we choose to subtract the fee from the payout rather
+than impose it on the input amount paid. The calculation of the fee follows the approach
+taken in Uniswap [16], and is formalized by the rule:
+[swap_with_fees]
+στ0 ≥v0
+v∗
+1 = r1 · v0 · (1 −ϵ)
+r0 + v0 · (1 −ϵ)
+0 ≤v1 ≤v∗
+1
+A[σ]| {r0 : τ0, r1 : τ1}| Γ
+A: swap(v0:τ0,v1:τ1)
+−−−−−−−−−−−−→
+A[σ −v0 : τ0 + v∗
+1 : τ1]| {r0 + v0 : τ0, r1 −v∗
+1 : τ1}| Γ
+Where ϵ ∈R[0;1[ denotes the fee as a fraction, e.g. ϵ = 0.003 corresponds to a 0.3% fee
+(such as the one present on Uniswap [17]).
+Definition 4. Slippage [18] refers to the discrepancy between the internal exchange rate
+XΓ(τ0, τ1) and the exchange rate actually realized upon swapping a certain amount of v0:
+∆XΓ(v0, r0, r1) = SX(v0, r0, r1)
+XΓ(τ0, τ1)
+where
+SX(v0, r0, r1) =
+r1
+r0 + v0
+Example 5. As an example if A swaps 6 : τ0 for 4 : τ1 on an AMM:{12 : τ0, 12 : τ1} the
+slippage would be:
+∆X(6, 12, 12) = SX(6, 12, 12)
+XΓ(12, 12)
+= 2/3
+1
+= 2
+3
+Which makes sense as A only receives two thirds of what she would have received if getting
+a better price by swapping at the internal exchange rate of 1.
+Remark. Slippage grows with the size of the input amount v0 (disadvantaging large trades),
+but also decreases as the reserves of the AMM increase (as v0 becomes less significant in
+r1
+v0+r0 ).
+It is thus in the interest of users to have a well-provisioned AMM, as this means the price
+of slippage is a lot lower when swapping.
+Example 6. In this example we will see how the model checker can be used to analyze the
+cost of transacting on an AMM. We will investigate the trade-offs between transacting on
+an AMM with no fees but low liquidity, and an AMM with high liquidity but which charges
+a fee.
+A domain specific model checker for AMMs
+25
+==PAGE:34==
+We will seek to determine what fee may be charged on a well-provisioned AMM:
+{1000 : τ1, 1000 : τ2, fee =?}
+such that a user receives the same amount of tokens as when transacting on a less-well
+provisioned AMM
+{100 : τ1, 100 : τ2, fee = 0}
+without fees (but more slippage).
+To do this we introduce two users with some funds to swap A[50 : τ0] and B[50 : τ1] (one
+to trade on each AMM).
+And use the query:
+∃♢σA(τ0) = 0 ∧σB(τ1) = 0 ∧σA(τ1) = σB(τ2)
+stating that both users convert all their holdings to another token, on the respective AMMs
+- as well as requiring their post-swap holdings of τ1 and τ2 to be equal (i.e. they both
+received the same amount in return for swapping 50 tokens). Thus the only free parameter
+in the initial state is the fee on the well-provisioned AMM, which we hope it will find a
+suitable level for, to make the price on the swaps identical.
+We encode it in the solver:
+1
+TOKENS (t0, t1, t2)
+2
+DEPTH 2
+3
+4
+AMM t0t1 (100 : t0, 100 : t1)
+5
+AMM t1t2 (1000 : t1, 1000 : t2, _ : fee)
+6
+7
+USER A (50 : t0, 0 : t1)
+8
+USER B (50 : t1, 0 : t2)
+9
+10
+EF A.t0 = 0 && B.t1 = 0 && A.t1 = B.t2
+As can be seen from the output of the solver below (here we show the command line output
+of the solver), the AMM was instantiated with a fee of 31%, which is rather high - but it
+shows that swapping on a low-liquidity AMM carries a large cost in the form of slippage.
+Solution found at depth 2
+B[50.0:t1, 0.0:t2] ----swap(50.0:t1, 0.0:t2)----> (1000.0:t1, 1000.0:t2, 0.310?:fee)
+B[0.0:t1, 33.333?:t2] <---receives(33.333?:t2)--- (1050.0:t1, 966.666?:t2, 0.310?:fee)
+A[50.0:t0, 0.0:t1] ----swap(50.0:t0, 0.0:t1)----> (100.0:t0, 100.0:t1, 0.0:fee)
+A[0.0:t0, 33.333?:t1] <---receives(33.333?:t1)--- (150.0:t0, 66.666?:t1, 0.0:fee)
+Of course, the input amount of 50 : τ0 on an AMM with 100 : τ0 is also rather large, let’s
+repeat the experiment but with the users having a balance of 5 to convert, instead of 50.
+This time we get:
+B[5.0:t1, 0.0:t2] ----swap(5.0:t1, 0.0:t2)----> (1000.0:t1, 1000.0:t2, 0.043?:fee)
+B[0.0:t1, 4.761?:t2] <---receives(4.761?:t2)--- (1005.0:t1, 995.238?:t2, 0.043?:fee)
+A[5.0:t0, 0.0:t1] ----swap(5.0:t0, 0.0:t1)----> (100.0:t0, 100.0:t1, 0.0:fee)
+A[0.0:t0, 4.761?:t1] <---receives(4.761?:t1)--- (105.0:t0, 95.238?:t1, 0.0:fee)
+26
+A domain specific model checker for AMMs
+==PAGE:35==
+and the fee that makes the payout equal is lower at 4.3%, which shows slippage matters a
+lot less on smaller trades.
+3.7
+Summary
+In this chapter we first described the query language supported by our tool, and noted
+that as we only support existential quantifiers over paths, we can reduce the satisfiability
+problem to the search for a witness πi ∈Pathsi for i ≤k. Secondly, we noted that as
+the satisfiability of path formulae φ can be checked incrementally, we are able to find the
+shortest possible witness for φ and avoid expanding the search beyond what’s necessary.
+We covered how to encode the problem into an SMT-solver, by dividing the search-space
+into subproblems contained in the decidable QF_NRA logic, returning the first satisfiable
+query. Next, we briefly touched upon the numeric accuracy of our implementation, and
+noted that while we only allow rational numbers as inputs, we can still give solutions
+contained in the domain Q (with the exception of the ϵ-max query).
+We also described a way to constrain the set of transactions available to the solver when
+searching for a solution, and saw how by encoding that a transaction is available, the
+solver was able to find a better three-transaction sequence to optimize $(σA), by back-
+running an available transaction from B. However, we saw that querying iteratively for
+progressively higher values of $(σA) was a sub-optimal and time consuming way to find
+an optimal transaction sequence. To rectify this issue, we added a maximization operator
+that returns ϵ-tight bounds around the true max, and saw how this made it simpler to
+maximize $(σA).
+Lastly, we added fees to our model, and for various transaction sizes saw how the solver
+could be used to find the fee level that would make the cost of transacting on an AMM with
+high liquidity but which charges a fee equivalent to a fee-less AMM with low liquidity.
+A domain specific model checker for AMMs
+27
+==PAGE:36==
+Algorithm 5 ϵ-approximate maximization
+Input: i, υ, Φ, Γs
+0, ϵ
+1: (lo, hi, Li) ←getBounds(i, υ, Φ, Γs
+0)
+▷get loose bounds on max
+2: return binSearch(lo, hi, Li, υ, Φ, Γs
+0, ϵ)
+▷get ϵ tight-bounds on max
+Subroutine 1 - getBounds
+Input: i, υ, Φ, Γs
+0
+3: Li ←{⟨x1...xi⟩| x ∈X}
+▷sequences of swaps λs
+i ∈X i of length i
+4: lowerThresh ←−∞
+▷initialize lower bound
+5: while Li ̸= ∅do
+6:
+hiCollection ←∅
+▷initialize temporary max set
+7:
+for each λs
+i ∈Li do
+▷iterate over paths left in working set
+8:
+sat ←SMT-check-seq(Φ ∧(υ(Γi) > 2 · lowerThresh), Γs
+0, i, λs
+i)
+▷check sat
+9:
+if sat = ⊥then
+10:
+Li ←Li \ λs
+i
+▷remove sequence from consideration
+11:
+else
+12:
+hi ←υ(πi[i])
+▷update hi (πi[i] final state from SMT query)
+13:
+hiCollection ←hiCollection ∪hi
+▷add to temporary max set
+14:
+end if
+15:
+end for
+16:
+lowerThresh ←max hi ∈hiCollection
+▷Update lower bound
+17: end while
+18: return (lowerThresh, 2 · lowerThresh, Li)
+▷bounds and paths that lie inside
+Subroutine 2 - binSearch
+Input: lo, hi, L′
+i, i, υ, Φ, Γs
+0, ϵ
+19: while lo > 0 =⇒
+lo
+hi ≤(1 −ϵ), lo < 0 =⇒(1 −ϵ)|lo| > |hi|, hi = 0 =⇒|lo| > ϵ do
+20:
+mid ←lo + hi−lo
+2
+▷interval mid-point
+21:
+lowerHalf ←∅
+▷initialize sets of path with max in lower half
+22:
+upperHalf ←∅
+▷initialize sets of path with max in upper half
+23:
+for each λs
+i ∈Li do
+▷iterate over paths left in working set
+24:
+sat ←SMT-check-seq(Φ ∧(υ(Γi) > mid), Γs
+0, i, λs
+i)
+▷check sat
+25:
+if sat = ⊥then
+26:
+lowerHalf ←lowerHalf ∪λs
+i
+▷Sequence has max in lower half
+27:
+else
+28:
+upperHalf ←upperHalf ∪λs
+i
+▷Sequence has max in upper half
+29:
+end if
+30:
+end for
+31:
+if upperhalf = ∅then
+32:
+hi ←mid
+▷max is in lower half
+33:
+else
+34:
+lo ←mid
+▷Max is in upper half
+35:
+Li ←Li \ lowerHalf
+▷remove lower-half paths
+36:
+end if
+37: end while
+38: return (lo, hi, Li)
+▷bounds and paths that lie inside
+28
+A domain specific model checker for AMMs
+==PAGE:37==
+4
+Analysis
+In this chapter we will investigate the solver in more detail. In section 4.1 we will look at
+what theoretical guarantees can be made on the results obtained through our solver, sec-
+tion 4.2 investigates whether we can establish a completeness threshold for various com-
+binations of A and M. In section 4.3 we look at the size of the search space as a function
+of |A|, |M| and k before investigating how to reduce the size of this search space in sec-
+tion 4.4.
+4.1
+Theoretical Guarantees
+In this section we will look at what guarantees can be made on the results obtained through
+the tool.
+Completeness
+The tool can be said to be complete if there’s no false negatives where the solver reports
+unsat, but the formula in reality is satisfiable.
+As the search for a witness is bounded by k, we can only be complete to a depth of k, i.e.
+if the formula is satisfiable at depth k + 1, we won’t find it.
+However, within the bound of k, we believe the solver to be ”relatively complete”. Relative,
+because we can only be as complete as the underlying SMT-solver, and although the
+QF_NRA logic is decidable, Z3 has not been formally verified, and indeed we found a bug
+in the QF_NRA logic where z3 erroneously reports unsat to a satisfiable formula [19].
+Nonetheless we believe the ”high level” part of the solver to be complete as the partitioning
+of the transition relation into sub-cases spanned by (A, τin, τout) doesn’t leave any sequence
+unexamined.
+Soundness
+For the tool to be sound, we accept no false positives - i.e. no witness should be returned
+to an unsatisfiable formula.
+As we believe our transformation of the state-space and proposition into an SMT-encoding
+in the QF_NRA logic preserves the structure of the problem, we believe our solver is sound
+- of course provided that the underlying SMT-solver is sound.
+One potentially unsound operation is ϵ-max, (or when using the decimals output mode
+generally) as this relies on Z3 rounding algebraic reals to a decimal number. Inside Z3 this
+rounding is done by squeezing an interval around the ”accurate” number (some root of a
+polynomial), until the interval’s upper and lower bound are
+1
+16N from each other, before
+returning the interval upper bound (where N is the number of decimal places to use).1
+This means the ϵ-max operation may return a lower bound that is too-large by
+1
+16N and
+hence can be deemed a ”false positive”.
+1Leonardo
+de
+Moura,
+https://stackoverflow.com/questions/10302680/algebraic-reals-does-z3-do-
+rounding-when-pretty-printing
+A domain specific model checker for AMMs
+29
+==PAGE:38==
+4.2
+Completeness thresholds
+An important question to try and answer is when to terminate the search and be satisfied
+that no witness to the formula φ exists, and hence Γs
+0 ̸|= ∃φ.
+We speculate that no threshold exists if using fees - since every transaction made increases
+the size of the AMM reserves, it fundamentally changes the nature of swapping.
+For
+instance, transactions are no longer reversible. Thus, the results provided in this section
+assume a model of AMMs without fees.
+Definition 5. A completeness threshold gives a threshold k∗such that if
+∀πi ∈Paths≤k∗(Γs
+0) ̸|= φ
+then
+Γs
+0 ̸|= ∃φ
+In this section we seek to determine such a threshold k∗by looking at the size of the set
+of users |A| and AMMs |M|. It would be entirely possible to investigate in a more fine-
+grained fashion what the completeness threshold might be when taking into consideration
+the specific formulae φ - however, we try to keep it simple and see whether any bound can
+be established, solely based on the sizes of |A| and |M|.
+We start by considering the case where |M| = |A| = 1 and establish a completeness
+threshold of k∗= 1. However, no such trivial threshold exists for |M| ≥3 or |A| ≥2 (we
+leave the case for |A| = 1 and |M| = 2 open for now). As we will show, by varying the size
+of numbers in φ it’s possible to make k∗approach infinity. This means that for |A| ≥2
+or |M| ≥3 no bound on k∗can be made without also inspecting φ.
+Furthermore, we provide a result that shows when |A| = 1, and we give A ∈A access to
+a cost-free loan in Γs
+0, then any transaction sequence λ .|λ| > |M| can be reduced to λ|M|
+containing at most a single transaction per AMM- such that the net-effect of λ and λ|M|
+are equivalent.
+We start with the most simple case of Γs
+0 containing 1 AMM and 1 user. However, we
+first need to establish a few auxiliary results:
+Lemma 1. Zero sum game
+consider a state where |A| = |M| = 1:
+Γ = A[v0 : τ0, v1 : τ1]| {r0 : τ0, r1 : τ1}
+any sequence of transactions from the state Γ preserves the invariant:
+(v0 + r0)(v1 + r1) = C, for some C ∈R>0
+Proof. consider any swap x made by A, such that
+v′
+0 = v0 −x
+r′
+0 = r0 + x
+v′
+1 = v1 + y
+r′
+1 = r1 −y
+then
+(v′
+0 + r′
+0)(v′
+1 + r′
+1) =
+ (v0 −x) + (r0 + x)
+ (v1 + y) + (r1 −y)
+
+=
+ (v0 −x ) + (r0 + x )
+ (v1 + y) + (r1 −y)
+
+= C
+30
+A domain specific model checker for AMMs
+==PAGE:39==
+(a) 2 swaps in the same direction
+(b) 2 swaps in opposite directions
+Figure 4.1: Given x1, x2 shows how to construct x′
+1 to achieve the same net effect.
+Lemma 2. Let Γ
+x1 x2
+−−−→Γ′ then
+wal(x1) = wal(x2), tok(x1) = tok(x2) =⇒∃x′
+1 . Γ
+x′
+1
+−→Γ′
+or in words; any two consecutive transactions made by a user on the same AMM can be
+reduced to a single transaction.
+Proof. Consider any two swaps x1, x2 . wal(x1) = wal(x2), tok(x1) = tok(x2) since each
+swap is made on the same AMM, and preserves the invariant r0r1 = k each swap moves
+the AMM reserves to a point along the curve r0r1 = k.
+Any such two moves along the curve are additive in the sense that the same net-effect may
+be achieved in a single move, by adding the ∆τ0 and ∆τ1 of each move (see fig. 4.1 for
+examples).
+Secondly, due to the zero sum nature of swapping (lemma 1), any user gain in τ0 exactly
+corresponds to the loss in τ0 on the AMM and vice versa a user loss in τ1 corresponds to
+an equivalent gain for the AMM.
+These two properties together imply that x1 and x2 can be reduced to a single transaction.
+Theorem 2. if ∄x . Γ x−→Γ′ then
+∄λ . Γ λ−→Γ′
+if
+(∀x, x′ ∈λ : tok(x) = tok(x′), wal(x) = wal(x′) )
+or in words; if Γ′ is not reachable in a single swap x, then it’s not reachable through any
+sequence λ if λ only contains transactions from the same user on the same AMM.
+Proof. suppose by contradiction that such a λ actually exists, in that case since all x ∈λ
+have the same wal(x) and tok(x), we can apply lemma 2 on λ until λ is reduced to a
+A domain specific model checker for AMMs
+31
+==PAGE:40==
+single transaction x′′ such that Γ
+x′′
+−→Γ′ however this is a contradiction to the initial
+assumption.
+Corollary 1. With |A| = |M| = 1, the completeness threshold is k∗= 1, i.e. all reachable
+states are reachable in a single transaction.
+We may wonder if or how this result generalizes to A and M of higher cardinality, let’s
+investigate for |A| = 2 and |M| = 1:
+Theorem 3. With infinite precision numbers, the completeness threshold k∗for |A| = 2
+and |M| = 1 is directly linked to the size of the numbers in the path-formulae φ. More
+specifically, we will show that for certain φ; limϵ→0 k∗= ∞where ϵ is the smallest number
+in the query φ.
+Proof. We will give an example of a formulae φ, wherein the values can be varied to make
+k∗arbitrarily large.
+Suppose we are searching for a state in which the net worth of A is lower than some
+miniscule number:
+φ = ♢$(σA) < ϵ
+In this case the two users A, B ∈A can collude, and work together to bring down $(σA).
+Their strategy is outlined visually using the AMM curve in fig. 4.2.
+In short, since the payout v1 is given as
+v0·r1
+r0+v0 , swaps get more expensive as r1 gets smaller
+(reserves of token being purchased) and r0 gets larger (reserves of token being paid with)
+- thus A and B can take turns swapping on the AMM. A brings it out of balance (making
+swaps back into balance cheap) while B then brings it back into balance before A repeats
+this in the other swap direction.
+Figure 4.2: showing AMM curve r0r1 = k, and effects of A and B colluding to increase
+$(σB) and decrease $(σA)
+A and B can repeat this until they have transferred suﬀicient funds from A to B to satisfy
+$(σA) < ϵ how long they have to keep going depends on ϵ, and as limϵ→0 k∗= ∞.
+32
+A domain specific model checker for AMMs
+==PAGE:41==
+The results of theorem 3 makes it hard to establish a general completeness threshold for
+|A| ≥2, as we not only have to reason about the number of users & AMMs, and the
+formulae φ, but also the size of the numbers in φ.
+Finally, let’s see what can be said in the case of |A| = 1 and |M| = n.
+In theorem 4 we obtain a result that essentially tells us that if a user A has access to
+unlimited liquidity (e.g. through a flash loan or flash swap [20]), then all reachable states
+are reachable in ≤|M| transactions. Although our solver doesn’t support the notion of
+flash-loan, the result might be useful for a future iteration of the solver which could enable
+such an option (discussed in future work chapter 6).
+Theorem 4. Assume a setting with |A| = 1, |M| = n and further, that A has access to
+unlimited liquidity e.g. through a flash loan, then for any Γ0
+λ−→Γk where λ is enabled in
+Γ0, there exists an amount ∆σA which A can borrow in Γ0 (we name this new state Γ$
+0)
+and repay after executing λn such that
+Γ$
+0
+λn
+−→Γn
+is enabled in Γ$
+0, where
+Γ$
+0 = Γ′
+0 | A[σ + ∆σA]
+for
+Γ0 = Γ′
+0 | A[σ]
+Γn = Γ′
+k | A[σ + ∆σA]
+for
+Γk = Γ′
+k | A[σ]
+i.e. λ can be reduced to a sequence λn containing at most 1 transaction per AMM, but
+which has the same net-effect on the final state as λ.
+Proof. For any AMM : {r0 : τ0, r1 : τ1} ∈Γk, we can collect all transactions made on this
+AMM; λτ0,τ1 = {x | x ∈λ, {τ0, τ1} ∈x} and since we are in the single user setting, we note
+that lemma 2 can be applied to reduce λτ0,τ1 to a single transaction x′, such that x′ has
+the same net-effect on the wallet σA and reserves of {r0 : τ0, r1 : τ1} as executing λτ0,τ1.
+However, A might not be able to afford x′ directly in Γ0, as a series of intermediate trades
+on other AMMs might have been required to enable it.
+We let Γ′
+0 denote Γ0 where an amount ∆σ′
+A of τ0 or τ1 has been added to σA, suﬀicient to
+enable x′ in Γ0.
+Then we let Γ′
+0
+x′
+−→Γ1 and continue by constructing a new x′′ corresponding to some
+transaction sequence λτ,τ ′ on another AMM {r0 : τ, r1 : τ ′} ∈Γk, and if x′′ is not enabled
+in Γ1 we add funds ∆σ′′
+A to the modified initial state Γ′
+0 suﬀicient to enable the execution
+of x′′ in Γ1.
+If we do this for every AMM in Γk, we finally arrive at a wallet σA + ∆σA (where ∆σA is
+the sum of loans made to enable the transactions) and modified sequence λn = ⟨x . . . x′′′⟩,
+such that Γ$
+0
+λn
+−→Γn, and where Γ0 and Γk can be obtained through Γ$
+0 and Γn respectively,
+by subtracting the loan-amount ∆σA from A’s wallet.
+this shows that when |A| = 1 and |M| = n, any witness λ can be reduced to a sequence
+λn consisting of at most a single trade on each AMM, by giving a loan of ∆σA, which is
+subsequently subtracted from Γn.
+However, if A only has a scarcity of tokens, with no access to flash loans, then the com-
+pleteness threshold also approaches infinity for certain classes of formulae φ.
+This is
+substantiated in theorem 5, which has a similar flavor to theorem 3.
+A domain specific model checker for AMMs
+33
+==PAGE:42==
+Theorem 5. With infinite precision numbers, the completeness threshold k∗for |A| = 1
+and |M| ≥3 is directly linked to the size of the numbers in the path-formulae φ. More
+specifically, we will show that for certain φ; limϵ→0 k∗= ∞where ϵ is the smallest number
+in the query φ.
+(a) AMM graph
+(b) AMM curve
+Figure 4.3: A can repeatedly swap all his tokens along the cycle, to reduce $(σA)
+Proof. We will give an example of a formulae φ, wherein the values can be varied to make
+k∗arbitrarily large.
+Suppose as in theorem 3, that we are searching for a state in which the net worth of A is
+lower than some miniscule number ϵ:
+φ = ♢$(σA) < ϵ
+and that there exists a cycle in the graph of AMMs, see fig. 4.3 (a) for an example graph.
+Suppose all the AMMs are initialized at equilibrium reserve levels. In this case A can loop
+around the cycle in the same direction until she has lost an amount significant enough to
+satisfy $(σA) < ϵ.
+The reason this strategy makes A’s worth converge to 0 can be visualized by observing the
+curve of an AMM from the graph fig. 4.3, see (b). As every swap brings the AMM further
+out of equilibrium, the payout quickly diminishes, but since we have infinite precision
+numbers, and the space is continuous A can keep swapping along the cycle indefinitely to
+reduce $(σA).
+In summary, only for |A| = |M| = 1 were we able to establish a firm completeness threshold
+of k∗= 1. For larger sizes of A ≥2 and M ≥3 no such trivial bounds exist, as we were
+able to increase k∗by varying the size of numbers in φ. However, we noted that for the
+single-user setting, |A| = 1 and |M| = n, if a ”suﬀicient” amount is added to A’s wallet
+in Γ0 then any λ enabled in Γ0 can be reduced to a shorter sequence of length ≤|M|
+achieving the same effects as λ, this means that if a flash-loan feature is added to the
+solver, the completeness threshold when using it would be k∗= |M| (if |A| = 1).
+34
+A domain specific model checker for AMMs
+==PAGE:43==
+4.3
+Search space
+In this chapter we will look at how many transaction combinations the solver has to
+consider at each depth, as the size of the sets of AMMs M and users A varies. We start by
+considering the size of the search space, when using solely free unconstrained transactions.
+Finally, we consider how the size changes once some transactions are marked available or
+required, possibly alongside users who are still free to transact.
+Unconstrained transactions
+As in section 3.3, the legal combinations of sender, input token & output token (A, τin, τout) ∈
+A xT xT can be described by the set:
+X =
+
+A, τin, τout)
+
+A ∈A, τin, τout ∈T, τin ̸= τout
+∃{r0 : τ0, r1 : τ1} ∈Γ . {τin, τout} = {τ0, τ1}
+
+Theorem 6. The cardinality of X is:
+|X| = (2 · |M|) · |A|
+Proof. Every AMM{r0 : τ0, r1 : τ1} ∈M adds two new ways to swap τ0 →τ1 and τ1 →τ0
+respectively. Every user A ∈A has the option to do this, giving the formula.
+Thus, adding more users is twice as ’cheap’ (in terms of not growing the search space) as
+adding a new AMM.
+To consider how large the search space at depth k becomes, we recall that:
+|Lk| = |X|k =
+
+(2 · |M|) · |A|
+k
+The table below gives the size of |Lk| for various combinations of |M|, |A| and k:
+|Lk|
+k
+|A|
+|M|
+2
+1
+1
+1
+8
+1
+2
+2
+32
+1
+4
+4
+4
+2
+1
+1
+64
+2
+2
+2
+1, 024
+2
+4
+4
+16
+4
+1
+1
+4, 096
+4
+2
+2
+1, 048, 576
+4
+4
+4
+256
+8
+1
+1
+16, 777, 216
+8
+2
+2
+≃1.09 · 1012
+8
+4
+4
+it’s evident that even for relatively small models, the number of possible transaction
+sequences quickly becomes untenable, it’s simply not feasible to invoke the SMT-solver
+over 1 million times.
+A domain specific model checker for AMMs
+35
+==PAGE:44==
+Constrained transactions
+What happens to the size of the search space if we tell the solver that some set of trans-
+actions Xr are required, while some other set Xa is available? (with no one being entirely
+free to construct transactions)
+Theorem 7. Given a set of available transactions Xa and a set of required transactions
+Xr, if we assume there are no duplicate transactions, then there are:
+
+|Xa|
+k −|Xr|
+
+k!
+combinations to check at depth k.
+Proof. The formula can be decomposed into two parts.
+1. as there are |Xr| required transactions, we only have to choose k −|Xr| from the set
+of available transactions to fill out a sequence of length k. There are
+  |Xa|
+k−|Xr|
+
+ways
+to do this.
+2. given k −|Xr| transactions from the set of available transactions and |Xr| from the
+set of required transactions Xr, there are k! ways to order these.
+putting the two steps together gives the formula.
+Example 7. Consider a set of transaction constraints Xa = {x0, . . . , x7}, and Xr =
+{x8, x9}, i.e. there are eight available transactions and two required transactions x8 and x9.
+Let’s check how many sequences can be generated from these constraints at depth k = 4:
+
+8
+4 −2
+
+4! = 672
+comparing this to the table with the size of Lk for depth 4, we note that this is ∼6 times
+fewer sequences than for |A| = |M| = 2, and ∼1550 times fewer than with |A| = |M| = 4.
+Similarly, at depth 8 it would be:
+
+8
+8 −2
+
+8! = 1, 128, 960
+which is ∼16 times fewer than with |A| = |M| = 2 and ∼1 million times fewer than with
+|A| = |M| = 4.
+Clearly, using constrained transactions presents a sizable reduction in the search space -
+however, we haven’t considered how this changes when leaving some users free to transact
+along with the available/required transactions from other users.
+Theorem 8. Given a set of available transactions Xa and a set of required transactions
+Xr and finally a non-empty set of transactions X from users who are free to construct
+transactions, if we assume there are no duplicate transactions in Xa and Xr, then there
+are:
+k!
+(k −|Xr|)!
+ k−|Xr|
+X
+i=0
+|Xa|
+i
+
+(k −|Xr|)!
+(k −|Xr| −i)!
+X
+k−|Xr|−i
+
+possible combinations to check at depth k.
+Proof. We will only give the intuition behind the formula.
+36
+A domain specific model checker for AMMs
+==PAGE:45==
+1. The left term
+k!
+(k−|Xr|)! gives the number of ways to permute the required transactions
+into the sequence of length k, this leaves k −|Xr| slots open.
+2. The summation over i gives the number of ways the remaining k −|Xr| slots can
+be distributed between available transactions Xa or free transactions X. E.g. when
+i = 1, one transaction is taken from Xa and k −|Xr| −1 from X.
+3. Inside the summation, the term
+ |Xa|
+i
+ (k−|Xr|)!
+(k−|Xr|−i)! denotes the number of ways to draw
+i elements from the set Xa, and secondly once i elements are drawn - the number of
+ways to permute these elements in the k −|Xr| free slots.
+4. The final term inside the summation
+X
+k−|Xr|−i fills out the remaining k −|Xr| −i
+slots with transactions from users free to transact X, we raise it to the number of
+free slots left k −|Xr| −i to get all combinations.
+Example 8. Let’s consider a state where |A| = 2 and |M| = 2, however only A ∈A is
+free to transact, while B ∈A, has 1 required transaction, and 4 available transactions for
+the model to include.
+The table below compares the size of the search space using these constraints (denoted |L∗
+k|),
+against using the traditional unconstrained mode with both A, B ∈A free to transact:
+|Lk|
+k
+|A|
+|M|
+|L∗
+k|
+|Xr|
+|Xa|
+|Afree|
+8
+1
+2
+2
+1
+1
+4
+1
+64
+2
+2
+2
+16
+1
+4
+1
+4, 096
+4
+2
+2
+1696
+1
+4
+1
+16, 777, 216
+8
+2
+2
+5, 263, 360
+1
+4
+1
+We note there is an approximate ≃4x reduction in the size of the search space.
+However, we might still wonder if there might be some redundancy when checking the
+unconstrained sequences, are there sequences that we know can’t possibly contain a solu-
+tion?
+4.4
+Search space reductions
+In this chapter we explore how to reduce the cardinality of the set Li, to reduce the search
+space of our model (and thus make it faster).
+To accomplish this we reuse some of the results from the completeness thresholds section.
+Hence the search space reductions outlined below only apply to a model of AMMs without
+transaction fees.
+The result which will allow us to shrink the search space is presented in theorem 9, but
+we will work our way up to this result through two lemmas:
+Lemma 3 (reordering). Let Γ xx′
+−−→Γ′ then: tok(x) ̸= tok(x′), wal(x) ̸= wal(x′) =⇒Γ x′x
+−−→
+Γ′
+i.e.
+transactions from different users between different pairs of tokens can be ordered
+arbitrarily.
+Proof. Intuitively, since wal(x) ̸= wal(x′) and tok(x) ̸= tok(x′) the transactions are made
+by separate users on separate AMMs, and thus work on entirely disjoint subsets of the
+state. This disjointness ensures the transactions can be reordered arbitrarily.
+A domain specific model checker for AMMs
+37
+==PAGE:46==
+Lemma 4. if ∄x, λ .(∀x′ ∈λ : tok(x′) ̸= tok(x), wal(x) ̸= wal(x′)) . Γ x λ
+−−→Γ′ then
+∄x′ .(tok(x′) = tok(x), wal(x′) = wal(x)) . Γ x λ x′
+−−−→Γ′
+Proof. suppose by contradiction that such a transaction x′ exists. Then, since ∀x′′ ∈
+λ . tok(x′) ̸= tok(x′′), wal(x′) ̸= wal(x′′) we can use lemma 3 to reorder x λ x′ to x x′ λ, next
+since tok(x) = tok(x′) and wal(x) = wal(x′) we can apply lemma 2 to create a transaction
+x′′ equivalent to x x′ obtaining a new sequence: x′′ λ however, by the initial assumption no
+such sequence could lead to Γ′.
+Theorem 9. Assume that the path formulae to check φ had no witness at depth i −1,
+then for a sequence guess of the form λs
+i = ⟨. . . x λ′ x′ . . .⟩where
+wal(x) = wal(x′) ∧tok(x) = tok(x′) ∧∀x′′ ∈λ′ : tok(x′′) ̸= tok(x), wal(x′′) ̸= wal(x)
+λs
+i can be removed from the set of paths Li to check at depth i.
+Proof. By lemma 2 we know x λ′ x′′ can only reach the same set of states as x λ′. Further-
+more, for sequences of length i −1, no witness was found: ⟨. . . xλ′ . . .⟩̸|= φ, which implies
+⟨. . . xλ′x′ . . .⟩̸|= φ.
+Using theorem 9 we show how much the search space can be reduced for various combi-
+nations of k, |A| and |M| (where |L∗
+k| is the reduced size of the search space at depth
+k):
+|Lk|
+|L∗k|
+k
+|A|
+|M|
+2
+2
+1
+1
+1
+8
+8
+1
+2
+2
+32
+32
+1
+4
+4
+4
+2
+2
+1
+1
+64
+48
+2
+2
+2
+1, 024
+960
+2
+4
+4
+16
+2
+4
+1
+1
+4, 096
+1408
+4
+2
+2
+1, 048, 576
+778, 752
+4
+4
+4
+At depth 1, there is essentially no redundancy - however, for larger depths there is always
+some redundant sequences being removed. We note that the %-reduction achieved by this
+optimization is more pronounced the fewer users there are, which makes sense as in those
+cases there are generally more patterns where a user trades on the same AMM, with no
+intervening transactions of consequence.
+As a special case we note that for |A| = |M| = 1, the number of sequences in |L∗
+i | is 2
+for all depths, which falls in line with the completeness threshold established earlier that
+depth 1 suﬀices to be complete when |A| = |M| = 1.
+38
+A domain specific model checker for AMMs
+==PAGE:47==
+4.5
+Summary
+In this chapter, we first considered the soundness and completeness of the solver - and con-
+cluded that while our partition of the problem and transformation into an SMT-encoding
+preserves the structure of the problem, a limiting factor is the completeness of the under-
+lying SMT-solver. We concluded that the tool was sound, with the exception of the ϵ-max
+operator, as this relies on numbers in Q \ Q being rounded to a decimal by Z3, which may
+result in false positives if Z3 rounds up.
+Secondly, we looked at whether we could establish completeness thresholds for various
+combinations of M and A, and saw that while for |A| = |M| = 1 the threshold was
+k∗= 1, for |A| ≥2 and |M| ≥3 the bound k∗could approach infinity for certain φ.
+Additionally, for |A| = 1 and |M| = n we noted that any sequence λ could be reduced
+to λn, containing at most 1 transaction per AMM achieving the same net-effect as λ -
+provided that A has (or were given) suﬀicient funds in the initial state Γ0 to execute λn.
+Next, we looked at the size of the search space, and noted that when using unconstrained
+transactions, the number of combinations to check quickly grows to an untenable size
+around k = 8. When limiting the ability of a subset of A to transact freely, we noted a
+sizable reduction in the size of the search space. However, the exponential blow-up in size
+from having a user free to transact still dominated the expression.
+Thus, we finally looked at how we could remove redundant combinations from the uncon-
+strained sequences Li, by drawing on some of the results established in the completeness
+thresholds section.
+A domain specific model checker for AMMs
+39
+==PAGE:48==
+40
+A domain specific model checker for AMMs
+==PAGE:49==
+5
+Examples
+In this section, we will illustrate how the solver can be used for a variety of different
+problems. Starting with a simple swapping of tokens ’between’ two users in example 9,
+the construction of a sandwich attack in example 10, an example of how to best route a
+sequence of transactions across a network of AMMs in example 11, and finally an example
+of how to use the tool for induction in example 12.
+Example 9. Users swap at 1:1
+We’ve seen how transacting on an AMM changes the exchange rate of subsequent swaps,
+and may wonder if it’s possible for two users to exchange a pair of tokens with each other
+at a 1:1 rate using an AMM as ”middleman”.
+If we assume an initial state of:
+Γ0 = A[6 : τ0, 0 : τ1] | B[0 : τ0, 6 : τ1] | {12 : τ0, 12 : τ1}
+and want to check whether A and B can exchange holdings we encode it as:
+1
+TOKENS (t0, t1)
+2
+DEPTH 3
+3
+4
+AMM t0t1 (12 : t0, 12 : t1)
+5
+6
+USER A (6 : t0)
+7
+USER B (6 : t1)
+8
+9
+EF
+A.t1 = 6 && B.t0 = 6
+which returns the trace displayed in fig. 5.1
+As our solver returned a sequence of 3 swaps, we know that given the initial state Γ0, it
+was impossible to do it in 2 swaps. With 2 swaps on a balanced AMM, one user would
+have moved the AMM out of balance (paying a ’bad’ rate), while the other user would gain
+from bringing it back into balance.
+Yet, we may wonder if this holds for all AMM reserves, or whether there exists some
+{x : τ0, y : τ1} such that 2 swaps suﬀice? Let’s check:
+1
+TOKENS (t0, t1)
+2
+DEPTH 3
+3
+4
+AMM t0t1 (_ : t0, _ : t1)
+5
+6
+USER A (6 : t0)
+7
+USER B (6 : t1)
+8
+9
+EF
+A.t1 = 6 && B.t0 = 6
+which indeed returns a trace of length 2, as shown in fig. 5.2.
+A domain specific model checker for AMMs
+41
+==PAGE:50==
+User A
+[6 : τ0, 0 : τ1]
+AMM t0t1
+{12 : τ0, 12 : τ1}
+User B
+[0 : τ0, 6 : τ1]
+s1 = B: swap(3.369? : τ1, 0 : τ0)
+B[2.630? : τ1, 2.630? : τ0]|{9.369? : τ0, 15.369? : τ1}
+s2 = A: swap(6 : τ0, 0 : τ1)
+A[0 : τ0, 6 : τ1]|{15.369? : τ0, 9.369? : τ1}
+s3 = B: swap(2.630? : τ1, 0 : τ0)
+B[0 : τ1, 6 : τ0]|{12 : τ0, 12 : τ1}
+User A
+[0 : τ0, 6 : τ1]
+AMM t0t1
+{12 : τ0, 12 : τ1}
+User B
+[6 : τ0, 0 : τ1]
+Figure 5.1: Three transactions to swap at 1 : 1 rate on balanced AMM
+Example 10. Sandwich attack
+While the last example showed how 2 users A and B could cooperate to exchange tokens
+at a 1 : 1 rate, in this example we consider an adversarial setting. Consider a state:
+Γ = A[10 : τ0, 0 : τ1] | B[6 : τ0, 0 : τ1] | {8 : τ0, 18 : τ1}
+We put A in the powerful role of being free to transact and look to maximize $(σA), while
+B has submitted a transaction B : swap(6 : τ0, 2 : τ1), which is open for inclusion.
+Let’s encode it into the solver:
+1
+TOKENS (t0, t1)
+2
+DEPTH 3
+3
+4
+AMM t0t1 (8
+: t0, 18: t1)
+5
+USER A
+(10 : t0, 0 : t1)
+6
+USER B
+(6
+: t0, 0 : t1)
+7
+8
+AVAILABLE (B, 6 : t0, 2 : t1)
+9
+FREE (A)
+10
+11
+MAX A.t0 + A.t1
+42
+A domain specific model checker for AMMs
+==PAGE:51==
+User A
+[6 : τ0, 0 : τ1]
+AMM t0t1
+{7 : τ0, 1 : τ1}
+User B
+[0 : τ0, 6 : τ1]
+s1 = B: swap(6 : τ1, 0 : τ0)
+B[0 : τ1, 6 : τ0]|{1 : τ0, 7 : τ1}
+s2 = A: swap(6 : τ0, 0 : τ1)
+A[0 : τ0, 6 : τ1]|{7 : τ0, 1 : τ1}
+User A
+[0 : τ0, 6 : τ1]
+AMM t0t1
+{7 : τ0, 1 : τ1}
+User B
+[6 : τ0, 0 : τ1]
+Figure 5.2: A and B swap at 1 : 1 rate in two transactions.
+As the state-space is pretty small, we will set the bounds to ϵ = 1 · 10−6 (i.e. an 0.0001%
+interval around max υ). This yields intervals for depths ≤3 as follows:
+Solution found at depth 0 with max value in interval: [10.000; 10.000]
+Solution found at depth 1 with max value in interval: [12.000; 12.000]
+Solution found at depth 2 with max value in interval: [12.000; 12.000]
+Solution found at depth 3 with max value in interval: [15.999; 16.000]
+In the initial state (depth 0), $(σA) = 10.
+This increases to $(σA) = 12 at depth 1,
+as A can execute the transaction A : swap(4 : τ0, 6 : τ1), leaving the AMM in balance
+{12 : τ0, 12 : τ1}. At depth 2, no improvement can be made over this solution - however
+at depth 3 the max suddenly jumps to $(σA) ≃16. The reason for this sudden jump, can
+be found in the zero sum nature of trading on an AMM. If B makes a net-loss on a trade
+with the AMM, it enables a potential gain for A - and as we will see, A’s gain was made
+at B’s expense.
+Let’s investigate the trace at depth 3 in more detail to understand what happens. The trace
+is outlined in fig. 5.3.
+1. The first transaction A : swap(9.99? : τ1, 0 : τ0), has the sole purpose of moving
+the reserves of the AMM from {8 : τ0, 18 : τ1} to {17.99? : τ0, 8.00? : τ1} at which
+point B’s transaction is still enabled - however, at the worst possible execution price
+permitted. Note that this transaction leaves $(σA) unchanged.
+2. B executes B: swap(6 : τ0, 2 : τ1), getting in return exactly 2 : τ1 (if executed in
+the initial state it would have yielded ≃7.8 : τ1).
+This moves the AMM from
+{17.99? : τ0, 8.00? : τ1} to {23.99? : τ0, 6.00? : τ1}.
+3. Finally, A executes A: swap(6 : τ1, 0 : τ0) which brings the AMM into equilibrium
+{11.99? : τ0, 12.00? : τ1} and earns A ≃12 : τ0, bringing $(σA) up to ≃16.
+A domain specific model checker for AMMs
+43
+==PAGE:52==
+Thus, the difference between the solution at depth 1 and 2 of $(σA) = 12 and at depth 3
+of $(σA) ≃16 is in fact a loss of 4 tokens by B, which were transferred to A through the
+”sandwich attack”.
+User B
+[6 : τ0, 0 : τ1]
+AMM t0t1
+{8 : τ0, 18 : τ1}
+User A
+[10 : τ0, 0 : τ1]
+s1 = A: swap(9.99? : τ0, 0 : τ1)
+A[0.00? : τ0, 9.99? : τ1]|{17.99? : τ0, 8.00? : τ1}
+s2 = B: swap(6 : τ0, 2 : τ1)
+B[0 : τ0, 2.00? : τ1]|{23.99? : τ0, 6.00? : τ1}
+s3 = A: swap(6 : τ1, 0 : τ0)
+A[3.99? : τ1, 12.00? : τ0]|{11.99? : τ0, 12.00? : τ1}
+User B
+[0 : τ0, 2.00? : τ1]
+AMM t0t1
+{11.99? : τ0, 12.00? : τ1}
+User A
+[12.00? : τ0, 3.99? : τ1]
+Figure 5.3: A executing a sandwich attack on B’s transaction.
+44
+A domain specific model checker for AMMs
+==PAGE:53==
+Example 11. Routing
+In this example, we will consider the problem of identifying a path through a network of
+AMMs, which maximizes the utility of the user. More specifically, we consider a state
+consisting of a network of AMMs as seen in fig. 5.4, and a user A[6 : τ0] with an amount
+of τ0 she desires to convert into τ4. The question is, given the constellation of AMMs,
+which path maximizes σA(τ4)?
+Figure 5.4: Routing problem, which AMM path yields the greatest amount of τ4?
+For simplicity, we will make the assumption that following any cycle in the network won’t
+yield a positive gain - which allows us to only check depth k ≤3.
+We encode this into the solver as follows:
+1
+TOKENS (t0, t1, t2, t3, t4)
+2
+DEPTH 3
+3
+4
+AMM t0t1 (12 : t0, 12 : t1)
+5
+AMM t0t3 (18 : t0,
+8 : t3)
+6
+AMM t1t2 (8
+: t1, 18 : t2)
+7
+AMM t1t3 (12 : t1, 12 : t3)
+8
+AMM t2t4 (12 : t2, 12 : t4)
+9
+AMM t3t4 (6
+: t3, 24 : t4)
+10
+11
+USER A (6 : t0)
+12
+13
+EF A.t0 = 0 && A.t1 = 0 && A.t2 = 0 && A.t3 = 0
+14
+MAX A.t4
+i.e. we look for a state in which A only has a positive amount of τ4, and in the states that
+satisfy this proposition - we seek to maximize τ4.
+The query returns the trace seen in fig. 5.5, from which we observe that A manages to
+A domain specific model checker for AMMs
+45
+==PAGE:54==
+convert 6 : τ0 to 8 : τ4 through 3 transactions (following the middle route of the three red
+routes in fig. 5.4).
+User A
+[6 : τ0, 0 : τ1, 0 : τ2, 0 : τ3, 0 : τ4]
+AMM t0t1
+{12 : τ0, 12 : τ1}
+AMM t1t3
+{12 : τ1, 12 : τ3}
+AMM t3t4
+{6 : τ3, 24 : τ4}
+s1 = A: swap(6 : τ0, 0 : τ1)
+A[0 : τ0, 4 : τ1]|{18 : τ0, 8 : τ1}
+s2 = A: swap(4 : τ1, 0 : τ3)
+A[0 : τ1, 3 : τ3]|{16 : τ1, 9 : τ3}
+s3 = A: swap(3 : τ3, 0 : τ4)
+A[0 : τ3, 8 : τ4]|{9 : τ3, 16 : τ4}
+User A
+[0 : τ0, 0 : τ1, 0 : τ2, 0 : τ3, 8 : τ4]
+AMM t0t1
+{18 : τ0, 8 : τ1}
+AMM t1t3
+{16 : τ1, 9 : τ3}
+AMM t3t4
+{9 : τ3, 16 : τ4}
+Figure 5.5: The optimal route through the network of AMMs
+Example 12. Induction (Non-depletion)
+In this example we will see how leaving the initial state space Γs
+0 entirely symbolic can be
+used to prove safety properties of AMM swaps, such as the non-depletion of AMM reserves
+(which essentially states that the reserves of an AMM can’t be exhausted).
+A safety property states that something bad α never happens, i.e. ∀□¬α should hold. As
+our solver only supports ∃♢, to reason about global properties over all paths, we must use
+the equivalence:
+∀□¬α ≡¬∃♢α
+and show that ∃♢α doesn’t have a witness - however, we are still limited by the fact that
+our solver only checks for witnesses of a length bounded by k. Thus if we don’t find a
+witness of length ≤k we can only say that ∀□¬α holds for the first k states on paths in
+Paths(Γs
+0), but nothing can be said to the effect that it doesn’t hold thereafter. However,
+this changes when doing induction on symbolic states.
+Initial state, validity assumption
+For the case of our transition system, as we don’t support the deposit function which
+instantiates an AMM, we will need to assume that the AMMs in the state space of our
+model are valid by construction. This means that if we don’t impose any constraints on
+the initial state Γs
+0, then the initial constraints I(γ0) only contain the constraints that
+can be said to hold following a legal sequence of deposit transaction(s). These validity
+46
+A domain specific model checker for AMMs
+==PAGE:55==
+assumptions are: any AMM in the model has strictly positive reserves, while users have
+non-negative balances.
+The idea is then to firstly show that (base-case):
+I(γ0) ∧α0
+is unsatisfiable (where α is the undesired property), i.e.
+in this initial state space the
+property α doesn’t have a witness. Secondly, to show that (induction-step):
+I(γ0) ∧¬α0 ∧T(γ0, γ1) ∧α1
+doesn’t have a witness. This means there’s no way of executing a swap from a valid state
+to arrive at a state that satisfies α.
+non-depletion
+We will give an example of this for the non-depletion property, which dictates that
+AMM reserves can’t be exhausted. This can be encoded as follows:
+1
+TOKENS (t0, t1)
+2
+DEPTH 1
+3
+4
+AMM t0t1 (_ : t0, _ : t1)
+5
+USER A
+(_: t0, _ : t1)
+6
+7
+EF
+0 >= t0t1.t0 || 0 >= t0t1.t1
+which returns unsat as expected. This means the solver could not find a way to instantiate
+an initial state, from which to execute a swap and arrive at a state with non-positive
+reserves on the AMM.
+A domain specific model checker for AMMs
+47
+==PAGE:56==
+48
+A domain specific model checker for AMMs
+==PAGE:57==
+6
+Future work
+In this section we will outline a few ideas for work that could improve the state of our
+model checker.
+Liquidity provider transactions, Deposit & Redeem
+In reality AMMs not only support swap transactions, but also the ”liquidity provider”
+transactions of depositing tokens into as well as redeeming tokens from the AMM’s liquid-
+ity pool. Supporting these transactions would permit analysis of the returns earned by
+liquidity providers, and thus the incentives for depositing resources into the AMM.
+New scenarios to be checked might include how large deposits and redeems can be used in
+sandwich attacks to affect slippage, or modeling initial states that initially have no AMM at
+all, which would allow for stronger induction, since we won’t have to make assumptions
+on the base-case that the initial state was validly constructed.
+Complete, when?
+The results of the completeness thresholds section were somewhat depressing, in the sense
+that for most combinations of A and M, we failed to provide a proper bound on k∗(as we
+saw due to the infinite precision numbers, values in φ could be scaled to make k∗approach
+infinity). A future line of work could be to incorporate φ into the analysis, and say ”given
+φ, we know the threshold to be k∗= . . . since . . .”
+Alternatively, by changing the domain from infinite precision numbers to bit-vectors (e.g.
+of length 256 as is the word size of the EVM), it might be possible to both model the do-
+main of on-chain contracts more accurately, as well as get around some of the completeness
+threshold issues that we saw arise from using infinite precision numbers.
+Further reduction of search space
+As the search space grows exponentially in k, it’s infeasible to check depths beyond k ≃10.
+To make the solver more scalable for longer sequences, it would be imperative to remove
+more sequences λs
+i ∈Li from consideration.
+It might be possible to remove more redundant sequences purely based on the contents of
+the sequence itself (as seen in in theorem 9). However, another line of work could be to
+inspect the formula φ, and use this to impose constraints on sequences in Li.
+For instance, say that a subset B ⊆A of users must have a wallet different from their
+wallet in the initial state to satisfy φ. Then sequences λs
+i ∈Li lacking some sender A ∈B
+may be discarded, as such a sequence will never satisfy φ. Along the same lines, if φ
+implies A is converting some τ0 to τn, then only sequences that contain a ”route” from τ0
+to τn should be considered.
+Another alternative way to speed up the search could be a parallelization of the SMT-
+invocation step - as each sequence in Li, represents a disjoint transaction path, checking
+each sub-problem could be done independently.
+Temporary balance overdrafts
+Another line of future work could be to add a setting for ”temporary” overdrafts, e.g.
+along the lines of taking a flash-loan. As we saw in section 4.2, if |A| = 1, then by allowing
+A to take a (cost-free) loan in Γ0 the completeness threshold would be |M|, making it easy
+to conclude when to terminate the search. Additionally, if we make the solver return the
+amount ∆σA that was added to σA in Γ0 - it would enable users to identify how much to
+A domain specific model checker for AMMs
+49
+==PAGE:58==
+borrow, to enable their transactions - perhaps using the utility function to minimize the
+loan amount ∆σA.
+In [21] the authors introduce an AMM that allows for temporary overdrafts in user bal-
+ances, swaps are then submitted to a queue until the balance of every user has turned
+positive, in which case it may be cleared. By allowing overdrafts, the solver could be used
+to assist in finding ways of clearing such a queue of swaps to reach a positive state.
+Constraints
+The constraints used to constrain the transaction relation simply tells the solver which
+transactions it can use, but it’s impossible to constrain when it may use them. Thus a
+future line of work could be to add an option for imposing an ordering on the available
+set of transactions. This can implicitly also be used to shrink the search space, if the user
+knows the solution sequence has a certain shape, he may impose it through these ordering
+constraints and hence find a solution faster.
+The query language also doesn’t support relating states of a different depth to each other.
+It should be possible to add a new path formulae φ, which permits imposing constraints on
+multiple states along a path π, or even relate them to each other as in υ(π[i]) < υ(π[i+j])
+for some depths i and j.
+Use domain specific ”sub-solvers”
+The tool developed as part of this project is sort of a swiss-army knife that can be used
+for many purposes. However, a lot of the sub-problems it may be used for already have
+either analytic solutions[9], or eﬀiciently implemented solvers[8]. A phase could be added
+to identify the ”class” of problem being solved, and if it falls into one of these categories
+where a more eﬀicient solution exist, then delegate it to that solver - otherwise fall back
+to the default of checking the formula iteratively through Z3.
+Parameterize swap function
+While the constant product swap rate seems to be the most popular among AMM-implementations,
+some AMM implementations rely on other swap functions. By making the swap function
+a parameter of the solver, it would enable checking properties on these as well.
+Additionally, this would enable AMM-developers to check that the swap function of new
+constant function market maker implementations exhibit certain desirable properties -
+such as non-depletion of reserves.
+50
+A domain specific model checker for AMMs
+==PAGE:59==
+7
+Conclusions
+In summary, the solver can be used in many settings and solve a variety of problems.
+While specific solvers or analytic solutions exist for many of the sub-problems considered
+in the examples of this project, no unifying solver capable of encoding every sub-problem
+exists to our knowledge. Thus, we believe it to be the first general-purpose model checker
+for the domain of AMMs.
+However, there are still things left to be wanted - for instance the search space is still
+very large for relatively short transaction sequences, and unless the state space is small
+it would be infeasible to check formulae beyond k ≃10. However, with more analysis it
+would almost surely be possible to shrink the search space further.
+Another shortcoming was the lack of a definite completeness threshold k∗for most combi-
+nations of A and M, which makes it hard to conclude when to stop searching. To rectify
+this, it might be required to either inspect the specfic path formulae φ, to determine a
+k∗- or alternatively change the number domain to bit-vectors, to mimic the semantics
+of the on-chain AMM contracts, and get around the completeness issues that arise from
+supporting infinite-precision numbers.
+As discussed in future work, there are many possible avenues to improve or expand the
+capabilities of the solver. Nonetheless, the solver is also very usable in its current state,
+and lends itself well to gain intuition of a complex domain through active experimentation.
+A domain specific model checker for AMMs
+51
+==PAGE:60==
+52
+A domain specific model checker for AMMs
+==PAGE:61==
+Bibliography
+[1]
+Sam M. Werner et al. SoK: Decentralized Finance (DeFi). 2022. arXiv: 2101.08778
+[cs.CR]. url: https://arxiv.org/abs/2101.08778.
+[2]
+Curve TVL. https://app.uniswap.org/explore. Accessed: 15-01-2025.
+[3]
+Uniswap TVL. https : / / news . curve . fi / week - 52 - curve - best - yields - key - metrics/.
+Accessed: 15-01-2025.
+[4]
+Spot Trading Volume(24h) - Uniswap. https : / / coinmarketcap . com / exchanges /
+uniswap-v3/. Accessed: 15-01-2025.
+[5]
+Spot Trading Volume(24h) - Curve. https://coinmarketcap.com/exchanges/curve-
+finance/. Accessed: 15-01-2025.
+[6]
+Massimo Bartoletti and Roberto Zunino. A theoretical basis for Blockchain Ex-
+tractable Value. 2023. arXiv: 2302.02154 [cs.CR]. url: https://arxiv.org/abs/2302.
+02154.
+[7]
+Massimo Bartoletti, James Hsin-yu Chiang, and Alberto Lluch-Lafuente. “A theory
+of Automated Market Makers in DeFi”. In: Logical Methods in Computer Science
+Volume 18, Issue 4 (Dec. 2022). issn: 1860-5974. doi: 10.46298/lmcs-18(4:12)2022.
+url: http://dx.doi.org/10.46298/lmcs-18(4:12)2022.
+[8]
+Guillermo Angeris et al. Optimal Routing for Constant Function Market Makers.
+2022. arXiv: 2204.05238 [math.OC]. url: https://arxiv.org/abs/2204.05238.
+[9]
+Massimo Bartoletti, James Hsin-yu Chiang, and Alberto Lluch-Lafuente. Maximiz-
+ing Extractable Value from Automated Market Makers. 2022. arXiv: 2106.01870
+[cs.CR]. url: https://arxiv.org/abs/2106.01870.
+[10]
+Corwin Smith. ERC-20 TOKEN STANDARD. url: https : / / ethereum . org / da /
+developers/docs/standards/tokens/erc-20/.
+[11]
+Armin Biere et al. “Linear Encodings of Bounded LTL Model Checking”. In: Logical
+Methods in Computer Science Volume 2, Issue 5 (Nov. 2006). issn: 1860-5974. doi:
+10.2168/lmcs-2(5:5)2006. url: http://dx.doi.org/10.2168/LMCS-2(5:5)2006.
+[12]
+Clark Barrett, Pascal Fontaine, and Cesare Tinelli. “The SMT-LIB Standard Version
+2.6”. In: (2017). url: https://smt-lib.org/papers/smt-lib-reference-v2.6-r2017-07-
+18.pdf.
+[13]
+Cesare Tinelli. SMTLib Reals theory. May 8, 2017. url: https://smt-lib.org/theories-
+Reals.shtml.
+[14]
+ethervm. Apr. 7, 2024. url: https://ethervm.io.
+[15]
+Bjorner Nikolaj. non-linear optimization not supported. url: https://github.com/
+Z3Prover/z3/issues/5339#issuecomment-861699771.
+[16]
+Moody Salem (Uniswap). v2-periphery. url: https : / / github . com / Uniswap / v2 -
+periphery/blob/0335e8f7e1bd1e8d8329fd300aea2ef2f36dd19f/contracts/libraries/UniswapV2Library.
+sol#L43-L50.
+[17]
+Uniswap Docs. Fees. url: https://docs.uniswap.org/contracts/v2/concepts/advanced-
+topics/fees.
+[18]
+Daniel Engel and Maurice Herlihy. Presentation and Publication: Loss and Slippage
+in Networks of Automated Market Makers. 2021. arXiv: 2110.09872 [cs.OH]. url:
+https://arxiv.org/abs/2110.09872.
+[19]
+Aleksander Junge. Z3 returns incorrect ’unsat’ in QF_NRA logic. url: https://
+github.com/Z3Prover/z3/issues/7489.
+[20]
+Uniswap Docs. Flash Swaps. url: https://docs.uniswap.org/contracts/v2/guides/
+smart-contract-integration/using-flash-swaps.
+A domain specific model checker for AMMs
+53
+==PAGE:62==
+[21]
+Margherita Renieri et al. A Netting Protocol for Liquidity-saving Automated Market
+Makers. May 2024. url: https://ceur-ws.org/Vol-3791/paper18.pdf.
+54
+A domain specific model checker for AMMs
+==PAGE:63==
+A
+Query Language
+To facilitate the interaction with the solver, we have developed a simple scripting language.
+In this section we take a look at the syntax & semantics of this language. We write non-
+terminals in a green font to distinguish them from terminals. The usage of ∗, + and ?
+are the usual, t∗means t occurs 0 or more times, t+ means t occurs at least once, while
+t? indicates t occurs once or not at all.
+Syntax
+• Comments; we only support line comments made from the beginning of a line. --
+denotes the beginning of a comment.
+• A ⟨symbol⟩, is a sequence of alphanumeric characters, it does not need to be enclosed
+by quotation marks " and it can’t start with a digit.
+• An ⟨int⟩is a sequence of digits 0 −9 not starting with a 0.
+• A ⟨rational⟩is a token of the shape:⟨int⟩%⟨int⟩, where the first token is the numer-
+ator, and the last represents the denominator.
+• A ⟨decimal⟩is a token of the form: ⟨int⟩.0∗⟨int⟩
+Queries made to the solver are written as a ⟨script⟩. A ⟨script⟩is simply a sequence of
+⟨command⟩s:
+⟨script ⟩::= ⟨command ⟩*
+The next subsection will cover how to write a valid ⟨script⟩in more detail.
+The grammar below gives the syntax used to write ⟨command⟩s.
+⟨number ⟩
+::= ⟨rational ⟩
+|
+⟨decimal ⟩
+|
+⟨int ⟩
+⟨token_amt ⟩::= ⟨number ⟩: ⟨symbol ⟩
+|
+_ : ⟨symbol ⟩
+⟨option ⟩
+::= DECIMAL
+⟨int ⟩
+|
+DECIMAL
+|
+RATIONAL
+|
+TEX
+⟨rate ⟩
+::= ⟨number ⟩: fee
+|
+_ : fee
+⟨command ⟩
+::= AMM ⟨symbol ⟩( ⟨token_amt ⟩
+⟨token_amt ⟩
+⟨rate ⟩?)
+|
+AVAILABLE ( ⟨symbol ⟩
+⟨token_amt ⟩
+⟨token_amt ⟩)
+|
+DEPTH
+⟨int ⟩
+|
+EF ⟨expr ⟩
+|
+EU ( ⟨expr ⟩) ( ⟨expr ⟩)
+|
+FREE ( ⟨symbol ⟩+)
+|
+INIT
+⟨expr ⟩
+|
+MAX ⟨expr ⟩
+|
+REQUIRED ( ⟨symbol ⟩
+⟨token_amt ⟩
+⟨token_amt ⟩)
+|
+SETOPT
+⟨option ⟩
+|
+TOKENS ( ⟨symbol ⟩
+⟨symbol ⟩+)
+|
+USER
+⟨symbol ⟩( ⟨token_amt ⟩*)
+A domain specific model checker for AMMs
+55
+==PAGE:64==
+Note, whenever two non-terminals are adjacent, they should be separated by a comma
+(which is not shown in the rules above).
+Expressions are formed according to the grammar:
+⟨identifier ⟩::= ⟨symbol ⟩. ⟨symbol ⟩
+⟨expr ⟩
+::= not ⟨expr ⟩
+| ⟨expr ⟩+ ⟨expr ⟩
+| ⟨expr ⟩- ⟨expr ⟩
+| ⟨expr ⟩* ⟨expr ⟩
+| ⟨expr ⟩/ ⟨expr ⟩
+| ⟨expr ⟩< ⟨expr ⟩
+| ⟨expr ⟩> ⟨expr ⟩
+| ⟨expr ⟩= ⟨expr ⟩
+| ⟨expr ⟩/= ⟨expr ⟩
+| ⟨expr ⟩>= ⟨expr ⟩
+| ⟨expr ⟩|| ⟨expr ⟩
+| ⟨expr ⟩&& ⟨expr ⟩
+| ⟨expr ⟩=> ⟨expr ⟩
+| ( ⟨expr ⟩)
+| ⟨number ⟩
+| ⟨identifier ⟩
+While not all ⟨expr⟩form meaningful expressions, it is the job of the type-checker to find
+those cases and halt the program.
+The summary below outlines the type signature of each operator:
+• {+, -, *, /} ∈Q →Q →Q
+• {<, >, >=} ∈Q →Q →B
+• {/=, =} ∈α →α →B
+where
+α ∈Q ∨α ∈B
+• {<, >, >=} ∈Q →Q →B
+• {||, &&, =>} ∈B →B →B
+• {not} ∈B →B
+Semantics
+In this section we will delve into what the meaning of each ⟨command⟩is, as well as how
+to describe a well-formed program.
+There’s a minimum set of ⟨command⟩s required to form a valid ⟨script⟩, as well as an
+order imposed on the ⟨command⟩s.
+We can divide a ⟨script⟩into 4 parts:
+1. a meta-arguments part, here arguments such as the search-depth k, what the universe
+T of tokens look like, as well as desired output format can be set.
+2. a part consisting of declarations, this is where state variables (users and AMMs) are
+declared.
+3. an optional transaction constraints section, which may be used to limit the set of
+transactions used for building possible transaction-sequences λs.
+4. and finally, a path constraints section, used to express the query/search to make on
+the state.
+56
+A domain specific model checker for AMMs
+==PAGE:65==
+In what follows, we will treat these parts separately, to describe what they contribute to
+the final program.
+meta-arguments
+There are 3 different ⟨command⟩s in this category:
+⟨command ⟩
+::= SETOPT
+⟨option ⟩
+|
+DEPTH
+⟨int ⟩
+|
+TOKENS ( ⟨symbol ⟩
+⟨symbol ⟩+)
+The ⟨command⟩: SETOPT ⟨option⟩enables the option in ⟨option⟩, currently supported is
+toggling between decimal and rational output, where the first will round all numbers to x
+digits of precision (3 by default) and the latter output numbers as fractions when possible
+(unless the output from Z3 is the root of a polynomial in which case it gives a ”root-obj”1).
+The option SETOPT TEX can be used to produce LATEX sequence diagrams of the execution
+trace, such as the ones seen in this project.
+The ⟨command⟩: DEPTH ⟨int⟩is used to provide the depth k at which to terminate the
+search if no solution is found.
+The ⟨command⟩: TOKENS (⟨symbol⟩⟨symbol⟩+) sets the universe of tokens T to the ⟨symbol⟩s
+listed.
+The following DFA describes a well formed meta-arguments section:
+start
+acc
+SETOPT
+TOKENS
+TOKENS
+DEPTH
+declarations
+Users and AMMs are declared using the ⟨command⟩s:
+⟨command ⟩
+::= AMM ⟨symbol ⟩( ⟨token_amt ⟩
+⟨token_amt ⟩
+⟨rate ⟩?)
+|
+USER
+⟨symbol ⟩( ⟨token_amt ⟩*)
+A few notes on ’⟨token_amt⟩’ which occurs in both declarations. This is a non-terminal
+used to denote an amount v of some token τ. v may be either a ⟨number⟩or the terminal
+_ indicating that this value is left free for the solver to instantiate as it sees fit to make
+the formula satisfiable. In case _ is used, the solver will add a minimal set of validity
+constraints, ensuring that the variable is assigned a legal value. For AMM reserves this
+means a positive value, while for user holdings the value should be non-negative, lastly for
+fees it should belong to R[0;1[.
+To further constrain the initial state when using _, see the ⟨command⟩”INIT” described in
+the path constraints section.
+Both declarations begin with the token ⟨symbol⟩, used to provide a name by which to
+refer to the AMM or user.
+1see https://stackoverflow.com/questions/69734745/what-is-root-object-in-z3-with-real-theory for an ex-
+planation of root-obj
+A domain specific model checker for AMMs
+57
+==PAGE:66==
+The ⟨command⟩: AMM ⟨symbol⟩(⟨token_amt⟩⟨token_amt⟩⟨rate⟩?) declares a new AMM. The
+two parenthesized ⟨token_amt⟩s are used to initialize the reserves r0 : τ0 and r1 : τ1, while
+the optional ⟨rate⟩denotes the fee paid when transacting on this AMM, for more on fees
+see section 3.6.
+The ⟨command⟩: USER ⟨symbol⟩(⟨token_amt⟩*) declares a new user. The sequence of ⟨token_amt⟩
+is used to initialize the wallet, when an amount of some token is left unspecified, we con-
+strain it to be 0.
+The following DFA can be used to describe well-formed declarations:
+start
+acc
+USER
+AMM
+AMM
+USER
+USER
+AMM
+AMM/USER
+transaction constraints
+These ⟨command⟩s are used to constrain the set of transactions the model can use to find
+a witness. This is an optional section, and if left unspecified the solver will consider all
+possible transactions.
+⟨command ⟩
+::= AVAILABLE ( ⟨symbol ⟩
+⟨token_amt ⟩
+⟨token_amt ⟩)
+|
+REQUIRED ( ⟨symbol ⟩
+⟨token_amt ⟩
+⟨token_amt ⟩)
+|
+FREE ( ⟨symbol ⟩+)
+However, as soon as any of the above ⟨command⟩s are listed, the default behaviour that the
+model can freely construct any legal transaction reverses, so that no transactions can be
+made at all - unless specified using the commands listed above.
+For both AVAILABLE and REQUIRED statements, the initial ⟨symbol⟩refers to the user
+sending the transaction, the first ⟨token_amt⟩is the amount v0 : τ0 where τ0 is the token
+being paid with, while the last ⟨token_amt⟩represents the token τ1 being bought, with
+an amount v1 denoting the least amount required for the transaction to not revert.
+Note that as before, ⟨token_amt⟩allows inputting a symbolic amount, by using _ for the
+amount.
+The ⟨command⟩AVAILABLE (⟨symbol⟩⟨token_amt⟩⟨token_amt⟩) denotes an available transac-
+tion, i.e. the solver will include this in its set Xa of available transactions.
+The ⟨command⟩REQUIRED (⟨symbol⟩⟨token_amt⟩⟨token_amt⟩) denotes an required transac-
+tion, i.e. the solver will include this in its set Xr of required transactions.
+The ⟨command⟩FREE (⟨symbol⟩+) enumerates all the users for whom the model can create
+transactions freely.
+58
+A domain specific model checker for AMMs
+==PAGE:67==
+The following DFA can be used to describe well-formed transaction constraints:
+acc
+start
+acc
+FREE
+REQ/AVAIL
+REQ/AVAIL
+path constraints
+The following commands collectively make up the set of path constraints supported by
+our solver.
+⟨command ⟩
+::= EF ⟨expr ⟩
+|
+EU ( ⟨expr ⟩) ( ⟨expr ⟩)
+|
+INIT
+⟨expr ⟩
+|
+MAX ⟨expr ⟩
+The ⟨command⟩EF ⟨expr⟩corresponds to the formulae ∃♢⟨expr⟩where ⟨expr⟩must eval-
+uate to a boolean.
+The ⟨command⟩EU (⟨expr⟩)(⟨expr⟩) corresponds to the formulae ∃⟨expr1⟩U⟨expr2⟩where
+both ⟨expr⟩1 and ⟨expr⟩2 must evaluate to a boolean.
+The ⟨command⟩INIT ⟨expr⟩corresponds to the formulae ⟨expr⟩, i.e. it ensures that the
+atomic proposition ⟨expr⟩holds in the initial state - here too, ⟨expr⟩must be boolean-
+valued.
+The ⟨command⟩MAX ⟨expr⟩seeks to maximize the value of ⟨expr⟩which must evaluate to
+a ⟨number⟩. This command is discussed further in section 3.5
+The following DFA can be used to describe well-formed path constraints:
+start
+acc
+acc
+acc
+acc
+acc
+acc
+acc
+MAX
+EF/EU
+INIT
+INIT
+EF/EU
+INIT
+MAX
+MAX
+EF/EU
+EF/EU
+MAX
+INIT
+A domain specific model checker for AMMs
+59
+==PAGE:68==
+Technical
+University of
+Denmark
+Building 324
+2800 Kgs. Lyngby
+Tlf. 4525 1700
+www.compute.dtu.dk

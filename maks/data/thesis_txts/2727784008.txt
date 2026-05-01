@@ -1,0 +1,2198 @@
+==PAGE:1==
+Development and application of a
+high-performance implementation of
+the NNAlign_MA algorithm for
+motif identification of receptor-ligand
+datasets
+Master Thesis
+Written by:
+Maurice Kappelmeyer (s212710)
+Supervisor: Prof. Morten Nielsen
+Technical University of Denmark (DTU)
+==PAGE:2==
+Contents
+1
+Introduction
+1
+2
+Methods and Materials
+4
+2.1
+Dataset
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4
+2.2
+Artificial neural networks
+. . . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+2.3
+Compiler . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+2.4
+Matrix-matrix multiplication
+. . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+2.5
+Intel MKL and BLAS
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+2.6
+NNAlign_MA . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+2.7
+Performance measurements
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+2.7.1
+Pearson correlation coefficient . . . . . . . . . . . . . . . . . . . . . .
+20
+2.7.2
+Positive predictive value . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+2.7.3
+Receiver operating characteristic
+. . . . . . . . . . . . . . . . . . . .
+20
+2.7.4
+Cross-validation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+2.7.5
+Paired t-test . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+22
+2.7.6
+Sequence logo . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+22
+2.7.7
+Speed measurement
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+24
+3
+Results
+25
+3.1
+Compiler/Intel MKL . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+3.2
+Batch Gradient Descent . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+30
+3.3
+In-depth performance analysis . . . . . . . . . . . . . . . . . . . . . . . . . .
+32
+3.4
+Reducing epochs
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+34
+3.5
+MA annotation decay
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+3.6
+Dynamic multi-allele annotation . . . . . . . . . . . . . . . . . . . . . . . . .
+37
+3.7
+Sample weighting . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+39
+4
+Discussion
+46
+5
+References
+48
+6
+Appendix
+55
+6.1
+CPU architectures
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+55
+6.1.1
+Computerome . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+55
+6.1.2
+DTU HPC
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+56
+6.2
+Compiler optimizer flags . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+58
+6.2.1
+ICC
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+58
+==PAGE:3==
+6.2.2
+GCC . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+58
+6.3
+Transition matrix . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+66
+==PAGE:4==
+1
+Introduction
+The immune system consists of two parts, the innate and the adaptive immune response.
+Innate immune responses are the first layer of protection against pathogens, as it reacts
+quickly but unspecific. The adaptive immune response needs a longer time to get activated
+but gives a more directed reaction against the pathogen. Major histocompatibility complex
+(MHC) molecules play a key role in the adaptive immune response. Their function is to
+present ligands to other actors of the immune system, which is required to facilitate a
+response against pathogens [1].
+There are two major types of MHC molecules, MHC class I and MHC class II, which differ
+in their subunit composition. While MHC class I is expressed on the surface of all nucleated
+cells, which are all cells but red blood cells (erythrocytes). MHC class II molecules are
+only expressed on so-called professional antigen-presenting cells (APCs). These APCs are
+mainly dendritic cells (DCs), macrophages, and B cells, which have their main function
+in the immune response. Which type of ligands and from which origin is presented on
+the MHC molecule depends on the class. For MHC class I ligands are internally collected
+in the cell, mostly self-peptides from the regular cellular process or in case of a viral or
+other intracellular infection pathogenic peptides. Also in the case of cancer MHC class I
+could present cancerous peptides. MHC class II mainly presents ligands that are taken up
+by the extracellular medium of the cell, e.g. by phagocytosis (uptake of a large particle
+like a bacteria) or endocytosis (uptake of smaller particles like proteins).
+Each MHC
+class has its own mechanism of preparing the protein into a smaller peptide which is then
+loaded on the MHC molecule, respectively proteosomes or proteases which are breaking
+up larger proteins into smaller peptides for class I and class II. Ligands in the context of
+MHC molecules are peptides that are fractions of larger proteins. Both MHC class I and
+class II present their peptides as a peptide-MHC complex (pMHC) to T-cells and their
+T-cell receptor (TCR). The MHC molecule is necessary for a TCR:peptide interaction
+because only bound peptides get recognized by TCRs and a TCR is only primed on one
+specific type of MHC molecule, the so-called MHC restriction. During their development
+T-cells are tested for a positive reaction to self-MHC molecules and only develop further if
+successfully establish an interaction. If no positive interaction happens, the T-cell would
+undergo apoptosis and die. In the process of TCR generation, multiple steps are taken
+to achieve a large variety of TCRs with different specificity for different peptides. MHC
+class I also binds to the CD8 co-receptor while MHC class II binds to the CD4 co-receptor.
+Thus both MHC classes target two distinct T-cell populations. In case of an engagement
+of pMHC and the TCR, the T cell gets activated to further react. For humans the MHC
+1
+==PAGE:5==
+system is called human leukocyte antigen (HLA) system. The loci HLA-A, B, and C are
+equivalents to MHC class I and HLA-DP, DM, DO, DQ, and DR to MHC class II. The
+HLA system shows a large variability in existing alleles for the mentioned loci. There are
+currently at least 10,754 known HLA class II alleles known [2]. The polymorphic regions
+are especially important to ensure the ability to bind an unknown peptide in at least a few
+individuals in a population. The anchor residues which shape the binding of a peptide to
+an MHC molecule are called a sequence motif. Determining this motif is an important step
+for designing a peptide vaccine, as the peptide has to be bound and presented effectively
+on MHC molecules to be working [1]. It has been shown that predicting binding motifs
+plays a crucial role in the design process of e.g. neoantigen cancer vaccines [3].
+In this project the method NNAlign_MA has been investigated that can align peptide
+along MHC class II molecules to find the best match of binding. Despite the high pre-
+dictive power, one drawback of NNAlign_MA is the long training time required.
+The
+goal of NNAlign_MA is the enable the usage of liquid chromatography-mass spectrometry
+experimental data, after a pre-training with binding-affinity data. An illustration of how
+NNAlign_MA works can be seen in Fig. 1.
+NNAlign_MA is based on an artificial neural network (ANN) programmed in C. The
+original implementation does not use any highly optimized math libraries. Intel MKL has
+been introduced to the code and evaluated. Other optimization techniques, like the ICC
+compiler, have also been investigated in this project.
+Furthermore, different techniques, to boost the predictive performance have been imple-
+mented and evaluated.
+In Fig. 2, it is illustrated how a peptide is taken up by an APC, processed, loaded onto
+an MHC class II molecule, and presented as pMHC to a CD4+ T-cell. Fig. 3 shows a
+rendered illustration of a binding groove from an MHC class II molecule loaded with an
+antigen.
+Training
+MA Annotation
+Annotated
+MA data
+SA data
+Raw MA
+data
+Figure 1: Overview of the workflow in NNAlign_MA (simplified Fig. 1 from NNAlign_MA
+[4])
+2
+==PAGE:6==
+Figure 2: Illustration of peptide processing, MHC class II binding an antigen and inter-
+acting with a T-cell receptor, created with BioRender.com
+Figure 3: Structure of human MHC class II protein HLA-DR1 (alpha-chain: red, beta-
+chain:green) carrying an influenza hemagglutinin peptide (yellow) partially filling the bind-
+ing groove (PDB: 4I5B) [5]
+3
+==PAGE:7==
+2
+Methods and Materials
+2.1
+Dataset
+The dataset used in this project was mostly obtained from NetMHCIIpan-4.2 by Nilsson,
+Kaabinejadian et al. [6] and the Immune Epitope Database (IEDB) [7]. There are three
+parts in the dataset: single-allele binding affinity, single-allele eluted ligand, and multi-
+allele eluted ligand. In the dataset were only MHC class II samples, from human leukocyte
+antigen (HLA) alleles and mouse (Mus musculus) alleles. Explicitly excluded were BoLA
+(Bovine Leukocyte Antigen) alleles. The data can be characterized by binder/non-binder,
+number of MHC molecules, and peptide length.
+Single-allele data was obtained by binding affinity assays. Binding affinity assays measure
+how strong proteins are binding together. In this project, it is the binding between peptides
+and MHC molecules. The affinity is expressed as half maximal inhibitory concentration
+(IC50) measured in nM. A higher nM means a weaker binding affinity between the peptides
+and MHC molecules [8].
+The binding affinity can be scaled to be between 0 and 1 with:
+affscale = 1 −
+log(aff)
+log(50.000)
+(1)
+where:
+aff = affinity in nM
+Affinities above 0.5 are then considered binders (positives).
+A newer method to obtain MHC binding data is the liquid chromatography-mass spec-
+trometry (LC-MS/MS). The general workflow of this method is lysing the cell, purifying
+peptide-MHC complexes with MHC-specific antibodies, detaching and separating peptides
+from MHC molecules, separating peptides with chromatography, and infusing the peptides
+into a mass spectrometer. Afterward, spectral annotation methods are applied to obtain
+the amino acid sequence [9].
+Instead of measuring a continuous value of binding affinity, LC-MS/MS results in binary
+data points where binders are represented by 1 and non-binders by 0. Binders are the
+peptides that could be found in the dataset. Non-binders are random peptides chosen
+from the UniProt database [10], that are known to not bind. For each length of peptides,
+the same amount of non-binder was chosen as there were binders in the dataset [4].
+The reason to include not only binding affinity single-allele data points but also eluted
+multi-allele data points is that BA assays neglect the internal processing of peptides before
+the presentation of MHC molecules and BA assays can not be done in a high-throughput
+4
+==PAGE:8==
+manner [11] [4]. Therefore data obtained with the LC-MS/MS method gives more biolog-
+ically relevant data which can be helpful in addition to the binding affinity data.
+Eluted single-allele data points can also be obtained with the previously described MS
+method. But instead of having multiple MHC molecules expressed on the cell and leading
+to convoluted data, cells are genetically engineered to only express one MHC molecule [4].
+In total, the binding affinity dataset 516,440 contains data points. Peptides of length 13-21
+were in the dataset, while most peptides had a length of 15 amino acids (>420,000). As
+mentioned earlier for each peptide length the data is distributed in 1:1 for binders and
+non-binders. Some alleles are highly represented, like DRB1_0101, while others are less
+present, like HLA-DQA10102-DQB10604.
+Figure 4: Number of peptides for different peptide lengths in the BA dataset, colored
+according to binders (green) / non-binders (red)
+5
+==PAGE:9==
+Figure 5: Number of peptides for alleles in the BA dataset, colored according to binders
+(green) / non-binders(red)
+In the MA dataset, there are 214 cell lines included with a total of approx. 27,000,000
+data points. As can be seen in Fig. 6, the cell lines had a number of alleles from 1-12. But
+most of the cell lines had single-allele eluted ligands.
+Figure 6: Frequency of cell lines according to their number of alleles
+The eluted samples contain, almost similar to the binding affinity samples, peptides with
+length 12-21 amino acids.
+6
+==PAGE:10==
+Figure 7: Number of peptides for different peptide lengths in the EL dataset, colored
+according to binders (green) / non-binders(red)
+Figure 8: Number of peptides for alleles in the EL dataset, colored according to binders
+(green) / non-binders(red)
+2.2
+Artificial neural networks
+Artificial neural networks (ANN) are a fundamental concept in computer science. ANN
+are also build up of neurons like biological neural networks. One purpose of an ANN is
+regression for a continuous target value or classification for discrete target values [12].
+The training process of a neural network involves iteratively adjusting the weights of neu-
+rons to minimize the error between the predicted values and the ground truth. Initially, the
+weights are typically randomly initialized, and then the network goes through a series of
+forward passes and backpropagation steps. During backpropagation, the gradients of the
+weights are computed using techniques like gradient descent, and the weights are updated
+7
+==PAGE:11==
+accordingly, guided by a learning rate or step size. This iterative process continues until
+the network converges to a satisfactory level of performance.
+In the first layer input neurons take input values. The next, so-called hidden, layer calcu-
+lates the values by summing up the product of the previous layer values times the weights.
+The values for the hidden layer neurons are calculated from input layer values (a0,i) and
+weights (wi,0) by this:
+a1 = S(
+n
+X
+i=0
+a0,i · wi,0)
+(2)
+The values for the output layer neurons are calculated from hidden layer values (a1,i) and
+weights (wi,1) by this:
+a2 = S(
+m
+X
+i=0
+a1,i · wi,1)
+(3)
+Activation functions, like the Sigmoid function, are essential components of neural networks
+as they introduce non-linearity to the network’s output. The Sigmoid function squashes
+the input values into a range between 0 and 1, enabling the network to model complex
+relationships and make predictions based on probabilistic interpretations. The Sigmoid
+has already been implemented in the original NNAlign_MA.
+S(x) =
+1
+1 + e−x
+(4)
+After the forward-step, the error between the predicted value and the known truth can
+be calculated. To correct the weights and therefore minimize the error a backpropagation
+step is taken.
+Backpropagation refers to the process of propagating the error backward through the net-
+work, from the output layer to the input layer. It involves calculating the gradient of the
+error with respect to each weight in the network. By using the chain rule of calculus, the
+gradient is computed layer by layer, starting from the output layer and moving toward the
+input layer.
+There are multiple algorithms for backpropagation, one of them is gradient descent (GD).
+The general idea is to update the weights by moving in the negative direction of the
+gradient. This means that the weights are adjusted to decrease the error, aiming to find a
+configuration that minimizes it. By iteratively updating the weights based on the gradient
+information, the network gradually converges towards a better set of weights that yields
+lower errors. The squared error is calculated with:
+E2 =
+n
+X
+i=0
+(ˆyi −yi)2
+(5)
+where:
+8
+==PAGE:12==
+yi = predicted value
+ˆyi = ground-truth
+By applying the chain rule iteratively for each layer in the network, the gradients of the
+error with respect to the weights can be calculated layer by layer. Starting from the output
+layer, the gradients are propagated backward toward the input layer. Applying the chain
+rule, ∂E2
+∂w is calculated as:
+∂E2
+∂w = ∂E2
+∂y
+∂y
+∂w
+(6)
+In each layer, the general update rule for gradient descent is applied to update the weights:
+w(t + 1) = w(t) −η∂E2
+∂w
+(7)
+where:
+w(t) = weight variable on a time point
+η
+= learning rate or step size
+2.3
+Compiler
+A compiler is a computer program that translates human-readable programming code of a
+specific programming language to a machine-executable form. There are various compilers
+for different purposes, languages, and target machines. In this project, the focus is on the
+programming language C, as the NNAlign_MA has been developed in C.
+As the GNU Compiler Collection (GCC) compiler is a widely used compiler for C and
+was previously used for NNAlign_MA, it served as a baseline for comparison for other
+compilers. Version 11.3.0 has been used in this project [13].
+The Intel C/C++ Compiler (ICC) was used as an alternative compiler, as ICC shows
+very good performance on Intel machines, which were used in this project [14]. For this
+project, the ICC version 2019.5.281 was used, as in newer versions compilation errors for
+batched BLAS functions were occurring. By now ICC is deprecated and the Intel oneAPI
+DPC++/C++ Compiler is maintained instead.
+Both GCC and ICC can specifically optimize the code for a specific CPU. The CPU
+architectures are shown in Appendix 6.1.
+There are various flags for enabling the optimization techniques the compiler can apply.
+Tab. 1 provides an overview of the used compiler flags. The -Ofast flags turn a list of other
+techniques on, like -no-prec-div which could increase the speed at the expense of accuracy
+[15].
+Another technique is vectorization. Modern processors, like the ones used, can use Single
+instruction, multiple data (SIMD) if turned on during the compilation.
+From a set of
+9
+==PAGE:13==
+SIMD-able instructions, a single instruction can be executed simultaneously on multiple
+data points. The length of the vector that stores the data points is depending on the
+hardware. The bigger the vector, the more data can be executed at the same time. The
+data type is also important, as a 32-bit single-precision floating point number takes 4 bytes,
+and a 64-bit double-precision floating point number takes 8 bytes. Therefore a vector of
+length 256 bits for the first AVX version can store eight float numbers or four double
+numbers. There are multiple versions of AVX, like AVX, AVX2, or AVX512, which differ
+in the size of the vector they are using and the instruction set usable for SIMD. Another
+older SIMD technique is SSE, which can also be used by Intel processors. No manual afford
+was made to manually add SIMD pragmas to loops which would enforce SIMD but could
+lead to errors if not done correctly. The ICC compiler can produce an optimization report
+which recommends code sections for the usage of SIMD pragmas [16].
+It has been verified that both, ICC and GCC, can detect AVX2, the best vector instruction
+set available on the DTU HPC.
+The most time-consuming function is forward_inp, as it does the complete forward-step
+(90% of execution time in GCC). Both ICC and GCC claim to unroll and vectorize the loops
+according to the optimization reports of the compilers. This verifies the correct selection
+of compiler flags.
+But only ICC is, according to the assembler code, able to vectorize
+forward_inp because of a floating point reduction. To enable floating point reductions in
+GCC -ffast-math would need to be set.
+The flag -funroll-all-loops can be advantageous as the overhead of the loop could be limited.
+The increment and stop condition of the loop can be calculated less frequently in unrolled
+loops and the iterations can be hard-coded in the assembly code as repeating code blocks.
+Algorithm 1 Not unrolled for-loop
+1: for i ←0 to n-1 do
+2:
+statement(i)
+3: end for
+Algorithm 2 Unrolled for-loop
+1: for i ←0 to n-1 step k do
+2:
+statement(i)
+3:
+statement(i + 1)
+4:
+statement(i + 2)
+5:
+...
+6:
+statement(i + k −1)
+7: end for
+Another feature of ICC is to find parallelizable code loops and use multi-threaded OpenMP
+high-level parallelism. The compiler analyzes the loops and data flow. To be parallelizable,
+the iterations need to be independent of each other. Otherwise, a so-called race condition
+could occur, which makes the result non-deterministic, as can be seen in Alg. 3.
+10
+==PAGE:14==
+Algorithm 3 Code with race-condition
+1: A[0] ←n
+2: for i ←0 to m −2 do
+3:
+A[i + 1] ←statement(A[i])
+4: end for
+The auto-parallelization by ICC, activated with -parallel, could not find any candidate
+loops to parallelize and was therefore excluded from further investigation [17]. It could be
+investigated if further parallelization could be done manually, especially in non-optimized
+parts, like the encoding functions.
+An important consideration for optimizing the execution speed is the cache structure of
+CPUs. CPUs have a hierarchical structure of different cache levels, as illustrated in Fig. 9.
+The further away the cache is from the computing unit, the core, the larger the memory
+space and the slower the cache. Therefore the goal is to keep temporally relevant data close
+to the core, as fetching data from the lower-level cache takes time. To find the relevant
+data, the CPU requests the line from the closest cache (L1). If this results in a hit, the data
+can be directly loaded into the core. If instead, the data is not in L1, the data is requested
+from the next level (L2). This continues for all levels in the hierarchy. The overall goal
+is therefore to keep the miss-rate as low as possible to avoid time-expensive loading from
+lower-level cache [18].
+It is known that for example, the ordering of nested loops influences the cache performance
+[19]. For the introduction of new nested loops, this concept has been considered. In the
+examples of Alg. 5 compared to Alg. 4, the inner two loops, which an executed more often,
+iterate row-wise over the matrices and therefore match the row-major matrix storage in C
+[20].
+Algorithm 4 Matrix-matrix multiplication
+1: for j ←0 to n do
+2:
+for k ←0 to n do
+3:
+for i ←0 to n do
+4:
+C[i, j] ←C[i, j] + A[i, k] ∗B[k, j]
+5:
+end for
+6:
+end for
+7: end for
+Algorithm 5 Matrix-matrix multiplication
+with optimized loop-order
+1: for i ←0 to n do
+2:
+for k ←0 to n do
+3:
+for j ←0 to n do
+4:
+C[i, j] ←C[i, j] + A[i, k] ∗B[k, j]
+5:
+end for
+6:
+end for
+7: end for
+11
+==PAGE:15==
+Figure 9: Illustration of the common cache hierarchy for CPUs
+The goal of loop-blocking or loop-tiling is to split the matrices into chunks that can fit
+entirely in the cache [21] [22].
+Algorithm 6 Matrix-matrix multiplication without loop-blocking
+1: for i ←0 to n do
+2:
+for j ←0 to n do
+3:
+C[i, j] ←0
+4:
+for k ←0 to n do
+5:
+C[i, j] ←C[i, j] + A[i, k] ∗B[k, j]
+6:
+end for
+7:
+end for
+8: end for
+Algorithm 7 Matrix-matrix multiplication with loop-blocking
+1: for i ←0 to n step block_size do
+2:
+for j ←0 to n step block_size do
+3:
+for k ←0 to n step block_size do
+4:
+for ii ←i to min(i + block_size, n) do
+5:
+for jj ←j to min(j + block_size, n) do
+6:
+C[ii, jj] ←0
+7:
+for kk ←k to min(k + block_size, n) do
+8:
+C[ii, jj] ←C[ii, jj] + A[ii, kk] ∗B[kk, jj]
+9:
+end for
+10:
+end for
+11:
+end for
+12:
+end for
+13:
+end for
+14: end for
+Another method for speed optimization is cache prefetching.
+There is software-based
+and hardware-based prefetching.
+Software-based prefetching is disabled by default by
+ICC while hardware-based prefetching is built in the CPU. The goal of prefetching is to
+load data/instructions ahead of time from a slower lower-level cache into a faster higher-
+level cache by predicting which cache line will be needed soon and loading it ahead of
+12
+==PAGE:16==
+time. Successful predictions result in a higher hit and lower miss rates, which boost speed
+performance [23].
+A downside of code optimization is that the executable can be bigger, e.g. with the flag -
+funroll-all-loops, more assembler code is added to the executable. This could even lead to a
+reduction in execution speed, as the instruction from the executable has to be loaded in the
+Instruction cache of the L1 cache, a phenomenon called code bloat [24]. The compilation
+can also take a longer time, e.g. for ipo, as other code files get optimized as well. The
+goal of this project was to optimize the execution time and other factors were therefore
+not considered further.
+Compiler flag
+Description
+-Ofast
+Most aggressive optimization flag, includes all -O3
+optimizations used by GCC and uses less precise
+floating-point operations (-no-prec-div, and -fp-model
+fast=2), turns on -xHOST
+-O3
+Aggressive optimization flag, extends to other opti-
+mizations flags
+-mkl
+Enable support for Intel MKL, expands to all flags
+necessary for parallel MKL
+-qopenmp
+Enables multi-threaded code based on OpenMP
+-g
+Adds debugging/symbol information in the exe-
+cutable, does not speed up the code but provides
+the possibility to investigate the performance on a
+per-function level
+-DMKL_DIRECT_CALL_JIT
+Turns on JIT compilation to optimize BLAS kernel,
+see 2.5
+-funroll-all-loops
+Unrolls all loops
+-mtune=native
+Tuning for the specific processor type, that ICC can
+detect (native), does not turn on vectorization tech-
+niques
+-xHOST
+Turns on vectorization techniques like AVX or SSE,
+depending on accessible CPU flags
+-ipo
+Turns on inlining, to expand functions that are called
+from within the same or a different file
+-parallel
+Turns on auto-parallelization to turn candidate loops
+into multi-threaded code
+13
+==PAGE:17==
+Table 1: ICC compiler optimization flags used, not comprehensive for all implicitly used
+flags [15], the complete list of compiler flags for GCC can be found in the Appendix 6.2
+2.4
+Matrix-matrix multiplication
+The simplest algorithm for square-matrices multiplication is shown in Alg. 8. There are
+more complex algorithms, proven to be faster, like Strassen’s algorithm with O(nlog2 7) ≈
+O(n2.807) instead of O(n3.0) for the simple algorithm [25].
+Recently a machine learning-powered tool by DeepMind called AlphaTensor was released,
+which was able to find even better matrix-matrix multiplication algorithms than Strassen’s
+algorithm [26].
+Algorithm 8 Matrix-matrix multiplication with for-loops
+1: procedure mult(A, B, n)
+2:
+for i ←0 to n do
+3:
+for j ←0 to n do
+4:
+C[i, j] ←0
+5:
+for k ←0 to n do
+6:
+C[i, j] ←C[i, j] + A[i, k] ∗B[k, j]
+7:
+end for
+8:
+end for
+9:
+end for
+10: end procedure
+As shown in Fig. 10, the forward-step of the neural network can be represented by three
+nested loops or a matrix-matrix multiplication, like Alg. 8. The three nested for-loops
+can not simply be parallelized as there are dependencies between iterations. But there are
+more complex parallel algorithms like Cannon’s Algorithm or Berntsen’s Algorithm [27].
+Instead of implementing such an algorithm in this project, optimized libraries were used
+as will be described later 2.5.
+2.5
+Intel MKL and BLAS
+Intel Math Kernel Library (MKL) is a programming library developed by Intel. It contains
+multiple functionalities but in this project, only linear algebra and memory allocation have
+been used. In the library linear algebra functions are implemented as an instance of the
+Basic Linear Algebra Subprograms (BLAS) specification, first introduced by Lawson et al.
+1979 [28].
+14
+==PAGE:18==
+Figure 10: A: Illustration of matrix-matrix multiplication in the context of ANN B: Illus-
+tration of an ANN with an input layer of three neurons, a hidden layer with four neurons,
+and an output layer with two neurons, in this illustration input matrix is done for multiple
+MHC molecules
+While there are many implementations of BLAS like OpenBLAS, ATLAS, or cuBLAS (for
+Nvidia GPUs), Intel MKL has been chosen as it promised the best performance in an Intel
+CPU environment [29] [30]. The library is proprietary developed and specially optimized
+for Intel processors but not limited to them.
+The functions of BLAS, in general, can be divided into three levels: vector-vector (Level
+1), matrix-vector (Level 2), and matrix-matrix (Level 3). As mentioned in the section
+Artificial neural networks 2.2, the forward-step of ANNs can be described as a matrix-
+matrix multiplication, a so-called general matrix multiply (GEMM) function in BLAS
+[28].
+BLAS calls can be executed on different data types. In this project, only the single precision
+float has been used, as it was previously implemented. Even though a double precision
+could eventually give a slightly higher predictive performance, it would significantly slow
+down the execution time, as will be explained further in 2.3. As Intel MKL is developed
+proprietary, it can not be investigated how the optimization works. But one has to assume
+that techniques like ordering of loops, and loop blocking are used, as well as an efficient
+algorithm for matrix-matrix multiplication [31] [32].
+A call of matrix-matrix multiplication in Intel MKL works like:
+void cblas_sgemm (const CBLAS_LAYOUT Layout, const CBLAS_TRANSPOSE transa,
+15
+==PAGE:19==
+const CBLAS_TRANSPOSE transb, const MKL_INT m, const MKL_INT n, const
+MKL_INT k, const float alpha, const float *a, const MKL_INT lda, const
+float *b, const MKL_INT ldb, const float beta, float *c, const MKL_INT
+ldc);
+which represents this term:
+C = α ∗op1(A) ∗op2(B) + β ∗C
+(8)
+In the case of matrix-matrix multiplication, the scalars would be α = 1.0 and β = 0.0,
+for matrices A of size (m × k), B (k × n), C (m × n). Matrices can be non-transposed
+(CblasNoTrans), transposed (CblasTrans) or conjugated-transposed (CblasConjTrans
+) by the call with transa or transb, before performing the multiplication.
+With
+Layout the major direction of array storage can be set to CblasRowMajor
+or CblasColMajor. For C programming row-major array storage is the default. By keep-
+ing this standard the memory blocks which are continuously put row-wise in the memory,
+memory the number of caching-hits can be improved. Using column-major would lead to
+many cache-misses which require time-extensive reloading of data from a higher memory
+level.
+Importantly matrices for Intel MKL have to be given as a 1D array (float *), not as
+a 2D array (float **). This required the adaption of certain parts in the code. Intel
+MKL has its own implementation of the C function malloc, which takes the size of the
+memory block to allocate as well as the alignment which specifies how to put the data in
+the memory to allow fetching data from the cache in the word boundaries. This could lead
+to slightly worse utilization of memory but better performance.
+void* mkl_malloc (size_t alloc_size , int alignment);
+Intel MKL has the built-in feature to enable and use multi-threading using OpenMP in-
+ternally [33]. As it was determined as a requirement in this project, that NNAlign_MA
+should run on one core only, the multi-threading feature was explicitly turned off with the
+standard OpenMP environment variable OMP_NUM_THREADS =1.
+Without setting the
+variable or increasing the number of threads, Intel MKL would automatically determine
+at runtime which level of parallelism would be beneficial and make use of it. Although
+this usage of parallelism seems promising for increasing the execution speed, it has been
+shown that matrix-matrix multiplication on small matrices is difficult to improve as the
+distribution of data takes a longer time than the benefiting of running the multiplication
+in parallel [34].
+Intel proposed the parameter Just-In-Time (JIT) code generation for small matrices in
+Intel MKL 2019 Update 3, for sgemm, AVX2, and any matrix size. The function can
+16
+==PAGE:20==
+easily be implemented by using the preprocessor macro MKL_DIRECT_CALL_JIT. JIT
+compiling allows Intel MKL to choose if the standard sgemm implementation or a different
+kernel (submatrix size) will be more effective for given parameters like matrix sizes, alpha,
+beta, and transposition). The resulting decision is stored in the cache and can be used for
+every repeating sgemm. Intel states that the number of sgemm to amortize the cost of JIT
+depends on the problem size but is up to 450. This is intended to boost execution time for
+small matrix-matrix multiplications [35]. During the development, it has been seen that
+this feature brings a slight speed increase (data not shown) and the feature has been kept
+for all ICC/Intel MKL versions.
+2.6
+NNAlign_MA
+The computational methods NNAlign_MA by Alvarez et al. [4] is the foundation of this
+project. NNAlign_MA has been developed for the investigation of the immunopeptidome,
+the peptides presented by major histocompatibility complex (MHC) molecules on the sur-
+face of antigen-presenting cells. NNAlign is an algorithm by Andreatta et al. which aligns
+peptide sequences along a binder molecule, in this case MHC, to identify binding patterns.
+NNAlign works only on single-allele (SA) data [36]. SA data points are only annotated to
+one MHC. Other frameworks, like NetMHCpan [37] and NetMHCIIpan [38] use NNAlign.
+The NNAlign_MA algorithm extends NNAlign for multi-allele (MA) data.
+MA data
+points are annotated to multiple MHCs.
+The task of NNAlign_MA is to deconvolute
+the peptide:MHC interaction from a MA peptides dataset to predict the binding motifs of
+the MHC molecules [4]. An NNAlign_MA trained model serves as a pan-specific model
+that has the potential to predict binding affinities on MHC molecules that it has not
+been trained on. Like NNAlign, NNAlign_MA is facilitating this task by looping over
+all possible binding cores for a 9mer, a peptide 9 amino acids long, and aligning the
+peptide to the position that gives the highest score calculated by the network. Additionally,
+NNAlign_MA can take insertions and deletions into consideration. Although this part
+is not investigated for the project.
+NNAlign_MA has been benchmarked on multiple
+datasets, including MHC class I and class II data, and has been shown to perform very
+well [4].
+NNAlign_MA is an artificial neural network (ANN 2.2) with one hidden layer and the last
+neuron of each layer acts as a bias, where the value is always set to 1. It has two output
+neurons, one for binding affinity values and another for eluted ligand likelihood values. All
+the other weights/neurons are shared to enable transfer knowledge of the two distinct but
+related problems and improve the predictive performance [4].
+Like NNAlign it starts with encoding the peptide sequence by BLOSUM encoding to
+17
+==PAGE:21==
+incorporate amino acid similarity into the encoding, which results in a BLOSUM log-
+odds vector. Additionally, the regions surrounding the peptide, known as peptide flanking
+regions (PFR), are represented by a BLOSUM substitution frequency vector, which spans
+a maximum length of three amino acids [4].
+Before the training, all network weights are set randomly. The weights are updated by a
+gradient descent back-propagation [8]. NNAlign_MA starts the training with a burn-in
+period on only SA data points. In all following experiments, the burn-in duration has been
+kept to 20 epochs as this was also originally used. [4]
+After this so-called pre-training, MA data points get annotated to a single MHC molecule
+by the trained model. This annotation is done by the previously trained weights and is
+therefore dependent on the burn-in period. The best MA binder is found by iterating
+over the multiple MHC molecules included in the selected cell line. Another iteration is
+happening over the offset, which defines the 9mer that is the peptide binding core. The
+combination with the highest score predicted by the neural network is assumed to be the
+binding position on a MHC molecule [4]. This is illustrated in Fig. 11.
+Figure 11: Illustration of the algorithmic procedure in NNAlign_MA, with MHC pseu-
+dosequence, peptide cores (red), peptide flanking regions (green), and the predicted score
+This principle can be used to make use of the previously mentioned matrix-matrix mul-
+tiplication functionalities of Intel MKL 2.4, as multiple predictions happen in the same
+forward-step without interrupting backpropagation-step. The encoded peptide and MHC
+18
+==PAGE:22==
+can be filled in column-wise in the input matrix and the forward-step can be done in one
+function call per layer, as can be seen in Fig. 10, with the introduced Intel MKL and BLAS
+functionality (2.5).
+An additional step in the MA annotation is the z-score transformation. The standard
+z-scores are defined as:
+z = (ρ −¯ρ/σ)
+(9)
+where:
+z = z-score
+ρ = raw score
+¯ρ = mean score
+σ = standard deviation
+The mean and standard deviation have been calculated on scores for 1000 random 9mer
+peptides for each allele before the MA annotation. Rescaling the scores is supposed to help
+level out the difference of scores for alleles that were involved in the SA burn-in period
+compared to the MA training phase. After the burn-in, an increasing number of MA data
+points are accurately incorporated into the training set. Therefore the z-scoring should be
+leveled out towards later epochs to give an unbiased scoring. With w depending on the
+epoch, initially, all the influence is put on the ¯ρ and σ but slowing fading to uniform values
+¯ρu and σu, which are the averaged ¯ρ and σ. Later the influence of ¯ρ and σ will vanish out
+[4].
+¯ρ′ = w · ¯ρ + (1 −w) · ¯ρu
+(10)
+σ′ = w · σ + (1 −w) · σu
+(11)
+w =
+1
+1 + eiter−75/10
+(12)
+z′ = (ρ −¯ρ′/σ′)
+(13)
+where:
+¯ρ′
+= Transformed mean score
+σ′
+= Transformed standard deviation
+¯ρu
+= Uniform mean score
+σu = Uniform standard deviation
+iter = Current iteration
+In the original NNAlign_MA, the annotation step happens for all MA data points with
+a positive binding affinity once before each training epoch. From the next epoch on, the
+annotated MA data points can also be used to train the model, like the SA data points [4].
+19
+==PAGE:23==
+2.7
+Performance measurements
+2.7.1
+Pearson correlation coefficient
+The Pearson correlation coefficient (PCC) is used to measure the linear correlation between
+two quantitative variables (x and y) of a dataset. The PCC can be between -1 and 1, where
+-1 would mean a perfect negative linear relation and 1 a perfect positive linear relation. A
+PCC of 0 would imply no linear relation between the two variables.
+rxy =
+Pn
+i=1(xi −¯x)(yi −¯y)
+pPn
+i=1(xi −¯x)2pPn
+i=1(yi −¯y)2
+(14)
+where:
+n data points (x,y) with ¯x and ¯y as arithmetic mean of all x and y measurements =
+PCC is used as a metric to determine the performance during the training as well as motif
+comparison, which will be described later.
+2.7.2
+Positive predictive value
+The positive predictive value (PPV) is in the context of NNAlign_MA defined as the
+fraction of peptides in the top N·0.95 predictions that were actual ligands, for each cell
+line [4]:
+PPV =
+TP
+TP + FP
+(15)
+where:
+TP = number of top N·0.95 predicted ligands that are actual ligands
+FP = number of top N·0.95 predicted ligands that are not ligands
+In the context of this project, PPV is used to evaluate the prediction of binders.
+2.7.3
+Receiver operating characteristic
+In contrast to the PCC, binary classification (true or false) performance can be measured
+with Receiver operating characteristic (ROC) curves. In the ROC curve the true positive
+rate (TPR) is plotted against the false positive rate (FPR) [39].
+TPR = TP
+P
+(16)
+FPR = FP
+N
+(17)
+where:
+20
+==PAGE:24==
+P
+= total number of positives
+N
+= total number of negative
+TP = number of truly predicted positives
+FP = number of falsely predicted positives
+To determine the number of truly/falsely predicted positives a list of binary predicted
+values and a list of ground truth binary values is necessary. Every time the class is matching
+the TP is incremented by 1 and if the ground truth class is false but the predicted class is
+true FP is incremented by 1. The relation between TPR and FPR is influenced by the
+threshold. A more specific threshold would usually lead to lower TPR/FPR while a more
+sensitive threshold would lead to a higher TPR/FPR. The ROC curve is then created by
+varying the threshold for the binary classification and calculating the TPR and FPR [39].
+A numerical representation is the Area under the curve (AUC). The AUC can be between
+0 and 1. An AUC of 0.5 would imply a random classifier. [39] To put more focus on the
+ability to not predict falsely positive, thus truly negative values the measurement AUC 0.1
+only considers values up to a FPR of 0.1 in an AUC. This AUC 0.1 is normalized to be
+between 0 and 1 to be comparable to the AUC.
+ROC curves and AUC are useful because they provide a comprehensive evaluation of a
+binary classifier’s performance that is not affected by the specific threshold chosen for clas-
+sification. They also allow for easy comparison of different classifiers or different versions
+of the same classifier. Furthermore, ROC curves and AUC are robust to class imbalance,
+which is a common problem in binary classification when one class is much more prevalent
+than the other [39].
+2.7.4
+Cross-validation
+To avoid performance overestimation and model overfitting, where a model gives good
+performance only on the training set, but can not generalize the knowledge on a different
+dataset, partitioning of datasets has to be performed. Then a part of the training set is used
+for the training and another part is used for the testing after the training. A structured
+way to do this, without losing data to get trained on, is K-fold cross-validation (CV). In
+this method, the data is split up into 5 equally sized parts. Each model gets trained on 4
+of these parts and 1 part is used for the testing. This is done for 5 models and the assigned
+test set changes for each model so that every part is used as both training and test set at
+one point [40]. After testing each set individually on one of the five partitions, the test
+sets are concatenated into one dataset, and performance metrics, like AUC, AUC 0.1, and
+PPV, are determined on the complete set.
+21
+==PAGE:25==
+Highly similar sequences should not be in the same data partition, as this would limit
+the number of unique data points and thus the learning abilities. Pre-partitioned sets of
+sequences with minimal overlap were made with a method introduced in NetMHCIIpan-4.0
+[41].
+To boost the performance and to enable reliable testing, the final predictions are made
+by an ensemble of 100 models, as was also done for the original NNAlign_MA. The final
+decision of the ensemble is determined as an average of all models decisions. The 100
+models are made for 5 partitions (5-fold cross-validation), a hidden layer size of 60 or 100
+neurons, and 10 seeds for random functions. These models were trained for 300 epochs.
+As a result, the average over the single models was taken. [4]
+2.7.5
+Paired t-test
+To reliably assess the performance of the trained ensemble the paired t-test for two related
+samples is used. As input AUC, AUC 0.1, and PPV per cell line is used. The paired t-test
+determines whether the mean difference between the two sets of samples is significantly
+different [42].
+t =
+¯XD
+sD/√n
+(18)
+where:
+¯XD = average of the differences between all pairs
+sD = standard deviation of the differences between all pairs
+n
+= sample size
+2.7.6
+Sequence logo
+Sequence logos show the binding motif of a MHC molecule. Aligned sequences which are the
+predicted binding receptors, transcription binding sites, or in this project MHC molecules
+of the ligands are the input. In the project Seq2Logo by Thomsen and Nielsen was used
+[43]. The amino acids are colored by their chemical properties: negatively charged (red),
+positively charged (blue), polar (green), or hydrophobic (black). The absolute height of
+a bar in a sequence logo is equal to the information content at each amino acid position,
+measured in bits. This can be interpreted as how influential a position is to the binding.
+The relative height of a letter is the observed frequency of the amino acid [43].
+The information content can be calculated using the Shannon entropy or the Kullback–Leibler
+divergence (relative entropy). For Kullback–Leibler background frequencies for the amino
+acids have to be provided. For Shannon, each amino acid is assumed to be equally likely.
+22
+==PAGE:26==
+With Kullback–Leibler depleted amino acids are represented on the negative y-axis. Ad-
+ditional techniques to reduce the redundancy of sequences by clustering/weighting can be
+applied, like Hobohm 1 or sequence weighting [43] [44] [45].
+The information content including the background frequency is calculated with (Shannon):
+Ii = log2(20) +
+20
+X
+a=1
+pa,i · log2
+pa,i
+qa
+(19)
+where:
+pa = observed probability
+qa = background probability for the amino acid a
+The information content including the background frequency is calculated with (Kull-
+back–Leibler):
+Ii =
+20
+X
+a=1
+pa,i · log2
+pa,i
+qa
+(20)
+where:
+pa,i = the observed probability
+qa
+= the background probability for the amino acid a
+In the negative y-axis, amino acids with p<q are represented, with the height of each amino
+acid indicating its proportionality to p.
+Figure 12: Sequence logo of DRB1_0405 from the cell line Abelin__HLA_DR_A375
+Binding motifs can be compared for similarity with the PCC metric (2.7.1). The binding
+motif matrix of 9 amino acid positions and 20 amino acid residues can be transformed into
+a vector of length 9 · 20. For these vectors, the PCC can be calculated to find the motif
+similarity [4].
+23
+==PAGE:27==
+2.7.7
+Speed measurement
+Speed measurements are done with the LSF queuing system on DTU HPC. LSF is used be-
+cause of higher system specifications, unshared resources, and included time measurements.
+All of which are supporting unbiased measurements.
+Each time measurement is done five times and averaged for the final result to get a reliable
+result.
+24
+==PAGE:28==
+3
+Results
+In the following section, the experiments with the objective to improve the computational
+speed of NNAlign_MA and to boost the predictive performance will be introduced. The
+experiments for comparing two methodological variations of NNAlign_MA are based on
+ensembles of 100 trained networks with 60 or 100 hidden neurons, validated with a 5-
+fold cross-validation. The performance metrics are determined on the concatenated test
+partitions.
+All experiments have, if not stated otherwise, been performed with the following parameters
+Tab. 2.
+Parameter
+Value
+Allow X in MHC pseudo sequence
+True
+Use Blosum encoding
+True
+Allow only Hydrophobic AA at P1
+True
+Number of burn-in cycles with -p1a turned on
+2
+Number of burn-in cycles with single HLA BP
+20
+Maximum PRF length
+XXX
+Optimal Peptide length
+no Pep length encoding
+Optimal length of Flanking region
+3
+Number of minimization cycles (training epochs)
+300
+Motif length
+9
+Number of hidden neurons
+60 or 100
+Number of training samples to include in each cycle
+500000
+Fraction of single allele to cell line EL data
+0.5
+Max length of insertions
+0
+Max length of gaps
+0
+Table 2: Baseline parameters for running the NNAlign_MA training program
+3.1
+Compiler/Intel MKL
+As a first experiment the compiler has been changes from GCC to ICC with the original
+code.
+For GCC the original makefile, including the -O3 flag, was used.
+For the ICC
+compiler the flags according to 2.3 have been chosen. Two different optimization flags have
+been chosen for ICC. In one experiment the more aggressive -OFast and in another one
+-O3 was used. The newly implemented Intel MKL with sgemm for the batch sizes 1 (SGD)
+and 40 (BGD) have been measured for both flags. In Fig. 13, it can be seen that all Intel
+25
+==PAGE:29==
+MKL and ICC versions perform extensively faster than the GCC baseline version. Intel
+MKL with -O3 with a batch size of 40 performs best in this set of experiments. The finding
+that the -O3 version of ICC performed faster than the -Ofast version is unexpected. Even
+though an average of 5 timings was taken, the difference could be non-significant or induced
+by extraneous variables, e.g. the HPC environment. For the Intel MKL version, the batch
+size has a strong influence on the speed performance. For a batch size of 1 sample, both
+-O3 and -Ofast versions, are slower than both ICC versions which also perform on 1 sample
+(per batch). The reason is that there is some overhead in managing the arrays which is
+also expressed in a changed distribution of time among the functions (data not shown). It
+is also possible that ICC is able to detect further optimization possibilities if not explicitly
+be forced to generalize for a batched version.
+Figure 13: Computation time for the different compilers GCC, ICC and using the Intel
+MKL library with compiler flags -O3 and -OFast
+In Fig. 14 the speed-up of all methods compared to GCC can be seen. All of the methods
+have a speed-up of at least 4x.
+The best performing method using Intel MKL with a
+batch size of 40 samples has a speed-up of almost 15x compared to GCC. The results are
+even more impressive as all versions run on one CPU and multi-threading has explicitly
+be turned off. It has also been validated in the Oracle Studio Performance Analyzer that
+no parallelism is used (data not shown). Therefore all versions have the same resources
+usable compared to each other.
+26
+==PAGE:30==
+Figure 14: Speed-up for the different compilers GCC, ICC and using the Intel MKL library
+with compiler flags -O3 and -OFast
+In Fig. 15 it can be seen that the ICC-compiled version with -O3 performs significantly
+better but only with a small difference than the GCC-compiled version with -O3 (AUC:
+0.0002, AUC 0.1: 0.0016, PPV: 0.0014).
+For the AUC, the competitor (ICC O3) was
+better for 113 samples and worse for 101 samples compared to the baseline (GCC O3).
+This positive result allows for further investigation of the ICC-compiled versions.
+27
+==PAGE:31==
+Figure 15: Performance metrics AUC, AUC 0.1 and PPV for eluted ligand cell lines deter-
+mined on the concatenated test CV folds, Comparing GCC with -O3 vs. ICC with -O3,
+Significance ns: p-value > 0.05, *: p-value ≤0.05, **: p-value ≤0.01, ***: p-value ≤
+0.001, ****: p-value ≤0.0001
+As can be seen in Fig.
+16, the compiler flag -OFast performs significantly worse for
+AUC 0.1 compared to -O3 (AUC 0.1: -0.0006). All other performance metrics did not
+show any significant difference. As -OFast enables flags which are supposed to speed up
+the computation but limit the precision of floating point numbers, a decrease in predictive
+would be expectable as inaccuracies could accumulate up the predicted result. To guarantee
+a good predictive performance, all following experiments have been conducted with -O3
+instead of -OFast. As mentioned before surprisingly -O3 performs faster than -OFast in
+this experiment. Although the decision would usually be a trade-off between speed and
+predictive performance and the usage of -OFast would be conceivable.
+28
+==PAGE:32==
+Figure 16: Performance metrics AUC, AUC 0.1 and PPV for eluted ligand cell lines deter-
+mined on the concatenated test CV folds, Comparing ICC with -O3 vs. ICC with -OFast,
+Significance ns: p-value > 0.05, *: p-value ≤0.05, **: p-value ≤0.01, ***: p-value ≤
+0.001, ****: p-value ≤0.0001
+When comparing the ICC-compiled original implementation to the ICC-compiled Intel
+MKL implementation, in Fig. 17 it can be seen that for AUC no significant change was
+detectable.
+For AUC 0.1 and PPV, the MKL version is significantly worse (AUC 0.1:
+-0.0000028, PPV: -0.0000909). Because of the small differences in means, it can be de-
+termined that the performance of the Intel MKL implementation is almost similar to the
+ICC-compiled native implementation. Considering the significant speed increase and sim-
+ilar predictive performance, the following experiments will be conducted with the Intel
+MKL implemented code.
+29
+==PAGE:33==
+Figure 17: Performance metrics AUC, AUC 0.1 and PPV for eluted ligand cell lines de-
+termined on the concatenated test CV folds, Comparing ICC with -O3 vs. Intel MKL
+without MBGD, Significance ns: p-value > 0.05, *: p-value ≤0.05, **: p-value ≤0.01,
+***: p-value ≤0.001, ****: p-value ≤0.0001
+3.2
+Batch Gradient Descent
+The gradient descent algorithm implemented in NNAlign_MA is called stochastic gradient
+descent (SGD). For every data point a forward-step is done and directly afterwards the
+weights are updated for a single-value loss. SGDs advantage is that it is able to jump
+out of local minima to possibly better minima. But the convergence will be more instable
+as one sample could lead it into one direction and a following sample in a completely
+different direction. Furthermore, it can not easily be optimized time-wise. There are two
+alternatives to this approach, the batch and mini-batch gradient descent. [46]
+The batch gradient descent (BGD) does the forward-step for all data points in an epoch
+and afterwards updates the weights once for an average of the gradient over all data points.
+BGD is supposed do give the fastest convergence of gradient descent variations for convex
+learning problems. [46]
+For large datasets and common computing systems the entire dataset can not fit in the
+memory. An important property of convex problems is that any local minimum is also a
+global minimum. But many complex problems are also not convex learning problems but
+have local minima that are not global minima [47]. As the decision whether a problem
+30
+==PAGE:34==
+is convex or not for a problem with more than multivariate polynomial of degree four is
+NP-hard, it can not be determined beforehand if the problem NNAlign_MA tries to solve
+in convex, but only be interpreted afterwards [48].
+A trade-off between SGD and BGD is the mini-batch gradient descent (MBGD). Instead
+of taking a single sample or the complete dataset in one step, a batch of a specific size, the
+batch size n, is constructed. For each batch in an epoch, the forward-step and then the
+backpropagation with updating the weights is done. MBGD is supposed to allow faster
+convergence then SGD with feasible requirements for the memory. It could potentially also
+deal better with non-convex learning problems than BGD. [49]
+Both SGD and MBGD have been tested in this project. BGD can not be tested with the
+given training data size as there would not be enough memory to store the data. [50]
+An aspect of batched calculations to be considered is that the backpropagation can also
+be done in a batched manner.
+The challenge is that the input batch can consist of two types, binding affinity or eluted
+ligand likelihood. As the relevant output neuron is chosen for each data point based on
+the datatype there has to be a differentiation in the backpropagation step. The problem
+was solved by running the backpropagation step twice, for the binding affinity and eluted
+ligand likelihood samples separately.
+In Fig. 18, the mean loss for training and testing for 100 models in the ensemble is been
+shown. It can be seen that the average loss for both, training and testing is lower for
+batch gradient descent. Especially a lower test loss would indicate that the model is giving
+better predictive performance and is not just overfitting due to a lower training loss. The
+standard deviation for the training loss is equally wide for both methods. But for the test
+loss, the standard deviation of MBGD is consistently narrower.
+Figure 18: Mean/dispersion for the training and test (calculated every 20 epoch) loss for
+Stochastic Gradient Descent (SGD) and Mini-batch Gradient Descent (MBGD)
+31
+==PAGE:35==
+In Fig. 19, it can be seen that MBGD does not improve the predictive performance but
+worsened it. The difference is not big but significant (AUC: -0.001, AUC 0.1: -0.001, PPV:
+-0.001). For the AUC the competitor (MBGD) was better for 73 samples, worse for 139
+samples and equal for 2 samples compared to the baseline (SGD).
+The reason for the decline in predictive performance could be the previously mentioned
+non-convex nature of the problem NNAlign_MA tries to solve.
+Figure 19: Performance metrics AUC, AUC 0.1 and PPV for eluted ligand cell lines deter-
+mined on the concatenated test CV folds, Comparing Intel MKL with Stochastic Gradient
+Descent (SGD) vs. Intel MKL with Mini-batch Gradient Descent (MBGD), Significance
+ns: p-value > 0.05, *: p-value ≤0.05, **: p-value ≤0.01, ***: p-value ≤0.001, ****:
+p-value ≤0.0001
+3.3
+In-depth performance analysis
+With the Oracle Studio Performance Analyzer a profile on a limited dataset was run. Even
+though the dataset was a fifth of the original dataset, to be able to run it in an interactive
+session, the relative timing of the function will be the same. Inclusive is the time spend
+in the function itself and other called functions from inside the function. Exclusive is the
+time spend only in the function itself, without measuring time in called functions.
+As can be seen in Fig. 20, most functions are Intel MKL library functions, for matrix-
+matrix multiplication, memory and JIT management. Other functions like encode_gap,
+forward_batch_MA or forward_batch are used for encoding of inputs and are controlling
+32
+==PAGE:36==
+the iterations over offsets and MHC molecules. backprop_batch_t is the backpropagation
+function which does not use any Intel MKL functions. In general this result is very good, as
+the forward function, which is the native implementation and was using most of the time,
+has successfully been replaced with an Intel MKL implementation. The relative timings do
+not indicate any acceleration of the computations but proof the correct implementation.
+Figure 20: Ratio of CPU time spend exclusive and inclusive in functions from the Oracle
+Studio Performance Analyzer, cut off at 0.07%
+The Intel Advisor states that there is a 5.93x speedup for vectorized code compared to
+scalar version for the Intel MKL ICC-compiled executable. Interestingly the vectorization
+techniques AVX, AVX2 and SSE have all been used for different loops.
+The previously mentioned z-score scaling was assessed for computation time, as it was ques-
+tioned whether refitting the z-score in every epoch was necessary or too time-consuming.
+But it was found that the refitting did not contribute much to the overall computation
+time for a large data set.
+Additional performance values, that can be seen in Tab. 3, were measured with the Oracle
+Studio Performance Analyzer. These values are called hardware counts, as they show how
+33
+==PAGE:37==
+the hardware works with the executable. The results were consistent with the execution
+time. The faster ICC shows that less instructions in general and more instructions per
+cycle have been executed compared to GCC, this could be because of SIMD. Furthermore,
+ICC has less cache misses, which would explain a better speed performance. Intel MKL,
+in turn, has better results in every category compared to ICC. Likely because of highly
+optimized functions and fit kernels.
+Metric
+GCC
+ICC
+Intel MKL
+Total CPU Time
+15719.706
+2593.414
+1258.540
+Instructions Executed
+50389731362734
+8399327725578
+5082145624820
+Instructions Per Cycle
+1.412
+1.433
+1.837
+CPU Cycles Time
+10813.549
+1776.627
+838.421
+L1 D-cache Hits
+6940568905903
+2490731830777
+1634921028317
+L1 D-cache Misses
+63760513204
+571298658050
+63122193071
+L2 Cache Hit
+37483728828
+555564723087
+52983447979
+L2 Cache Misses
+26305092225
+16441978615
+10035046608
+L3 Cache Misses
+1345231702
+1314419821
+810029110
+Table 3: Hardware-count measured by the Oracle Studio Performance Analyzer, including
+instruction counts and cache level hits/misses, measured for 100 epochs
+Although it was not the aim of the project, it was evaluated whether parallelism, using the
+Intel MKL in-build parallelism functionalities could be achieved easily. It was seen that
+Intel MKL can spread out multiple threads but for the 20 threads, all threads spend 95%
+of the time waiting at barriers. Therefore the current implementation of NNAlign_MA
+using Intel MKL is not able to utilize parallelism efficiently.
+3.4
+Reducing epochs
+A parameter to be optimized in machine learning is the number of training epochs. A large
+number of epochs could lead to overfitting, where the training loss is still decreasing while
+the test loss is increasing.
+As can be seen in Fig. 21, the training loss is going into slow decrease after an initial steep
+decrease. The validation loss is not significantly moving in a direction after the decrease
+after 50 epochs. These findings motivate to investigate the reduction of training epochs.
+34
+==PAGE:38==
+Figure 21: Training and test (calculated every 20 epoch) loss for 300 epochs Intel MKL
+with SGD
+Reducing the number of training epochs would lead to a reduced execution time. It would
+expected that the execution time scales linear for the number of epochs. The number of
+training epochs for this experiment was reduced from 300 epochs to 100 epochs.
+As expected the execution time got reduced by 40% compared to the baseline. The reason
+that this is below the theoretical reduction of 66%, for 1/3 of the epochs, is that there is
+some overhead like reading in files which is independent of the epochs. In Fig. 22, it can be
+seen that the performance of models with limited training epochs does not hold up against
+the baseline with more training epochs. The difference is significantly worse (p-value ≤
+0.001) and has a substantial differences (AUC: -0.004, AUC 0.1: -0.014, PPV: -0.011).
+35
+==PAGE:39==
+Figure 22: Performance metrics AUC, AUC 0.1 and PPV for eluted ligand cell lines deter-
+mined on the concatenated test CV folds, Comparing Intel MKL MBGD (batch size = 40)
+with 300 training epochs vs. Intel MKL MBGD (batch size = 40) with 100 training epochs,
+Significance ns: p-value > 0.05, *: p-value ≤0.05, **: p-value ≤0.01, ***: p-value ≤0.001,
+****: p-value ≤0.0001
+3.5
+MA annotation decay
+As could be seen in Fig. 24, the times MA binders gets annotated a new allele per epochs
+declines steep until around epoch 150, afterwards it is almost a plateau at a low level.
+Therefore the idea came up to decay the frequency of MA annotation depending on the
+epoch. It was decided to split the training into three parts. In the first 100 epochs the
+MA samples were annotated an allele every epoch, like in the native implementation. In
+the following 100 epochs, MA samples were annotated an allele every second epoch and
+for the last 100 epochs, in every fourth epoch.
+This approach speed up the execution time by 40%.
+As can be seen in Fig.
+23, the
+performance was significantly worse but with only a marginal difference in mean values
+(AUC: -0.0005, AUC 0.1: -0.001, PPV: -0.002). Further tests could find an optimal decay
+strategy to get a speed gain without losing significantly predictive performance. Although
+it would not be a big gain as already this significantly worse strategy gave 40% time saving,
+which is a speed-up of 1.7.
+36
+==PAGE:40==
+Figure 23: Performance metrics AUC, AUC 0.1 and PPV for eluted ligand cell lines deter-
+mined on the concatenated test CV folds, Comparing Intel MKL MBGD (batch size = 40)
+without MA annotation decay vs. Intel MKL MBGD (batch size = 40) with MA anno-
+tation decay, Significance ns: p-value > 0.05, *: p-value ≤0.05, **: p-value ≤0.01, ***:
+p-value ≤0.001, ****: p-value ≤0.0001
+3.6
+Dynamic multi-allele annotation
+In the previous implementation, the annotation of multi-allele binders took place before
+the training epoch on all samples. As weights from the training were also used for the
+annotation, it was suspected that annotating the MA binders in the already used batches
+during the training epoch could improve the performance.
+This enables the usage of
+updated weights and thus could give a higher performance for the annotation. The change
+for MA annotation is counted as data points that get a new allele annotated and displayed
+as a ratio of these changed points over all MA binders in the epoch.
+In Fig. 24 it can be seen that there seems to be no relevant difference between annotating
+MA binders dynamically or before the training period after the epoch 150. Although the
+native annotation method appears to converge faster than the dynamically annotation in
+the beginning. Towards the end of the training less than 1% gets annotated a new allele.
+The statistical test on the ensemble also does show significant but very small difference in
+performance for AUC (0.0007), as can be seen Fig. 25. Therefore dynamically annotating
+MA binders does not improve the performance much. Nevertheless it has been kept for
+37
+==PAGE:41==
+further experiments.
+Figure 24: Ratio of changed MA binder annotations per non-binder for each epoch for
+Intel MKL
+Figure 25: Performance metrics AUC, AUC 0.1 and PPV for eluted ligand cell lines deter-
+mined on the concatenated test CV folds, Comparing Intel MKL with static MA annotation
+vs. Intel MKL with dynamic MA annotation, Significance ns: p-value > 0.05, *: p-value
+≤0.05, **: p-value ≤0.01, ***: p-value ≤0.001, ****: p-value ≤0.0001
+In Fig. 26, the number of occurrences for each allele is shown depending on the epoch of
+the training. It can be seen that for the first approx. 100 epochs the occurrence changes
+38
+==PAGE:42==
+for many alleles. For the following epochs the occurrences do not change much. The allele
+striking out in the first epochs is HLA-DPA10103-DPB10401. The reason for the high
+occurrence is likely that HLA-DPA10103-DPB10401 is the most often occurring allele in
+all cell lines (60 cell lines), followed by DRB3_0101 (42 cell lines). Later this allele is far
+less often annotated to, which indicates an ability to learn of NNAlign_MA.
+Figure 26: Occurrence MA binder data points annotated (z-axis) to alleles (x-axis) over
+300 epochs (y-axis)
+Another representation of the transition of MA binder data points in their annotation for
+alleles can be seen in the Appendix 6.3. For the visibility the main diagonal has been set
+to zero, as most data points do not change their annotated allele after a few epochs. The
+plots combine the change in alleles for multiple epochs. In the normalized Fig. 35, it can
+be seen that fewer MA binders get annotated to a different allele after first 50 epochs.
+3.7
+Sample weighting
+Sample weighting was investigated because it can be seen in the dataset that there is an
+imbalance between the occurrences of the different alleles (classes), Fig. 8. As can be
+seen in Fig. 27, there is a drop in all performance metrics at a sample size of 5096 (HLA-
+DPA10103-DPB10101). This so-called class imbalance problem is due to the differences in
+positive samples for some alleles in the dataset. It can be seen that there are alleles with an
+39
+==PAGE:43==
+AUC above 0.6 but 0 PPV. This indicates an all-negative prediction, which is a common
+phenomenon for the class imbalance problem [51]. A method to solve this problem is to
+introduce a weight for samples that determines the importance during the training.
+Another important factor is that also the performance metrics themselves get unstable.
+Fewer testing data points lead to higher fluctuations in the performance, as there could
+be a few random alleles that are guessed correctly. Sample weighting can not solve this
+problem, as it does not change the testing but only the training.
+Figure 27: Performance metrics AUC, AUC 0.1 and PPV (left y-axis) for eluted ligand cell
+lines determined on the concatenated test CV folds separated for alleles without sample
+weighting, sorted on the x-axis for the number of data points per allele (right y-axis, black
+line)
+A method to calculate samples weights are inverse frequency:
+f(N
+nt
+)/b
+(21)
+where:
+N = sum of all counts
+nt = single count for class t
+b = normalization factor to adapt the values into a reasonable range
+Another methods is a variation of the inverse frequency, the normalized inverse frequency,
+inspired by the scikit-learn implementation of compute_sample_weight [52]:
+f(
+N
+|n| · nt
+)/b
+(22)
+where:
+40
+==PAGE:44==
+N = sum of all counts
+|n| = number of classes
+nt = single count for class t
+f
+= function to normalize the inverse frequency
+b
+= normalization factor to adapt the values into a reasonable range
+The difficulty to determine the frequencies of classes in NNAlign_MA is that it can not
+be done on the training dataset because of the convoluted MA binders. Therefore the
+frequencies of classes are determined on the predicted test set. This could lead to overfitting
+as it builds upon an already trained network.
+The sample weights can then be multiplied onto the loss. It has been decided to use sample
+weighting after the pre-training period. As the sample weights are positive numbers larger
+than 0.0, a positive loss would be increased or decreased but still positive and a negative
+loss would be increased or decreased but still be negative respectively. A higher absolute
+loss then enforces a larger change onto the weights during the backpropagation.
+The
+weighting method has to be chosen reasonably. Too big differences between the native
+sample weights would have the same effect as choosing a large learning rate η.
+Common functions for the transformation functions are natural logarithm, logarithm with
+base 2, logarithm with base 10, square root, or the identity function. As can be seen in Fig.
+28, for the mentioned functions, log2 seems to be a reasonable choice, as it gives a steady
+declining function over the sample size. For all functions and the normalization factors 1.0,
+5.0, 10.0, 20.0, 30.0, 40.0, and 50.0 a grid search was done to test the performance in one
+model with the same seed and parameters. It was proven that log2 with a normalization
+factor of 40.0 gave the best results on the test set (data not shown).
+41
+==PAGE:45==
+Figure 28: Sample weights per allele (class) for the functions log1,2,10 (left y-axis) and sqrt
+(right y-axis, red) with normalization factor b = 1.0 (scikit-learn function not shown, as in
+different range than log and sqrt functions)
+Fig. 29 shows the performance metrics AUC, AUC 0.1, and PPV for all alleles with the
+sample weighting method. As seen previously, alleles with few data points show unstable
+performance values. Compared to the baseline in Fig. 27 a few alleles seem to have a
+higher performance.
+Figure 29: Performance metrics AUC, AUC 0.1 and PPV (left y-axis) for eluted ligand
+cell lines determined on the concatenated test CV folds separated for alleles for sample
+weighting (f = log2, b = 40.0), sorted on the x-axis for the number of data points per
+allele (right y-axis)
+42
+==PAGE:46==
+The two outliers which were only predicted by one method were excluded in Fig.
+30.
+The plot shows the differences in the performance metrics for all alleles from the sample
+weighting compared to the baseline. Interestingly the performance on most alleles has been
+slightly improved, not only on less frequent alleles. The mean differences are AUC: 0.006,
+AUC 0.1: 0.0117, PPV: 0.0108. As before the performance gets more unstable for less
+frequent alleles with both, performance increases and decreases. But there are negative
+outliers HLA-DQA10105-DQB10501 and HLA-DQA10201-DQB10301. These values have
+been measured on 5662 and 5006 test samples, respectively. The changes in AUC 0.1 and
+PPV are substantial compared to other alleles but at maximum a difference of -0.15.
+Figure 30: Differences of performance metrics AUC, AUC 0.1 and PPV (left y-axis) for
+eluted ligand cell lines determined on the concatenated test CV folds separated for alleles
+for non sample weighting vs. sample weighting (f = log2, b = 40.0), sorted on the x-axis
+for the number of data points per allele (right y-axis)
+For the binding motifs similarity, the PCC from each cell line has been averaged for each
+allele. As can be seen in Fig. 32, for highly frequent alleles, the predicted sequence motifs
+are very similar (PCC > 0.95). For less frequent alleles the correlation of the motifs is lower
+(PCC < 0.5) which was anticipated as low-frequency alleles are supposed to be trained
+with more impact due to higher sample weights. An example of a differing sequence logo
+from the two models can be seen for HLA-DPA10201-DPB10201 in Fig. 31. The only
+significant similarity is the importance of position 6. Like in the previous plots, there are
+also fewer data points to do the sequence motif calculation on or the number of predicted
+samples in the allele differs. In this example, it is 100 vs. 11 samples. It is not possible to
+decide which model performs better based on the correlation or sequence logo plots alone.
+43
+==PAGE:47==
+(a) Intel MKL without sample weighing sequence
+logo
+(b) Intel MKL with sample weighing (f = log2,
+b = 40.0) sequence logo
+Figure 31:
+Comparison of two sequence logos for the same allele (HLA-DPA10201-
+DPB10201)
+Figure 32: Average Pearson’s Correlation Coefficient for sequence motif between no sample
+weighting vs. (f = log2, b = 40.0) per allele over all cell lines
+As can be seen in Fig. 33, there is a substantial increase in performance with sample
+weighting (p-value ≤0.001). Not only is the difference significant but also substantial
+(AUC: 0.003, AUC 0.1: 0.01, PPV: 0.01). As previously mentioned the frequencies needed
+for the sample weights are calculated on a predicted test set. Other methods of obtaining
+the frequencies need to be found, to be applicable in real-world cases where only one
+model should be trained. One idea would be to dynamically keep track of the occurrence
+of alleles during the training and update the sample weights accordingly. Although classes
+are switched for each MA annotation step, sample weights would change over time and it
+has to be investigated if this approach is functional.
+44
+==PAGE:48==
+Figure 33: Performance metrics AUC, AUC 0.1 and PPV for eluted ligand cell lines deter-
+mined on the concatenated test CV folds, Comparing Intel MKL MBGD (batch size = 40)
+without sample weighting vs. Intel MKL MBGD (batch size = 40) with sample weighting
+(f = log2, b = 40.0), Significance ns: p-value > 0.05, *: p-value ≤0.05, **: p-value ≤
+0.01, ***: p-value ≤0.001, ****: p-value ≤0.0001
+45
+==PAGE:49==
+4
+Discussion
+The main objective of this project was to reduce the computation time needed for training
+as well as investigate techniques to improve the predicative performance of NNAlign_MA.
+This project achieved both goals, to improve the speed as well as the predictive perfor-
+mance. The reached speed-up of almost 15x is especially impressive as, like in the original
+implementation only one thread is used. Combined with other accelerating methods, show-
+ing also a good predictive performance like MA annotation decay, a speed-up of up to 24x
+would be possible.
+It could be seen that simply changing the compiler from GCC to ICC with reasonable
+compiler flags gives an impressive acceleration of the execution time with a similar predic-
+tive performance. As this change can be done easily in most software projects, it could be
+interesting to investigate the speed performance in other projects as well. Especially as sav-
+ing computational resources could also save energy and budget for running the HPC. The
+usage of Intel MKL for the matrix-matrix multiplication only gave a speed-up when used
+in combination with mini-batch gradient descent compared to the native implementation
+compiled with ICC. The approach of reducing the number of training epochs reduced the
+execution time but limited the predictive performance by doing so. The reduction of epochs
+and decaying of the MA annotation requires a careful determination of their parameters
+and strategies to find an optimal balance between speed and predictive performance.
+The best approach to improve the predictive performance was sample weighting with the
+log2 function. Other methods like mini-batch gradient descent or changing the compiler had
+a positive impact on the computation speed and did not change the predictive performance.
+Dynamic MA annotation did not have any influence on both predictive as well as speed
+performance.
+It could also be investigated whether parallelization in a multi-threaded version is possible
+by manually introducing parallelism, as auto-parallelism has been shown to be not func-
+tional. Although only using a single-core version has the advantage of saving resources,
+most CPUs have multiple cores and HPC systems consist of multiple CPUs. Especially the
+functions responsible for encoding peptides and MHC pseudosequences could potentially
+be parallelized on the level of multiple samples being encoded simultaneously or even par-
+allelize multiple encoding steps for a single sample. They have not been optimized beyond
+the compiler level. Another way of parallelization is batched function calls, which are able
+to handle multiple matrix-matrix multiplications at once and can distribute them over mul-
+tiple threads, particularly useful for multiple small matrices as a single small matrix-matrix
+multiplication can not benefit from parallelism.
+46
+==PAGE:50==
+There are other oneAPI, non-BLAS standard, functions for small matrices which could
+be investigated for their speed performance, like mkl_sgemm_compact. Also, the sparsity
+of handled matrices could be investigated to eventually make use of specialized sparse
+matrix-matrix multiplication functions, like mkl_sparse_s_mm. Those functions would re-
+quire additional effort for implementation. oneAPI offers the library Deep Neural Network
+Library (oneDNN) which could be used for completely rewriting the NNAlign_MA neural
+network components.
+Through the time savings achieved in the project, more time-consuming modifications,
+which were not feasible before, to the algorithm and network could be investigated to
+boost the performance even further. For example, another hidden layer could be intro-
+duced as this could capture even more complex motifs. Also, the previously mentioned
+insertion/deletion feature was not feasible for big datasets before, because the computa-
+tional complexity is soaring. For the earlier described workflow in NNAlign_MA, this
+would add another nested loop for the score calculation.
+It can be concluded that optimizing a program time-wise needs thorough investigation even
+though simple changes, like a different compiler, can improve execution speed a lot. Tuning
+the predictive performance for a well-researched method like NNAlign_MA has been more
+difficult. Only the sample weighting showed a significant and noticeable improvement.
+47
+==PAGE:51==
+5
+References
+[1]
+Kenneth M. Murphy et al. Janeway’s immunobiology. eng. 10th edition, international
+student edition. New York, NY London: W.W. Norton & Company, 2022. isbn: 978-
+0-393-88491-3 978-0-393-68093-5.
+[2]
+HLA Nomenclature @ hla.alleles.org. url: https://hla.alleles.org/nomenclature/
+stats.html (visited on 06/13/2023).
+[3]
+Nupur Biswas et al. “Designing neoantigen cancer vaccines, trials, and outcomes”.
+In: Frontiers in Immunology 14 (Feb. 2023), p. 1105420. issn: 1664-3224. doi: 10.
+3389/fimmu.2023.1105420. url: https://www.frontiersin.org/articles/10.
+3389/fimmu.2023.1105420/full (visited on 06/11/2023).
+[4]
+Bruno Alvarez et al. “NNAlign_MA; MHC Peptidome Deconvolution for Accurate
+MHC Binding Motif Characterization and Improved T-cell Epitope Predictions”. eng.
+In: Molecular & cellular proteomics: MCP 18.12 (Dec. 2019), pp. 2459–2477. issn:
+1535-9484. doi: 10.1074/mcp.TIR119.001658.
+[5]
+Monika-Sarah E. D. Schulze et al. “Disruption of Hydrogen Bonds between Major
+Histocompatibility Complex Class II and the Peptide N-Terminus Is Not Sufficient to
+Form a Human Leukocyte Antigen-DM Receptive State of Major Histocompatibility
+Complex Class II”. en. In: PLoS ONE 8.7 (July 2013). Ed. by Scheherazade Sadegh-
+Nasseri, e69228. issn: 1932-6203. doi: 10 . 1371 / journal . pone . 0069228. url:
+https://dx.plos.org/10.1371/journal.pone.0069228 (visited on 06/07/2023).
+[6]
+Jonas Birkelund Nilsson et al. “Machine learning reveals limited contribution of trans-
+only encoded variants to the HLA-DQ immunopeptidome”. en. In: Communications
+Biology 6.1 (Apr. 2023), p. 442. issn: 2399-3642. doi: 10.1038/s42003-023-04749-
+7. url: https://www.nature.com/articles/s42003-023-04749-7 (visited on
+06/20/2023).
+[7]
+Randi Vita et al. “The Immune Epitope Database (IEDB): 2018 update”. en. In:
+Nucleic Acids Research 47.D1 (Jan. 2019), pp. D339–D343. issn: 0305-1048, 1362-
+4962. doi: 10.1093/nar/gky1006. url: https://academic.oup.com/nar/article/
+47/D1/D339/5144151 (visited on 05/24/2023).
+[8]
+Morten Nielsen and Ole Lund. “NN-align. An artificial neural network-based align-
+ment algorithm for MHC class II peptide binding prediction”. eng. In: BMC bioinfor-
+matics 10 (Sept. 2009), p. 296. issn: 1471-2105. doi: 10.1186/1471-2105-10-296.
+48
+==PAGE:52==
+[9]
+Morten Nielsen, Nicola Ternette, and Carolina Barra. “The interdependence of ma-
+chine learning and LC-MS approaches for an unbiased understanding of the cellular
+immunopeptidome”. en. In: Expert Review of Proteomics 19.2 (Feb. 2022), pp. 77–88.
+issn: 1478-9450, 1744-8387. doi: 10.1080/14789450.2022.2064278. url: https:
+//www.tandfonline.com/doi/full/10.1080/14789450.2022.2064278 (visited on
+05/24/2023).
+[10]
+The UniProt Consortium et al. “UniProt: the Universal Protein Knowledgebase in
+2023”. en. In: Nucleic Acids Research 51.D1 (Jan. 2023), pp. D523–D531. issn: 0305-
+1048, 1362-4962. doi: 10.1093/nar/gkac1052. url: https://academic.oup.com/
+nar/article/51/D1/D523/6835362 (visited on 05/24/2023).
+[11]
+Scheherazade Sadegh-Nasseri and AeRyon Kim. “MHC Class II Auto-Antigen Pre-
+sentation is Unconventional”. In: Frontiers in Immunology 6 (July 2015). issn: 1664-
+3224. doi: 10.3389/fimmu.2015.00372. url: http://journal.frontiersin.org/
+Article/10.3389/fimmu.2015.00372/abstract (visited on 06/13/2023).
+[12]
+Rodrigo Fernandes de Mello and Moacir Antonelli Ponti. Machine learning: a prac-
+tical approach on the statistical learning theory. eng. Cham: Springer, 2018. isbn:
+978-3-319-94989-5 978-3-319-94990-1.
+[13]
+Inc. Free Software Foundation. GCC 11 Release Series - GNU Project. url: https:
+//gcc.gnu.org/gcc-11/ (visited on 05/23/2023).
+[14]
+Intel® C/C++ Compilers Complete Adoption of LLVM. en. url: https://www.
+intel.com/content/www/us/en/developer/articles/technical/adoption-of-
+llvm-complete-icx.html (visited on 05/23/2023).
+[15]
+Manpage of ICC. url: https://www.dartmouth.edu/~rc/HPC/man/icc.html
+(visited on 06/13/2023).
+[16]
+Chris Lomont. “Introduction to Intel® Advanced Vector Extensions”. en. In: (2011).
+url: https : / / www . intel . com / content / dam / develop / external / us / en /
+documents/intro-to-intel-avx-183287.pdf.
+[17]
+Automatic Parallelization. url: https : / / www . intel . com / content / www / us /
+en / docs / cpp - compiler / developer - guide - reference / 2021 - 8 / automatic -
+parallelization.html (visited on 06/07/2023).
+[18]
+Liang Zhong et al. “Cache hit ratio maximization in device-to-device communications
+overlaying cellular networks”. In: China Communications 17.2 (Feb. 2020), pp. 232–
+238. issn: 1673-5447. doi: 10.23919/JCC.2020.02.018. url: https://ieeexplore.
+ieee.org/document/9020310/ (visited on 06/08/2023).
+49
+==PAGE:53==
+[19]
+Abdullah Almurayh. “Improved Matrix Multiplication by Changing Loop Order”.
+en. In: Mobile Information Systems 2022 (Oct. 2022). Publisher: Hindawi, e9650652.
+issn: 1574-017X. doi: 10.1155/2022/9650652. url: https://www.hindawi.com/
+journals/misy/2022/9650652/ (visited on 06/13/2023).
+[20]
+Steven S. Skiena. The algorithm design manual. 2nd ed. OCLC: ocn228582051. Lon-
+don: Springer, 2008. isbn: 978-1-84800-069-8 978-1-84800-070-4.
+[21]
+How to Use Loop Blocking to Optimize Memory Use on 32-Bit Intel®... en. url:
+https://www.intel.com/content/www/us/en/developer/articles/technical/
+how- to- use- loop- blocking- to- optimize- memory- use- on- 32- bit- intel-
+architecture.html (visited on 06/14/2023).
+[22]
+João M. P. Cardoso, José Gabriel F. Coutinho, and Pedro C. Diniz. “Chapter 5 -
+Source code transformations and optimizations”. en. In: Embedded Computing for
+High Performance. Ed. by João M. P. Cardoso, José Gabriel F. Coutinho, and Pe-
+dro C. Diniz. Boston: Morgan Kaufmann, Jan. 2017, pp. 137–183. isbn: 978-0-12-
+804189-5. doi: 10.1016/B978- 0- 12- 804189- 5.00005- 3. url: https://www.
+sciencedirect.com/science/article/pii/B9780128041895000053 (visited on
+06/14/2023).
+[23]
+David Callahan, Ken Kennedy, and Allan Porterfield. “Software prefetching”. In: Pro-
+ceedings of the fourth international conference on Architectural support for program-
+ming languages and operating systems. ASPLOS IV. New York, NY, USA: Associa-
+tion for Computing Machinery, Apr. 1991, pp. 40–52. isbn: 978-0-89791-380-5. doi:
+10.1145/106972.106979. url: https://dl.acm.org/doi/10.1145/106972.106979
+(visited on 06/08/2023).
+[24]
+Richard Uhlig et al. “Instruction fetching: coping with code bloat”. en. In: ACM
+SIGARCH Computer Architecture News 23.2 (May 1995), pp. 345–356. issn: 0163-
+5964. doi: 10.1145/225830.224445. url: https://dl.acm.org/doi/10.1145/
+225830.224445 (visited on 06/11/2023).
+[25]
+Volker Strassen. “Gaussian elimination is not optimal”. en. In: Numerische Mathe-
+matik 13.4 (Aug. 1969), pp. 354–356. issn: 0029-599X, 0945-3245. doi: 10.1007/
+BF02165411. url: http://link.springer.com/10.1007/BF02165411 (visited on
+05/31/2023).
+[26]
+Discovering novel algorithms with AlphaTensor. en. url: https://www.deepmind.
+com/blog/discovering-novel-algorithms-with-alphatensor (visited on 05/31/2023).
+50
+==PAGE:54==
+[27]
+Anshul Gupta and Vipin Kumar. “Scalability of Parallel Algorithms for Matrix Mul-
+tiplication”. In: 1993 International Conference on Parallel Processing - ICPP’93 Vol3.
+Syracuse, NY, USA: IEEE, Aug. 1993, pp. 115–123. isbn: 978-0-8493-8983-2. doi:
+10.1109/ICPP.1993.160. url: http://ieeexplore.ieee.org/document/4134256/
+(visited on 05/31/2023).
+[28]
+C. L. Lawson et al. “Basic Linear Algebra Subprograms for Fortran Usage”. en. In:
+ACM Transactions on Mathematical Software 5.3 (Sept. 1979), pp. 308–323. issn:
+0098-3500, 1557-7295. doi: 10.1145/355841.355847. url: https://dl.acm.org/
+doi/10.1145/355841.355847 (visited on 05/09/2023).
+[29]
+Numpy/Scipy with Intel® MKL and Intel® Compilers. en. url: https://www.
+intel.com/content/www/us/en/developer/articles/technical/numpyscipy-
+with-intel-mkl.html (visited on 05/09/2023).
+[30]
+Performance Comparison of OpenBLAS* and Intel® oneAPI Math Kernel... en.
+url: https : / / www . intel . com / content / www / us / en / developer / articles /
+technical/performance-comparison-of-openblas-and-intel-math-kernel-
+library-in-r.html (visited on 05/09/2023).
+[31]
+Devangi N. Parikh et al. “Learning from Optimizing Matrix-Matrix Multiplication”.
+In: 2018 IEEE International Parallel and Distributed Processing Symposium Work-
+shops (IPDPSW). Vancouver, BC: IEEE, May 2018, pp. 332–339. isbn: 978-1-5386-
+5555-9. doi: 10.1109/IPDPSW.2018.00064. url: https://ieeexplore.ieee.org/
+document/8425431/ (visited on 06/01/2023).
+[32]
+M. Ananth, S. Vishwas, and M.R. Anala. “Cache Friendly Strategies to Optimize
+Matrix Multiplication”. In: 2017 IEEE 7th International Advance Computing Con-
+ference (IACC). Hyderabad, India: IEEE, Jan. 2017, pp. 23–27. isbn: 978-1-5090-
+1560-3. doi: 10.1109/IACC.2017.0020. url: http://ieeexplore.ieee.org/
+document/7976754/ (visited on 06/01/2023).
+[33]
+Using Threaded Intel® MKL in Multi-Thread Application. url: https : / / www .
+intel.com/content/dam/develop/external/us/en/documents/mkl-affinity.
+pdf.
+[34]
+Ian Masliah et al. “High-Performance Matrix-Matrix Multiplications of Very Small
+Matrices”. en. In: Euro-Par 2016: Parallel Processing. Ed. by Pierre-François Dutot
+and Denis Trystram. Vol. 9833. Series Title: Lecture Notes in Computer Science.
+Cham: Springer International Publishing, 2016, pp. 659–671. isbn: 978-3-319-43658-
+6 978-3-319-43659-3. doi: 10.1007/978-3-319-43659-3_48. url: http://link.
+springer.com/10.1007/978-3-319-43659-3_48 (visited on 06/13/2023).
+51
+==PAGE:55==
+[35]
+Intel® Math Kernel Library Improved Small Matrix Performance Using... en. url:
+https://www.intel.com/content/www/us/en/developer/articles/technical/
+onemkl - improved - small - matrix - performance - using - just - in - time - jit -
+code.html (visited on 05/09/2023).
+[36]
+Massimo Andreatta et al. “NNAlign: A Web-Based Prediction Method Allowing Non-
+Expert End-User Discovery of Sequence Motifs in Quantitative Peptide Data”. en. In:
+PLoS ONE 6.11 (Nov. 2011). Ed. by Niall James Haslam, e26781. issn: 1932-6203.
+doi: 10.1371/journal.pone.0026781. url: https://dx.plos.org/10.1371/
+journal.pone.0026781 (visited on 05/23/2023).
+[37]
+Vanessa Jurtz et al. “NetMHCpan-4.0: Improved Peptide–MHC Class I Interaction
+Predictions Integrating Eluted Ligand and Peptide Binding Affinity Data”. en. In:
+The Journal of Immunology 199.9 (Nov. 2017), pp. 3360–3368. issn: 0022-1767, 1550-
+6606. doi: 10 . 4049 / jimmunol . 1700893. url: https : / / journals . aai . org /
+jimmunol/article/199/9/3360/109797/NetMHCpan-4-0-Improved-Peptide-
+MHC-Class-I (visited on 05/24/2023).
+[38]
+Kamilla Kjaergaard Jensen et al. “Improved methods for predicting peptide binding
+affinity to MHC class II molecules”. en. In: Immunology 154.3 (July 2018), pp. 394–
+406. issn: 00192805. doi: 10.1111/imm.12889. url: https://onlinelibrary.
+wiley.com/doi/10.1111/imm.12889 (visited on 05/24/2023).
+[39]
+Jan Korst et al. “Introduction to Classification Algorithms and Their Performance
+Analysis Using Medical Examples”. en. In: Data Science for Healthcare. Ed. by Sergio
+Consoli, Diego Reforgiato Recupero, and Milan Petković. Cham: Springer Interna-
+tional Publishing, 2019, pp. 39–73. isbn: 978-3-030-05248-5 978-3-030-05249-2. doi:
+10.1007/978-3-030-05249-2_2. url: http://link.springer.com/10.1007/978-
+3-030-05249-2_2 (visited on 06/13/2023).
+[40]
+Payam Refaeilzadeh, Lei Tang, and Huan Liu. “Cross-Validation”. en. In: Encyclope-
+dia of Database Systems. Ed. by Ling Liu and M. Tamer Özsu. Boston, MA: Springer
+US, 2009, pp. 532–538. isbn: 978-0-387-35544-3 978-0-387-39940-9. doi: 10.1007/
+978-0-387-39940-9_565. url: http://link.springer.com/10.1007/978-0-387-
+39940-9_565 (visited on 06/13/2023).
+[41]
+Birkir Reynisson et al. “NetMHCpan-4.1 and NetMHCIIpan-4.0: improved predic-
+tions of MHC antigen presentation by concurrent motif deconvolution and integra-
+tion of MS MHC eluted ligand data”. In: Nucleic Acids Research 48.W1 (July 2020),
+W449–W454. issn: 0305-1048. doi: 10.1093/nar/gkaa379. url: https://www.
+ncbi.nlm.nih.gov/pmc/articles/PMC7319546/ (visited on 07/04/2023).
+52
+==PAGE:56==
+[42]
+Ronald J. Tallarida and Rodney B. Murray. “t-Test II: Paired Data”. en. In: Manual of
+Pharmacologic Calculations. New York, NY: Springer New York, 1987, pp. 134–136.
+isbn: 978-1-4612-9380-4 978-1-4612-4974-0. doi: 10.1007/978-1-4612-4974-0_41.
+url: http://link.springer.com/10.1007/978-1-4612-4974-0_41 (visited on
+06/13/2023).
+[43]
+Martin Christen Frølund Thomsen and Morten Nielsen. “Seq2Logo: a method for
+construction and visualization of amino acid binding motifs and sequence profiles
+including sequence weighting, pseudo counts and two-sided representation of amino
+acid enrichment and depletion”. en. In: Nucleic Acids Research 40.W1 (July 2012),
+W281–W287. issn: 0305-1048, 1362-4962. doi: 10.1093/nar/gks469. url: https:
+//academic.oup.com/nar/article-lookup/doi/10.1093/nar/gks469 (visited on
+05/09/2023).
+[44]
+C. E. Shannon. “A mathematical theory of communication”. In: The Bell System
+Technical Journal 27.3 (July 1948). Conference Name: The Bell System Technical
+Journal, pp. 379–423. issn: 0005-8580. doi: 10.1002/j.1538-7305.1948.tb01338.
+x.
+[45]
+S. Kullback and R. A. Leibler. “On Information and Sufficiency”. en. In: The Annals of
+Mathematical Statistics 22.1 (Mar. 1951), pp. 79–86. issn: 0003-4851. doi: 10.1214/
+aoms/1177729694. url: http://projecteuclid.org/euclid.aoms/1177729694
+(visited on 06/13/2023).
+[46]
+Michael A. Nielsen. “Neural Networks and Deep Learning”. en. In: (2015). Publisher:
+Determination Press. url: http://neuralnetworksanddeeplearning.com (visited
+on 05/06/2023).
+[47]
+Stephen P. Boyd and Lieven Vandenberghe. Convex optimization. Cambridge, UK ;
+New York: Cambridge University Press, 2004. isbn: 978-0-521-83378-3.
+[48]
+Amir Ali Ahmadi et al. “NP-hardness of deciding convexity of quartic polynomi-
+als and related problems”. en. In: Mathematical Programming 137.1-2 (Feb. 2013),
+pp. 453–476. issn: 0025-5610, 1436-4646. doi: 10 . 1007 / s10107 - 011 - 0499 - 2.
+url: http://link.springer.com/10.1007/s10107- 011- 0499- 2 (visited on
+06/05/2023).
+[49]
+Mu Li et al. “Efficient mini-batch training for stochastic optimization”. en. In: Pro-
+ceedings of the 20th ACM SIGKDD international conference on Knowledge discovery
+and data mining. New York New York USA: ACM, Aug. 2014, pp. 661–670. isbn:
+978-1-4503-2956-9. doi: 10.1145/2623330.2623612. url: https://dl.acm.org/
+doi/10.1145/2623330.2623612 (visited on 02/22/2023).
+53
+==PAGE:57==
+[50]
+Sebastian Ruder. “An overview of gradient descent optimization algorithms”. In:
+(2016). Publisher: arXiv Version Number: 2. doi: 10.48550/ARXIV.1609.04747.
+url: https://arxiv.org/abs/1609.04747 (visited on 05/25/2023).
+[51]
+Thomas R. Shultz et al. “Class Imbalance Problem”. en. In: Encyclopedia of Machine
+Learning. Ed. by Claude Sammut and Geoffrey I. Webb. Boston, MA: Springer US,
+2011, pp. 171–171. isbn: 978-0-387-30768-8 978-0-387-30164-8. doi: 10.1007/978-
+0-387-30164-8_110. url: http://link.springer.com/10.1007/978-0-387-
+30164-8_110 (visited on 05/25/2023).
+[52]
+Lars Buitinck et al. “API design for machine learning software: experiences from
+the scikit-learn project”. In: (2013). Publisher: arXiv Version Number: 1. doi: 10.
+48550/ARXIV.1309.0238. url: https://arxiv.org/abs/1309.0238 (visited on
+05/25/2023).
+54
+==PAGE:58==
+6
+Appendix
+6.1
+CPU architectures
+6.1.1
+Computerome
+Architecture: x86_64
+CPU op-mode(s): 32-bit, 64-bit
+Byte Order: Little Endian
+CPU(s): 40
+On-line CPU(s) list: 0-39
+Thread(s) per core: 1
+Core(s) per socket: 1
+Socket(s): 40
+NUMA node(s): 4
+Vendor ID: GenuineIntel
+CPU family: 6
+Model: 85
+Model name: Intel(R) Xeon(R) Gold 6230 CPU @ 2.10GHz
+Stepping: 7
+CPU MHz: 2095.077
+BogoMIPS: 4190.15
+Hypervisor vendor: VMware
+Virtualization type: full
+L1d cache: 32K
+L1i cache: 32K
+L2 cache: 1024K
+L3 cache: 28160K
+NUMA node0 CPU(s): 0-9
+NUMA node1 CPU(s): 10-19
+NUMA node2 CPU(s): 20-29
+NUMA node3 CPU(s): 30-39
+Flags: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat
+pse36 clflush mmx fxsr sse sse2 ss syscall nx pdpe1gb rdtscp lm
+constant_tsc arch_perfmon nopl xtopology tsc_reliable nonstop_tsc
+eagerfpu pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe
+popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm
+55
+==PAGE:59==
+abm 3dnowprefetch invpcid_single ssbd ibrs ibpb stibp ibrs_enhanced
+fsgsbase tsc_adjust bmi1 avx2 smep bmi2 invpcid avx512f avx512dq rdseed
+adx smap clflushopt clwb avx512cd avx512bw avx512vl xsaveopt xsavec
+arat pku ospke md_clear spec_ctrl intel_stibp flush_l1d
+arch_capabilities
+6.1.2
+DTU HPC
+Architecture: x86_64
+CPU op-mode(s): 32-bit, 64-bit
+Byte Order: Little Endian
+CPU(s): 20
+On-line CPU(s) list: 0-19
+Thread(s) per core: 1
+Core(s) per socket: 10
+Socket(s): 2
+NUMA node(s): 2
+Vendor ID: GenuineIntel
+CPU family: 6
+Model: 63
+Model name: Intel(R) Xeon(R) CPU E5-2660 v3 @ 2.60GHz
+Stepping: 2
+CPU MHz: 1199.707
+CPU max MHz: 3300.0000
+CPU min MHz: 1200.0000
+BogoMIPS: 5187.85
+Virtualization: VT-x
+L1d cache: 32K
+L1i cache: 32K
+L2 cache: 256K
+L3 cache: 25600K
+NUMA node0 CPU(s): 0-9
+NUMA node1 CPU(s): 10-19
+Flags: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat
+pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx
+pdpe1gb rdtscp lm constant_tsc arch_perfmon pebs bts rep_good nopl
+56
+==PAGE:60==
+xtopology nonstop_tsc aperfmperf eagerfpu pni pclmulqdq dtes64 ds_cpl
+vmx smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid dca sse4_1 sse4_2
+x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand
+lahf_lm abm epb invpcid_single intel_ppin ssbd rsb_ctxsw ibrs ibpb
+stibp tpr_shadow vnmi flexpriority ept vpid fsgsbase tsc_adjust bmi1
+avx2 smep bmi2 erms invpcid cqm xsaveopt cqm_llc cqm_occup_llc dtherm
+ida arat pln pts md_clear spec_ctrl intel_stibp flush_l1d
+57
+==PAGE:61==
+6.2
+Compiler optimizer flags
+6.2.1
+ICC
+-inline-factor: 100
+-inline-min-size: 30
+-inline-max-size: 230
+-inline-max-total-size: 2000
+-inline-max-per-routine: disabled
+-inline-max-per-compile: disabled
+6.2.2
+GCC
+-faggressive-loop-optimizations [enabled]
+-falign-functions [enabled]
+-falign-functions= 16
+-falign-jumps [enabled]
+-falign-jumps= 16:11:8
+-falign-labels [enabled]
+-falign-labels= 0:0:8
+-falign-loops [enabled]
+-falign-loops= 16:11:8
+-fallocation-dce [enabled]
+-fallow-store-data-races [disabled]
+-fassociative-math [disabled]
+-fasynchronous-unwind-tables [enabled]
+-fauto-inc-dec [enabled]
+-fbit-tests [enabled]
+-fbranch-count-reg [enabled]
+-fbranch-probabilities [disabled]
+-fcaller-saves [enabled]
+-fcode-hoisting [enabled]
+-fcombine-stack-adjustments [enabled]
+-fcompare-elim [enabled]
+-fconserve-stack [disabled]
+-fcprop-registers [enabled]
+-fcrossjumping [enabled]
+58
+==PAGE:62==
+-fcse-follow-jumps [enabled]
+-fcx-fortran-rules [disabled]
+-fcx-limited-range [disabled]
+-fdce [enabled]
+-fdefer-pop [enabled]
+-fdelayed-branch [disabled]
+-fdelete-dead-exceptions [disabled]
+-fdelete-null-pointer-checks
+-fdevirtualize [enabled]
+-fdevirtualize-speculatively [enabled]
+-fdse [enabled]
+-fearly-inlining [enabled]
+-fexceptions [disabled]
+-fexcess-precision=[fast|standard|16] [default]
+-fexpensive-optimizations [enabled]
+-ffast-math
+-ffinite-loops [disabled]
+-ffinite-math-only [disabled]
+-ffloat-store [disabled]
+-ffold-simple-inlines [available in C++, ObjC++]
+-fforward-propagate [enabled]
+-ffp-contract=[off|on|fast] fast
+-ffp-int-builtin-inexact [enabled]
+-ffunction-cse [enabled]
+-fgcse [enabled]
+-fgcse-after-reload [enabled]
+-fgcse-las [disabled]
+-fgcse-lm [enabled]
+-fgcse-sm [disabled]
+-fgraphite [disabled]
+-fgraphite-identity [disabled]
+-fguess-branch-probability [enabled]
+-fhandle-exceptions -fexceptions
+-fharden-compares [disabled]
+-fharden-conditional-branches [disabled]
+-fhoist-adjacent-loads [enabled]
+59
+==PAGE:63==
+-fif-conversion [enabled]
+-fif-conversion2 [enabled]
+-findirect-inlining [enabled]
+-finline [enabled]
+-finline-atomics [enabled]
+-finline-functions [enabled]
+-finline-functions-called-once [enabled]
+-finline-small-functions [enabled]
+-fipa-bit-cp [enabled]
+-fipa-cp [enabled]
+-fipa-cp-clone [enabled]
+-fipa-icf [enabled]
+-fipa-icf-functions [enabled]
+-fipa-icf-variables [enabled]
+-fipa-modref [enabled]
+-fipa-profile [enabled]
+-fipa-pta [disabled]
+-fipa-pure-const [enabled]
+-fipa-ra [enabled]
+-fipa-reference [enabled]
+-fipa-reference-addressable [enabled]
+-fipa-sra [enabled]
+-fipa-stack-alignment [enabled]
+-fipa-strict-aliasing [enabled]
+-fipa-vrp [enabled]
+-fira-algorithm=[CB|priority] CB
+-fira-hoist-pressure [enabled]
+-fira-loop-pressure [disabled]
+-fira-region=[one|all|mixed] one
+-fira-share-save-slots [enabled]
+-fira-share-spill-slots [enabled]
+-fisolate-erroneous-paths-attribute [disabled]
+-fisolate-erroneous-paths-dereference [enabled]
+-fivopts [enabled]
+-fjump-tables [enabled]
+-fkeep-gc-roots-live [disabled]
+60
+==PAGE:64==
+-flifetime-dse [enabled]
+-flifetime-dse=<0,2> 2
+-flimit-function-alignment [disabled]
+-flive-patching -flive-patching=inline-clone
+-flive-patching=[inline-only-static|inline-clone] [default]
+-flive-range-shrinkage [disabled]
+-floop-interchange [enabled]
+-floop-nest-optimize [disabled]
+-floop-parallelize-all [disabled]
+-floop-unroll-and-jam [enabled]
+-flra-remat [enabled]
+-fmath-errno [enabled]
+-fmodulo-sched [disabled]
+-fmodulo-sched-allow-regmoves [disabled]
+-fmove-loop-invariants [enabled]
+-fmove-loop-stores [enabled]
+-fnon-call-exceptions [disabled]
+-fnothrow-opt [available in C++, ObjC++]
+-fomit-frame-pointer [enabled]
+-fopt-info [disabled]
+-foptimize-sibling-calls [enabled]
+-foptimize-strlen [enabled]
+-fpack-struct [disabled]
+-fpack-struct=<number>
+-fpartial-inlining [enabled]
+-fpatchable-function-entry=
+-fpeel-loops [enabled]
+-fpeephole [enabled]
+-fpeephole2 [enabled]
+-fplt [enabled]
+-fpredictive-commoning [enabled]
+-fprefetch-loop-arrays
+-fprintf-return-value [enabled]
+-fprofile-partial-training [disabled]
+-fprofile-reorder-functions [disabled]
+-freciprocal-math [disabled]
+61
+==PAGE:65==
+-free [enabled]
+-freg-struct-return [enabled]
+-frename-registers [disabled]
+-freorder-blocks [enabled]
+-freorder-blocks-algorithm=[simple|stc] stc
+-freorder-blocks-and-partition [enabled]
+-freorder-functions [enabled]
+-frerun-cse-after-loop [enabled]
+-freschedule-modulo-scheduled-loops [disabled]
+-frounding-math [disabled]
+-frtti [available in C++, D, ObjC++]
+-fsave-optimization-record [disabled]
+-fsched-critical-path-heuristic [enabled]
+-fsched-dep-count-heuristic [enabled]
+-fsched-group-heuristic [enabled]
+-fsched-interblock [enabled]
+-fsched-last-insn-heuristic [enabled]
+-fsched-pressure [disabled]
+-fsched-rank-heuristic [enabled]
+-fsched-spec [enabled]
+-fsched-spec-insn-heuristic [enabled]
+-fsched-spec-load [disabled]
+-fsched-spec-load-dangerous [disabled]
+-fsched-stalled-insns [disabled]
+-fsched-stalled-insns-dep [enabled]
+-fsched-stalled-insns-dep=<number>
+-fsched-stalled-insns=<number>
+-fsched2-use-superblocks [disabled]
+-fschedule-fusion [enabled]
+-fschedule-insns [disabled]
+-fschedule-insns2 [enabled]
+-fsection-anchors [disabled]
+-fsel-sched-pipelining [disabled]
+-fsel-sched-pipelining-outer-loops [disabled]
+-fsel-sched-reschedule-pipelined [disabled]
+-fselective-scheduling [disabled]
+62
+==PAGE:66==
+-fselective-scheduling2 [disabled]
+-fsemantic-interposition [enabled]
+-fshort-enums [enabled]
+-fshort-wchar [disabled]
+-fshrink-wrap [enabled]
+-fshrink-wrap-separate [enabled]
+-fsignaling-nans [disabled]
+-fsigned-zeros [enabled]
+-fsimd-cost-model=[unlimited|dynamic|cheap|very-cheap] unlimited
+-fsingle-precision-constant [disabled]
+-fsplit-ivs-in-unroller [enabled]
+-fsplit-loops [enabled]
+-fsplit-paths [enabled]
+-fsplit-wide-types [enabled]
+-fsplit-wide-types-early [disabled]
+-fssa-backprop [enabled]
+-fssa-phiopt [enabled]
+-fstack-check=[no|generic|specific]
+-fstack-clash-protection [disabled]
+-fstack-protector [disabled]
+-fstack-protector-all [disabled]
+-fstack-protector-explicit [disabled]
+-fstack-protector-strong [disabled]
+-fstack-reuse=[all|named_vars|none] all
+-fstdarg-opt [enabled]
+-fstore-merging [enabled]
+-fstrict-aliasing [enabled]
+-fstrict-enums [available in C++, ObjC++]
+-fstrict-volatile-bitfields
+-fthread-jumps [enabled]
+-fno-threadsafe-statics [available in C++, ObjC++]
+-ftoplevel-reorder [enabled]
+-ftracer [disabled]
+-ftrapping-math [enabled]
+-ftrapv [disabled]
+-ftree-bit-ccp [enabled]
+63
+==PAGE:67==
+-ftree-builtin-call-dce [enabled]
+-ftree-ccp [enabled]
+-ftree-ch [enabled]
+-ftree-coalesce-vars [enabled]
+-ftree-copy-prop [enabled]
+-ftree-cselim [disabled]
+-ftree-dce [enabled]
+-ftree-dominator-opts [enabled]
+-ftree-dse [enabled]
+-ftree-forwprop [enabled]
+-ftree-fre [enabled]
+-ftree-loop-distribute-patterns [enabled]
+-ftree-loop-distribution [enabled]
+-ftree-loop-if-convert
+-ftree-loop-im [enabled]
+-ftree-loop-ivcanon [enabled]
+-ftree-loop-optimize [enabled]
+-ftree-loop-vectorize [enabled]
+-ftree-lrs [disabled]
+-ftree-parallelize-loops=<number> 1
+-ftree-partial-pre [enabled]
+-ftree-phiprop [enabled]
+-ftree-pre [enabled]
+-ftree-pta [enabled]
+-ftree-reassoc [enabled]
+-ftree-scev-cprop [enabled]
+-ftree-sink [enabled]
+-ftree-slp-vectorize [enabled]
+-ftree-slsr [enabled]
+-ftree-sra [enabled]
+-ftree-switch-conversion [enabled]
+-ftree-tail-merge [enabled]
+-ftree-ter [enabled]
+-ftree-vectorize [disabled]
+-ftree-vrp [enabled]
+-ftrivial-auto-var-init=[uninitialized|pattern|zero] uninitialized
+64
+==PAGE:68==
+-funconstrained-commons [disabled]
+-funroll-all-loops [disabled]
+-funroll-completely-grow-size [enabled]
+-funroll-loops [disabled]
+-funsafe-math-optimizations [disabled]
+-funswitch-loops [enabled]
+-funwind-tables [enabled]
+-fvar-tracking [disabled]
+-fvar-tracking-assignments [disabled]
+-fvar-tracking-assignments-toggle [disabled]
+-fvar-tracking-uninit [disabled]
+-fvariable-expansion-in-unroller [disabled]
+-fvect-cost-model=[unlimited|dynamic|cheap|very-cheap] dynamic
+-fversion-loops-for-strides [enabled]
+-fvpt [disabled]
+-fweb [disabled]
+-fwrapv [disabled]
+-fwrapv-pointer [disabled]
+-gstatement-frontiers [disabled]
+65
+==PAGE:69==
+6.3
+Transition matrix
+Figure 34: Transition matrix showing changes in MA binder annotations to alleles, main
+diagonal excluded, not normalized
+66
+==PAGE:70==
+Figure 35: Transition matrix showing changes in MA binder annotations to alleles, main
+diagonal excluded, normalized for row-sum times column-sum, value range differs for each
+subplot
+67

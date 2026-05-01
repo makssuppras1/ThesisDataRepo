@@ -1,0 +1,3170 @@
+==PAGE:1==
+Machine Learning Methods
+for Sea Ice Mapping
+Master Thesis
+DTU Space & DTU Compute
+National Space Institute & Department of Applied Mathematics and Computer Science
+==PAGE:2==
+Machine Learning Methods for Sea Ice Mapping
+Master Thesis
+July, 2020
+Author:
+Tore Wulf
+Supervisors:
+Henning Skriver
+Allan Aasbjerg Nielsen
+David Malmgren-Hansen
+Technical University of Denmark,
+National Space Institute & Department of Applied Mathematics and Computer Science
+Anker Engelunds Vej 1, 2800 Kgs. Lyngby, Denmark
+www.space.dtu.dk
+www.compute.dtu.dk
+==PAGE:3==
+Abstract
+Greenland is highly dependent on ships for the import and export of goods, for transporta-
+tion and for various economic activities. Greenland is also partially surrounded by sea ice
+year-round, and the economy of Greenland relies on sea ice mapping services in order
+to ensure safe and efficient navigation in Greenland waters. The Danish Meteorlogical
+Institute has the public obligation to operate the Greenland Ice Service and provide regu-
+lar maps of the sea ice conditions. Manual sea ice charting is, however, a laborious and
+time-consuming task.
+In this thesis, two methodologies that aim to automate the task of sea ice detection and sea
+ice concentration estimation are presented. At the core of the methodologies lie super-
+vised learning algorithms, which are trained using Sentinel-1 SAR imagery and digitized
+ice charts. The first methodology is based on a traditional machine learning approach in
+which a Random Forest algorithm is fed multi-scale texture features derived from grey-
+level co-occurence matrices. The second methodology is based on a deep learning ap-
+proach in which the convolutional neural network architecture, U-Net, is applied to the
+task of sea ice mapping.
+It is shown that, when segmenting sea ice and open water in previously unseen test data,
+the Random Forest algorithm achieves an F1-score of 88.2%, while the U-Net algorithm
+achieves an F1-score of 95.4%. When estimating the sea ice concentration, the Random
+Forest algorithm achieves an R2-score of 87.6% when comparing polygon-wise mean
+predictions to the sea ice concentrations given in the ice charts, while the U-Net algorithm
+achieves an R2-score of 96.3%.
+ii
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:4==
+Acknowledgements
+First and foremost, I would like express my gratitude to my supervisors Henning Skriver,
+Allan Aasbjerg Nielsen and David Malmgren-Hansen for their invaluable guidance dur-
+ing our weekly meetings. The first half of 2020 has been a tumultuous time, and I am
+lucky to have had a dedicated team of supervisors, who were quick to adapt to the new
+circumstances and continue the unabated supervision of my project.
+I would also like extend my thanks to DTU Compute for letting me conduct my experiments
+on their GPU Cluster, and to Ejner Fergo for his support and patience when GPU-related
+issues arose.
+Lastly, a huge thanks to the Danish Meteorlogical Institute, and specifically to Matilde
+Brandt Kreiner for sharing her knowledge on the remote sensing of sea ice and the inner
+workings of the DMI Ice Service, and for being open and kind whenever I approached her
+with questions.
+Machine Learning Methods for Sea Ice Mapping
+iii
+==PAGE:5==
+Contents
+Abstract . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ii
+Acknowledgements
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iii
+1
+Introduction
+1
+1.1
+The Automated downstream Sea Ice Products Project . . . . . . . . . . . .
+3
+1.2
+Thesis Objectives
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2
+Sea Ice
+4
+2.1
+Sea Ice Extent and Sea Ice Concentration . . . . . . . . . . . . . . . . . . .
+5
+2.2
+Sea Ice Charts . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+3
+Radar Monitoring of Sea Ice
+7
+3.1
+Radar Remote Sensing
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+3.2
+SAR Scattering from Sea Ice . . . . . . . . . . . . . . . . . . . . . . . . . . 10
+3.3
+The Sentinel-1 Mission Specifications
+. . . . . . . . . . . . . . . . . . . . .
+11
+4
+The ASIP Dataset
+14
+5
+Algorithm Design & Performance Metrics
+17
+5.1
+Flat vs. Hierarchical Algorithmic Structure . . . . . . . . . . . . . . . . . . . 18
+5.2
+Random Forest & Manual Feature Engineering . . . . . . . . . . . . . . . . 19
+5.3
+U-Net & Automatic Feature Extraction . . . . . . . . . . . . . . . . . . . . . 25
+5.4
+Performance Metrics & Algorithm Evaluation
+. . . . . . . . . . . . . . . . . 32
+6
+Implementation & Validation
+37
+6.1
+Data Preparation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 37
+6.2
+Random Forest & Manual Feature Engineering . . . . . . . . . . . . . . . . 40
+6.3
+U-Net & Automatic Feature Extraction . . . . . . . . . . . . . . . . . . . . . 52
+7
+Results & Comparisons
+60
+7.1
+Algorithm Performance Evaluation on the Testing Sets . . . . . . . . . . . . 60
+7.2
+Qualitative Assessment of the Algorithm Performances
+. . . . . . . . . . . 63
+8
+A Proposed Methodology For Improving the Sea Ice Edge Accuracy of U-Net 69
+9
+Various Considerations & Future Work
+73
+10 Conclusions
+77
+Bibliography
+79
+A Formulae for the GLCM-based Texture Features
+83
+B GLCM-based Texture Features for the HV channel
+86
+C Random Forest: A Look into Features Importances
+89
+D Random Forest & U-Net Probability Maps
+93
+iv
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:6==
+1
+Introduction
+The Artic sea ice cover is an essential part of the Arctic environment, and the extent of
+the sea ice cover has a direct impact on the global climate due to various feedback mech-
+anisms. Furthermore, sea ice has a big impact on human activities in the Artic region,
+such as maritime navigation and offshore operations. The worlds largest non-continental
+island, Greenland, is partially surrounded by sea ice (and icebergs) year-round. Green-
+land’s cities and towns are predominantly located along the coast, and fishing is one of
+the nation’s most important industries [1]. Additionally, most of the goods and passen-
+ger transport is by ship, and virtually all import and export is by sea [2]. Sea ice and
+icebergs are major hazards that can severely damage and/or slow vessels or ships, and
+thus negatively impact the economy of Greenland. It is therefore of primary importance to
+operationally monitor the sea ice on a daily basis and produce sea ice forecasts to assist
+ship traffic, fisheries and other marine operations in Greenland.
+Since industry and trade in the Arctic countries are dependent on sea transportation, the
+Arctic countries have all initiated ice services to caretake the operational monitoring of sea
+ice in the region in order to bring about safe navigation in ice-covered seas [3]. The Danish
+Meteorlogical Institute (DMI) is one of a handful of national institutes that provide regular
+sea ice mapping services. DMI has had the public obligation to operate the Greenland
+Ice Service for more than half a century in support of safe navigation along the coasts of
+Greenland [4] .
+The monitoring of sea ice in the Artic is one of the many domains in which remote sensing
+by satellite has been heavily exploited. A plethora of geophysical sea ice parameters can
+be derived from the combined use of passive and active spaceborne sensors operating
+in the visible, infrared and microwave ranges of the electromagnetic spectrum. Of all of
+these sea ice parameters, knowledge of the extent of the sea ice is particularly important
+to the industries of Greenland, as well as knowledge of the concentration of the sea ice,
+which aids nautical navigators in the determination of potentially passable regions.
+In visible images acquired by satellite instruments operating in the optical spectral range,
+open water and sea ice are often easily discriminable due to contrasts in albedo [3]. Gen-
+erally, the albedo of sea ice is much higher than that of open water, making sea ice appear
+much brighter than open water in optical satellite images. However, since optical sensors
+measure radiation from the Sun reflected from the surface of the Earth, visible data can
+only be collected during daytime. Furthermore, visible light is reflected off of clouds ob-
+scuring the sea ice below, and ice-covered regions in the Arctic are obscured by clouds up
+to 70−90 percent of the time [5]. Satellite sensors that measure thermal infrared radiation
+can also easily detect sea ice due to the difference in surface temperature of sea water
+and sea ice [6]. Such sensors are, however, also limited by the reflection and emission
+of thermal radiation by clouds.
+Radar systems, on the other hand, operate in the microwave range of the electromagnetic
+spectrum, and the longer wavelengths of such systems allow for the penetration of clouds
+and precipitation in the atmosphere, rendering radar remote sensing more reliable than
+its aforementioned counterparts - particularly in the Arctic region, where the lack of solar
+illumination during the polar night significantly limits the use of passive optical instruments
+for a large portion of the year. Passive microwave instruments measure the microwave
+radiation emitted from the surface of the Earth, and while the microwave signatures for
+Machine Learning Methods for Sea Ice Mapping
+1
+==PAGE:7==
+open water and sea ice generally are easily distinguishable, the passive microwave foot-
+prints are rather large, typically 10 −60 km depending on the frequency [3]. The coarse
+resolution limits the use of passive microwave radiometers in the monitoring of sea ice on
+a regional or local scale.
+The synthetic aperture radar (SAR) system is an imaging radar system that combines
+the ability to penetrate clouds with high spatial resolution, often between 1 −1000 m [7].
+Due to the moderately narrow swaths of SAR systems, they are most efficiently used on
+regional or local scales, where detailed mapping is important. High resolution SAR images
+therefore enable the mapping of coastal regions in Greenland as well as the detection of
+smaller sea ice features or areas of open water in those regions.
+In 2014 the Copernicus Programme was initiated by the European Commission in partner-
+ship with the European Space Agency (ESA), and since then an unprecedented volume
+of SAR data has become readily availiable. The free and open data policy has paved
+the way for countless downstream applications and services, as well as research, in a
+vast range of fields, including Arctic sea ice monitoring. However, with the drastically
+increasing amount of available data, the visual intepretation of these images by sea ice
+analysts becomes laborious. The automatic generation of sea ice charts has thus been a
+long-standing goal for various sea ice communities - operational and scientific.
+With the availability of large amounts of remote sensing data covering the Arctic region as
+well as corresponding analyst-produced sea ice charts, the application of sophisticated
+supervised machine learning and deep learning algorithms, such as Random Forest (RF)
+and Artificial Neural Networks (ANNs), becomes feasible. A particular type of neural net-
+work, namely the Convolutional Neural Network (CNN), has received a lot of attention in
+recent years for various image intepretation tasks due to its ability to approximate complex
+relationships between an input image and an output image as long as a sufficient number
+of representative samples are available during the training of the network. Deep learning
+algorithms also have the advantage that a set of discriminative features is automatically
+extracted from the training samples, whereas the traditional machine learning approach
+often requires complex manual feature engineering.
+The potential benefits on the economy of Greenland of the automation of sea ice chart-
+ing are substantial. An improvement in the regularity of sea ice charts will improve the
+optimization of maritime route planning, as well as reduce exceptional expenses linked
+to accidents, such as sea ice collisions, or incidents, such as the entrapment of vessels
+within the sea ice. Furthermore, fuel expenses will be reduced, and the reliability and
+security of supply, import and export, and thus the financial stability of Greenland as a
+whole could improve.
+2
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:8==
+1.1
+The Automated downstream Sea Ice Products Project
+In 2017, the Automated downstream Sea Ice Products (ASIP) project was initiated as
+a collaborative endeavour carried out between the Danish Meteorlogical Institute (DMI),
+the Technical University of Denmark (DTU), and Harnvig Artic and Maritime. The aim of
+the project is to partially or fully automate the retrieval of sea ice information from radar
+and radiometry data using CNNs in order to meet the demands for more timely sea ice
+products and thus to improve the safety and efficiency of maritime operations in Green-
+land waters [4]. The use of an automatic ice service has the potential of reducing the
+time delay between the acquisition of the remote sensing data and the availability of the
+corresponding ice chart.
+One of the many tasks of DMI has been to produce a dataset comprising Sentinel-1 SAR
+images and corresponding sea ice charts manually produced by the DMI Ice Service. This
+dataset is at the foundation of this thesis.
+1.2
+Thesis Objectives
+The aim of this thesis is to study, develop and apply methodologies to accurately detect
+sea ice and estimate sea ice concentration along the coasts of Greenland based solely on
+synthetic aperture radar imagery from the Sentinel-1 mission. Part of the objective is to
+apply and compare traditional machine learning algorithms, which involve manual feature
+engineering, to novel deep learning algorithms for which the extraction of discriminative
+features is inherent to the algorithm.
+The algorithms are evaluated on their ability to accurately distinguish sea ice from open
+water, as well as on their ability to accurately estimate the concentration of the sea ice. A
+focal point of the thesis will be an examination of whether any improvements in algorithm
+performance can be achieved by separating the binary segmentation of sea ice and open
+water and the sea ice concentration estimation into two steps, thus creating a hierarchical
+algorithmic structure, in which the first step of the algorithm is to segment sea ice and
+open water, and the second step of the algorithm is to assign a concentration to the sea
+ice areas.
+Machine Learning Methods for Sea Ice Mapping
+3
+==PAGE:9==
+2
+Sea Ice
+This chapter offers a brief overview of the physical phenomenom that is at the center of
+this project - namely, the Arctic sea ice - as well as quick introduction to the concept of
+sea ice concentration and how it is represented digitally in ice charts.
+Sea ice is primarily formed in the Arctic and Antarctic regions, and the sea ice formed in
+those regions have different characteristics introduced by the dynamic environment and
+geographical setting in which it exists. In the Northern Hemisphere the sea ice cover
+reaches its peak extent in March and its minimum extent in September. Figure 2.1 shows
+the mean extent of the Arctic sea ice for the month of April 2020 derived by the National
+Snow and Ice Data Center (NSIDC) from passive microwave radiometry data [8].
+Figure 2.1: The figure shows the expanse in the Arctic covered by sea ice at greater than
+15 percent mean concentration for the month of April 2020 derived by the National Snow
+and Ice Data Center from passive microwave radiometry data. Additionally, the median
+line (in pink) illustrates the typical sea ice extent based on April measurements from 1981
+to 2010.
+The Arctic Ocean and many of its adjacent seas are - at least seasonally - either fully
+or partially covered by sea ice. The coasts of Greenland are severely affected by sea
+ice (and icebergs), restricting human activities and ship traffic, which in turn affects the
+economy of Greenland. As figure 2.1 clearly suggests, satellite remote sensing is an
+oppportune platform for the retrieval of geophysical parameters in the Arctic as the spatial
+scales are vast, the transportation is hazardous and the climate is hostile.
+4
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:10==
+2.1
+Sea Ice Extent and Sea Ice Concentration
+Naturally, one of the primary variables in the monitoring of the Arctic sea ice is the sea ice
+extent. Satellite microwave missions have been successful in generating an exceptionally
+complete record of the sea ice extent over the past many decades as spaceborne multi-
+channel microwave radiometers have been monitoring sea ice daily since the 1970’s [9].
+In comparison to the typical size of sea ice floes, the coarse resolution imagery obtained
+by means of passive microwave radiometry implies that the determination of the sea ice
+extent must neccesarily be approached statistically rather than as the delineation of in-
+dividual ice floes. One must recognize that wide-swath measurements of sea ice - while
+good at obtaining synoptic measurements over large regions - often does not have the
+spatial resolution to resolve the fine structure and smaller features of the sea ice cover,
+such as individual ice floes, leads, polynyas etc. This limitation introduces the concept of
+sea ice concentration (SIC) as the spatially averaged proportion of sea ice within a reso-
+lution cell of the measuring instrument. As such, the SIC describes the area of the ocean
+surface covered by sea ice as a fraction of the total area,
+SIC = Aice
+Atot
+= 1 −Aow
+Atot
+(2.1)
+In eq. 2.1 Aice is the area of sea ice cover within the total area Atot, and Aow is the area of
+open water within the total area. The SIC can thus be expressed either as a fraction or a
+percentage - the latter will be used in majority of this project. Due to the scale-dependent
+definition of the SIC in eq. 2.1, SIC estimates are dependent on the coarseness of the
+data on which the estimates are made. Essentially, on a very fine scale the SIC is always
+either 0%, ie. open water, or 100%, ie. sea ice.
+2.2
+Sea Ice Charts
+The SIGRID3 format is the format currently adopted by the World Meteorological Organi-
+zation (WMO) as the international standard for sea ice chart data in digital form [10]. In
+accordance with the WMO nomenclature, the SIC information in sea ice charts are given
+as fractions of 10, and often given as intervals. A polygon in an ice chart might therefore
+contain a code, such as 57, referencing the SIC interval 5/10 −7/10.
+As an example, a DMI-produced ice chart from December 2019 of a stretch of coast in
+eastern Greenland is shown in figure 2.2.
+Machine Learning Methods for Sea Ice Mapping
+5
+==PAGE:11==
+Figure 2.2: The figure exemplifies a typical SIGRID3 formatted ice chart from the eastern
+coast of Greenland [11].
+In figure 2.2 the SICs of the specific polygons are colour coded; red being 9/10 −10/10,
+orange being 7/10 −8/10, yellow being 4/10 −6/10, green being 1/10 −3/10 and white
+being ice-free. The SIC, stage of sea ice development and ice form (floe size) of specific
+polygons are elaborated on further in the additional information contained within the egg
+codes, although that information is not of significant importance in this project.
+6
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:12==
+3
+Radar Monitoring of Sea Ice
+Today, one of the most important sources for sea ice monitoring data is satellite-borne
+radar remote sensing, partially due to its ability to observe sea ice on regional scale inde-
+pendently of solar illumination and unobscured by clouds or precipitation. Radar remote
+sensing systems are generally divided into imaging and non-imaging systems - the most
+extensively used for operational sea ice mapping being the imaging radar system, and -
+more specifically - the Synthetic Aperture Radar (SAR) system.
+This chapter introduces the main means of data acquisition relevant to this project, which
+is the acquisition of radar imagery of sea ice by means of SAR systems. Sea ice is diverse
+and complex with a wide range of scattering behaviours depending on the developmen-
+tal stage and concentration of the ice. In order to illustrate the diversity of sea ice in
+SAR imagery, various sea ice types and their associated scattering properties are briefly
+presented. Lastly, the specifications of the ESA-led Copernicus radar imaging mission,
+Sentinel-1, and their relation to sea ice monitoring are explored.
+3.1
+Radar Remote Sensing
+An imaging radar system operates in the microwave range of the electromagnetic spec-
+trum and provides its own source of illumination, rendering the instrument ideal for sea
+ice mapping the Arctic, where the prolonged period of winter darkness severely limits the
+use of passive optical instruments. Additionally, the longer wavelengths of a radar system
+makes it largely independent of clouds and atmospheric propogation effects, although the
+influence of such factors is frequency-dependent [3]. The purpose of imaging radars sys-
+tems is the detection and ranging of features on the surface of the Earth. Imaging radar
+systems use an antenna to transmit a pulse of microwave radiation toward the Earth’s
+surface and, in the monostatic case, use the same antenna to collect the backscattered
+radiation, which is then used to compose a two-dimensional image of the surface.
+The images produced by an imaging radar system differ from visible imagery in a number
+of fundamental ways. Firstly, radar systems are sensitive to the dielectric properties of the
+surface, and - due to the wavelength of the radar signal - it is sensitive to the roughness
+of the surface on which it is scattered. Secondly, radar systems utilize the polarization
+of the electromagnetic waves emitted by the radar antenna. A common polarimetric con-
+figuration of radar systems is one, where a linearly polarized signal is transmitted and
+two orthogonal polarizations of the return signal are measured. Such a dual-polarized
+system is said to have two channels. A vertically or horizontally polarized signal can be
+obtained by aligning a linear antenna with the surface of the Earth. In a case, where a
+horizontally polarized signal is transmitted, and the horizontal and vertical components
+of the backscattered signal are measured, the two channels are called HH and HV ,
+respectively. The measured backscatter depends on the combination of transmit and
+receive polarizations, and therefore the use of different transmit/receive polarization com-
+binations has the potential of increasing the separability of the features of interest on the
+Earth’s surface.
+Furthermore, the fundamental radar image is complex containing both amplitude and
+phase information for every pixel, and an inevitable drawback of such an image is the
+presence of a granular noise-like phenomena called speckle. The speckle phenomena
+occurs due to the interference of the backscattered waves from many individual scat-
+terers within a resolution cell [3]. Speckle is multiplicative in nature, and there can be
+Machine Learning Methods for Sea Ice Mapping
+7
+==PAGE:13==
+need to reduce the amount of speckle in the acquired imagery depending on the applica-
+tion. Speckle can be reduced by spatially averaging the image pixel intensities using an
+averaging filter, however, the speckle reduction comes at the cost of spatial resolution.
+There is therefore a trade-off between the amount of speckle in the image and the spatial
+resolution, which has to be weighed and determined on an application-wise basis.
+A simplification of the typical imaging radar geometry is depicted in figure 3.1.
+Figure 3.1: The figure illustrates the typical imaging radar geometry [3].
+The look-direction of the antenna, which is called the slant-range direction, is tilted to one
+side, away from nadir (which is the ground projection of the orbit of the satellite), while
+being perpendicular to the azimuth direction, which is the direction along the satellite orbit.
+The ground range direction, which is often just called the range direction, is the direction
+from nadir to the radar footprint.
+The spatial resolution of an imaging radar system refers to system’s ability to discriminate
+between two point targets appearing as bright spots in an image. The spatial resolution
+in the azimuth direction ρazi for a side-looking system as the one depicted in 3.1 is deter-
+mined by the width of the antenna beam β, which in turn is determined by the physical
+length of the antenna D [3],
+ρazi = Rβ = R λ
+D
+(3.1)
+In eq. 3.1 λ denotes the wavelength of the radar signal and R denotes the distance be-
+8
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:14==
+tween the measuring instrument and target in the slant-range direction. In order to obtain
+a high spatial resolution in the azimuth-direction the distance between the instrument and
+the target has to be reduced or the physical size of the antenna has to be increased,
+rendering real aperture side-looking system radar systems unideal as a space-borne in-
+strument.
+This problem can be overcome by using the along-track motion of the platform to synthet-
+ically produce a very large antenna. This is done by utilizing that the same features on the
+surface are measured from several viewing angles as the platform moves forward. This
+concept is called Synthetic Aperture Radar. The azimuth resolution of the SAR system is
+given as [3],
+ρazi = D
+2
+(3.2)
+and is thus independent of the range R. The slant-range resolution ρr of the SAR system
+is determined by the duration of the transmitted radar pulse tp, which in turn is given as
+the reciprocal of the bandwidth of the pulse B,
+ρr = ctp
+2 =
+c
+2B
+(3.3)
+In eq. 3.3 c is the speed of light. In order to obtain the ground-range resolution, the
+slant-range resolution has to be projected on to the ground-range. Due to the varying
+incidence angle, this projection results in a worsening of the ground-range resolution in
+the near-range as compared to far-range.
+SAR sensors are highly sensitive to surface roughness, as illustrated in figure 3.2.
+Figure 3.2: Illustration of the dependence of the roughness of the surface (relative to
+the wavelength of the radar signal) on the amount of the incident energy reflected back
+towards the radar sensor [12].
+If the radar waves are incident on a smooth surface (relative to the wavelength of the
+signal), there is a specular direction of the scattered waves and little - if any - energy is
+reflected back to the radar sensor. As the surface becomes rougher, the scattering of
+the radar waves becomes more diffuse, and thus a larger part of the incident energy is
+reflected back towards the radar sensor.
+Machine Learning Methods for Sea Ice Mapping
+9
+==PAGE:15==
+For radar imagery of extended surfaces a reflection coefficient, the Radar Backscatter
+Coefficient σ0, is defined, which is a measure of the scattering behaviour of the features
+on the surface. The radar backscatter coefficient (often shortened to backscatter) is a
+function of frequency, incidence angle, polarisation combination, and the scattering char-
+acteristics of the illuminated area [12].
+3.2
+SAR Scattering from Sea Ice
+Sea ice is a complex composite of pure ice, brine and air pockets. The scattering of
+microwaves by sea ice is markedly sensitive to even small variations in physical structure
+and composition of the ice. Sea ice is very diverse, and therefore so is its microwave
+scattering characteristics. Furthermore, backscatter ambiguities can occur between sea
+ice and open water under certain conditions, which can complicate the automatic mapping
+of sea ice from SAR imagery. The following is a brief introduction to the diversity of the
+microwave scattering characteristics of sea ice.
+The SAR backscatter from sea ice is largely determined by the stage of development of
+the sea ice, the form of the ice (ie. the presence of deformations, ridges, etc.) as well as
+the concentration of the sea ice [3]. The stage of development of sea ice can serve as a
+general proxy for several sea ice charactistics pertaining to the (C-band) scattering prop-
+erties of the sea ice, such as surface roughness and salinity. The term new ice denotes
+several subtypes of sea ice in the first stages of sea ice formation, such as grease ice.
+Usually, new ice is easily detectable in SAR imagery due to very low backscatter, as new
+ice has been observed to dampen the short capillary waves of the ocean creating a very
+smooth surface (even smoother than the surrounding ice-free water surface), and thus
+resulting in almost purely specular reflection [12] (see figure 3.2).
+In wave-agitated conditions, grease ice might develop into the characteristically circulally
+or elliptically shaped ice pieces called pancake ice. The individual ice pieces bump into
+each other forming raised rims on the edges, thus roughening the surface of the sea ice,
+which substantially increases backscatter. In calm waters, grease ice develops into a thin,
+elastic and continous sheet of ice called nilas. The backscatter from nilas is very low due
+to the smoothness of the surface. However, as the ice grows thicker and less elastic,
+it becomes susceptible to ice rafting due to currents or wind, which results in a higher
+backscatter.
+As the ice develops and thickens further, it loses elasticity and becomes young ice. Young
+ice will raft, break and form ridges on its edges due to pressure, wave-action and collisions.
+This deformation of the ice increases the backscatter, and the more deformed the ice
+becomes, the larger the backscatter increase.
+When young ice reaches a thickness larger than 30 cm, it becomes first-year (FY) ice,
+which is defined as sea ice formed during the present winter with a thickness larger than
+30 cm [12]. FY ice exhibits a relatively large range of SAR backscatter intensities; level,
+undeformed and smooth FY ice generates a low SAR backscatter, while rough and de-
+formed FY ice generates a high SAR backscatter. As mentioned, the deformation of the
+sea ice is dependent on weather conditions and sea ice drift.
+The sea ice that survives the yearly melt season is denoted multi-year (MY) ice. During
+the melt season meltwater accumulates into ponds on the sea ice surface and percolates
+through the ice, flushing out brine and desalinating especially the top layer of the sea ice,
+leaving behind pockets of air.
+10
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:16==
+The penetration depth of radar waves into the sea ice is determined by the complex di-
+electric constant. When large, the transmission into the material is very limited, and thus
+little to no volume scattering occurs. The dielectic properties of the ice is strongly linked
+to the distribution of brine and air pockets within the ice, and by proxy therefore linked to
+the developmental stage of the ice. FY ice retains a considerable amount of brine, limiting
+the penetration depth of C-band radar waves to only a few centimeters. On the contrary,
+due to the desalination of the upper layers of MY ice during the melt season, the penetra-
+tion depth of C-band radar waves is increased to a few tens of centimeters, allowing for
+volume scattering to occur, which increases the measured SAR backscatter [7].
+Of course, all of the above mentioned scattering properties assume the absence of melt
+ponds or moist snow on top of the sea ice. While dry snow is mainly transparent to radar
+waves, moist or wet snow has a considerable effect on SAR backscatter, which might
+complicate the automation of SAR-based sea ice mapping even further. The backscatter
+intensity of MY ice decreases considerably at the onset of melting conditions, as the radar
+penetration depth is reduced, and thus reducing the volume scattering from air pockets
+within the ice. The backscatter intensity of FY ice, on the other hand, has been shown to
+increase slightly at the onset of the melt season [7].
+Depending on incidence angle, the SAR backscatter of open water is usually lower than
+that of sea ice - with the exception of new ice and smooth nilas. The near-vertical (ie.
+for low incidence angles) backscatter response of water is often larger than that of sea
+ice, and the backscatter response decreases quickly as the incidence angle increases.
+In addition, open water has a very variable backscatter signature, increasing rapidly with
+increasing wind speed. Even a slight breeze is sufficient in roughening the water surface
+enough to produce a significant backscatter enhancement [12].
+In addition to the developmental stage of the sea ice, the size of individual ice floes is a
+determining factor in the appearence of sea ice in SAR imagery. In the packice, ice floes
+of all shapes and sizes can be formed. When the individual ice floes cannot be resolved
+by the SAR instrument, the radar backscatter will typically increase with decreasing floe
+size [12].
+3.3
+The Sentinel-1 Mission Specifications
+The Copernicus radar imaging mission, Sentinel-1, comprises a constellation of two polar-
+orbiting satellites: Sentinel-1A, which was launched on April 3rd 2014, and Sentinel-1B,
+which followed on April 25th 2016. The satellites share the same orbital plane with a
+180◦orbital phase difference in a sun-synchronous orbit. Both Sentinel-1 satellites carry
+C-band SAR systems operating at a frequency of 5.405 GHz [13].
+The Sentinel-1 mission has several operational modes with differing spatial resolutions,
+ground coverage and dual-polarisation combinations. In the polar regions the main opera-
+tional mode is the Extra Wide (EW) swath mode, which employs the TOPSAR processing
+technique in order to achieve a 400 km swath width by combining five sub-swaths. This
+mode provides relatively large spatial coverage and enables the operational production
+of sea ice charts with a wide expanse.
+In the polar regions, the Sentinel-1 satellites employ dual-polarisation using an HH/HV
+combination. The HH polarisation combination is preferred to the VV combination due
+to the former being less sensitive ocean clutter under limited circumstances of low wind
+speeds and thus more suitable for sea ice/open water discrimination [7]. However, at high
+wind speeds the ocean surface might appear as bright or even brighter than sea ice in the
+co-polarized channel, whereas it remains relatively dark in the cross-polarized channel.
+Machine Learning Methods for Sea Ice Mapping
+11
+==PAGE:17==
+Also, the contrast between sea ice and open water is more pronounced in the cross-
+polarized channel due the cross-polarized channel being less sensitive to sea surface
+roughness. However, smooth sea ice with low backscatter is not easily detectable in the
+cross-polarized channel [14].
+The greater coverage of the EW mode TOPSAR processing technique unfortunately in-
+troduces a few noise-induced problems. Firstly, the overlap between sub-swaths result
+in discontinuous sharp changes in the backscatter intensity at the interswath boundaries.
+Secondly, there are significant radiometric variations between the sub-swaths - especially
+the first sub-swath (the sub-swath closest to the measuring instrument) exhibits large
+backscatter intensities compared to the remaining four sub-swaths [15].
+Another important issue related to wide-swath SAR images is the progressive decrease of
+radar backscatter intensity from near range to far range due to incidence angle variation.
+The side-looking geometry of the SAR system (see figure 3.1) and the use of the TOP-
+SAR processing technique means that the imaged pixels are viewed over a large range
+of incidence angles, specifically from 18.90 - 47.00 [13]. The variation in incidence angle
+directly affects the microwave interaction with the surface, producing varying backscat-
+ter intensities from near range to far range, which in turn complicates automatuc image
+interpretation - especially if the backscatter brightness variations are larger than the inter-
+class brightness differences. Usually, incidence angle correction is considered as a pre-
+processing step to facilitate automatic interpretation of SAR imagery. However, due to
+that fact that the backscatter brightness incidence angle dependence differs for different
+features on the surface (open water, sea ice or even different types of sea ice), the cor-
+rection of incidence angle variation is quite complicated and not within the scope of this
+project.
+Figure 3.3 exemplifies a Sentinel-1 SAR dual-polarisation image of a coastal area in South
+East Greenland. The land has been masked out. The scene is part of a larger dataset
+produced by DMI in conjunction with the ASIP Project containing Sentinel-1 SAR scenes
+with corresponding ice charts. The dataset will be elaborated on in the following chapter.
+The lower half of the scene is part of the eastern coastline of Greenland and has thus been
+masked out. Along the contour of the coastline is a quite wide stretch of sea ice bordered
+by open ocean in the top of the scene. The aforementioned TOPSAR-related issues are
+clearly visible in this scene; the discontinuous sharp changes in the backscatter intensity
+at the interswath boundaries are quite pronounced, especially in the HV channel, whereas
+the incidence angle dependent backscatter variation is most prominent in the HH channel.
+An additional source of noise present in the scene is the effect of scalloping, which is seen
+clearly in the HV-channel as horizontal ripples in the image.
+12
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:18==
+Figure 3.3: The figure exemplifies a Sentinel-1 SAR dual-polarisation image of a coastal
+area in South East Greenland. The image is part of the ASIP dataset. Top: The HH
+channel is clearly affected by the incidence angle dependent backscatter variation. Bot-
+tom: The HV channel clearly illustrates the issue of the discontinuous sharp changes in
+the backscatter intensity at the interswath boundaries as well as the horizontal scalloping
+effect.
+Machine Learning Methods for Sea Ice Mapping
+13
+==PAGE:19==
+4
+The ASIP Dataset
+This project utilizes the ASIP dataset. The ASIP dataset comprises a total of 915 Sentinel-
+1 HH/HV dual-polarisation SAR images acquired between 2015 and 2017 as well as the
+corresponding sea ice charts based on those Sentinel-1 SAR images, produced by DMI’s
+ice analysts.
+The Sentinel-1 products provided in the ASIP dataset are the EW Mode Level-1 Ground
+Range Detected Medium Resolution (GRDM) products, which consist of focused SAR
+data that have been detected and projected to ground range. A Sentinel-1 GRDM scene
+is thus composed of square pixels representing only the amplitude information, as the
+phase information is discarded during the detection process. The Sentinel-1 EW mode
+GRDM products cover roughly 400x400 km2 areas. The spatial resolution in the range
+direction is 93 m, whereas the spatial resolution in the azimuth direction is 87 m. The
+products are provided with a pixel spacing of 40x40 m [13].
+The HH and HV radar backscatter coefficients have been normalized such that a backscat-
+ter range of [−30 : 10] dB is packed within the range [−1 : 1], so as to be better suited for
+machine learning/deep learning algorithms whose learning process is often sensitive to
+the scale of the input. Additionally, incidence angle information is included in the auxillary
+Sentinel-1 data in order to enable the modelling of incidence angle dependent radiometric
+variation in the range direction of the SAR images.
+As presented in the previous chapter, the EW operational mode introduces noise-induced
+problems related to radiometric variations between sub-swaths. The first sub-swath, es-
+pecially, exhibits problematic backscatter behaviour compared to the remaining four sub-
+swaths. As Sentinel-1 EW mode noise-reduction is not within the scope of this thesis, the
+first sub-swath has been systematically removed from all 915 scenes in the ASIP dataset.
+Figure 4.1 shows the temporal distribution of the Sentinel-1 images comprising the ASIP
+dataset.
+14
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:20==
+Figure 4.1: Temporal distribution of the Sentinel-1 SAR scenes comprising the ASIP
+dataset with blue, green and red bars representing the years 2015, 2016 and 2017, re-
+spectively. The purple bars are the total monthly Sentinel-1 SAR scene acuisitions in the
+timeframe from 2015 to 2017.
+The Sentinel-1 SAR images comprising the ASIP dataset were acquired during a time-
+frame from 2015 to 2017. As is evident in figure 4.1, all of the year’s 12 months are
+represented in the ASIP dataset, meaning that sea ice in the SAR imagery might take
+differing appearances depending on the season.
+The spatial distribution of the Sentinel-1 SAR images comprising the ASIP dataset is il-
+lustrated in figure 4.2. Note that only the mean latitudinal and longitudinal point of each
+Sentinel-1 image is shown.
+DMI is primarily concerned with the areas in which the most sea traffic occurs, which
+oftentimes coincides with areas close to coastal settlements. There is therefore an abun-
+dance of ice charts produced along the western and eastern coasts of Greenland, and
+especially near the southern tip of the island, Cape Farewell, which is an important area
+for navigation.
+The DMI-produced ice charts, as was exemplified in figure 2.2, are produced by the DMI
+ice analysts primarily on the basis of the accompanying Sentinel-1 images, although aux-
+iliary remote sensing data is used in support when available, such as optical, thermal-
+infrared and passive microwave radiometry data. The estimates of sea ice concentration
+in the charts are based on the judgement of the analyst, and due to the associated subjec-
+tivity the level of accuracy varies. Studies show sea ice concentration discrepencies of up
+to 20% when comparing ice charts of the same geographical region produced by different
+sea ice services, eg. [16] and [17]. Intra-analyst variation might also be a contributing
+factor to the discrepancies.
+Machine Learning Methods for Sea Ice Mapping
+15
+==PAGE:21==
+Figure 4.2: Spatial distribution of the Sentinel-1 SAR scene acquisitions. Note that only
+the mean latitudinal and longitudinal point of each Sentinel-1 image is shown.
+The ice charts are rasterized to match the resolution of the Sentinel-1 SAR scene. The
+SIC information in the ice chart is given as fractions of 10 in accordance with the WMO
+SIGRID3 format. If the SIC of a particular polygon in the ice chart is given as an interval, it
+is converted to a fixed mean value in the rasterized grid, and as result the SIC information
+covers a range from 0% to 100% in steps of 5%. Please note that the SICs provided in the
+ice chart are not necessarily homogenously distributed in the respective polygons. While
+the SIC estimate made by the analyst might be correct as an average within the poly-
+gon, the individual post-rasterization pixels might deviate substantially from this average
+estimate.
+Land in the ice charts has been masked out using a land-mask of Greenland with an
+additional bufferzone of 10 km. Furthermore, areas without ice chart information have
+been masked out in the Sentinel-1 scenes.
+A large proportion of the users of operationally provided sea ice maps are primarily inter-
+ested in avoiding sea ice all together, while a minority uses sea ice concentration infor-
+mation to determine potentially passable regions of the ice. One of the most important
+aspects of sea ice mapping is therefore the accurate determination of the location of the
+ice edge, that is, the boundary between the sea ice and open water. The concept of an
+ice edge is, of course, rather fuzzy in regions of low sea ice concentration. At DMI, the ice
+edge is defined as the boundary between regions of no sea ice altogether (SIC = 0%)
+and regions of any sea ice at all (SIC > 0%), which is the same definition adopted in this
+thesis.
+16
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:22==
+5
+Algorithm Design & Performance
+Metrics
+The design of automatic sea ice detection and concentration estimation schemes have
+been studied for several decades. The initiation of the Sentinel-1 mission ensures the
+regular acquisition of SAR imagery with high temporal resolution in the Arctic region. Ad-
+vancements in deep learning image intepretation technology over the last decade com-
+bined with the free and open data policy of the Copernicus Programme have sparked
+renewed enthusiasm within the sea ice communities - operational and scientific - as signif-
+icant attention has been paid to the development of automatic sea ice information retrival
+algorithms to generate more timely and cheaper SAR-based sea ice end products.
+Generally, traditional machine learning algorithms, such as Random Forests or Support-
+vector Machines, face a few obstacles when applied in the field of image intepretation
+- most notably, the fact that these types of supervised learning algorithms have been
+developed to deal with one-dimensional data, while image data by nature is comprised
+of two-dimensional matrices of numbers. Naturally, this issue is bypassed by taking the
+matrix apart - row by row or column by column - and concatenating the parts into a one-
+dimensional vector. In doing so, however, the spatial relations between neighbouring
+pixels are lost. Since SAR sea ice imagery contains spatially dependent characteristics
+of different surface features, the loss of contextual information is a severely limiting dis-
+advantage.
+In order to retain the spatial inter-pixel information, additional features must be manually
+engineered to encode the contextual information that would otherwise be lost. Several
+feature-extraction methods have been proposed and studied within the field of SAR-based
+sea ice mapping, such as GLCM-based texture features, as well as texture features de-
+rived using Gabor filters and Markov random fields [18].
+Such feature-based approaches do, however, have a common bottleneck in that they
+depend on the quality of the engineered features. In general, humans are bound to miss
+latent or abstract features, and the inclusion of a large number of contextual features might
+result in redundancy due to correlation between features. Furthermore, the use of an un-
+necessarily large feature set is computationally inefficient. The design, computation and
+selection of optimal contextual features is therefore a serious limiting factor in traditional
+machine learning approaches for SAR-based sea ice mapping.
+Automatic feature learning is an attractive alternative approach to this problem. Recent
+advances in computing technology has allowed for the application of deep learning al-
+gorithms - and specifically convolutional neural networks (CNNs) - to the task of satellite
+image interpretation. The application of CNNs to the task of SAR-based sea ice map-
+ping bypasses the aforementioned task of manual feature engineering due to the ability
+of CNNs to automatically extract features relevant to the task at hand.
+This chapter outlines the appoaches to the task of sea ice detection and concentration
+estimation taken in this project. Both flat and hierarchical algorithmic structures will be
+employed. The models at the basis of these structures are derived using 1) a traditional
+machine learning approach with manual feature engineering, and 2) a deep learning ap-
+proach with automatic feature extraction. The traditional machine learning approach will
+Machine Learning Methods for Sea Ice Mapping
+17
+==PAGE:23==
+be based on the Random Forest algorithm with multi-scale GLCM-based texture fea-
+tures as inputs in addition to the HH/HV backscatter intensities and the incidence angle.
+The popular encoder-decoder segmentation architecture, U-Net, is employed as a deep
+learning alternative to the traditional machine learning approach. Lastly, several means
+of model characterization, comparison and performance evaluation will be presented.
+5.1
+Flat vs. Hierarchical Algorithmic Structure
+The SIC, as given in the ice charts from the ASIP dataset, is a discrete variable (ranging
+from 0 −100% in steps of 5%), and not quite ordinal, as the numerical distances between
+values are meaningful. The distances between values do, however, seem somewhat
+abitrary when a polygon given an estimated average concentration interval of 4/10−6/10,
+for example, is converted to a fixed concentration of 50% in the rasterized grid. In essence,
+the estimation of the sea ice concentration resembles a regression problem more so than
+a classification problem, but both classification and regression techniques will be tested.
+Both flat and hierarchical classification/regression structures will be employed. The ra-
+tionale behind the decision to investigate the hierarchical approach is that the SIC vari-
+able might be inherently hierarchical in the sense that it can be divided into open water
+(SIC = 0%) and sea ice (SIC > 0%), after which the concentration of the latter can
+be estimated. The patterns learned by the machine learning or deep learning algorithms
+might be fundamentally different depending on whether the task at hand is to discrimi-
+nate sea ice from open water, or to discriminate between different sea ice concentrations.
+Furthermore, the primary task of the operational sea ice services is the accurate identifi-
+cation of the boundary between the sea ice and open water - ie. the localization of the ice
+edge - and therefore special attention should be paid to ability of the models to accurately
+distinguish ice-free waters from sea ice ridden waters.
+Below is a summary of the two overarching approaches:
+1. Flat Algorithmic Structure
+– In the flat approach a single classifier is trained to discriminate between a num-
+ber of discrete sea ice concentrations ranging from 0-100%. Thus, the tasks of
+sea ice detection and sea ice concentration estimation is handled by a single
+classifier.
+2. Hierarchical Algorithmic Structure
+– In the hierarchical approach the tasks of sea ice detection and sea ice concen-
+tration estimation are separated. One classifier is trained to distinguish sea ice
+from open water, and another classifier or regressor is trained to a assign a
+non-zero sea ice concentration to the already classified sea ice pixels.
+Thoughout the report, there will therefore be a distinction between binary classifiers,
+whose sole purpose is the binary segmentation of sea ice (SIC > 0%) and open wa-
+ter (SIC = 0%), and SIC classifiers or SIC regressors trained for the task of assigning a
+sea ice concentration. It follows naturally, that if a binary classifier outperforms the SIC
+classifier in the task of segmenting sea ice and open water, the hierarchical approach is
+deemed superior to the flat approach, and vice versa.
+18
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:24==
+5.2
+Random Forest & Manual Feature Engineering
+As is evident in the Sentinel-1 SAR scene presented in figure 3.3, the radar backscatter
+intensities alone provide a very limited amount of information on which to base a super-
+vised learning classification or regression scheme. The human visual perception system
+is very efficient in the use of spatial information - such as texture and tonal changes -
+to delineate objects or segments in an image and to help the intepretation of said image.
+Even in SAR images - in which several water/ice backscatter ambiguities might be present
+- a layman is likely to feel somewhat confident in delineating open water and sea ice. If,
+however, one was presented with only the radar backscatter intensities of a stand-alone
+pixel, the classification of said pixel as either water or sea ice would prove arduous.
+As a consequence, sea ice parameter retrieval algorithms based entirely on radar backscat-
+ter intensities at different polarizations produce relatively modest results - even algorithms
+based on several polarimetric SAR features, eg. [19]. A common approach is therefore
+to use the available SAR features combined with a number of derived textural image fea-
+tures to improve the accuracy of the algorithm. Manual feature engineering - that is, the
+design, computation and selection of optimal image features - is thus a very important part
+of the traditional machine learning approach for sea ice information retrieval algorithms.
+The backbone of the traditional machine approach employed in this project is the Random
+Forest algorithm fed with multi-scale GLCM-based texture features.
+5.2.1
+The Random Forest Algorithm
+Random Forest (RF) is an ensemble learning algorithm introduced by Leo Breiman in
+2001 [20]. The idea of ensemble learning is to build a predictive model by combining the
+strengths of a collection of simpler models. Ensemble learning is thus the task of using a
+training dataset to develop a population of simpler models, and then combining them to
+form as composite predictor [21].
+The main building blocks of the RF ensemble are decision trees. The algorithmic details
+of decision trees are fairly simple. It involves recursively partitioning the input space X
+into subspaces, and once a set of terminal subspaces have been reached, the data points
+belonging to these terminal subspaces are assigned a class label (or some other discrete
+category) in the classification case, or a numeric prediction in the regression case.
+Decision trees consist of nodes. The top node is called the root node, which is where the
+partitioning of the input space X begins. The bottom nodes are called leaf or terminal
+nodes. They each form a partition of X and they are each designated with a class label or
+numeric value. The nodes that are neither root nor terminal nodes are called internal/in-
+terior or split nodes. Any two nodes are connected by exactly one path. If every node
+apart from the terminal nodes splits into two subsequent nodes (has two children), the
+tree is said to be binary, which is the only type of tree considered in this project. In these
+terms, a decision tree is a model that maps from the input space X to an output space
+Y, with every node representing a subspace of X and with the root node corresponding
+to X itself. The binary splits are formed by conditions on the features of X. A data point
+x is considered to belong to a particular subspace x ∈Xa if the features of x adheres to
+the conditions defining the subspace Xa [22]. A new data point x propogates through the
+tree structure by node-by-node comparison of the features of x to the conditions placed
+at the nodes. Once the data point reaches a terminal node, the tree classifier assigns a
+class label or a numeric value to the data point.
+Classification Trees
+The main idea in the construction of tree-structured models is to use a training set to select
+the optimal splits of a subset of the training set such that the data in the descendent nodes
+Machine Learning Methods for Sea Ice Mapping
+19
+==PAGE:25==
+are purer than the data in the parent nodes. A node is considered to be the most impure
+when all classes are equally represented in it, and the most pure when the node contains
+only one class. The quality or goodness of a particular split is thus defined as the impurity
+decrease of the split [23].
+For any node t, consider a candidate split s into children nodes tR and tL. The impurity
+decrease of the split is defined as [22]:
+∆i(s, t) = i(t) −pLi(tL) −pRi(tR)
+(5.1)
+Here i(t) is a measure of the impurity of node t, ∆i(s, t) is the impurity decrease given
+the candidate split s of node t, and pz is the proportion of samples going from node t to
+node tz. Several functions have been proposed as measures of impurity. In this project
+the Gini Impurity is employed:
+iG(t) =
+C
+∑
+k=1
+p(k|t)(1 −p(k|t))
+(5.2)
+In eq. 5.2, p(k|t) is the proportion of the data points in node t belonging to class k. C is
+the total number of classes.
+Regression Trees
+The induction of a regression tree is very similar to that of a classification tree. However,
+when the response variable is quantitative, an often used impurity function is the mean
+squared error (MSE) [22]:
+iR(t) = 1
+Nt
+Nt
+∑
+i=1
+(yi −¯yt)2
+(5.3)
+In eq. 5.3, ¯yt is the mean response for the samples in node t, whereas yi is the actual
+response of the ith sample. That is, at a given node t, the best split is chosen such that
+the MSE at node t is minimized, which in turn maximizes the impurity decrease (eq. 5.1).
+Decision Tree Pruning & Stopping Criteria
+The more complex the decision tree, that is, the deeper the decision tree, the higher
+the risk of over-fitting. Essentially, one could grow a decision tree where the number
+of terminal nodes equal the number of training samples. In that case, the decision tree
+would be able to perfectly predict the response variable of every sample in the training
+set, however, it would fail to adequately generalize to other datasets. Therefore, certain
+stopping criteria must be defined to indicate whether to declare a node terminal or to
+continue splitting in order to prevent the decision tree from becoming neither too shallow
+nor too deep.
+To achieve this, several heuristic stopping criteria have been proposed [22]. A few of
+these criteria are presented here:
+1. A node t is set as terminal if its depth is greater than or equal to a predefined maxi-
+mum depth max_depth of the decision tree.
+2. A node t is set as terminal if it contains less then a predefined number of samples
+Nmin.
+20
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:26==
+3. A node t is set as terminal if the impurity decrease (eq. 5.1) of the best possible split
+is less than a predefined threshold β.
+Ideally, all of the hyperparameters max_depth, Nmin, and β would have to be tuned in
+order to find the most satisfactory tree-based model, although only max_depth will be
+investigated in this project. The process of applying early stopping techniques is also
+called pre-pruning, as opposed to post-pruning, where all nodes of the tree-structure are
+fully developed, potentially resulting in an over-fitting model, whereafter terminal nodes
+are sequentially removed in order to increase the generalizability of the model.
+Assuming that none of the stopping criteria have been met, the best split s (or an ap-
+proximation thereof) is the split that maximizes ∆i(s, t) in eq. 5.1. The set of all possible
+splits is infinitely large if the predictor variable can take infinitely many values. Consider
+a dataset in which each data point has the form x = (x1, x2, x3, ..., xM), where M is the
+fixed dimensionality of the data set. Only splits that result in non-empty subsets are con-
+sidered, and for this project all features are numeric. The condition at each split depends
+on the value of only one feature and such a condition has the form ”is xm ≤c” for all c
+within the range of values of that particular feature xm. The c values are chosen as the
+midpoints between consecutive distinct values of xm. If Nt is the number of data points
+in a node t, then Nt is also the maximum number of univariate splits at that node.
+Bootstrap Aggregation
+The bias-variance dilemma is a trade-off that has to be adressed in most machine learning
+applications. A model is said to be biased if it systematically under - or over-predicts
+some target variable. If not due to an underlying bias in the training data, this is typically a
+problem for oversimplified models. A biased model is unable to fully capture trends in the
+data. Model variance, on the other hand, is a measure of how much the prediction would
+change if the model was trained on another dataset. A high-variance model is overfitting
+the dataset it was trained on and is capturing ”patterns” that are products of noise or
+randomness. Generally, a very complex and flexible model is prone to overfitting, while it
+is likely to have a low bias. In the general case, model bias is thus a decreasing function
+of model complexity, while model variance is an increasing function of model complexity.
+There is therefore a trade-of between model bias and model variance.
+A deep decision tree is intrinsically a high-variance classifier, while a shallow decision
+tree is a high-bias classifier. The idea behind growing randomized forests of deep de-
+cision trees is to average the predictions of a large ensemble of low-bias high-variance
+decision tree classifiers to obtain a low-bias low-variance ensemble model [21]. Different
+Random Forest algorithms mostly differ in the way they add random pertubations into the
+construction of individual decision trees.
+Aggregating several versions of a tree-based model into an ensemble can substantially
+improve prediction accuracy [22]. Bootstrap aggregation or bagging exploits the insight
+that the errors of a large number of uncorrelated decision trees will average to zero, and
+thus reduce model variance and proneness to overfitting [20]. Given a dataset D of size
+N, bagging is the process of generating m new datasets of size N - so-called bootstrap
+samples - by uniformly sampling from D with replacement. Consequently, it follows from
+the fact that the sampling is done with replacement that a significant proportion of the data
+points in D will be missing in the bootstrap samples on average. Therefore decision trees
+built on the bootstrap samples that differ slightly from sample to sample will likely benefit
+from averaging.
+Another technique used to introduce random pertubations into the construction of the
+decision trees is random feature selection, where the search for the best split at each node
+Machine Learning Methods for Sea Ice Mapping
+21
+==PAGE:27==
+is restricted to a random subset of the input features. As a result, the generated trees
+become structurally different. In the Random Forest algorithm randomness is injected
+into the construction of the individual trees by combining bagging and random feature
+selection.
+In many ensemble methods, such as the Random Forest algorithm, the models in the
+ensemble are considered as a committee, and for classification problems the process of
+majority voting is used to form the final prediction. Alternatively, one can skip the final
+step of majority voting, and use the class probabilities as output from the model, which
+will be the case in this project. For regression problems the final prediction is given as the
+mean of the predictions from the individual trees.
+Feature Importances
+A useful feature of randomized forests is the possibility of estimating relative importances
+of the input features. At each split in every decision tree in the forest, the reduction of the
+split-criterion (Gini for classification and MSE for regression) can be used as an impor-
+tance measure attributed to the splitting feature, and is accumulated over all the trees in
+the forest separately for each feature.
+The importance of a feature is evaluated by summing the impurity decreases for all nodes,
+where the feature is used to split, and then averaging over the number of trees in the forest
+[22].
+Of course, this kind of measure of feature importance is to be used cautiously - especially
+if the input features are correlated, which is not unlikely when using GLCM-based texture
+features.
+5.2.2
+Grey-level Co-occurence Matrices
+Recent SAR-based sea ice mapping studies have reported decent classification results
+encoding spatial information into texture features based on grey-level co-occurence matri-
+ces, eg. [24], and one study found GLCM-based texture features to be superior to features
+derived from Gabor filters or Markov random fields for the task of sea ice mapping using
+SAR imagery [18].
+Let N be the total number of grey-levels in a SAR image. The GLCM of a sub-window of
+that image is a square NxN matrix in which the (i, j)th element represents the number
+of occasions that a pixel with intensity i is adjacent to a pixel with intensity j given a
+predefined orientation ϕ and inter-pixel distance d [25]. GLCMs are often normalized by
+dividing each element by the total number of co-occurence pairs in the matrix in order
+to obtain the co-occurence probabilities. The grey-level co-occurence probabilities are
+thus the joint conditional probabilities of all pair-wise combinations of a discrete number
+of grey-levels in a sub-window of an image given some spatial relation defined by an
+orientation and an off-set [18].
+22
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:28==
+The adjacency of two pixels is given by an orientation and an inter-pixel distance, as
+illustrated in figure 5.1.
+Figure 5.1: Illustration of inter-pixel adjacency given orientations ϕ = 0◦, 45◦, 90◦and 135◦
+and an inter-pixel distance d of 1 [26].
+In figure 5.1 four orientations ϕ = 0◦, 45◦, 90◦and 135◦and an inter-pixel distance d of 1
+is illustrated. There is no rigorous method for selecting the optimal ϕ and d, but the use
+of the four orientations and the inter-pixel distance of 1, as shown in figure 5.1, seems
+to be generally preferred in sea ice information retrieval schemes [18]. Additionally, it is
+common to take the directional average for orientations ϕ = 0◦, 45◦, 90◦and 135◦in order
+to reduce the dimensionality of the GLCM [24].
+Haralick Texture Features
+In 1973, Robert Haralick proposed 14 texture features derived from GLCMs for automatic
+image classification tasks [25]. The texture features are generated by applying statistics
+to the co-occurence probabilities in the GLCMs. The purpose of these statistics is to iden-
+tify some texture-related structural arrangement of the probabilities within the matrix. A
+few studies advocate using only a subset of the texture features in order to avoid unnesse-
+cary redundancy as the features tend to be heavily correlated [18], although for the sake
+of completeness, and due to a general interest in the relative feature importance estima-
+tion possible when using the Random Forest algorithm, 13 texture features will be utilized
+in this project (the 14th feature proposed by Haralick has a risk of being numerically un-
+stable). These are called: Angular Second Moment (ASM), Contrast (CON), Correlation
+(COR), Sum of Squares: Variance (VAR), Inverse Difference Moment (IDM), Sum Aver-
+age (SAV), Sum Variance (SVA), Sum Entropy (SEN), Entropy (ENT), Difference Variance
+(DVA), Difference Entropy (DEN), Information Measure of Correlation 1 (INF1) and Infor-
+mation Measure of Correlation 2 (INF2). The formulae for all 13 GLCM-based texture
+features can be found in Appendix A (eqs. A.1-A.13).
+In addition to the 13 GLCM-based texture features, the Variance-to-Mean Ratio (VMR)
+will be used as an input feature, as one study reported its usefulness in sea ice mapping
+using Sentinel-1 SAR imagery [24].
+Gaussian Pyramid Decomposition
+Scale is of vital importance in the understanding and analysis of images. The information
+contained in an image depends on the spatial scale of said image. The surface features
+visible in the SAR imagery that occur at scales larger than the spatial resolution of the
+instrument, such as ice floes, ridges, leads etc., may reveal homogenous or inhomoge-
+nous areas that can be characterized by the GLCM-based texture features. Such surface
+characteristics exist across various spatial scales, and therefore the inclusion of texture
+descriptors derived from different scale-space representations of the image might improve
+the combined discriminative power of the feature set, and thus improve the overall accu-
+racy of the algorithm.
+Machine Learning Methods for Sea Ice Mapping
+23
+==PAGE:29==
+In order to capture sea ice texture information present at different spatial scales in the
+SAR imagery, the GLCM-based texture features will be derived from different scale-space
+representations of the original SAR image, and these representations are obtained using
+gaussian pyramid decomposition [27]. The concept of gaussian pyramid decomposition
+is illustrated in figure 5.2.
+Figure 5.2: Illustration of the concept of gaussian pyramid decomposition in which a num-
+ber of scale-space representations are obtained by succeedingly smoothing and sub-
+sampling the image [28].
+The pyramid, as exemplified in figure 5.2, is created by succeedingly smoothing and sub-
+sampling the image to obtain the next level in the pyramid. The smoothing is achieved
+by convolution with a gaussian filter, and the smoothing is necessary in order to filter out
+high spatial frequencies, and suppress small-scale features in the imagery.
+An orientation-averaged GLCM is calculated from each spatial scale present in the pyra-
+mid, and from these GLCMs the 13 Haralick textures features as well as VMR are derived.
+When dealing with HH/HV dual-polarisation SAR imagery, and if a 4-layer gaussian pyra-
+mid is used, this amounts to a total of 112 manually engineered features in addition to the
+two SAR channels and the incidence angle to be fed to Random Forest algorithm.
+24
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:30==
+5.3
+U-Net & Automatic Feature Extraction
+Traditional machine learning algorithms work very well for a wide variety of problems.
+However, the design, computation and selection of manually engineered domain-specific
+features is a difficult and cumbersome task. In deep learning, the issue of manual feature
+engineering can be bypassed as artificial neural networks are able to automatically extract
+features of high abstraction relevant to the task at hand.
+Before dwelving into the architecture of U-Net, which is the architecture used for sea ice
+detection and concentration estimation in this project, it is important familiarize oneself
+with the general concept of neural networks, and in particular CNNs and the different
+building blocks that make up CNNs.
+5.3.1
+The Multi-layer Perceptron
+Most of the concepts in deep learning can be readily explained using a simpler model than
+CNNs, namely the regular feedforward neural network (or Multi-layer Perceptron (MLP)),
+which is the quintessential deep learning model. An MLP is made up of neurons, and a
+neuron, in terms of mathematics, is a non-linearity applied to an affine function [29]. An
+artificial neuron with input features x = (x1, x2, ..., xn) is illustrated in figure 5.3.
+Figure 5.3: A schematic illustration of an artificial neuron [30].
+The inputs x are passed through an affine function with given weights W and biases b
+before a non-linearity g is applied to obtain the neuron output h. A neural network consists
+of a multitude of neurons arranged acyclically, such that the outputs of some neurons
+become the inputs of other neurons. The neurons are organized in layers, as illustrated
+in figure 5.4, with an input layer consisting of the input data, a number of hidden layers
+and an output layer containing the prediction of the network.
+Machine Learning Methods for Sea Ice Mapping
+25
+==PAGE:31==
+Figure 5.4: A schematic illustration of shallow neural network consisting of an input layer,
+two hidden layers, and an output layer [30].
+Most networks arrange these layers in a chain structure, with each layer being a function
+of the layer that preceeded it. In this type of structure, the output of the first layer is given
+by [29],
+h(1) = g
+(
+W (1)x + b(1)
+)
+(5.4)
+The output of the first layer is then the input to the second layer. The output of the second
+layer is therefore given as,
+h(2) = g
+(
+W (2)h(1) + b(2)
+)
+(5.5)
+and so the information propagation continues throughout the network. In order for the net-
+work to give meaningful predictions, the weight and bias parameters have to be tuned to
+proper values given the task, and they are called the trainable parameters of the network.
+In the case of a supervised learning problem with inputs x and targets y, the goal of such
+a model is to approximate a mapping f, such that y = f(x; θ), and learn the trainable
+parameters θ (the weights and biases) that result in the best approximation according to
+some cost function [29]. In addition to the trainable parameters, external hyperparame-
+ters, like the number of hidden layers and the number of neurons in each hidden layer,
+should be tuned, such that the model capacity is aligned with the complexity of the prob-
+lem. As the number of layers and neurons increase, the number of trainable parameters
+increase manyfold in comparison. Many modern deep learning architectures have millions
+of trainable parameters.
+26
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:32==
+Gradient Based Learning & Backpropagation
+The network is fed an input xi, which propagates through the network to produce an
+output ˆyi. This is called forward propagation. The quality of the prediction, or inversely,
+the loss, is measured using some loss function L(ˆyi, yi). Often the cost J(θ) is given as
+a loss average over the training set,
+J(θ) = 1
+m
+m
+∑
+i=1
+L(f(xi; θ), yi)
+(5.6)
+In eq. 5.6, f(xi; θ) = ˆyi is the predicted output from the network given the input xi and
+network parameters θ, and m is the number of training samples over which the losses
+are averaged to obtain the cost. Of course, the ultimate goal of any machine learning
+algorithm is to reduce the cost for a dataset sampled independently of the training set.
+The choice of loss function L depends on problem the network is supposed to solve -
+a common loss measure for classification tasks is the cross-entropy between the target
+y and the predictions of the model ˆy, whereas the MSE is a common loss measure for
+regression tasks.
+Neural networks are usually trained using iterative, gradient descent based optimizers,
+whose purpose is to drive the cost to a very low value. If the parameters of the network
+are randomly initialized, the output obtained by means of forward propagation is almost
+definitely a very poor approximation of the target, i.e. the cost J(θ) is high. The principle
+of gradient based learning is to use the cost gradient ∇θJ(θ) with respect to the network
+parameters θ to change the parameters ever so slightly, so as to nudge the network to-
+ward a minimum on the multi-dimensional ’cost surface’ spanned by θ. This is known as
+gradient descent [29]. The step taken is thus in the opposite direction of the cost gradient,
+θ′ = θ −ϵ∇θJ(θ)
+(5.7)
+where ϵ is the learning rate, ie. a positive scalar determining the size of the step taken,
+and θ′ are the updated network parameters.
+The gradient ∇θJ(θ) is optained by means of backpropagation, which is an algorithm that
+recursively applies the chain rule of calculus to obtain gradients. The training of a neural
+network is thus composed of 1) forward propagation to obtain to network prediction and
+compute the cost, 2) the backpropagation though the network to obtain ∇θJ(θ), and lastly
+3) the gradient descent method, as presented in eq. 5.7, to update the parameters of the
+network.
+Stochastic Gradient Decent
+A recurring problem in deep learning is that good generalization often requires large
+datasets, but dealing with large datasets is computationally inefficient. Generally, the cost
+functions used in deep learning are additive sums of per-example losses, as denoted in
+eq. 5.6. In this case, the gradient descent method requires the computing of,
+∇θJ(θ) = 1
+m
+m
+∑
+i=1
+∇θL(f(xi; θ), yi)
+(5.8)
+which is a computationally expensive operation. The insight of stochastic gradient descent
+(SGD) is that the gradient can be approximated using a smaller subset, ie. a batch (or
+Machine Learning Methods for Sea Ice Mapping
+27
+==PAGE:33==
+mini-batch), of the terms in the full cost function [29]. That is, for each iteration of the
+training of the model, a batch of samples are randomly sampled from the training set, and
+used to estimate the gradient in order to complete the SGD step in eq 5.7.
+The Adam optimizer is a slightly more sophisticated gradient descent based optimizer as
+compared to vanilla SGD, and will be utilized in this project. The details of the Adam
+optimizer is not within the scope of the project.
+5.3.2
+Convolutional Neural Networks
+A CNN is a specialized type of feedforward neural network primarily designed to recognize
+visual patterns in images. CNNs are very similar to MLPs in that they consist of a large
+number of learnable parameters, but in contrast to MLPs, CNNs are designed with the
+explicit assumption that the inputs to the network are images.
+The main building blocks of CNNs are convolutional layers, which in turn generally are
+made up of three separate stages; the convolution operation, the application of a non-
+linearity and a pooling operation.
+The Convolution Operation
+As the name implies, CNNs employ convolutions in place of the general matrix multipli-
+cations employed in MLPs. The convolution operation employed in CNNs is exemplified
+in figure 5.5.
+Figure 5.5: Illustration of the convolutional operation utilized in the CNNs. The boxes are
+drawn to indicate that the upper-left element of the output is computed by applying the
+kernel to the upper-left part of the input [29].
+The input is usually a multi-dimensional array of data, such as a multi-channel SAR image,
+28
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:34==
+while the kernel (or sometimes called the filter) is a multi-dimensional array of learnable
+parameters. The output of a convolutional layer is obtained by means of convolution
+between the kernel and the input image. A CNN is able to capture spatially important
+information in an image through the applications of many different kernels.
+While MLPs have a separate parameter describing the interaction between each input
+and output neuron - that is, each neuron in a layer is connected to every neuron is the
+preceding layer (see figure 5.4) - CNNs have sparse connections [29]. This is due to the
+fact that the kernel is smaller than the input. The input might contain several thousand
+pixels, while the kernel usually only occupies a few or a few tens of pixels. This effectively
+reduces the memory requirements of CNN models. Another important distinction between
+MLPs and CNNs is the fact that the parameters are shared - in CNNs, each element of a
+kernel is used at every position in the input (apart from exceptions along the boundaries
+of the input). This sharing of parameters results in the detection of similar features, such
+as edges, at all the locations in which the feature is present in the input, which is a very
+practical property. The convolution operation between an input and a specific kernel cre-
+ates a two-dimensional output, often called a feature map, of the features captured by the
+specific kernel.
+Non-linearities
+A number of non-linear activation functions have been proposed for use in deep learning
+architectures. Non-linear activation functions are used in deep learning to allow the neural
+networks to approximate non-linear functions as well as linear functions. The main non-
+linearity employed in U-Net is the rectified linear unit (ReLU) activation function, which is
+given as,
+g(z) = max{0, z}
+(5.9)
+where z = W x+b. The ReLU activation function is thus a piece-wise linear function. The
+ReLU activation function has been shown to have several advantages over other widely
+used activation functions, such as the sigmoid activation function [29].
+Max-Pooling
+A pooling function summarizes a region of a feature map with a summary statistic. In the
+case of max-pooling, this statistic is the maximum pixel intensity of that particular region
+of the feature map. In addition to reducing the overall dimensionality of the convolved
+feature map, the pooling operation also introduces an invariance to small translations,
+meaning that if one were to translate the feature map by a small amount, the maximum
+value in a local region of the feature map would remain unchanged as compared to the
+non-translated feature map.
+5.3.3
+U-Net: An Encoder-Decoder Architecture for Image Segmentation
+U-Net was proposed in 2015 as a CNN architecture for biomedical image segmentation
+(ie. pixel-wise classification), but it has since been applied to a vast variety of image seg-
+mentation problems. U-Net employs an encoder-decoder type of CNN architecture that
+draws inspiration from autoencoders [31]. U-Net consists of an encoder that encodes the
+input representations from a raw input to an intermediate lower dimensional representa-
+tion through a number of convolution and max-pooling operations, and a decoder that
+attempts to upsample and reconstruct the lower dimensional representations through a
+mirrored sequence of transposed convolution and regular convolution operations to output
+a segmentation map that matches the resolution of the original input image [32]. During
+training the loss is thus computed in terms of the difference between the output segmenta-
+tion map and a desired segmentation map. The encoder is essentially a feature extractor,
+Machine Learning Methods for Sea Ice Mapping
+29
+==PAGE:35==
+and similarly to how different spatial scales are considered when extracting the GLCM-
+based texture features in the traditional machine learning approach, U-Net employs skip
+connections to transfer and concatenate feature maps of varying levels of abstraction,
+ie. at different stages in the encoder, to the corresponding stages of the decoder. The
+inclusion of features of different abstraction levels has been shown to improve the quality
+of the generated segmentation map [31]. The CNN architecture proposed in the U-Net
+paper is presented in figure 5.6.
+Figure 5.6: Illustration of original the U-Net architecture as presented in [32]. The blue
+boxes represent multi-channel feature maps and the numbers on top of the blue boxes
+denote number of filters. The white boxes represent the feature maps transferred from
+the different stages of the encoder network to the corresponding stages of the decoder
+network. The numbers next to each box denotes the dimentionality of that layer. The
+arrows represent different operations.
+The encoder network (the left half of the U-Net architecture in figure 5.6) consists of the
+repeated application of two 3x3 convolutions - both of which are passed through the ReLU
+activation function - followed by a 2x2 max-pooling operation with a stride of 2, which
+effectively downsamples the input by a factor of 2. At each max-pooling step the number
+of filters/kernels is doubled. At the ’bottom’ of the U-Net architecture is the bottleneck,
+which consists of two 3x3 convolutions (+ ReLUs).
+The decoder network (the right half of the U-Net architecture) mirrors the encoder network.
+The upsampling of the lower dimensional representations is achieved differently depend-
+ing on the specific implementation of U-Net, however, this project utilizes 2x2 transposed
+convolutions with a stride of 2, which - inversely to the max-pooling operations in the en-
+coder - effectively upsamples the input by a factor of two. At each transposed convolution
+step the number of filters/kernels is halved. After the transposed convolution, the features
+maps from the corresponding encoder stage is concatenated to the features maps at the
+30
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:36==
+decoder stage. Then two 3x3 convolutionals (+ReLUs) are applied before the steps are
+repeated at the next decoder stage.
+The final convolutional layer performs a 1x1 convolution to map the feature vectors of
+the preceding layer to a C-channel segmentation map, where C is the desired number
+of classes. In the original U-Net paper the desired number of classes was 2, hence the
+depth of 2 of the last layer in the archictecture.
+Batch normalization
+Although batch normalization is not mentioned in the original U-Net paper - likely due to
+the paper proposing batch normalization being released at roughly the time as the U-Net
+paper - batch normalization is used in many contemporary implementations of U-Net.
+Batch normalization is a per-layer technique whose core concept when applied to a layer
+is to normalize the layer output by subtraction of the batch mean and division by the batch
+standard deviation. In addition, the batch normalization technique introduces two new
+learnable parameters that controls the normalization of the layer output. When applied,
+this technique has been shown to improve speed and stability during the training process
+of deep learning models [33].
+Dropout
+Dropout was proposed as a regularization technique for deep learning algorithms in 2014
+[34]. In CNNs the technique provides a regularization effect by randomly zeroing out
+feature maps according to a dropout probability assigned to that specific convolutional
+layer. The intuition behind the dropout technique is that the model cannot rely solely on
+a single feature map (or a few feature maps), and thus the model is forced to spread its
+weights more evenly. For example, if a convolutional layer outputs 64 feature maps and
+a dropout probability of 20% has been assigned to that particular layer, an average of
+roughly 13 feature maps will be randomly zeroed out during each iteration of the training
+loop.
+The application of dropout in deep learning algorithms is somewhat analogous to the bag-
+ging technique employed in the Random Forest algorithm, in which a bagged ensemble
+of tree-based models are trained and combined when used for prediction. Recall that in
+bagging m different datasets are sampled from the training set with replacement to train
+m models. The dropout technique is similar to bagging in that a different sub-model is
+trained with a new mini-batch sampled from the training set each iteration of the training
+loop, and the model is restricted to a subset of the features. The dropout technique dif-
+fers from bagging in that each sub-model is trained for only one iteration and all of the
+sub-models share parameters [29].
+Machine Learning Methods for Sea Ice Mapping
+31
+==PAGE:37==
+5.4
+Performance Metrics & Algorithm Evaluation
+The performances of the traditional machine learning and the deep learning algorithms
+will be evaluated separately and compared subsequently. This entails the evaluation of
+the flat and hierarchical algorithmic structures. As the binary segmentation of sea ice
+and open water and the estimation of sea ice concentration are inherently different tasks
+(the former being a binary classification problem and the latter being a multi-class classi-
+fication/regression problem), the measures by which to quantify the performances of the
+binary classifiers and the SIC classifiers/regressors will also be inherently different. The
+quality of predictive models is usually evaluated by how well they perform on a previously
+unseen testing set - as opposed to the training set used to train the models and the val-
+idation set used to tune the hyperparameters of the algorithms, and therefore the ASIP
+dataset will be split into 3 constituent parts.
+This section presents the measures used to quantify the performances of the Random
+Forest and U-Net algorithms for the task of sea ice detection and concentration estimation,
+as well as the reasoning behind the choice of those performance measures.
+5.4.1
+Segmentation of Sea Ice and Open Water
+Recall that in the flat classification structure the SIC classifiers generate sea ice concen-
+tration maps of a SAR scene by assigning each pixel a SIC between 0% and 100%. In
+the hierarchical structure a binary classifier distinguishes sea ice pixels from open water
+pixels prior to the assignment of non-zero SICs by a SIC classifier or regressor to the sea
+ice pixels.
+The output of the Random Forest classifiers and the softmaxed output from the U-Net
+classifiers correspond to C-channel probability maps, where C is equal to a pre-defined
+number of classes. For the SIC classifiers C is equal to the number of discrete SIC values
+in the data, which depends on how the SIC variable in the ice charts are discretized
+between 0% and 100%. In the flat classification structure, a SIC classifier generates a
+sea ice concentration map by assigning each pixel the class label of the class with the
+highest probability (ie. applying an argmax function).
+In the binary classification case, the algorithms generate 2-channel probability maps with
+the channels corresponding to the open water and the sea ice class probabilities, re-
+spectively. The sea ice class channel is a sea ice probability map in which each pixel
+in the particular scene is assigned a probability of belonging to the sea ice class. These
+probabilistic algorithm outputs introduce a level of granularity, and allow us to think proba-
+bilistically, adding a degree of confidence to the prediction. In the hierarchical approach a
+probability threshold has to be determined in order to binarize the sea ice probability maps
+predicted by the binary classifiers. The choice of threshold will obviously have an impact
+on the trade-offs between positive and negative errors (the sea ice class is considered
+the positive class).
+32
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:38==
+A convenient way of summarizing the performance of a classifier is to do a cross-tabulation
+between true and predicted classes. The confusion matrix provides an insightful look into
+not only the performance of a predictive model, but the types of errors made by the model
+[35]. A confusion matrix for a binary classification problem is exemplified in table 5.1.
+Predicted positive class
+Predicted negative class
+True positive class
+True Positive
+False Negative
+True negative class
+False Positive
+True Negative
+Table 5.1: The table illustrates the structure of a Confusion Matrix of a two-class classifi-
+cation problem.
+In the confusion matrix in table 5.1, the true positives (TP) and true negatives (TN) in-
+dicate pixels correctly classified as the positive and negative classes, respectively. The
+off-diagonal elements, false positives (FP) and false negatives (FN), indicate pixels be-
+longing to the positive or negative class misclassified as the positive or negative class,
+respectively.
+The choice of threshold with which to binarize the sea ice probability maps predicted by
+the binary classifiers has a direct impact on the elements of the confusion matrix. A higher
+threshold will reduce the false positive rate, ie. the ratio of open water pixels misclassified
+as sea ice pixels to all open water pixels, as fewer pixels will be classified as sea ice.
+As a counterpoint, the false negative rate, ie. the ratio of sea ice pixels misclassified
+as open water pixels to all sea ice pixels, would increase. Naturally, the opposite effect
+would occur if the threshold was decreased rather than increased. Additionally, binarizing
+the sea ice probability maps discards the level of granularity, as it is no longer possible
+to differentiate between more or less likely sea ice predictions. In order to avoid this,
+a threshold-independent measure will be employed in the evaluation and comparison of
+binary models - namely, the ROC AUC measure.
+A ROC graph is a plot of the false positive rate (FPR) versus the true positive rate (TPR).
+A graph is drawn by varying the threshold from the most restrictive probability (ie. 100%)
+to the least restrictive probability (0%). For each threshold, there exists a point in the
+ROC-space based on the FPR and TRP values resulting from binarizing at that particular
+threshold [35]. An illustrative example of a ROC graph is available in figure 5.7.
+Machine Learning Methods for Sea Ice Mapping
+33
+==PAGE:39==
+Figure 5.7: Illustrative example of a ROC graph [35]. The ROC curve is drawn by connect-
+ing the individual (FPR, TPR)-points in the ROC space. The upward diagonal indicates a
+completely random performance.
+The closer the ROC curve is to the upper left corner in the ROC space, the better the
+classifier. The ROC AUC measure is given as the area under the ROC curve. The ROC
+AUC measure can be intepreted as the probability that a binary classifier will assign a
+higher sea ice probability to a randomly chosen sea ice pixel than a randomly chosen
+open water pixel [35]. The ROC AUC measure therefore allows for the evaluation and
+comparison of binary classifiers regardless of chosen binarization threshold.
+After the best binary classifier has been identified using the ROC AUC measure, the
+probability maps predicted by said binary classifier are still to be binarized in order to
+produce a final segmentation map, and thus an optimal threshold has to be determined
+using some performance measure. A large number of different performance measures
+based on the confusion matrix elements have been proposed in attempts to summarize
+the information into a single number. The most obvious way of determining an optimal
+threshold might be to choose the threshold that maximizes the pixel-wise accuracy, which
+is given as the ratio of correctly classified pixels to total number of pixels in an image,
+acc =
+TP + TN
+TP + TN + FP + FN
+(5.10)
+The pixel-wise accuracy can, however, be misleading in imbalanced classification prob-
+lems, where the data has a non-uniform class distribution. In the case of an imbalanced
+binary dataset the classifier might achieve a high pixel-wise accuracy even if the model
+is not able to correctly predict the minority class. Thus, the prevalence of a more fre-
+quent class may mask a poor classification performance in the infrequent class when the
+34
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:40==
+pixel-wise accuracy is used a performance measure.
+The F1-score is a metric commonly used as a performance measure in imbalanced seg-
+mentation problems. The F1-score is defined as the harmonic mean of precision P and
+recall R, which in turn are defined as P =
+TP
+TP+FP and R =
+TP
+TP+FN , respectively [36]. The
+F1-score is thus given as,
+F1 = 2 · P · R
+P + R
+(5.11)
+The optimal threshold will be determined as the threshold that maximizes the F1-score.
+The F1-score focuses on the analysis of the positive class, that is, the sea ice class as
+opposed to the open water class. The precision evaluates the number of correctly clas-
+sified pixels belonging to the positive class among all pixels classified as positive (this is
+equivalent to the TPR). The recall, on the other hand, evaluates the number of correctly
+classified pixels belonging to the positive class among all positive pixels. The objective of
+the F1-score is thus to find an equal balance between the precision, which is a measure
+of the correctness of the classification, and recall, which is a measure of the coverage of
+the classification [35].
+A common criticism of the use of the F1-score as a performance measure is that the
+F1-score by its definition in eq. 5.11 gives equal weight to precision and recall - and by
+extension therefore equal weight to the two types of errors FP and FN -, when in many
+cases the relative importance assigned to precision and recall should be an aspect of
+the particular problem. This aspect is, however, not considered, as in this thesis the
+misclassification of an open water pixel as sea ice (FP) and the misclassification of a
+sea ice pixel as open water (FN) are weighted equally, and therefore the F1-score is
+reasonable as a performance metric. This choice has been made due to the assumption
+that ice analysts, in general, are conservative when drawing the polygons that delineate
+sea ice and open water - ice services would rather draw too much sea ice, than risk
+providing sea ice maps that result in unfortunate and costly incidents due to unmapped
+sea ice. It is therefore assumed that such a bias already exists in the data, and does not
+need introduction by means of adding weight to certain types of errors.
+The performance of the flat and hierarchical algorithmic structures in the task of segment-
+ing sea ice from open water will thus be evaluated using the F1-score as a performance
+measure. In the flat classification approach a binary segmentation map is obtained by
+binarizing the sea ice concentration map such as to only contain sea ice (SIC > 0%) and
+open water (SIC = 0%) pixels before the F1-score is computed. The F1-scores of the
+flat and hierarchical approaches are then compared to determine whether one approach
+is superior to the other.
+5.4.2
+Sea Ice Concentration Estimation
+The ability of the SIC classifiers and the SIC regressors to accurately estimate the sea ice
+concentration cannot be satisfactorily evaluated using the pixel-wise accuracy or the F1-
+score, as the discrepancies between the ’true’ sea ice concentrations and the estimated
+sea ice concentrations are not meaningless - eg. if a pixel has a true sea ice concentration
+of 50%, an estimated sea ice concentration of 60% is a better prediction than an estimated
+sea ice concentration of 70%. If the pixel-wise accuracy or the F1-score was used as a
+performance measure the two sea ice concentration estimates would be deemed equally
+wrong, which is clearly not true - one is a better prediction than the other. Therefore other
+performance measures must be considered. Also, in order to be able to directly com-
+pare the performance of a SIC classifier and a SIC regressor in their ability to accurately
+Machine Learning Methods for Sea Ice Mapping
+35
+==PAGE:41==
+estimate the sea ice concentration, the continuous output from a SIC regressor must be
+discretized to match the output from the SIC classifiers.
+An important point is that the sea ice concentrations assigned by the DMI ice analyst
+to a drawn polygon is an average concentration within that polygon - the sea ice is not
+necessarily homogenously distributed within the polygon. For this reason, the predictive
+capabilities of the SIC classifiers and SIC regressors should not be evaluated at pixel-
+level, but rather as average estimates over polygons. Say, a testing set has been sampled
+from the ASIP dataset, then a SIC classifier/regressor will be evaluated on how closely
+the mean estimate of all pixels belonging to, for example, the SIC = 50% polygons in the
+testing set approximates a sea ice concentration of 50%, and likewise for the remaining
+discrete sea ice concentrations.
+Since the estimation of the sea ice concentration resembles a regression problem more
+so than a classification problem, a regression performance measure will be employed in
+the evaluation of the SIC classifiers and SIC regressors. The R2-statistic, which is also
+called the coefficient of determination, is a statistical measure of goodness-of-fit, and it is
+often used in linear regression analysis. The R2-statistic represents the extent to which
+the variation in one variable is explained by another variable [37]. Given a dataset of size
+N with true values y1, y2, ..., yN and corresponding predicted values f1, f2, ..., fN, then the
+total variation in the true values is given by,
+SStot =
+N
+∑
+i=1
+(yi −¯y)2
+(5.12)
+in which ¯y is the arithmetic mean of the true values. The variation of the true values, which
+is not explained by the predictive model is given by the sum of squared residuals,
+SSres =
+N
+∑
+i=1
+(yi −fi)2
+(5.13)
+The amount of variation in the true values described by the predictive model, ie. the
+R2-statistic, is thus given as,
+R2 = 1 −SSres
+SStot
+(5.14)
+Say, a testing set sampled from the ASIP dataset has been discretized to 11 discrete sea
+ice concentrations, ie. SIC = 0%, 10%, 20%, ..., 100%, and SICtrue denotes a vector
+of these 11 discrete sea ice concentrations. Then, if SICest is a vector in which the
+ith element is the mean sea ice concentration estimate of the pixels of the testing set
+belonging to the ith discrete value in SICtrue, then the R2-statistic evaluated between
+SICtrue and SICest quantifies the degree of linear correlation between the true sea ice
+concentrations and the class-wise mean sea ice concentration estimates made by the SIC
+classifer or SIC regressor.
+In these terms, the SIC classifier or SIC regressor with the highest measure of the R2-
+statistic will be deemed the most accurate estimator of the sea ice concentration.
+36
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:42==
+6
+Implementation & Validation
+In this chapter the ASIP dataset is prepared and pre-processed, and the algorithms pre-
+sented in chapter 5 are implemented. The implementations are carried out exclusively
+in Python using an extensive selection of libraries and frameworks to ease the workflow.
+A number of Random Forest and U-Net models are trained and subsequently validated
+against a validation set in order to identify the best performing models.
+6.1
+Data Preparation
+Prior to the implementation of the algorithms presented in chapter 5, the ASIP dataset has
+to be pre-processed and prepared in various ways. The dataset comprises 915 HH/HV
+dual-polarisation Sentinel-1 SAR scenes and corresponding DMI ice charts. The SAR
+scenes are scattered along the coasts of Greenland and they each cover an area of ap-
+proximately 400x400 km, corresponding to roughly 10000x10000 pixels at a pixel spacing
+of 40 m. However, in most of the SAR scenes only a smaller subset of the 400x400 km
+area has an accompanying ice chart - either due to the application of a land mask, or due
+to fact that often only a subset of the SAR scene is relevant for navigational purposes.
+The areas of the 915 SAR scenes that overlap with the corresponding ice charts has
+been cropped into 300x300 pixel tiles, so as to prepare the data for CNN ingestion. This
+amounts to a total of roughly 200000 tiles.
+All the SAR data and the corresponding ice charts are sub-sampled by 2x2 block averag-
+ing, thus obtaining 150x150 pixel tiles with a pixel spacing of 80x80 m, which more closely
+matches the 93x87 m spatial resolution of the Sentinel-1 sensor, while also reducing im-
+age noise and data volume.
+Addressing the Issue of Class Imbalance
+The sea ice concentration variable in the ASIP dataset covers a range from 0% to 100%
+in steps of 5% with the rare appearance of 1% polygons for areas where the ice analyst
+is not absolutely confident of ice-free conditions. The ASIP dataset has an unequal dis-
+tribution of sea ice concentrations, and severely disproportionately so, as more than half
+of all pixels are assigned a sea ice concentration of 0%. When class imbalance exists in
+the training set, the learning algorithm generally tends to over-classify the majority class
+due to its increased prior probability. Consequently, the minority classes are more often
+misclassified. The issue of class imbalance can be adressed in several different ways;
+data-level techniques usually involve a resampling of the dataset to obtain a new dataset
+with a less skewed class distribution, whereas algorithm-level techniques usually involve
+the implementation of cost-sensitive learning, which penalizes the misclassification of mi-
+nority classes more than the misclassification of majority classes.
+In order to simplify the task of alleviating the class imbalance, the sea ice concentration
+variable is divided into 11 classes. The details of the class division is presented in table
+6.1.
+Machine Learning Methods for Sea Ice Mapping
+37
+==PAGE:43==
+Class label
+SIC interval
+0
+0% ≤SIC < 5%
+1
+5% ≤SIC < 15%
+2
+15% ≤SIC < 25%
+3
+25% ≤SIC < 35%
+4
+35% ≤SIC < 45%
+5
+45% ≤SIC < 55%
+6
+55% ≤SIC < 65%
+7
+65% ≤SIC < 75%
+8
+75% ≤SIC < 85%
+9
+85% ≤SIC < 95%
+10
+95% ≤SIC ≤100%
+Table 6.1: The table presents the details of the division of the sea ice concentration vari-
+able into 11 classes.
+The encoding of spatial information into GLCM-based features is a tile-level operation,
+however, the subsequent training of Random Forest algorithm uses pixel-level samples,
+which facillitates a completely uniform class distribution to be fed to the Random Forest
+algorithm. U-Net, on the other hand, is trained purely on tile-level samples, and thus
+requires a training set balanced at tile-level, which is difficult to obtain.
+Figure 6.1 illustrates the tile-level class balance of the ASIP dataset. For each tile in the
+ASIP dataset, the mean of all pixels with a non-zero sea ice concentration (SIC > 0%) is
+computed, and then the tile is assigned a class label in accordance with table 6.1 based
+on this mean. If a tile consists only of open water pixels (SIC = 0%), the tile is counted
+as belonging to class 0. While inaccurate class assignments are still likely to occur, the
+reason for not including the open water pixels when computing the SIC mean of each
+tile, is to avoid situations where one half of the tile is open water (SIC = 0%) and the
+other half is compact sea ice (SIC = 100%), and then the tile is assigned class label 5,
+due to the mean being 50%. Instead, only the non-zero sea ice concentration pixels are
+considered when computing the mean. Simultaneously, the average per-tile fraction of
+open water pixels is computed for all tiles containing non-zero sea ice concentrations, so
+as to deduct tiles from the 0th class when balancing the dataset. The assumption is then
+that the tile-level class distribution to some extent reflects the underlying pixel-wise class
+distribution.
+38
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:44==
+Figure 6.1: The figure illustrates the tile-level class distribution of the ASIP dataset.
+As is evident in figure 6.1, the 0th class is disproportionately frequent in the ASIP dataset
+compared to the remaining 10 classes. Prior to the rebalancing of the ASIP dataset, the
+entire data pool is split into training, testing and validation data pools using a 75%/15%/10%-
+split. The ASIP dataset is split such that tiles from a particular SAR scene is only present
+in one of the splits. The tile-wise class distributions of the three splits are presented in
+table 6.2.
+No. of tiles
+Class label
+Training data
+Testing data
+Validation data
+0
+103644
+19839
+13577
+1
+1588
+422
+253
+2
+5217
+1304
+530
+3
+3622
+662
+365
+4
+3602
+601
+617
+5
+2525
+766
+522
+6
+2640
+829
+706
+7
+3133
+441
+637
+8
+4579
+688
+691
+9
+10220
+1920
+919
+10
+16792
+2366
+2229
+Table 6.2: Table of the tile-wise class distribution of the training, testing and validation
+data pools. The training, testing and validation sets are sampled from these data pools.
+The data-level techniques for addressing class imbalance include under-sampling and
+over-sampling. These techniques modify the class distribution by either randomly discard-
+ing samples from the majority classes, or by randomly over-sampling the minority classes.
+Over-sampling increases the computational load due to the increased size of the dataset,
+and the technique has also been shown to cause overfitting [38]. Under-sampling, on the
+other hand, has the disadvantage of reducing the total amount of information available
+for the algorithm to learn from. Due to the class distribution of the ASIP dataset being as
+severely skewed as it is, purely relying on over-sampling to balance the data is impracti-
+cal. Instead, a hybrid of under-sampling and over-sampling will be employed in an effort
+Machine Learning Methods for Sea Ice Mapping
+39
+==PAGE:45==
+to balance the training, testing and validation sets.
+Deep learning models generally require much more data to match or exceed the per-
+formance of its traditional machine learning counterpart. The training of deep learning
+models are, however, extremely accelerated due to the use of highly-parallel Graphics
+Processing Units (GPUs). On the contrary, traditional machine learning algorithms of-
+ten suffer from large computational loads and memory requirements when working with
+large datasets, which is further exacerbated by the necessary computation of many hand-
+engineered features. Therefore the sizes of the datasets sampled for the Random Forest
+and U-Net algorithms, respectively, differ significantly.
+The resampling of the ASIP dataset for the traditional machine learning approach is done
+exclusively with under-sampling due to the cumbersome computation of the GLCM-based
+texture features. The training, testing and validation sets will consist of 100, 10 and 10
+tiles, respectively, per class.
+The resampling of the ASIP dataset for the deep learning approach is done using a hybrid
+between under-sampling and over-sampling. The training, testing and validation sets of
+the SIC classifiers/regressors will consist of 3000, 300 and 300 tiles, respectively, per
+class. As is then evident in table 6.2, the classes 1, 5 and 6 will be over-sampled in the
+training set, and class 1 will be over-sampled in the validation set.
+In both approaches, the binary classifiers are trained to discriminate between open water
+and any non-zero sea ice concentration, and will thus require 10 times as many samples
+from the 0th class as compared to the other classes in order to be balanced. This is
+easily acommodated in the traditional machine learning approach as the Random Forest
+algorithm is trained on individual pixels. However, in the deep learning approach this
+is accommodated by sampled two training sets - one with equal representiation of each
+class and one with 10 times as many samples from the 0th class as compared to the
+other classes. Furthermore, it was found that approximately 10% of the pixels in the tiles
+assigned to classes 1-10 have a sea ice concentration of 0%, and therefore 10% of the
+total number of tiles sampled from the 0th class are deducted from all the splits.
+6.2
+Random Forest & Manual Feature Engineering
+In this section the methodology and implementation of the traditional machine learning ap-
+proach is presented. This includes the derivation of the multi-scale GLCM-based texture
+features, as well as the hyperparameter tuning of the Random Forest algorithm. A number
+of binary classifiers and SIC classifiers/regressors are trained, evaluated and compared.
+Grey-level quantization
+A necessary step prior to the derivation of the GLCM-based texture features is the quan-
+tization of the grey-levels in the training, validation and testing sets, meaning that the
+backscatter intensities have to be quantized in order to compute the grey-level co-occurrence
+matrices from which the texture features proposed by Haralick are derived. Therefore, a
+method of quantization and the number of quantization levels have to be decided upon.
+A smaller number of quantization levels accelerates the computation of the GLCM-based
+features, however, this computational gain is offset by a loss of information. A 2002 study
+on the influence of the number of quantization levels on the derived GLCM-based features
+used sea ice classification as its case study [39]. The paper concludes that the use of less
+than 24 quantization levels produces unreliable results, whereas the use of more than 64
+quantization levels did not increase the classifcation accuracy. Unfortunately, the study
+focuses on a smaller subset of the 13 GLCM features used in this project. Other studies
+within the field of sea ice mapping, eg. [40] and [18], suggest somewhere between 16
+40
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:46==
+and 32 quantization levels. 32 quantization levels will be used in this project.
+The method of quantization refers to the method by which the backscatter intensities are
+packed into the 32 quantization levels. Histogram equalization is utilized in this project.
+Histogram equalization is a quantization method that maps the backscatter intensity dis-
+tribution into a uniform grey level distribution, such that each grey level is equally repre-
+sented in the data. This quantization method is applied on the training set, and the specific
+mapping used to quantize the training data is stored, such that the same mapping can be
+used on the validation and testing sets as well to ensure that the SIC classes look similar
+across the datasets.
+Gaussian pyramid decomposition
+A total of four different spatial scales will be considered when deriving the GLCM-based
+texture features, and thus each tile in the training, validation and testing sets is to be
+represented at four different spatial scales - that is, a four-layered gaussian pyramid. For
+each tile, each level of the gaussian pyramid is obtained by the repeated sequence of
+gaussian blurring and downsampling. The tile is blurred by convolvning the tile with a 5x5
+gaussian filter. After the blurring operation, the tile is downsampled by a factor of two.
+At the lowest level of the pyramid, which corresponds to the spatial scale of the original
+imagery, the pixel spacing is 80 m. In the next three levels the pixel spacing increases to
+160 m, 320 m and 640 m, respectively.
+Derivation of the GLCM-based texture features
+The computation of the directionally averaged GLCMs and the subsequent derivation of
+the 13 GLCM-based texture features is carried out using the Computer Vision library ma-
+hotas [41] in Python. The 13 GLCM features, as well as the VMR, is derived for every tile
+in the training, testing and validation sets, and for each scale-space representation. The
+size of the sub-window from which the GLCMs are computed is 25x25 pixels at the lowest
+level of the gaussian pyramid representation of the data, which at a pixel spacing of 80 m
+corresponds to a 2x2 km area. This area is kept roughly the same for each spatial scale,
+and thus the window size is adapted to the spatial scale of the data being processed. Due
+to the per-window computation of the GLCMs, the GLCM-based features of a 150x150 tile
+only cover the 126x126 inner-most pixels of the tile. The raw HH/HV backscatter and
+incidence angle features are trimmed accordingly.
+As the Sentinel-1 SAR data is dual-polarised, this results in a total of 112 manually en-
+gineered features. Along with the raw HH/HV backscatter intensities and the incidence
+angle, these are concatenated into a 115 element feature vector for each pixel in the
+training, testing and validation sets, thus creating a high-dimensional feature space for
+the Random Forest algorithm to learn from.
+A visual inspection of the 13 GLCM-based texture features and the VMR of all four spatial
+scales for the HH channel of a Sentinel-1 SAR scene is available in figures 6.3 and 6.4.
+These visualizations are based on a scene from the testing set, which can seen in figure
+6.2.
+Machine Learning Methods for Sea Ice Mapping
+41
+==PAGE:47==
+Figure 6.2: The figure shows the Sentinel-1 HH and HV channels, as well as the corre-
+sponding DMI-produced ice chart for a scene from the testing set.
+The color scale is set individually for each GLCM feature across the four spatial scales.
+Additionally, the contrast of each feature is enhanced. While this might seem misleading
+in regards to the relative intensities of the features, it makes the fine structure of each
+feature as well as the changes across spatial scales more clearly visible to the viewer.
+42
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:48==
+Figure 6.3: Visualization of the first 7 GLCM-based texture features based on the HH
+channel of the Sentinel-1 scene presented in figure 6.2. Each row represents a specific
+Haralick feature, while the columns represent the spatial scales 0-3.
+Machine Learning Methods for Sea Ice Mapping
+43
+==PAGE:49==
+Figure 6.4: Visualization of the last 7 GLCM-based texture features as well as the VMR
+feature based on the HH channel of the Sentinel-1 scene presented in figure 6.2. Each
+row represents a specific Haralick feature, while the columns represent the spatial scales
+0-3.
+44
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:50==
+As is obvious from figures 6.3 and 6.4, many of the GLCM features are highly correlated.
+The issue of redundancy is further worsened by the fact that some of the features do
+not exhibit much change across spatial scales. In general, the GLCM features tend to
+become more noisy as one moves up the gaussian pyramid representation of the data,
+which might be due to the loss of information at higher spacial scales, and the fact that
+the sparsity of the co-occurence matrices increases as well. It is important to note that
+the GLCM-based texture features computed for the HV-channel are notably different than
+those computed for the HH-channel. A visual inspection of the 13 GLCM-based texture
+features and the VMR of all four spatial scales for the HV backscatter of the Sentinel-1
+SAR scene is available in Appendix B.
+Feature correlation is not inherently an issue for the predictive capabilities of the Random
+Forest algorithm, as the algorithm only ever uses a single predictor at each node. Feature
+correlation does, however, reduce the interpretability of the individual decision trees as
+well as the usefulness of feature importance measures. This is due to the fact that any
+one of the correlated features can be used as the predictor at a particular node with no
+substantial preference over the others. Once one of the correlated features has been
+used in a split, the importances of the other correlated features are significantly reduced
+as the impurity they are able to remove has already been removed. This is an issue
+when it comes to the intepretation of the individual decision trees or when computing
+the relative feature importances, as it can lead to the incorrect conclusion that a certain
+feature is a very strong predictor of the response variable, while other correlated features
+are unimportant, when in reality they might be close to equally as informative in terms of
+their relationship with the response variable. While this effect is somewhat mitigated by
+the process of random feature selection, it is most likely not completely removed. A look
+into the importances of the various GLCM-based texture features for the trained Random
+Forest models is available in Appendix C.
+6.2.1
+Random Forest Model Training & Validation
+All Random Forest models are trained using the Random Forest implementation available
+in the scikit-learn [42] machine learning library in Python. The models are trained on the
+GPU Cluster at DTU Compute, which houses machines with powerful CPUs as well as
+GPUs.
+Two hyperparameters are considered during the training of the Random Forest models;
+the number of trees in the forest, n_estimators, as well as the pre-pruning parameter
+max_depth. The max_depth parameter controls the maximum depth of the individual
+decision trees in the forest. Deep decision trees can approximate complex patterns, but
+are at the same time prone to overfitting. The generalization variance is reduced as more
+trees are added to the ensemble, though with diminishing returns beyond a certain point.
+The addition of more trees to the ensemble also increases the computional load during
+training. There is thus a trade-off between the maximum tree depth and the number of
+trees in the ensemble that has to be balanced in order to maximise model performance
+on the validation set, while keeping the number of trees as low as possible. The number
+of features considered at each split is kept constant as the square root of the total number
+of features. As such, 11 randomly chosen features are considered at each split.
+The pixel-level class distribution of the training set sampled for the Random Forest algo-
+rithm is shown in figure 6.5. The class labels are assigned to the pixels in accordance
+with table 6.1.
+Machine Learning Methods for Sea Ice Mapping
+45
+==PAGE:51==
+Figure 6.5: The figure illustrates the pixel-level class distribution of the training set sam-
+pled for the Random Forest algorithm.
+The tile-level resampling and rebalancing scheme presented in section 6.1 has clearly had
+a balancing effect on the pixel-level class distribution of the training data. The Random
+Forest algorithm uses pixel-level samples during training, and thus it is possible to feed a
+completely uniform class distribution to the algorithm.
+The binary classifiers are trained using 350000 samples per class, except for the 0th
+class from which 3.5M samples are sampled from the training set. The SIC classifiers
+are trained using 700000 samples per class. The SIC regressors are trained on the same
+samples as the SIC classifiers, although the raw sea ice concentrations are used as op-
+posed to the class labels in table 6.1.
+Binary Segmentation of Sea Ice and Open Water
+As explained in chapter 5, the hierarchical algorithmic structure is tested against the flat
+algorithmic structure by evaluating each approach on its ability to accurately discriminate
+between sea ice and open water, which is measured using the F1-score. In the hierarchi-
+cal approach the binary classifiers are evaluated and compared - independently of how
+the output sea ice probability maps are thresholded - using the ROC AUC measure com-
+puted on the validation set. Afterwards, the highest scoring model is binarized using the
+threshold that maximizes the F1-score during model inference on the validation set.
+The hyperparameters considered when training the binary classifiers are: n_estimators =
+{8, 16, 32, 64} and max_depth = {4, 8, 16, 32, 64}. Figure 6.6 shows the performance of
+the binary classifiers as measured using ROC AUC as a performance metric.
+46
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:52==
+Figure 6.6: The plot shows the performances of the binary classifiers when the hyper-
+parameters n_estimators and max_depth are varied, using the ROC AUC score as a
+performance measure. The model containing 32 trees with a maximum tree depth of 8
+achieves the highest ROC AUC score.
+The best performing binary classifier - as determined using the ROC AUC score as a
+performance measure - scores 86.6% on the validation set. This binary classifier achieves
+an optimal F1-score of 87.2% on the validation set at a threshold of 55%.
+The hyperparameters considered when training the SIC classifiers are the same as those
+considered when training the binary classifiers. For the flat classification approach the
+F1-scores of the SIC classifiers are shown in figure 6.7.
+Machine Learning Methods for Sea Ice Mapping
+47
+==PAGE:53==
+Figure 6.7: The plot shows the performances of the SIC classifiers when the hyperparam-
+eters n_estimators and max_depth are varied using the F1-score score as a performance
+measure. The model containing 16 trees with a maximum tree depth of 32 achieves the
+highest F1-score.
+The SIC classifier with 16 trees and a maximum tree depth of 32 achieves an F1-score of
+86.6% on the validation set, which is the highest score of the SIC classifiers. Even though
+the margin is small, the binary classifier does outperform the SIC classifier in the task
+segmenting sea ice and open water in SAR imagery, and thus the hierarchical approach
+is deemed superior.
+Estimation of Sea Ice Concentration
+As the hierarchical approach is deemed superior to the flat approach, the ability of the
+SIC classifiers and the SIC regressors to accurately predict the sea ice concentration is
+evaluated only on the pixels from the validation set with a non-zero sea ice concentration,
+as the discrimination between sea ice and open water is handled by the binary classifier.
+The R2-scores between the sea ice concentrations assigned by DMI and the per-class
+means of the sea ice concentration estimates by the models are chosen as the measure
+of model performance. According to table 6.1, class 1 encompasses the sea ice concen-
+trations from 5% up to - but not including - 15%, and thus class 1 is assumed to represent a
+sea ice concentration of 10%. Similarly, class 2 is assumed to represent a sea ice concen-
+tration of 20%, and so on. Class 10, however, encompasses the sea ice concentrations
+from 95% −100%, and is thus assumed to represent a sea ice concentration of 97.5%.
+48
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:54==
+The R2-scores for the SIC classifiers and the SIC regressors are presented in figures 6.8
+and 6.9.
+Figure 6.8: The plot shows the performances of the SIC classifiers using the R2-score
+score as a performance measure. The model containing 32 trees with a maximum tree
+depth of 8 achieves the highest R2-score.
+Machine Learning Methods for Sea Ice Mapping
+49
+==PAGE:55==
+Figure 6.9: The plot shows the performances of the SIC regressors using the R2-score
+score as a performance measure. The model containing 32 trees with a maximum tree
+depth of 32 achieves the highest R2-score.
+The SIC classifiers outperform the SIC regressors by a large margin, and thus SIC re-
+gressors with ensembles larger than 32 trees have not been pursued. The SIC classifier
+consisting of 32 trees with a maximum tree depth of 8 achieves the highest R2-score of
+92.6% on the validation set. The performance of this specific model is illustrated in figure
+6.10, which shows the class-wise mean sea ice concentration estimates along with the re-
+spective errorbars corresponding to the standard deviations of the class-wise estimates.
+The red line indicates the perfect model performance, ie. the line on which the points
+would lie if the SIC classifier perfectly predicted the sea ice concentrations assigned by
+the DMI analysts.
+50
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:56==
+Figure 6.10: This plot visualizes the class-wise performance of the best SIC classifier.
+The red line indicates the sea ice concentrations assigned by the DMI analysts. The black
+squares indicate the class-wise mean SIC estimates, and the errorsbars correspond to
+the standard deviations of the class-wise estimates.
+It appears that the model tends to over-shoot the lower sea ice concentrations, while
+under-shooting the higher sea ice concentrations. It is especially concerning that the
+mean prediction of pixels with a sea ice concentration of 20% is higher than the mean
+prediction of pixels with a sea ice concentration of 30%. The mean standard deviation of
+the class-wise sea ice concentration estimates is 28.7%, which is unfavorable, but com-
+parable to the 20% discrepencies found between ice charts from different ice services.
+Machine Learning Methods for Sea Ice Mapping
+51
+==PAGE:57==
+6.3
+U-Net & Automatic Feature Extraction
+In this section the methodology and implementation of the deep learning approach for
+sea ice detection and sea ice concentration estimation is presented. Only one variation
+of the U-Net architecture will be employed. U-Net models trained using three different loss
+functions are evaluated and compared using a validation set. For classification the cross-
+entropy and the F1-score/Dice losses are employed, while the MSE loss is employed for
+regression. In an attempt to mitigate the imbalance of the pixel-level class distribution, a
+cost-sensitive learning technique known as median frequency balancing is implemented
+and used in the cross-entropy loss function.
+6.3.1
+Model Architecture
+A schematic of the U-Net architecture employed in this project is shown in figure 6.11.
+Figure 6.11: The schematic illustrates the variation of the U-Net architecture that is em-
+ployed in this project. The schematic is based on the schematic presented in the U-Net
+paper [32].
+This implementation of the U-Net architecture is analagous to the original architecture in
+all, but a few areas. The number of filters in each encoder and decoder block has been
+reduced as compared to the original architecture in order to reduce the overall number of
+trainable parameters in the architecture. In the first encoder block each of the two convo-
+lutional layers contain 16 filters, which is repeatedly doubled in the succeeding blocks of
+contracting path of the network, finally reaching 256 filters in the bottleneck of the architec-
+ture. The dropout regularization technique is applied between convolutional layers, and
+the dropout probability is gradually increased as the number of filters increase, such that
+the dropout probability of first two encoder blocks is 10%, 20% for the next two blocks,
+and 30% in the botteneck of the network. The gradual change in dropout probability is
+mirrored in the decoder network. Furthermore, batch normalization is applied between all
+convolutional layers. Zero-padding is added where needed in order to retain the image
+size during the convolution operations.
+52
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:58==
+The input layer is a 150x150 pixel dual-polarisation (ie. 2-channel) Sentinel-1 SAR tile.
+The final layer performs a 1x1 convolution to map each feature vector - containing 16
+features - to the desired number of classes, which is 2 for the binary classifier trained to
+discriminate sea ice from open water, and 11 for the SIC classifiers trained to assign a
+sea ice concentration to each pixel in the Sentinel-1 SAR image. For the classification
+models the output of the network is thus a 2- or 11-channel map of class scores. For the
+SIC regressor the final layer maps the 16-component feature vector of each pixel to a
+specific sea ice concentration estimate.
+6.3.2
+Loss Functions
+The choice of activation function in the last layer of the U-Net architecture in figure 6.11 is
+tightly coupled with the choice of loss function. Arguably, the most commonly used loss
+function for image segmentation problems is the pixel-wise cross-entropy loss [29]. The
+softmax function is applied to the output layer of the network to ensure that the C class
+scores sum to 1 for each pixel and can thus be intepreted as probabilities. If s is a vector
+of the class scores for a given pixel, the cross-entropy loss of that pixel is computed as,
+CE = −log
+(
+exp(st)
+∑C
+k exp(sk)
+)
+(6.1)
+In eq. 6.1, st is the class score inferred by the network of the true class. Since the cross-
+entropy loss evaluates the class scores for each pixel individually, and then averages over
+all pixels, equal learning is essentially asserted to each pixel in the image. If the training
+set suffers from class imbalance, the training will therefore be dominated by the most
+frequent class(es). Median frequency balancing (MFB) is implemented in an attempt to
+mitigate the pixel-level class imbalance in the training set. Each pixel in weighted by wk =
+median_freq/freq(k), where freq(k) is the number of pixels belonging to class k divided
+by the total number of pixels in the tiles in which class k is present, and median_freq is
+the median of these frequencies [43]. This particular cost-effective learning technique
+was employed in SegNet [44], which is an encoder-decoder segmentation architecture
+very similar to U-Net.
+Two other loss functions are considered in addition to the pixel-wise cross entropy loss.
+Firstly, the F1-score loss (or equivalently, the Dice loss), which is natural choice for this
+type of segmentation task as the F1-score (see eq. 5.11) is used as performance metric.
+As the optimizers implemented in deep learning frameworks typically minimize losses,
+the F1-score loss is given as the negated F1-score. Secondly, the MSE loss is used for
+the regression model, which is analogous to impurity criterion employed in the regression
+trees (see eq. 5.3).
+The F1-score and the MSE losses are both computed using the raw logits from the output
+layer of the U-Net architecture, and thus no activation function is applied in the last layer.
+All losses are averaged for each mini-batch during training.
+6.3.3
+U-Net Model Training & Validation
+The U-Net architecture, as presented in figure 6.11, is implemented in PyTorch [45], which
+is a deep learning framework in Python primarily developed by Facebook’s AI Research
+Lab. The cross-entropy and MSE loss functions are built into the PyTorch framework,
+whereas a PyTorch compatible F1-score loss has been implemented seperately by a third
+party [46].
+A total of 7 U-Net models are trained; 3 binary classifiers and 3 SIC classifiers using the
+Machine Learning Methods for Sea Ice Mapping
+53
+==PAGE:59==
+CE, CE-MFB (weighted CE) and F1-score loss functions, and 1 SIC regressor using the
+MSE loss function. All models are trained using the GPU Cluster at DTU Compute.
+As mentioned in section 6.1, two training sets are sampled from the entire pool of training
+data (see table 6.2); one training set for the binary classifiers and one training set for
+SIC classifiers/regressors. The pixel-level class distribution of the training set sampled
+for the SIC classifiers/regressors is illustrated in figure 6.12. Evidently, class 0 is still
+overrepresented in the training data, although to lesser extent than prior to the application
+of tile-level resampling scheme.
+Figure 6.12: The figure illustrates the pixel-level class distribution of the training set sam-
+pled for the U-Net SIC classifiers/regressor.
+The pixel-level class distribution of the training set sampled for the binary classifiers differs
+from the distribution in figure 6.12 only in that number of pixels belonging to 0th class is
+increased (by adding more class 0 tiles) in an attempt to balance the number of open
+water pixels (SIC = 0%) and the number of sea ice pixels (SIC > 0%).
+Preliminary training sessions found that a batch size of 50 tiles combined with a learning
+rate of ϵ = 1e−4 consistently yielded well-mannered training processes and decent re-
+sults. All models are trained for 200 epochs. However, when training models with large
+representational capacity, it is common that the training loss decreases steadily as the
+model trains, whereas the validation loss decreases initially, but stagnates and starts to
+rise again at some point. In order to obtain the model with the lowest validation loss it
+is necessary to return to the parameter settings at the epoch with the lowest validation
+loss. This process is called early stopping, and acts as a form of regularization [29]. The
+validation loss is thus computed after every epoch, and a copy of the model parameters
+is stored every time the validation loss improves.
+The loss curves for the 3 binary classifiers are shown in figure 6.13, the loss curves for the
+3 SIC classifiers are shown in figure 6.14, and finally, the loss curve for the SIC regressor
+is shown in figure 6.15.
+54
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:60==
+Figure 6.13: Plots of the loss curves computed on the training and validation sets for the
+binary classifiers. Top: CE loss curves. Middle: MFB-weighted CE loss curves. Bottom:
+F1-score loss curves.
+Machine Learning Methods for Sea Ice Mapping
+55
+==PAGE:61==
+Figure 6.14: Plots of the loss curves computed on the training and validation sets for the
+SIC classifiers. Top: CE loss curves. Middle: MFB-weighted CE loss curves. Bottom:
+F1-score loss curves.
+56
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:62==
+Figure 6.15: Plot of the MSE loss curve computed on the training and validation sets for
+the SIC regressor.
+All 3 binary models start to overfit the training set after a certain number of epochs. Af-
+ter this point the losses evaluated on the validation set stagnate and cease to improve.
+Similarly to the binary classifiers, the SIC classifiers overfit the training data, however, the
+SIC classifiers do so more severely. Generally, the lowest validation losses for all models
+are achieved around the 80th −120th epoch. The tendency of the models to overfit the
+training data substantiates the need for an early stopping mechanism.
+Binary Segmentation of Sea Ice and Open Water
+As was the case for the binary Random Forest classifiers, the binary U-Net classifiers are
+evaluated on their ability to accurately discriminate between sea ice and open water using
+the ROC AUC measure as a performance metric, which is independent of the threshold
+used to binarize the output probability maps. Table 6.3 summarizes the ROC AUC scores
+for the 3 binary classifiers.
+Model
+ROC AUC [%]
+Binary CE
+98.7
+Binary CE-MFB
+98.6
+Binary F1-score/Dice
+95.0
+Table 6.3: The table summarizes the ROC AUC scores achieved by the binary classifiers.
+Based on the ROC AUC measure the binary classifier trained using the pixel-wise cross-
+entropy loss function outperforms the classifiers trained of the weighted pixel-wise cross-
+entropy and the F1-score/Dice loss functions.
+The binary CE classifier achieves a ROC AUC score of 98.7% on the validation set, and
+thus greatly outperforms the corresponding highest scoring binary Random Forest clas-
+sifer, which achieved a ROC AUC score of 86.6%. The binary CE classifier has an optimal
+F1-score of 94.7% at a threshold of 36%, which is also a significant increase compared to
+the F1-score of 87.2% achieved by the binary Random Forest classifer.
+Machine Learning Methods for Sea Ice Mapping
+57
+==PAGE:63==
+The F1-scores of the SIC classifiers are summarized in table 6.4.
+Model
+F1-score [%]
+SIC CE
+92.8
+SIC CE-MFB
+93.0
+SIC F1-score/Dice
+91.4
+Table 6.4: The table summarizes the F1-scores achieved by the SIC classifiers.
+The SIC classifier trained using the weighted pixel-wise cross-entropy loss function achieves
+the highest F1-score of 93.0% on the validation set. Comparing this result to the F1-score
+of 94.7% achieved by the binary CE classifier, it is the evident that the hierachical algo-
+rithmic structure is superior to the flat structure in this case.
+Sea Ice Concentration Estimation
+Again, as the hierarchical approach is deemed superior to the flat classification approach,
+the ability of the SIC classifiers and SIC regressors to accurately predict the sea ice con-
+centration is evaluated only on the pixels from the validation set with a non-zero sea ice
+concentration, as the discrimination between sea ice from open water is handled by the
+binary CE classifier.
+The R2-scores for the three SIC classifiers and the SIC regressor are summarized in table
+6.5.
+Model
+R2-score [%]
+SIC CE
+95.5
+SIC CE-MFB
+92.7
+SIC F1-score/Dice
+92.9
+SIC MSE
+88.0
+Table 6.5: The table summarizes the R2-scores achieved by the three SIC classifiers and
+the SIC regressor.
+The SIC CE classifier achieves the highest R2-score of 95.5%. The performance of the
+SIC CE classifier is illustrated in figure 6.16, which shows the class-wise mean sea ice
+concentration estimates along with the respective errorbars corresponding to the standard
+deviations of the class-wise estimates.
+58
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:64==
+Figure 6.16: This plot visualizes the class-wise performance of the SIC CE classifier. The
+red line indicates the sea ice concentrations assigned by the DMI analysts. The black
+squares indicate the class-wise mean SIC estimates, and the errorsbars correspond to
+the standard deviations of the class-wise estimates.
+The mean standard deviation of the class-wise sea ice concentration estimates is 23.2%,
+which is a notable improvement over the mean standard deviation of 28.7% achieved by
+the Random Forest algorithm. Similarly to the Random Forest algorithm, the SIC CE
+classifier tends to over-estimate the lower sea ice concentrations and under-estimate the
+higher sea ice concentrations.
+The use of MFB-based class weights does not seem to have a consistently positive or
+negative impact on model performance; in the case of the segmentation of sea ice and
+open water, the binary CE-MFB classifier performs marginally poorer than the un-weighted
+binary CE classifier, while the SIC CE-MFB classifier performs marginally better than the
+un-weighted SIC CE classifier. In the case of sea ice concentration estimation the SIC
+CE-MFB classifier performs notably worse than the SIC CE classifier based on the R2-
+measure.
+Machine Learning Methods for Sea Ice Mapping
+59
+==PAGE:65==
+7
+Results & Comparisons
+In this chapter the best performing models determined in the previous chapter are tested
+quantitatively on dedicated testing sets and qualitatively on 5 selected Sentinel-1 SAR
+scenes. Both the testing sets and the 5 Sentinel-1 SAR scenes have not previously been
+seen by the models. In both the traditional machine learning approach and the deep
+learning approach a hierarchical algorithmic structure was found to be superior to a flat
+algorithmic structure - although only by a small margin in the traditional machine learning
+approach. In the hierarchical algorithmic structure the predictions from the binary clas-
+sifiers and the SIC classifiers are combined in the following way. Firstly, the probability
+map, which is the output from the binary classifier, is binarized using the threshold that
+was found to maximize the F1-score in order to obtain a segmentation map of sea ice
+and open water. Subsequently, the pixels that have been classified as sea ice pixels are
+assigned a non-zero sea ice concentration by the SIC classifier.
+In section 6.2 it was found that a hierarchical classification approach comprised of a binary
+classifier consisting of 32 trees with a maximum depth of 8 and a SIC classifier consisting
+of 32 trees with a maximum depth of 8 scored highest on the performance metrics eval-
+uated on the validation set. In section 6.3 it was found that a hierarchical classification
+approach comprised of a binary classifier and a SIC classifier, both trained using the pixel-
+wise cross-entropy loss function, scored highest on the performance metrics evaluated
+on the validation set. These scores are summarised in table 7.1.
+Algorithm
+F1-score [%]
+R2-score [%]
+Random Forest
+87.2
+92.6
+U-Net
+94.7
+95.5
+Table 7.1: The table contains the F1-score and R2-score achieved by the Random Forest
+and U-Net algorithms evaluated on the validation set.
+7.1
+Algorithm Performance Evaluation on the Testing Sets
+The final performance evaluation of the algorithms is carried out on dedicated testing sets,
+which are sampled using the tile-level resampling scheme presented in section 6.1. Table
+7.2 summarises the F1-scores and the R2-scores achieved by Random Forest and U-Net
+algorithms when evaluated on the dedicated testing sets.
+Algorithm
+F1-score [%]
+R2-score [%]
+Random Forest
+88.2
+87.6
+U-Net
+95.4
+96.3
+Table 7.2: The table summarises the F1-scores and R2-scores achieved by the Random
+Forest and U-Net algorithms during inference on the dedicated testing sets.
+In figures 7.1 and 7.2 the per-class mean sea ice concentration estimates along with the
+respective errorbars corresponding to the standard deviations of the class-wise estimates
+of the algorithms are presented. The mean standard deviation of the class-wise estimates
+predicted by the Random Forest algorithm is 30.1%, and 21.6% for the U-Net algorithm.
+60
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:66==
+Figure 7.1: This plot visualizes the class-wise performance of the Random Forest al-
+gorithm on the dedicated testing set. The red line indicates the sea ice concentrations
+assigned by the DMI analysts. The black squares indicate the per-class mean SIC esti-
+mation, and the errorsbars correspond to the standard deviations of the class-wise esti-
+mates.
+Machine Learning Methods for Sea Ice Mapping
+61
+==PAGE:67==
+Figure 7.2: This plot visualizes the class-wise performance of the U-Net algorithm on the
+dedicated testing set. The red line indicates the sea ice concentrations assigned by the
+DMI analysts. The black squarer indicate the per-class mean SIC estimation, and the
+errorsbars correspond to the standard deviations of the class-wise estimates.
+The U-Net algorithm performs slightly better on the dedicated testing set as compared to
+the validation set on both performance measures. The Random Forest algorithm achieves
+a slightly higher F1-score on the testing set than on the validation set, however, the R2-
+score is considerably lower on the testing set compared to the validation set. This dis-
+crepency between the measures achieved on the validation set and on the testing set
+alludes to the possibility that the validation and/or testing sets are not entirely represen-
+tative samples of the ASIP dataset. The generalizability of the Random Forest algorithm
+might have been improved by increasing the sizes of the validation and testing sets, or by
+taking other measures to ensure that the samples are more representative of the under-
+lying dataset.
+62
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:68==
+7.2
+Qualitative Assessment of the Algorithm Performances
+The performances of the Random Forest and U-Net algorithms are qualitatively assessed
+through the visual inspection of 5 selected Sentinel-1 SAR scenes from the testing set.
+The HH and HV channels as well as the corresponding DMI-produced ice charts of the
+selected scenes are shown in figure 7.3. These 5 scenes were specifically chosen to
+expose the algorithms to different types of SAR scenes, and to showcase situations in
+which the algorithms perform well or poorly, and situations in which where one algorithm
+outperforms the other.
+Scene 1 was chosen primarily for its large SIC = 60% polygon, which appears to be dom-
+inated by relatively young sea ice with a particularly low SAR backscatter, which causes
+the polygon to appear darker than the surrounding water. In scene 2 the delineation be-
+tween sea ice and open water is particularly indistinct and unclear in the HH channel.
+Scenes 3 and 4 both have a high level of detail along the sea ice edge, which it is im-
+portant that the algorithms are able to map accurately. Lastly, the HV channel in scene
+5 is subject to very pronounced and sharp changes in the backscatter intensities at two
+interswath boundaries, which might cause problems for the algorithms.
+Machine Learning Methods for Sea Ice Mapping
+63
+==PAGE:69==
+Figure 7.3: Presentation of the 5 Sentinel-1 SAR scenes, which have been selected in or-
+der to qualitatively assess the performances of the Random Forest and U-Net algorithms.
+The two first columns show the HH and HV channels, while the third column shows the
+corresponding DMI-produced ice charts.
+64
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:70==
+7.2.1
+Qualitative Assessment of the Binary Segmentation of Sea Ice and
+Open Water
+The ability of the Random Forest and U-Net algorithms to accurately segment and de-
+lineate sea ice and open water is qualitatively assessed for 5 scenes in figure 7.4. The
+figure shows the Sentinel-1 HH channel, the binarized DMI ice chart and the segmenta-
+tion maps predicted by the Random Forest and the U-Net algorithms, respectively. The
+raw probability maps are available in Appendix D.
+Figure 7.4: The figure shows the Sentinel-1 HH channels, the binarized DMI ice charts
+and the segmentation maps predicted by the Random Forest and the U-Net algorithms,
+respectively, for the 5 carefully selected Sentinel-1 SAR scenes. The yellow color de-
+picts the pixels assigned a sea ice probability higher than the pre-determined thresholds,
+while the purple color depicts the pixels assigned a sea ice probability lower than those
+thresholds.
+Machine Learning Methods for Sea Ice Mapping
+65
+==PAGE:71==
+The F1-scores achieved on each scene by the Random Forest and U-Net algorithms,
+respectively, are found in table 7.3.
+F1-score [%]
+Scene
+Random Forest
+U-Net
+1
+92.4
+95.3
+2
+80.8
+89.8
+3
+95.2
+96.6
+4
+72.5
+94.4
+5
+94.7
+96.3
+Table 7.3: The table summarises the F1-scores achieved on the 5 test scenes by the
+Random Forest and U-Net algorithms.
+The U-Net algorithm consistently outperforms the Random Forest algorithm based on the
+F1-score as a performance measure on all 5 scenes. The most significant discrepancy in
+the achieved F1-scores occurs in the segmentation of scene 4. Here, the Random Forest
+algorithm is severely affected by the radiometric noise along the interswath boundary that
+is present as a vertical line down the middle of the scene. However, the Random Forest
+algorithm is not affected by the two prominent interswath boundaries present in scene 5,
+which leads to the possibility that the large number of false positives in scene 4 are not only
+a result of the Sentinel-1 EW mode TOPSAR-induced noise, but might be a combination
+of the EW mode TOPSAR-induced noise as well as other factors, such as certain weather
+conditions.
+Another quite notable difference in performance occurs in scene 2. Here, the Random
+Forest algorithm predicts two clusters of false positives in the upper part of the scene - both
+of which happen to coincide with the interswath boundaries. The U-Net algorithm seems
+to also be affected by the presence of the interswath noise in the rightmost part of the
+scene, as the sea ice edge here deviates significantly from the DMI-produced ice chart.
+Furthermore, scene 2 is the only scene in which the U-Net algorithm exhibits notable
+difficulties with false negatives. Of course, due to the manner in which the ice analysts
+draw the ice charts, it is a possibility that smaller regions within the sea ice polygons might
+actually be ice free. Though, this does not seem to be the case in the U-Net segmentation
+of scene 2.
+While the U-Net algorithm performs well in the aforementioned scene 1 polygon that con-
+tains low-backscatter sea ice, the Random Forest algorithm struggles with false negatives.
+Generally, it is notable that the sea ice edges in the segmentation maps produced by the
+U-Net algorithm appear fuzzy or smudged, and lacks the level of detail present in the ice
+charts and - in some cases - also present in the segmentation maps produced by the
+Random Forest algorithm. The low level of ice edge detail in the U-Net predictions is
+especially noticeable in scenes 1, 3 and 4. This concern is further addressed in chapter
+8.
+7.2.2
+Qualitative Assessment of the Sea Ice Concentration Estimation
+The ability of the Random Forest and U-Net algorithms to accurately assign specific non-
+zero sea ice concentrations is qualitatively assesed for the 5 SAR scenes in figure 7.5. The
+figure shows the Sentinel-1 HH channel, the DMI ice chart and the sea ice concentration
+maps predicted by the Random Forest and the U-Net algorithms, respectively.
+66
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:72==
+Figure 7.5: The figure shows the Sentinel-1 HH channels, the DMI ice charts and the
+sea ice concentration maps predicted by the Random Forest and the U-Net algorithms,
+respectively, for 5 carefully selected Sentinel-1 SAR scenes.
+Machine Learning Methods for Sea Ice Mapping
+67
+==PAGE:73==
+Similarly to the binary segmentation maps, the sea ice concentration maps generated by
+the Random Forest algorithm appear to generally exhibit a finer level of detail than those
+produced by the U-Net algorithm. The U-Net algorithm is, however, more succesful in the
+imitation of the DMI-produced ice charts in which the ice analysts draw relatively large
+homogenouous polygons. The Random Forest algorithm, on the other hand, responds
+strongly to small-scale inhomogeneities in the sea ice. In this way, it appears as though
+the U-Net algorithm recognizes a slightly larger field of view and adapts the prediction to
+encompass the average sea ice concentration within a certain area - that is, more similarly
+to how the ice analyst approaches the task - whereas the Random Forest algorithm is
+fixated on the small-scale sea ice concentration variations.
+In scene 1 neither the Random Forest nor the U-Net algorithm is able to accurately predict
+the polygon containing the low-backscatter sea ice. In the remaining polygons the U-Net
+algorithm largely performs well. When comparing the sea ice concentration map predicted
+by the Random Forest algorithm to the HH channel of the Sentinel-1 SAR image, it is clear
+that the Random Forest algorithm is very sensitive to any inhomogeneities in the sea ice,
+and while the prediction might not visually resemble the DMI-produced ice chart, it is still
+possible that the polygon-wise mean sea ice concentration estimates roughly match the
+sea ice concentrations assigned to the polygons in the DMI ice chart.
+In much of scene 2 the Random Forest algorithm severely over-estimates the sea ice
+concentration. The U-Net algorithm also struggles with this particular scene, although to
+a lesser extent than the Random Forest algorithm.
+In scenes 3 and 5 both algorithms perform reasonably well, although it is notable how the
+lower concentration polygons situated along the ice edge in both scenes are either over-
+estimated or not detected at all by the Random Forest algorithm, while U-Net algorithm is
+relatively succesful in the estimation of the lower concentrations - this is also exemplified
+in scene 4. This observation is largely in accordance with figure 7.1, in which it is quanti-
+tatively shown that the Random Forest algorithm tends to over-estimate the lower sea ice
+concentrations by a relatively large margin.
+68
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:74==
+8
+A Proposed Methodology For Improving
+the Sea Ice Edge Accuracy of U-Net
+This chapter outlines a proposed methodology that aims to increase the accuracy of the
+U-Net algorithm along the boundary between sea ice and open water. A significant pro-
+portion of the users of operationally provided sea ice maps are primarily interested in
+avoiding sea ice all together - only a minority uses sea ice concentration information to
+determine potentially passable regions of the ice. It is therefore of paramount importance
+to map the sea ice edge accurately and to increase the level of detail along the sea ice
+edge as much as possible.
+The U-Net algorithm has a strong tendency to assign either a very high probabilty of a
+pixel belonging to the sea ice class or a very low probability of belonging to the sea ice
+class in most areas except in the zones adjacent to the sea ice edge. This tendency is
+evident in the probability map of scene 4, which is shown in figure 8.1.
+Figure 8.1: The figure shows the Sentinel-1 HH channel, the binarized DMI ice chart and
+the sea ice probability map predicted by the U-Net algorithm of scene 4.
+In cases, such as the one presented in figure 8.1, it is clear that the probability threshold
+that maximizes the overall F1-score of the entire SAR scene is not necessarily equal to
+the probability threshold that maximizes the F1-score along the sea ice edge. Under
+the assumption that this is a general tendency, the sea ice edges in 5 scenes from the
+validation set are analyzed to derive the optimal probability threshold along the sea ice
+edge. An illustration the proposed methodology is presented in figure 8.2.
+Machine Learning Methods for Sea Ice Mapping
+69
+==PAGE:75==
+Figure 8.2: The figure illustrates the methodology to extract the pixels of what corresponds
+to 10 km on either side of the sea ice edge in order to determine the probability threshold
+that maximizes the F1-score in regions adjacent to a sea ice edge.
+First, the U-Net algorithm generates a probability map of the particular Sentinel-1 SAR
+scene. The probability map is then convolved with a gaussian filter in order to smooth
+the sea ice edge, which is later derived using a primitive edge detector. Prior to the
+derivation of the sea ice edge, the smoothed probability map is thresholded using the
+optimal threshold determined in section 6.3. The edge detector is then used to detect
+edges in the binarized segmentation map. The edge detector creates a mask of the sea
+ice edge, which is then used to extract what corresponds to 10 km on either side of the
+detected sea ice edge from the raw probability map.
+Employing this methodology, the sea ice edge adjacent pixels in the U-Net generated
+probability maps based on 5 Sentinel-1 SAR scenes from the validation set are extracted.
+The threshold that maximizes the F1-score of the ice edge adjacent pixels was found to
+be 56%, which is a substantial increase from the overall optimal threshold of 36%.
+The same edge detection scheme is applied to locate the sea ice edges (and 10 km on
+either side of the detected edges) in the probability maps of the 5 test scenes. The sea
+70
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:76==
+ice edge adjacent pixels are then binarized using a threshold of 56%, while the rest of the
+scene binarized using a threshold of 36%. A visual comparison of the U-Net segmentation
+maps and the edge improved segmentation maps is available in figure 8.3.
+Figure 8.3: The figure shows the Sentinel-1 HH channel, the binarized DMI ice chart and
+the segmentation maps predicted by the U-Net algorithm as well as the edge improved
+segmentation maps.
+Machine Learning Methods for Sea Ice Mapping
+71
+==PAGE:77==
+The F1-scores of the edge-improved U-Net predictions are presented in table 8.1.
+F1-score [%]
+Scene
+U-Net
+U-Net + Edge Improvement
+1
+95.3
+96.1
+2
+89.9
+88.5
+3
+96.6
+97.4
+4
+94.4
+96.8
+5
+96.3
+96.4
+Table 8.1: The table compares the F1-scores achieved by the U-Net algorithm on the 5
+Sentinel-1 SAR scenes to the F1-scores of the edge improved U-Net predictions.
+The proposed methodology increases the F1-score of the U-Net predictions in 4 out of the
+5 test scenes. The improved level of detail along the sea ice edge is especially evident in
+scenes 1, 3 and 4. Of course, the merit of this methodology is highly dependent on the
+overall accuracy of the U-Net algorithm. If the U-Net algorithm predicts a cluster of false
+negatives within the sea ice, as is the case in scene 2, then this cluster is detected as
+an ice edge and the cluster is potentially enlarged, which worsens the prediction. On the
+contrary, if the U-Net algorithm predicts a cluster of false positives, which is then detected
+as an ice edge, the number of false positives is potentially reduced - this occurs in scene
+4.
+72
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:78==
+9
+Various Considerations & Future Work
+This chapter outlines several previously not mentioned considerations about the imple-
+mented algorithms as well as topics or ideas for further work within the field of automatic
+sea ice detection and concentration estimation.
+About the Sentinel-1 EW Mode & TOPSAR Processing
+The two primary issues that arise from the use of the EW mode of the Sentinel-1 satel-
+lites are the sharp changes in backscatter intensity at the interswath boundaries as well
+as the progressive decrease in backscatter intensity from near range to far range due to
+incidence angle variation. Both of these issues complicate the automatic interpretation
+of the SAR images - especially if the backscatter intensity variations are larger than the
+inter-class brightness differences. There are, however, studies that aim to develop pre-
+processing schemes that reduce the severity of these issues. One such study reports
+being able to drastically reduce the severity of the backscatter intensity step at the inter-
+swath boundaries in the HV-channel by altering and improving the ESA-provided noise
+vectors that are available with Sentinel-1 products [15]. Implementing this technique, or
+a similar technique, as a pre-processing step could potentially increase the accuracy of
+the algorithms.
+The backscatter intensity variation related to the varying incidence angle in the range
+direction was incorporated into the Random Forest algorithm by including the incidence
+angle as a feature. The incidence angle was excluded from the U-Net algorithm, and due
+to the fact that the U-Net algorithm was trained on 150x150 pixel tiles at a pixel spacing of
+80 m, in which the incidence angle related backscatter variation is minimal, it is unlikely
+that the algorithm was able to learn and model this variation. It would thus be interesting
+to test whether or not including the incidence angle as an input to the U-Net algorithm
+would increase the achieved performance.
+About Class Balancing
+The class distribution of the ASIP dataset was shown to be severely skewed (see table
+6.2). The imbalance of the tile-level class distribution of the ASIP dataset is clearly illus-
+trated by the fact that the most frequent class in the training split of the dataset contains
+over 100000 samples, while the most infrequent class in the training split contains roughly
+1600 samples. The severe class imbalance complicates the task of sampling a training
+set, as it is preferable to use as much of the available data as possible, while still feeding
+a balanced training set to the algorithm. Of course, this issue primilarly applies to the U-
+Net algorithm, as deep learning algorithms are much less restricted in terms of large data
+amounts, and also requires a larger amount of data to converge on a decent solution.
+The issue of class imbalance resulted in the discardment of a large amount of valuable
+information, as relying entirely on over-sampling the most infrequent classes likely would
+have resulted in overfitting the infrequent classes. In future studies a more sophisticated
+re-balancing approach that retains more of the available information could be employed.
+A possible solution is the combination of over-sampling and data augmentation. In deep
+learning algorithms, data augmentation is often applied in order to artificially inflate the
+training set. Data augmentation techniques for image datasets include geometric trans-
+formations, such as vertical or horizontal flipping, rotation, cropping and translation, etc. If
+geometric transformations were to be applied to the samples belonging to the infrequent
+classes as they are over-sampled, the risk of overfitting the infrequent classes is reduced,
+thus facilitating the use of a larger amount of the available data.
+Machine Learning Methods for Sea Ice Mapping
+73
+==PAGE:79==
+Furthermore, increasing the total number of samples available for the U-Net algorithm
+to learn from could potentially reduce the overall tendency to overfit that was observed
+during training.
+About the GLCM-based texture features
+It is uncertain whether histogram equalization is the optimal method of quantizing the
+Sentinel-1 SAR image data prior to the derivation of the GLCM-based texture features.
+In the litterature, histogram equalization and uniform quantization seem to be the most
+regularly applied quantization methods. Whereas histogram equalization ensures a com-
+pletely uniform grey level distribution, uniform quantization linearly scales the data into
+the desired range without considering the distribution of the grey levels. One study as-
+sumes that uniform quantization is superior to histogram equalization for SAR-based tex-
+ture analysis of sea ice, but does not provide any quantitative evidence [40]. Another
+study found that applying uniform quantization prior to the derivation of the GLCM-based
+features produced a more discriminative set of texture features as compared to using his-
+togram equalization as the quantization technique [18]. It would therefore be interesting
+to try uniform quantization and compare the results with those achieved using histogram
+equalization.
+Another aspect worth considering is how the quantization technique is applied. In this
+project histogram equalization was applied over the entire training set. The rationale
+behind the decision to apply the quantization technique over the entire training set as
+opposed applying it once per scene or tile was to ensure that classes looked roughly the
+same in all scenes/tiles. A consequence of this approach is that tiles, in certain cases,
+will result in very sparse co-occurrence matrices. As an example, a tile containing only
+open water pixels quantized to 32 levels potentially results in very sparse co-occurence
+matrices, as the tile only contains low intensity grey levels. It is uncertain whether it is
+possible to find an approach that ensures that the individual classes look similar in all
+scenes/tiles, while still avoiding sparse co-occurence matrices.
+A hyperparameter in the derivation of the co-occurence matrices is the size of the window
+containing the pixels on which to base the co-occurence matrices. In this project the
+spatial size of the window was kept roughly the same across the spatial scales in gaussian
+pyramid representation of the data. This is contradictory to the U-Net architecture, in
+which the receptive field, ie. the field of view, gets larger and larger as the data propagates
+through the encoder network. The traditional machine learning approach would therefore
+have been more analogues to the deep learning approach if the pixel-wise window size
+was not adapted, but was kept the same across spatial scales.
+The use of 13 GLCM-based texture features across 4 different spatial scales derived for
+2 Sentinel-1 SAR channels resulted in a very high-dimensional feature space with a large
+amount of feature redundancy. The high dimensionality of the feature space might have
+had an inhibiting effect on the learning of the Random Forest algorithm [39]. Several
+studies advocate the use of a smaller subset of the GLCM-based features in order to
+reduce the redundancy and the dimensionality of the feature space, although there is
+disagreement as to which features to retain, eg. [18] and [24]. A reduction of the feature
+space dimensionality would also increase the speed at which new predictions can be
+obtained as fewer features require computation prior to the prediction. It would therefore
+be interesting to initiate a more exhaustive study of the relative importance of the features.
+Traditional Machine Learning vs. Deep Learning
+Algorithm performance is not the only measure by which the traditional machine learning
+and the deep learning approaches should be compared - there are other important aspects
+to consider.
+74
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:80==
+Generally, the traditional machine learning approach is more difficult to implement due
+to the rather complex and cumbersome nature of manual feature engineering, which in
+most cases requires domain-specific expertise. Additionally, apart from the hyperparam-
+eters intrinsic to the Random Forest algorithm, there are many parameters to choose and
+adjust in the derivation of the GLCM-based texture features, which ultimately makes it
+more difficult to reproduce the results obtained using the traditional machine learning ap-
+proach. Conversely, the advent of high-level object-oriented deep learning frameworks,
+like Pytorch, has significantly eased the workflow of deep learning model development
+and model testing, making it straightforward to implement and apply deep learning algo-
+rithms. Maybe even more importantly, the enthusiasm around deep learning in recent
+years has born with it a vast body of knowledge in the form of research papers, books
+and online resources, which are readily available.
+As deep learning algorithms do not require manual feature engineering, they are less
+restricted by requirements of domain-specific expertise, which facilitates the application
+of succesful deep learning architectures in several, seemingly unrelated fields of study.
+Naturally, a case in point is the U-Net architecture, which was developed for biomedical
+image segmentation, but has been applied in many different fields - now including SAR-
+based sea ice detection and concentration estimation. Of course, the complexity of deep
+learning models, as well as the disentanglement of deep learning algorithms from the
+domain-specific expertise, reduce the intepretability of the trained models, whereas one
+of the advantages of tree-based models is that they are very easily interpreted.
+A disadvantage of deep learning models is that they generally start off in poor initial state
+and the process of converging to an optimum and achieving a performance that matches
+or exceeds that of the traditional machine learning models requires a large amount of train-
+ing data. For a task with a very limited number of training samples, a traditional machine
+learning approach would therefore often be preferred over a deep learning approach -
+unless sophisticated data augmentation techniques were feasible to artificially inflate the
+training set.
+Inference time is also very important if the implemented Random Forest and U-Net algo-
+rithms were to be put in an operational context. Say, a new 400x400 km Sentinel-1 SAR
+image is acquired; using the DTU Compute GPU Cluster system, the U-Net algorithm is
+able to process the image and make a prediction in a matter of minutes, whereas the Ran-
+dom Forest algorithm requires the computation of the 13 GLCM-based texture features
+for each polarisation channel and in 4 different spatial scales - a process which can take
+several hours. Thus, in terms of inference time, the deep learning approach is superior,
+as it is able to deliver a new product in near-real time.
+Also, it would be interesting to study the features learned by the U-Net algorithm and
+compare them to the GLCM-based texture features.
+Lastly, it is possible that the addition of more trees to the Random Forest models could
+increase the model performances at maximum tree depths larger than 8, but the 10+ hour
+training time of the complex Random Forest models makes the process of pedantically
+thorough hyperparameter tuning impractical.
+Data Fusion of Sentinel-1 SAR Imagery and Passive Microwave Radiometry Data
+Perhaps the most promising future work is the development of machine learning/deep
+learning algorithms that utilize data fusion between SAR data and other types of remote
+sensing data. The most pressing issue regarding SAR-based sea ice classification seems
+to be the sea ice/open water ambigiuties that occur in SAR images in wind-roughened
+seas which can appear as bright as sea ice, and - to a lesser extent - areas with very
+Machine Learning Methods for Sea Ice Mapping
+75
+==PAGE:81==
+smooth sea ice surfaces which can appear as dark as open water. As mentioned in the
+introduction of the thesis, many remote sensing techniques can be applied for sea ice
+mapping. A number of these techniques can aid in the resolvement of the SAR ambigui-
+ties.
+Passive microwave radiometry (PMR) systems share many of the same advantages as
+SAR systems, such as cloud penetration capabilities and the independence from solar
+illumination. Sea ice and open water is generally clearly distinguished in PMR data, but at
+a much coarser resolution. Including PMR data as input to the algorithms might result in a
+more robust sea ice classification scheme, which exploits the complementary capabilities
+of the two synergetic data types; that is, the high spatial resolution of the SAR data and
+the reliable sea ice/open water discrimination of the PMR data.
+Data fusion efforts are already being pursued at DMI (the ASIP project), and the Norwe-
+gian Meteorlogical Institute recently initiated a similar R&D endeavour [47]. The poten-
+tial of data fusion with PMR data is further cemented by the initiation of the Copernicus
+Imaging Microwave Radiometer (CIMR) Mission - set to launch in the near future - which
+relieves the uncertainty of continuity of the PMR data flow.
+76
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:82==
+10
+Conclusions
+This thesis presented a comprehensive study of the detection and concentration estima-
+tion of sea ice along the coasts of Greenland using supervised learning algorithms based
+solely on SAR imagery from the ESA-led Sentinel-1 mission and digitized sea ice charts.
+The employed dataset, comprising Sentinel-1 SAR scenes and corresponding ice charts
+from the DMI Ice Service, was produced as part of the ASIP Project. It was found that
+SAR-based sea ice mapping requires the encoding of spatial information into contextual
+features, as classification schemes in the litterature based entirely on polarimetric SAR
+features report only modest results. Two overarching methodologies that accomodates
+this requirement were studied, implemented and compared.
+The first methodology was based on a traditional machine learning approach, which in-
+volved manual feature engineering. The spatial relationships between neighbouring SAR
+pixels were encoded into texture features based on grey-level co-occurence matrices. In
+order to capture spatial information present at different spatial scales, the texture features
+were derived from a scale-space representation of the SAR imagery, which was obtained
+using gaussian pyramid decomposition. Finally, the resulting high-dimensional feature
+set was fed to a Random Forest algorithm.
+The second methodology was based on deep learning, which bypasses the need for
+manually engineered contextual features due to the ability of deep learning algorithms
+to automatically extract discriminative features. Specifically, the encoder-decoder CNN
+architecture, U-Net, was implemented and applied to the task of SAR-based sea ice map-
+ping.
+A focal point of the thesis was an examination of whether any improvements in algorithm
+performance could be achieved by separating task of sea ice detection and the task of
+sea ice concentration estimation into two steps, thus creating a hierarchical algorithmic
+structure, in which the first step of the algorithm was to segment sea ice and open wa-
+ter, and the second step of the algorithm was to assign a non-zero concentration to the
+detected sea ice areas. As these tasks are inherently different, they were evaluated us-
+ing different performance measures. The ability of the algorithms to accurately segment
+sea ice and open water was evaluated using the F1-score. The ability of the algorithms
+to accurately predict sea ice concentrations was evaluated using the R2-score between
+the discrete values of the sea ice concentration classes and the means of the class-wise
+estimates made by the algorithms.
+For the task of segmenting sea ice and open water, the Random Forest algorithm achieved
+an F1-score of 87.2% utilizing a hierarchical classification structure, as opposed to 86.6%
+using a flat classification structure when evaluated on a validation set. In comparison,
+the U-Net algorithm achieved an F1-score of 94.7% utilizing a hierarchical classification
+structure, as opposed to 93.0% using a flat classification structure. Thus, the hierarchical
+classification structure was found to be superior to the flat classification structure in both
+the traditional machine learning approach and the deep learning approach.
+Evaluated on dedicated testing sets, the Random Forest algorithm achieved an F1-score
+of 88.2% in the task of segmenting sea ice and open water, while the U-Net algorithm
+achieved an F1-score of 95.4%. For the task of sea ice concentration estimation, the Ran-
+dom Forest algorithm achieved an R2-score of 87.6%, while the U-Net algorithm achieved
+an R2-score of 96.3%.
+Machine Learning Methods for Sea Ice Mapping
+77
+==PAGE:83==
+A qualitative assessment of the performances of the algorithms revealed that the sea ice
+concentration maps generated by the Random Forest algorithm exhibited a finer level of
+detail than those generated by the U-Net algorithm, and that the Random Forest algorithm
+was sensitive to small-scale inhomogeneities in the sea ice. The Random Forest algorithm
+was, however, also sensitive to noise in the SAR imagery that results from the Sentinel-1
+acquisition mode. The U-Net algorithm, on the other hand, was not overly responsive
+to image noise. The U-Net algorithm was relatively succesful in imitation of how the ice
+analysts draw the ice charts - that is, as larger homogeneous polygons.
+A qualitative assessment of the binary sea ice/open water segmentation capabilities of
+the algorithms revealed that the U-Net algorithm - while outperforming the Random Forest
+algorithm in the overall accuracy - did not exhibit a satisfactory level of detail along the
+boundaries between the sea ice and open water. A methodology was therefore proposed
+in order to improve the sea ice edge accuracy of the segmentation maps generated by
+the U-Net algorithm. The proposed methodology improved the overall F1-scores in 4 out
+of 5 selected Sentinel-1 SAR scenes.
+78
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:84==
+Bibliography
+[1]
+Economy and Industry in Greenland. 2013. URL: https://naalakkersuisut.gl/en/
+About - government - of - greenland / About - Greenland / Economy - and - Industry - in -
+Greenland.
+[2]
+(Danish) Bedre overvågning af havis skal fremme Grønlands økonomi. 2017. URL:
+https://www.space.dtu.dk/nyheder/2017/12/overvaagningstjeneste-til-havis-skal-
+fremme-groenlands-handel.
+[3]
+Ola M. Johanneson et al. Remote Sensing of Sea Ice in the Northern Sea Route.
+Springer International Publishing, 2007.
+[4]
+The ASIP Project. 2020. URL: https://asip.dk/about-1.html.
+[5]
+Visible Remote Sensing. 2020. URL: https://nsidc.org/cryosphere/seaice/study/
+visible_remote_sensing.html.
+[6]
+Infrared Remote Sensing. 2020. URL: https://nsidc.org/cryosphere/seaice/study/
+infrared_remote_sensing.html.
+[7]
+Wolfgang Dierking. “Sea Ice Monitoring by Synthetic Aperture Radar”. In: Oceanog-
+raphy 26.2 (2013), pp. 100–111.
+[8]
+Monthly Sea Ice Extent. 2020. URL: https://nsidc.org/data/seaice_index.
+[9]
+Lars-Anders Breivik et al. “Remote Sensing of Sea Ice”. In: OceanObs’09: Sus-
+tained Ocean Observations and Information for Society (2009).
+[10]
+SIGRID-3: a vector archive format for sea ice charts. 2004. URL: https://library.
+wmo.int/index.php?lvl=notice_display&id=11295#.XvpR42gzZyw.
+[11]
+DMI-produced Ice Charts. 2020. URL: http://ocean.dmi.dk/arctic/icecharts_gl_
+northcentraleast.uk.php.
+[12]
+Ola M. Johanneson et al. Sea Ice in the Arctic. Springer International Publishing,
+2019.
+[13]
+ESA: Sentinel-1 Mission Description. 2020. URL: https://sentinel.esa.int/web/
+sentinel/missions/sentinel-1.
+[14]
+Dan-Bee Hong & Chan-Su Yang. “Automatic discrimination approach of sea ice in
+the Arctic Ocean using Sentinel-1 Extra Wide Swath dual-polarized SAR data”. In:
+International Journal of Remote Sensing 39.13 (2018), pp. 4469–4483.
+[15]
+Jeong-Won Park et al. “Efficient Thermal Noise Removal for Sentinel-1 TOPSAR
+Cross-Polarization Channel”. In: IEEE Transactions on Geoscience and Remote
+Sensing 56.3 (2018), pp. 1555–1565.
+[16]
+CMEMS: Quality Information Document (Appendix VI - Ice Chart Uncertainty Es-
+timates). 2020. URL: https://resources.marine.copernicus.eu/documents/QUID/
+CMEMS-SI-QUID-011-001to007-009to014.pdf.
+[17]
+Rasmus T. Tonboe et al. “The EUMETSAT sea ice concentration climate data record”.
+In: The Cryosphere 10 (2016), pp. 2275–2290.
+[18]
+David A. Clausi. “Comparison and fusion of co-occurrence, Gabor and MRF tex-
+ture features for classification of SAR sea-ice imagery”. In: Atmosphere-Ocean 39.3
+(2001), pp. 183–194.
+[19]
+Ane S. Fors et al. “Late-summer sea ice segmentation with multi-polarisation SAR
+features in C and Xband”. In: Cryosphere 10.1 (2016), pp. 401–415.
+[20]
+Leo Breiman. “Random Forests”. In: Machine Learning 45 (2001), pp. 5–32.
+[21]
+Trevor Hastie et al. The Elements of Statistical Learning. Springer International Pub-
+lishing, 2009.
+Machine Learning Methods for Sea Ice Mapping
+79
+==PAGE:85==
+[22]
+Gille Louppe. “Understanding Random Forests: From Theory to Practice”. PhD the-
+sis. University of Liége, 2015.
+[23]
+Leo Breiman et. al. Classification And Regression Trees. Taylor Francis Group,
+LLC, 1984.
+[24]
+Jeong-Won Park et al. “Classification of Sea Ice Types in Sentinel-1 SAR images”.
+In: The Cryosphere Discuss (2019).
+[25]
+Robert Haralick. “Textural Features for Image Classification”. In: IEEE Transactions
+on Systems, Man, and Cybernetics 3 (1973), pp. 610–621.
+[26]
+Bino Sebastian V et al. “Grey Level Co-occurence Matrices: Generalization and
+Some New Features”. In: International Journal of Computer Science, Engineering
+and Information Technology 2 (2012).
+[27]
+Fernando Roberti de Siqueira et al. “Multi-scale gray level co-occurrence matrices
+for texture description”. In: Neurocomputing 120 (2013), pp. 336–345.
+[28]
+Gaussian Pyramid Decomposition Figure. 2020. URL: https://en.wikipedia.org/
+wiki/Pyramid_(image_processing).
+[29]
+Ian Goodfellow et al. Deep Learning. MIT Press, 2017.
+[30]
+Jonas Teuwenab & Nikita Moriakova. Handbook of Medical Image Computing and
+Computer Assisted Intervention. Academic Press, 2020.
+[31]
+Swarnendu Ghosh et al. “Understanding Deep Learning Techniques for Image Seg-
+mentation”. In: arXiv (2019).
+[32]
+Olaf Ronneberger et al. “U-Net: Convolutional Networks for Biomedical Image Seg-
+mentation”. In: arXiv (2015).
+[33]
+Sergey Ioffe & Christian Szegedy. “Batch Normalization: Accelerating Deep Net-
+work Training by Reducing Internal Covariate Shift”. In: 32nd International Confer-
+ence on Machine Learning 1 (2015), pp. 448–456.
+[34]
+Nitish Srivastava et al. “Dropout: A Simple Way to Prevent Neural Networks from
+Overfitting”. In: Journal of Machine Learning Research 15 (2014), pp. 1929–1958.
+[35]
+Alberto Fernández et al. Learning from Imbalanced Data Sets. Springer Interna-
+tional Publishing, 2018.
+[36]
+George Forman & Martin Scholz. “Apples-to-Apples in Cross-Validation Studies:
+Pitfalls in Classifier Performance Measurement”. In: ACM SIGKDD Explorations
+Newsletter 12 (2010).
+[37]
+Michael H. Kutner et al. Applied Linear Statistical Models. McGraw-Hill/Irwin, 2004.
+[38]
+Justin M. Johnson & Taghi M. Khoshgoftaar. “Survey on deep learning with class
+imbalance”. In: Journal of Big Data 6 (2019).
+[39]
+David A. Clausi. “An analysis of co-occurrence texture statistics as a function of grey
+level quantization”. In: Canadian Journal of Remote Sensing 28 (2002), pp. 45–62.
+[40]
+Leen-Kiat Soh & Costas Tsatsoulis. “Texture Analysis of SAR Sea Ice Imagery Using
+Gray Level Co-Occurrence Matrices”. In: IEEE Transactions on Geoscience and
+Remote Sesning 37 (1999), pp. 780–795.
+[41]
+LP Coelho: ESA: Mahotas: Open source software for scriptable computer vision.
+Journal of Open Research Software 1(1):e3. 2013. URL: http://dx.doi.org/10.
+5334/jors.ac.
+[42]
+F. Pedregosa et al. “Scikit-learn: Machine Learning in Python”. In: Journal of Ma-
+chine Learning Research 12 (2011), pp. 2825–2830.
+[43]
+David Eigen & Rob Fergus. “Predicting Depth, Surface Normals and Semantic La-
+bels with a Common Multi-Scale Convolutional Architecture”. In: 15th IEEE Interna-
+tional Conference on Computer Vision (2019).
+80
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:86==
+[44]
+Vijay Badrinarayanan et al. “SegNet: A Deep Convolutional Encoder-Decoder Ar-
+chitecture for Image Segmentation”. In: IEEE Transactions on Pattern Analysis and
+Machine Intelligence 39 (2017).
+[45]
+Adam Paszke et al. “PyTorch: An Imperative Style, High-Performance Deep Learn-
+ing Library”. In: Advances in Neural Information Processing Systems 32. Ed. by H.
+Wallach et al. Curran Associates, Inc., 2019, pp. 8024–8035. URL: http://papers.
+neurips.cc/paper/9015-pytorch-an-imperative-style-high-performance-deep-learning-
+library.pdf.
+[46]
+Kevin Zakka. PyTorch Losses. https://github.com/kevinzakka/pytorch- goodies/
+blob/master/losses.py. 2018.
+[47]
+SIRANO: Sea Ice Retrievals and data Assimilation in Norway. 2020. URL: https:
+//cryo.met.no/en/sirano.
+Machine Learning Methods for Sea Ice Mapping
+81
+==PAGE:87==
+82
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:88==
+A
+Formulae for the GLCM-based Texture
+Features
+Haralick proposed 14 textural features based on grey-level co-occurrence matrices. 13
+of these features are utilized in this project.
+Given a total of Ng distinct grey levels in a quantized image, let R be the sum of all ele-
+ments of the NgxNg co-occurence frequency matrix P(i, j) (ie. non-normalized GLCM).
+Then p(i, j) = P(i,j)
+R
+is the co-occurence probability matrix (ie. normalized GLCM).
+From the co-occurence probability matrix p(i, j) Haralick defines the following in order to
+simplify the derivation of the 13 features [25].
+px(i) =
+Ng
+∑
+j=1
+p(j, i)
+py(j) =
+Ng
+∑
+i=1
+p(j, i)
+px+y(k) =
+Ng
+∑
+i=1
+Ng
+∑
+j=1
+p(i, j),
+k = 2, 3, ..., 2Ng
+where k = i + j.
+px−y(k) =
+Ng
+∑
+i=1
+Ng
+∑
+j=1
+p(i, j),
+k = 0, 1, ..., Ng −1
+where k = |i −j|.
+HX = −
+Ng
+∑
+i=1
+px(i)log(px(i))
+HY = −
+Ng
+∑
+j=1
+py(j)log(py(j))
+HXY = −
+Ng
+∑
+i=1
+Ng
+∑
+j=1
+p(i, j)log(p(i, j))
+HXY 1 = −
+Ng
+∑
+i=1
+Ng
+∑
+j=1
+p(i, j)log(px(i)py(j))
+Machine Learning Methods for Sea Ice Mapping
+83
+==PAGE:89==
+HXY 2 = −
+Ng
+∑
+i=1
+Ng
+∑
+j=1
+px(i)py(j)log(px(i)py(j))
+The 13 texture descriptors are defined below.
+1. Angular Second Moment (ASM)
+ASM =
+Ng
+∑
+i=1
+Ng
+∑
+j=1
+p(i, j)2
+(A.1)
+2. Contrast (CON)
+CON =
+Ng−1
+∑
+k=0
+k2px−y(k)
+(A.2)
+3. Correlation (COR)
+COR =
+∑Ng
+i=1
+∑Ng
+j=1(ij)p(i, j) −µxµy
+σxσy
+(A.3)
+where µx, µy, σx and σy are the means and standard deviations of px and py.
+4. Sum of Squares: Variance (VAR)
+V AR =
+Ng
+∑
+i=1
+Ng
+∑
+j=1
+(i −µ)2p(i, j)
+(A.4)
+5. Inverse Difference Moment (IDM)
+IDM =
+Ng
+∑
+i=1
+Ng
+∑
+j=1
+1
+1 + (i −j)2 p(i, j)
+(A.5)
+6. Sum Average (SAV)
+SAV =
+2Ng
+∑
+i=2
+ipx+y(i)
+(A.6)
+7. Sum Variance (SVA)
+SV A =
+2Ng
+∑
+i=2
+(i −SEN)2px+y(i)
+(A.7)
+8. Sum Entropy (SEN)
+SEN = −
+2Ng
+∑
+i=2
+px+y(i)log(px+y(i))
+(A.8)
+9. Entropy (ENT)
+ENT = −
+Ng
+∑
+i=1
+Ng
+∑
+j=1
+p(i, j)log(p(i, j))
+(A.9)
+84
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:90==
+10. Difference Variance (DVA)
+DV A = variance of px−y
+(A.10)
+11. Difference Entropy (DEN)
+DEN = −
+Ng−1
+∑
+i=0
+px−y(i)log(px−y(i))
+(A.11)
+12. Information Measure of Correlation 1 (INF1)
+INF1 = HXY −HXY 1
+max(HX, HY )
+(A.12)
+13. Information Measure of Correlation 2 (INF2)
+INF2 =
+[
+1 −e−2(HXY 2−HXY )
+]1/2
+(A.13)
+Machine Learning Methods for Sea Ice Mapping
+85
+==PAGE:91==
+B
+GLCM-based Texture Features for the
+HV channel
+A visual inspection of the 13 GLCM-based texture features and the VMR of all four spatial
+scales for the HV channel of a Sentinel-1 SAR scene available in figures B.1 and B.2.
+These visualizations are based on a scene from the testing set, which can seen in figure
+6.2.
+86
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:92==
+Figure B.1: Visualization of the first 7 GLCM-based texture features based on the HV
+channel of the Sentinel-1 scene presented in figure 6.2. Each row represents a specific
+Haralick feature, while the columns represent the spatial scales 0-3.
+Machine Learning Methods for Sea Ice Mapping
+87
+==PAGE:93==
+Figure B.2: Visualization of the last 7 GLCM-based texture features as well as the VMR
+feature based on the HV channel of the Sentinel-1 scene presented in figure 6.2. Each
+row represents a specific Haralick feature, while the columns represent the spatial scales
+0-3.
+88
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:94==
+C
+Random Forest: A Look into Features
+Importances
+In figures C.1 and C.2 the relative feature importances of the GLCM features based on the
+HH and HV channels, respectively, are shown for the best Random Forest binary classifer.
+Recall that the importance of a feature is computed as the normalized total reduction of
+the pre-defined criterion brought on by that particular feature, and therefore the relative
+feature importances computed by the Random Forest algorithm are related more so to the
+usage of specific features by the algorithm, rather than to the actual discrimitative abilities
+of the features.
+Figure C.1: The bar plot presents the relative feature importances of the raw HH backscat-
+ter (HH), the incidence angle (INC), the 13 GLCM-based texture features and the VMR
+based on the HH channel for all 4 spatial scales (denoted 0, 1, 2 and 3).
+Machine Learning Methods for Sea Ice Mapping
+89
+==PAGE:95==
+Figure C.2: The bar plot presents the relative feature importances of the raw HV backscat-
+ter (HV), the incidence angle (INC), the 13 GLCM-based texture features and the VMR
+based on the HV channel for all 4 spatial scales (denoted 0, 1, 2 and 3).
+Of the HH-based GLCM features, the difference entropy (DEN), sum variance (SVA) and
+- to a lesser extent - the contrast (CON) seem to be consistently important for the first
+three levels of the gaussian pyramid representation of the training data, while the GLCM
+features based on the last layer of the gausssian pyramid are barely used at all.
+On the contrary, the Random Forest algorithm makes use of several of the HV-based
+GLCM features of the last layer of gaussian pyramid. Of the HV-based GLCM features,
+the correlation (COR) feature at the lowest level of the pyramid is particularly important.
+In figures C.3 and C.4 the relative feature importances of the GLCM features based on
+the HH and HV channels, respectively, are shown for the SIC classifer with 32 trees of
+maximum depth 8.
+90
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:96==
+Figure C.3: The bar plot presents the relative feature importances of the raw HH backscat-
+ter (HH), the incidence angle (INC), the 13 GLCM-based texture features and the VMR
+based on the HH channel for all 4 spatial scales (denoted 0, 1, 2 and 3).
+Machine Learning Methods for Sea Ice Mapping
+91
+==PAGE:97==
+Figure C.4: The bar plot presents the relative feature importances of the raw HV backscat-
+ter (HV), the incidence angle (INC), the 13 GLCM-based texture features and the VMR
+based on the HV channel for all 4 spatial scales (denoted 0, 1, 2 and 3).
+The relative feature importances of the SIC classifier is slightly more spread out among
+the features as compared to the feature importances of the binary classifier. All of the
+GLCM-based features derived from the first layer in the gaussian pyramid representa-
+tion are in use, while the features derived from the last layer are hardly in use except for
+the SAV (sum average) feature, which does not exhibit much change across the spatial
+scales. Generally, the sum average (SAV), variance-to-mean ratio (VMR) and the dif-
+ference entropy (DEN) of the HH channel appear to reduce the Gini criterion quite well,
+and the sum average (SAV) and variance-to-mean ratio (VMR) are also important in the
+HV-channel. Most notably, it is interesting how the incidence angle as a feature appear to
+be very important when discriminating between different sea ice concentrations. Please
+note that, while the incidence angle is represented in both figure C.3 and C.4, it is the
+one and same feature in both figures. SAR images from the EW mode of the Sentinel-1
+mission exhibit significant incidence angle related variation in backscatter intensity due to
+the wide swath. It is thus logical that if the incidence angle related backscatter intensity
+variations are similar to or larger than the inter-class brightness differences, the algorithm
+would indeed need to include the incidence angle to discriminate between different sea
+ice concentrations. On the contrary, the incidence angle related variation in backscatter
+intensity might be insignificant compared to the brightness variation between sea ice and
+open water, which would explain the lack of use of the incidence angle as a feature in the
+binary classification of sea ice and open water.
+92
+Machine Learning Methods for Sea Ice Mapping
+==PAGE:98==
+D
+Random Forest & U-Net Probability
+Maps
+Figure D.1 shows the HH channel, the DMI-produced ice charts and probability maps
+predicted by the Random Forest and U-Net algorithms for each of the 5 testing scenes.
+Figure D.1: The figure shows the HH channel, the DMI-produced ice charts and probability
+maps predicted by the Random Forest and U-Net algorithms for each of the 5 testing
+scenes.
+Machine Learning Methods for Sea Ice Mapping
+93
+==PAGE:99==
+Technical
+University of
+Denmark
+Anker Engelunds Vej 1
+2800 Kgs. Lyngby
+www.space.dtu.dk
+www.compute.dtu.dk

@@ -1,0 +1,3843 @@
+==PAGE:1==
+Danmarks Tekniske Universitet
+Master Thesis
+Statically detecting concurrency errors in
+Erlang and Elixir
+s174264 Emil Godsk
+s174283 Frederik Oliver Flint
+s174281 Oscar Gervin Fehrn
+June 18, 2022
+Supervisor Alceste Scalas
+Emil Godsk
+Frederik Oliver Flint
+Oscar Gervin Fehrn
+Danmarks Tekniske Universitet
+==PAGE:2==
+Abstract
+In large, mission-critical applications with requirements on high availability, it is critical to detect and
+ﬁx the most signiﬁcant amount of code errors before applications are deployed. The tool Dialyzer can
+be used to detect discrepancies statically in applications written in Erlang and Elixir. However, some
+errors are not caught and may cause a server to crash at runtime. Uncaught type errors especially
+occur in projects using the gen server behavior, where Dialyzer cannot detect discrepancies between
+the server implementations and the exposed client APIs. To this e↵ect, this paper describes the
+design and implementation of an extension to Dialyzer that signiﬁcantly improves the number of
+concurrency-related gen server discrepancies detected.
+Like Dialyzer, our tool guarantees a fast
+analysis with sound warnings, without relying on users to annotate their code. We have applied our
+tool to several real-world applications, including the production codebase of Motorola Solutions. The
+results show that our tool can detect multiple discrepancies even in seemingly bug-free, high-quality
+codebases.
+==PAGE:3==
+Table of Contents
+1
+Introduction. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+1
+2
+Background & Related work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2.1
+Erlang and gen server . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2.1.1
+Concurrency in Erlang . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2.1.2
+The Erlang Virtual Machine (BEAM) . . . . . . . . . . . . . . . . . . . . . . . .
+5
+2.1.3
+Client-server applications: The gen server behavior . . . . . . . . . . . . . . . .
+5
+2.2
+Elixir . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+10
+2.2.1
+Using Dialyzer in Elixir
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+2.2.2
+The gen server behavior in Elixir . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+2.3
+Type systems . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+2.3.1
+Static type checking . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+2.3.2
+Dynamic type checking . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+13
+2.4
+Dialyzer . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+13
+2.4.1
+Soundness and Completeness of Type Checking . . . . . . . . . . . . . . . . . .
+14
+2.4.2
+Success typings
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+2.4.3
+Persistent Lookup Table . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+19
+2.4.4
+Dialyzer in practice . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+19
+2.5
+Gradualizer . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+3
+Analysis . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+23
+3.1
+Motivation for the project
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+23
+3.1.1
+Discrepancy 1
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+23
+3.1.2
+Discrepancy 2
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+24
+3.1.3
+Discrepancy 3
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+3.2
+Scope of the project . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+3.2.1
+The requirement of soundness . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+27
+3.2.2
+The requirement of the analysis being fast . . . . . . . . . . . . . . . . . . . . .
+27
+3.2.3
+The requirement of little to no annotations or modiﬁcations from the user . .
+27
+3.3
+Analyzing the information available in Dialyzer
+. . . . . . . . . . . . . . . . . . . . . .
+28
+3.4
+The Chosen Approach . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+29
+3.5
+Outlining Alternative Approaches . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+29
+3.5.1
+Transforming the gen server server requests
+. . . . . . . . . . . . . . . . . . . .
+29
+3.5.2
+Building a new tool . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+30
+3.5.3
+Extending Gradualizer . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+31
+4
+Design . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+32
+4.1
+Extending Dialyzer . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+32
+4.2
+Supported gen server pattern
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+32
+4.3
+Fault tolerance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+35
+5
+Implementation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+5.1
+Locally building Erlang/OTP . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+5.2
+Extending Dialyzer with gen server . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+37
+5.2.1
+Mapping the gen server functions . . . . . . . . . . . . . . . . . . . . . . . . . . .
+37
+==PAGE:4==
+5.2.2
+Modifying the analysis call graph . . . . . . . . . . . . . . . . . . . . . . . . . . .
+38
+5.2.3
+Improving the server implementation types: from MFAs to MFAAAs . . . . .
+40
+5.3
+Supporting Elixir . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+43
+5.4
+Toggleable gen server Analysis . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+44
+5.5
+Distributing our tool . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+44
+6
+Testing. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+45
+6.1
+Self created test-modules . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+45
+6.2
+Real-world applications . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+45
+6.2.1
+Overshadowing function clause . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+46
+6.2.2
+Indirect false positives . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+46
+6.3
+GitHub Actions of Erlang/OTP . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+48
+7
+Evaluation & Results . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+49
+7.1
+Improvement of discrepancy detection in the gen server behavior . . . . . . . . . . . .
+49
+7.1.1
+The discrepancies our tool detected . . . . . . . . . . . . . . . . . . . . . . . . .
+49
+7.1.2
+More explicit type information metrics
+. . . . . . . . . . . . . . . . . . . . . . .
+50
+7.2
+The requirement of soundness . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+52
+7.3
+The requirement of the analysis being fast . . . . . . . . . . . . . . . . . . . . . . . . . .
+52
+7.4
+The requirement of minimal annotations or modiﬁcations
+. . . . . . . . . . . . . . . .
+54
+8
+Conclusion & Future Work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+56
+8.1
+Future Work
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+57
+8.1.1
+Integrating the modiﬁcations into Erlang/OTP . . . . . . . . . . . . . . . . . .
+57
+8.1.2
+Enabling more generic behaviors . . . . . . . . . . . . . . . . . . . . . . . . . . .
+57
+8.1.3
+General concurrency type analysis . . . . . . . . . . . . . . . . . . . . . . . . . .
+57
+8.1.4
+Cross-module gen server calling . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+58
+8.1.5
+Improving the overall Dialyzer analysis . . . . . . . . . . . . . . . . . . . . . . .
+58
+9
+References . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+61
+A Appendix . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+62
+A1
+Discrepancies provided by Motorola Solutions in Elixir . . . . . . . . . . . . . . . . . .
+62
+A1.1
+Elixir Discrepancy 1
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+62
+A1.2
+Elixir Discrepancy 2
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+63
+A1.3
+Elixir Discrepancy 3
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+63
+A2
+gen server dictionary example . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+63
+A2.1
+The server module . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+64
+A2.2
+The dictionary module . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+64
+A2.3
+The dictionary module using the gen server behavior . . . . . . . . . . . . . . .
+65
+A3
+The callbacks of gen server . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+65
+A4
+Anti Pattern examples . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+67
+A4.1
+Anti Pattern Example of module1 . . . . . . . . . . . . . . . . . . . . . . . . . .
+67
+A4.2
+Anti Pattern Example of module1 - Corrected . . . . . . . . . . . . . . . . . . .
+68
+A4.3
+Anti Pattern Example of module2 . . . . . . . . . . . . . . . . . . . . . . . . . .
+68
+A4.4
+Anti Pattern Example of module2 - Corrected . . . . . . . . . . . . . . . . . . .
+69
+A5
+Boxplots of runtimes on open source projects . . . . . . . . . . . . . . . . . . . . . . . .
+69
+==PAGE:5==
+1
+Introduction
+Concurrent and distributed systems are a known standard within large industrial applications. Er-
+lang and Elixir are popular open-source, functional programming languages designed to build dis-
+tributed and fault-tolerant systems. They are often used for mission-critical applications, and it is,
+therefore, crucial to detect and ﬁx the largest number of code bugs before applications are deployed.
+Erlang and Elixir do not, however, have a classic type system but instead, use a tool called Dialyzer
+to provide static type checking. It uses the concepts of success typings (described in section 2.4.2)
+to catch discrepancies in the programs without reporting any false positives. Consequently, only
+real code errors are reported, but some errors can go undetected and occur at runtime, resulting in
+a server crashing. E.g., a common error that can occur is a type discrepancy between a server’s im-
+plementation and the public APIs that are exposed. In Erlang and Elixir, the gen_server behavior
+is commonly used to write these client-server applications.
+In this project, we aim to improve the detection of concurrency-related errors in Erlang and Elixir
+programs by providing a tool that extends upon Dialyzer to catch more discrepancies when using
+the gen_server behavior.
+The motivation for the project comes from examples of discrepancies provided by Motorola Solutions
+that Dialyzer does not detect. Therefore, some of the choices we made in this project were made
+with Motorola Solutions in mind, as we want them to be able to use the produced tool. Furthermore,
+they allowed us to test the improvement in detecting discrepancies by our tool, by letting us analyze
+parts of their codebase that run in production applications. The programs provided by Motorola
+Solutions are written in Elixir, and though supporting Elixir is part of our scope, we will almost
+exclusively focus on Erlang in the examples throughout the paper. Elixir merely builds on top of
+Erlang, providing more productive tooling and extensible design. However, it is still run on the
+BEAM virtual machine, which is also used to run the Erlang language. Therefore, the concepts we
+explain using Erlang generally carry over to Elixir, and Dialyzer itself is written in Erlang.
+Dialyzer has some notable characteristics that were, and still are, important when it was integrated
+into the Erlang/OTP, mainly[1]: 1) It should report no false positives (soundness). 2) It should
+be fast. 3) It should require little to no annotations or modiﬁcations from the user. Since Dialyzer
+is well established in the Erlang community, it is crucial that our produced tool still satisfy these
+requirements. Otherwise, our tool would have a low chance of being accepted by the community in
+the future.
+We now enumerate the main objective and requirements of this project. We will further elaborate
+upon them in the analysis, and we will refer to them throughout the paper:
+Main objective:
+• Improve the detection of discrepancies between client APIs and server implementations in
+Erlang and Elixir, when using the gen_server behavior.
+1
+==PAGE:6==
+Requirements:
+1. The tool should remain sound, i.e., no false positives.
+2. The tool should remain fast.
+3. The tool should require minimal, preferably no, annotations or modiﬁcations from the user.
+To achieve the main objective, we will introduce the concept of MFAAA (Module, Function, Arity,
+Atom, Arity) - an extension to the MFA (Module, Function, Arity) used in Dialyzer when performing
+the type analysis. The MFAAA allows us to analyze the server implementations of the gen_server
+behavior with more precise type information, to catch the largest amount of discrepancies.
+The ﬁrst part of the report covers the background of this thesis. It is essential to understand the
+project’s domain and describe the ﬁndings of researching Erlang, Elixir, and Dialyzer, as well as
+other related work.
+We will analyze the problem and deﬁne the project’s scope based on these
+ﬁndings. Then, we will discuss the choices we made during the design and implementation of the
+tool, as well as analyze and present measurements of the improvement to justify that we have met
+the main objective and requirements. Lastly, we will evaluate the entire project and address how
+the tool and Dialyzer, in general, could be improved with future work.
+2
+==PAGE:7==
+2
+Background & Related work
+This section will introduce the background and theory that make up the domain of the project.
+Section 2.1 introduces Erlang and the gen_server behavior. In section 2.1.1 we describe the concepts
+of concurrency in Erlang, and section 2.1.3 explains how and why the gen_server behavior is so
+useful. We will introduce the analysis tool Dialyzer in section 2.4, as well as the theoretical concepts
+on which Dialyzer bases its analysis.
+At the start of this project, the overall goal was to improve the static detection of concurrency errors
+in Erlang and Elixir programs. To understand the current possibilities and limitations in Erlang
+and Elixir applications, it was necessary to thoroughly research the concepts and theories that make
+up the project’s domain.
+Domain. The domain of this project mainly consists of Erlang and Elixir, type systems in general
+and in Erlang, concurrency in general and in Erlang, the gen_server behavior, and Dialyzer.
+We started by studying Erlang and Elixir, including how they relate, how their type systems work,
+and why they excel at concurrent and distributed programming. We then studied Erlang’s included
+behavior modules, particularly the gen_server module for implementing generic servers. The most
+signiﬁcant part of our domain is Dialyzer. We researched all the components of Dialyzer: the theory
+behind its success typings, the source code, which discrepancies it detects and which it does not.
+This knowledge helped us decide which approach to take, and the sections below document our
+theoretical ﬁndings.
+2.1
+Erlang and gen server
+Erlang is a general-purpose programming language used to build massively scalable soft real-time
+systems with requirements on high availability[2].
+Erlang is usually used interchangeably with
+Erlang/OTP or Open Telecom Platform (OTP), which contains the Erlang runtime system itself
+and multiple components and design principles that developers can use to build powerful Erlang
+programs.
+Erlang is a dynamic language and does not have a classic type system (see section 2.3). Instead, it
+uses static analysis tools like Dialyzer to provide type checking, which we will describe in section
+2.4.
+Erlang is similar to other popular functional programming languages in that it has immutable data
+and powerful pattern matching. What sets Erlang apart is the fact that it has built-in support for
+concurrency, distribution, and fault tolerance. These principles are incredibly powerful, and while
+most modern programming languages have adopted them, the entire core of Erlang is built around
+these concepts. Therefore, they are especially well integrated, which is one of the main reasons
+developers still use Erlang.
+2.1.1
+Concurrency in Erlang
+Concurrent and parallel computing refers to programs where multiple threads can execute during
+the same time period. They are often confused with each other, the di↵erence being that in parallel
+3
+==PAGE:8==
+computing, the execution of the threads occurs at the same physical instant. Parallel computing
+can, therefore, only be achieved using multiple processors, cores, or computers and not on a single
+processor (a processor with only one core). In concurrent computing, the execution merely occurs
+during overlapping time periods. Each processor usually creates an illusion of true parallelism by
+rapidly switching between threads running di↵erent tasks. However, at a single clock cycle, only one
+task is executed. Despite this, concurrent programs may be executed in parallel, for example, by
+assigning each process to its own processor or core of a multicore processor, or by distributing the
+program across a network.
+While concurrent and distributed programming is possible in most modern programming languages,
+it is not always a simple job. Usually, one needs to consider things such as threading, shared memory,
+locking, and semaphores to avoid race conditions. In Erlang, concurrent programming is made much
+simpler by its usage of processes.
+Processes. Erlang excels at concurrent and distributed programming because Erlang applications
+consist of very lightweight processes that run in the Erlang runtime system. Each Erlang process is
+a single thread of execution, and they share no data with other processes. This approach enables
+distribution and fault tolerance since multiple instances of the process can exist on multiple machines.
+Every time the state of an instance is updated, the other instances of the process are notiﬁed and
+updated. If an instance’s server crashes, the other instances can continue handling incoming requests,
+which is why Erlang systems are fault-tolerant. Also, more instances of the processes can easily be
+created, making the system massively scalable.
+Spawning a new process in Erlang is as simple as calling spawn:
+Pid = spawn(Module, Name, Args)
+This creates a new process with the process identiﬁer (pid), Pid, and starts executing the code in
+Module:Name(Arg1, ..., ArgN)
+where N = length(Args). The pid of the process can now be used to pass messages to the function.
+Message passing. The processes of an Erlang application are entirely independent and can only
+communicate using message passing. Sending a message to another process occurs almost instantly,
+and the execution of the sender is not blocked since the send operation is asynchronous and non-
+blocking. Each process has a queue where incoming messages are stored until the process can handle
+them, sort of like a mailbox.
+To send a message to a process, the send operator ! is used:
+Pid ! Message
+This sends the message Message to the process with (pid), Pid. A message can be sent to multiple
+processes using the send operator multiple times:
+Pid1 ! Pid2 ! Pid3 ! ... ! Message
+A process can listen for messages that has been sent to it, using the receive keyword followed by
+pattern matching on the message received. Below is an example of a function listening for messages
+that are either ok or error:
+4
+==PAGE:9==
+1
+receive
+2
+ok ->
+3
+io:fwrite("Received
+ok");
+4
+error
+->
+5
+io:fwrite("Received
+an error
+message")
+6
+end.
+Listing 1: Receiving messages from other Erlang processes.
+Spawning processes and sending and receiving messages are all the basics of concurrent programming
+in Erlang.
+2.1.2
+The Erlang Virtual Machine (BEAM)
+What makes all of the features that make Erlang excel possible, is the Erlang Virtual Machine
+(BEAM). It is the virtual machine that is used to run Erlang code in the Erlang/OTP and is part
+of the Erlang Run-Time System (ERTS). The ERTS is what compiles the Erlang source code to
+bytecode, which is then run on the BEAM. Files compiled to bytecode to be run on the BEAM
+have the .BEAM ﬁle extension. The Elixir programming language (see section 2.2) is also compiled
+to BEAM ﬁles, and can therefore leverage the Erlang Virtual Machine to run massive, concurrent
+systems.
+2.1.3
+Client-server applications: The gen server behavior
+Now that we have introduced the idea of concurrent and distributed programming in Erlang, we
+want to introduce the gen_server behavior, which is also a signiﬁcant part of our domain. Listing
+5 shows an example of a server managing a dictionary resource, implemented using the gen_server
+behavior.
+A common structure used in distributed computing is the client-server model, which clearly distin-
+guishes the providers of a resource or service, the servers, and the service requesters, known as clients.
+The clients want to share a common resource, with the server being responsible for managing the
+resource. This architecture is often associated with the client and server running on di↵erent com-
+puters separated by a network. In the case of the client-server model in Erlang, the words ”client”
+and ”server” are only used to identify their roles: the client wants to access a resource that the
+server manages. The client and server are simply two separate Erlang processes, using the message
+passing explained previously to communicate. They can therefore run on the same computer or two
+di↵erent computers. Client-server applications can be programmed in Erlang and Elixir using the
+gen_server behavior. This behavior contains callbacks that help the programmer implement the
+generic parts of the server.
+In the following, we will explain why the gen_server behavior is so useful and how developers can
+use it to create the server of a client-server application. We will provide an example that separates
+the server into a generic part common to all servers and a part containing business logic. First, we
+will create the generic part of the server ourselves. Second, we will let the gen_server behavior
+handle the generic part. The example is heavily inspired by the example in chapter 4 of the Erlang
+documentation[3].
+5
+==PAGE:10==
+Creating the generic part of the server without gen server. The example problem consists
+of a resource, which is a simple dictionary of key-value pairs. The server is responsible for managing
+the dictionary and provides ways for the clients to interact with the dictionary. The goal now is to
+divide the functionality of the server into two di↵erent modules:
+• The server module: The generic part of the server that contains all the code that deals with
+spawning processes and sending and receiving messages.
+• The dictionary module: Contains all the code that has to do with the implementation of the
+dictionary, e.g., adding and getting values from the dictionary.
+The server module is the generic part of the server, which is common to all servers. It can therefore
+be reused to build other client-server applications. It contains no business logic of the dictionary
+resource, as this is all contained in the module dictionary. For example, to create a new server to
+manage a queue resource, only the module containing the business logic of the queue needs to be
+added.
+The dictionary in our example, will be implemented as a list of tuples of the form {Key, Value}.
+The dictionary module will contain the following functions:
+• dictionary:start() -> true, starts the server.
+• dictionary:stop() -> true, stops the server.
+• dictionary:add_value(Key, Value) -> ok,
+adds the given value to the dictionary with the key, Key.
+• dictionary:get_value(Key) -> {value, Value} | not_found,
+gives a tuple containing the value with the given key, or not_found if the key is not present
+in the dictionary.
+Naturally, the server must contain ways to start, stop and handle errors. However, let us only look at
+the most generic part of the server. A single function, f, can describe how the server should update
+its state in response to events. The server’s internal state, in this case, the state of the dictionary,
+can be described by the state variable S. In order to add and get values from the dictionary, the
+server must be able to receive a query Q, update its state accordingly to S’, and ﬁnally send a
+response R back to the client. The following equation can express this procedure:
+{R,S′} = f(Q,S)
+(1)
+The equation shows how the function f is applied to a query and a state, to achieve a new state.
+This approach is very generic, and we can now write the server module using this approach, given
+a function f:
+6
+==PAGE:11==
+1
+-module(server).
+2
+-export([start /3, call /2]).
+3
+4
+start(Name , F, State) ->
+5
+register(Name , spawn(server , loop , [Name , F, State])).
+6
+7
+call(Name , Query) ->
+8
+Name ! {self (), Query},
+9
+receive
+10
+{Name , Reply} ->
+11
+Reply
+12
+end.
+13
+14
+loop(Name , F, State) ->
+15
+receive
+16
+{Pid , Query} ->
+17
+{Reply , State1} = F(Query , State),
+18
+Pid ! {Name , Reply},
+19
+loop(Name , F, State1)
+20
+end.
+Listing 2: The server module: Contains the generic, reusable part of the server. The full module
+can be found in the appendix section A2.1.
+In listing 2 above, the function, start, starts the server, which spawns a process running the function
+loop. Notice that the function f, describing how the server should handle the received queries and
+update its state, is provided as the argument F. We will show this function in a moment when
+creating the dictionary module. The function call receives queries from the module containing
+the business logic of the resource - the dictionary module in this example. It sends a message
+containing the query to the process running loop, which then updates the state by applying the
+function f to the query and creates a response, as seen in equation 1.
+Using the server module, we can now write the implementation of the dictionary functionality in
+the module dictionary:
+1
+-module(dictionary).
+2
+-export([start /0, add_value /2, get_value /1]).
+3
+4
+% Start
+the
+server
+and
+pass
+handle_event () as the
+function f
+5
+start () -> server:start(xx1 ,
+6
+fun(Query , State) ->
+7
+handle_event (Query , State)
+8
+end ,
+9
+[]).
+10
+11
+% Client
+APIs
+12
+add_value(Key , Value) -> server:call(xx1 , {add_value , Key , Value}).
+13
+get_value(Key) -> server:call(xx1 , {get_value , Key}).
+14
+15
+% Tells
+the
+server
+how to
+handle
+queries
+16
+handle_event ({add_value , Key , Value}, State) ->
+17
+State1 = update_dictionary (Key , Value , State),
+18
+{ok , State1};
+19
+handle_event ({get_value , Key}, State) ->
+20
+Value = lookup(Key , State),
+21
+{Value , State}.
+Listing 3: The dictionary module: Contains the implementation of the dictionary using the server
+module. The full module can be seen in the appendix section A2.2.
+7
+==PAGE:12==
+The auxiliary functions update_dictionary and lookup can also be seen in the full module. They
+help interact with the dictionary to add and get values.
+Notice that two arguments are provided when the server is started: the handle_event function and
+the empty list. The empty list is the initial state of the dictionary, and the handle_event function
+is the function f described above. In this case, handle_event tells the server that when a value is to
+be added to the dictionary, which is the query {add_value, Key, Value}, the server should apply
+the function update_dictionary with the key and value to get a new state. Similarly, when the
+query to retrieve a value from the dictionary is received, the server should use the lookup function
+with the key in the current state.
+The add_value and get_value are the functions that the clients invoke to interact with the dictio-
+nary resource. When invoked, they send the received query to the server module by invoking the
+call function and return the response to the client.
+The dictionary module can now be used by clients that want to access the dictionary resource as
+follows:
+1
+1> dictionary:start ().
+2
+true
+3
+2> dictionary:add_value("John", 30).
+4
+ok
+5
+3> dictionary:add_value("Maria", 25).
+6
+ok
+7
+4> dictionary:get_value("John").
+8
+30
+9
+5> dictionary:get_value("Tim").
+10
+not_found
+11
+6> dictionary:add_value("Maria", {hello ,world}).
+12
+ok
+13
+7> dictionary:get_value("Maria").
+14
+{hello ,world}
+Listing 4: Example showing how clients can request the dictionary resource, using the dictionary
+module.
+The most important point from this dictionary example is the separation of the server’s functionality;
+the generic code responsible for spawning processes and receiving notiﬁcations is located in the
+server module, and the code responsible for the implementation of the dictionary is in the module
+dictionary. This separation follows the single-responsibility principle, which is a good practice
+and allows the dictionary’s functionality to be written using pure functions since they have no side
+e↵ects, making them easier to read and test. The module server is generic and can be reused for
+implementing di↵erent client-server applications. Furthermore, the server’s name can be substituted
+without altering the code that uses the client functions, which allows for easily turning our non-
+distributed applications into distributed applications at a later point if desired.
+Creating the generic part of the server using gen server. We now want to show how the
+generic server module above can be entirely replaced and handled by the gen_server behavior.
+The main reason it is beneﬁcial to use the gen_server behavior is that it provides several useful
+extensions that developers can use without adding a lot of complicated code to the server module.
+For example, to be used in a real-world application, we might want to extend the server module
+8
+==PAGE:13==
+in several di↵erent ways. E.g., adding tracing and error reporting, sending requests to multiple
+servers on di↵erent nodes, and adding timeouts to requests. Also, we might want to perform queries
+without waiting for a response from the server. These additions would require many modiﬁcations
+in the server module, making the module more complex and diﬃcult to maintain. Instead, the
+gen_server behavior either has built-in support for these or allows straightforward modiﬁcations
+to include them.
+We now rewrite the dictionary module to make use of the gen_server behavior, instead of the
+server module:
+1
+-module( dictionary_gen_server ).
+2
+-behaviour( gen_server ).
+3
+-export([start /0, add_value /2, get_value /1]).
+4
+5
+% client
+APIs
+6
+start () -> gen_server :start({local , xx2}, my_dict_gen_server , [], []).
+7
+8
+add_value(Key , Value) ->
+9
+gen_server :cast(xx2 , {add_value , Key , Value}).
+10
+11
+get_value(Key) ->
+12
+gen_server :call(xx2 , {get_value , Key}).
+13
+14
+% server
+implementation
+15
+init(_) -> {ok , []}.
+16
+17
+handle_cast ({add_value , Key , Value}, State) ->
+18
+State1 = update_dictionary (Key , Value , State),
+19
+{noreply , State1}.
+20
+21
+handle_call ({get_value , Key}, _From , State) ->
+22
+Value = lookup(Key , State),
+23
+{reply , Value , State};
+Listing 5: The dictionary module rewritten to use the gen server behavior. The full module can
+be in the appendix section A2.3.
+The gen_server behavior is now entirely handling the generic part of the server. The ﬁrst thing to
+note is that the server is now started using the start function exported by the gen_server behavior.
+We again provide the initial state, which is an empty list.
+Notice also that the functions receiving queries and updating the state are now handle_cast and
+handle_call. These are predeﬁned callbacks exported by the gen_server behavior that must be
+deﬁned in the module. We refer to these as server implementations. They both accept what we
+refer to as the Request argument as the ﬁrst argument (we will elaborate on this term later in the
+section) and a State variable. The gen_server behavior supplies the State variable automatically,
+and when a server implementation is ﬁnished, the updated state must be included in the return value.
+In the example in listing 5 for handle_cast, the tuple that is returned is {noreply, State1}, where
+State1 is the updated state. The handle_call callback also receives a reference, in this example,
+the ignored variable _From, to know where it should direct its reply.
+The Request argument corresponds to the query that the server implementation performs. The
+queries for updating the state are the same as before, e.g., to add a value to the dictionary, the query
+{add_value, Key, Value} must be provided as the Request argument. When this query is sent us-
+9
+==PAGE:14==
+ing gen_server:cast, it will invoke the handle_cast({add_value, Key, Value} server implemen-
+tation, since the Request argument matches. The requests containing the queries are still sent by
+the client APIs add_value and get_value, but now using gen_server:cast and gen_server:call.
+These both create requests to the server implementations in the following way:
+1. gen_server:call: creates a synchronous request to the server and waits for a re-
+sponse.
+2. gen_server:cast: creates an asynchronous request to the server and does not wait
+for a response.
+Creating requests with gen_server:call and gen_server:cast both require a server reference (in
+this case, the pid the server was started with) followed by the Request argument to know which
+server implementation is requested.
+We have now again implemented a server that manages a dictionary that multiple clients can access,
+but this time by only writing the dictionary module. The gen_server behavior is responsible for
+all the generic parts common to all servers, and the module server is no longer used. Furthermore,
+we can now use all of the built-in features of the gen_server behavior. For example, as seen above,
+we can update the state asynchronously using gen_server:cast when a response is not needed.
+More on the Request argument. As mentioned above, when client APIs of the module create
+requests to the server implementations, they specify which implementation should be invoked using
+the Request argument. For example, to invoke the server implementation with the clause deﬁned
+as
+handle_call({get_value, Key}, _From, State) -> ...
+the request using gen_server:call should be created as
+gen_server:call(Pid, {get_value, Key}).
+In the examples shown, the Request argument has been a tuple, with the ﬁrst element being an atom
+that can be matched to determine the requested server implementation. While this is most common,
+it is not always the case. The Request argument can just be an atom, meaning that the Request
+argument contains no variables in this case. E.g. gen_server:call(Pid, {get_value, Key}).
+The callbacks of gen server. In the example above, we have addressed the most common callbacks
+of the gen_server behavior, namely handle_call and handle_cast.
+They are the most used
+callbacks since they are the standard way to handle incoming requests. The other callbacks mainly
+provide additional features like terminating the server, logging information, or picking up where
+another server implementation left o↵.
+We have described a selection of the essential remaining callbacks in the section A3 of the appendix.
+2.2
+Elixir
+The Elixir programming language was created to make use of the powerful features of Erlang/OTP
+while providing several modern features to improve the overall developer experience. Elixir also runs
+10
+==PAGE:15==
+on the BEAM Virtual Machine (described in section 2.1.2), which supports massively scalable and
+fault-tolerant systems.
+For example, a feature Elixir adds to the developer experience not available in Erlang includes the
+pipe operator, |>. This feature allows developers to elegantly link functions together instead of
+having to nest function calls to pass arguments from one function to the next. This feature helps
+improve the overall readability of the code. Elixir also adds the ability to deﬁne exported functions,
+using the def keyword, and private functions, using the defp keyword.
+Overall, Elixir has the
+same ability to develop distributed and fault-tolerant systems as Erlang, but improves the developer
+experience[4].
+Mix.
+Another advantage that Elixir adds is the build tool Mix[5].
+Mix enables the developer
+to create, compile and test Elixir projects easily and manage their dependencies. Using Mix, the
+developer can easily incorporate other packages into their program to make the development process
+easier by utilizing the package manager Hex[6]. Popular packages include the Phoenix Framework,
+which is widely used to build real-world web applications.
+2.2.1
+Using Dialyzer in Elixir
+Since Elixir compiles down to the same type of BEAM ﬁles and utilizes the same virtual machine
+as Erlang, all of the features present in Erlang are also available for Elixir. The compiler converts
+all the syntactic improvements that Elixir brings into BEAM bytecode at compile-time, which can
+run on the BEAM Virtual Machine. Due to this, Dialyzer is able to perform the same analysis on
+both Elixir and Erlang without adding extra complexity or changes to the source code of Dialyzer.
+While Dialyzer can analyze the compiled BEAM ﬁles of Elixir directly, Mix allows the developer to
+use the package Dialyxir[7] to make this process simpler. Dialyxir enables the Mix build tool, with a
+single command, to run Dialyzer on the Elixir source code without having to worry about creating
+and specifying the PLT (see section 2.4.3) to be used in the analysis.
+2.2.2
+The gen server behavior in Elixir
+Elixir supports the same concept of the gen_server behavior as Erlang (as described in section 2.1.3).
+The behavior is called GenServer in Elixir and is primarily a wrapper around the gen_server of
+Erlang. The main way the two behaviors di↵er is in minimal syntactical di↵erences, e.g., for creating
+requests to the generic server. We will explain how we handled these di↵erences in section 5.3.
+Throughout the paper, we refer to the behavior both in Erlang and Elixir as gen_server.
+2.3
+Type systems
+A crucial part of reducing the possibility of bugs in computer programs is the type systems that
+usually are part of programming languages. A type system consists of rules that assign a type to
+the various components of a computer program. For example a variable of type string or a function
+that returns an array of integer. This approach helps prevent type errors, which are discrepancies
+between the data types of the program’s functions, constants, and variables, e.g., adding a string
+to a boolean, since there is no deﬁned way to handle this case. Checking that the components
+11
+==PAGE:16==
+of a program are used consistently regarding the data types can happen either at compile-time
+(statically), at runtime (dynamically), or as a combination of both.
+2.3.1
+Static type checking
+Languages that use static type checking are known as statically typed languages, and the type safety
+of these programs is veriﬁed by analyzing their source code. This is made possible by having the
+programmer explicitly state the data types of the constructs they create. A program is guaranteed to
+satisfy some properties of type safety for all inputs if it passes a static type checker, thus minimizing
+the number of type errors that can happen when the program is executing. Such a program is called
+a well-typed program, and to quote Robin Milner:
+”Well-typed programs cannot ’go wrong’”[8].
+Of course, this famous quote must be understood in the context of type safety. Plenty of things can
+go wrong in well-typed programs, e.g., null pointer exceptions and division by zero. However, type
+errors will never occur at runtime and cause an error.
+Popular statically typed languages include programming languages like Java and C#.
+Most static type systems are very conservative by nature, in the sense that they will reject programs
+that will never encounter a runtime error. This can be demonstrated with the following example of
+a program containing the statement:
+1
+if (true) {
+2
+string
+myString = "Hello
+world";
+3
+} else {
+4
+// This is a type
+error
+5
+string
+typeError = 1;
+6
+}
+Listing 6: Example of C# statement with no runtime errors that is rejected by the compiler.
+In the example, the assignment string typeError = 1; is a type error, since an integer is being
+assigned to a variable with the data type string.
+However, this assignment occurs in the else
+branch of the if-else-statement, with the condition being true, which is by deﬁnition always true.
+The else-branch will therefore never be reached when executing the program, and the assignment
+will not give a runtime error. Despite this, the compiler will give the following error:
+Cannot implicitly convert type ’int’ to ’string’.
+Most type checkers will call the statement ill-typed because it can be diﬃcult or even impossible to
+determine statically if the else branch will ever be executed. The if-statement condition might be
+very complex, making it nearly impossible to detect if it will always be true. Therefore, the program
+is rejected, ensuring that the statement never gives a runtime error. This example introduces the
+concepts of soundness (the type system will never reject a program that will not encounter runtime
+errors) and completeness (the type system will reject all programs that will encounter runtime
+errors)1. The concepts of soundness and completeness in type checking, will be explained more
+thoroughly in section 2.4.1.
+1These two concepts can be interpreted in di↵erent ways. In section 2.4.1 we will explain the exact deﬁnition we
+use in this paper.
+12
+==PAGE:17==
+2.3.2
+Dynamic type checking
+In contrast to statically typed languages, dynamically typed languages verify the type safety of their
+programs at runtime. This concept is generally implemented by associating a runtime object with
+a data type during the program’s execution. Therefore, a program that has not passed a static
+type checker is not guaranteed to satisfy a set of properties for the data types of the constructs in
+the program. That is, the program may, by deﬁnition, fail at runtime. Most dynamic languages
+accommodate this fact by providing ways to anticipate and recover from these errors when they are
+encountered.
+Erlang is a dynamically typed language, and type errors may therefore occur at runtime. To reduce
+the number of these errors, however, Erlang developers can use the tool Dialyzer (see section 2.4)
+to catch as many discrepancies as possible before the code is deployed. This is exactly why im-
+provements to Dialyzer, including those we introduce in this project, are crucial in helping Erlang
+programs become safer and more reliable.
+A common question might be when one would ever choose a dynamically typed language over a
+statically typed language, and this question can lead to intense discussion in the programming
+community. However, there are some cases where programmers may prefer not to explicitly state
+the data types of the constructs in their programs. Some examples include, but are not limited to:
+• The codebase is small and encapsulated, with few people working on it; explicitly stating types
+is time-consuming and not worth the e↵ort.
+• The core of the problem is in logic and not in the data types themselves; stating types explicitly
+takes focus away from the actual problem.
+Since type declarations do not need to be stated by the programmer, development can progress more
+rapidly in a dynamically typed language. There is also never a need to convince the type system
+that what one is doing is correct, which can sometimes be frustrating. However, the freedom of
+not having to state the purpose of one’s programs through type annotations has some drawbacks:
+fewer trivial errors like typos are caught by the compiler, and the code can become more diﬃcult
+to read and maintain. Not having explicit type declarations can make it diﬃcult to make sense of
+a piece of code written years ago, often by another developer. Comments may aid in this situation,
+but relying on developers to write fulﬁlling comments to all their code and maintain them as the
+codebase changes, is a lot to ask. Again, this is where a tool like Dialyzer can help bring clarity to
+the code by automatically inferring and annotating the types in the program.
+2.4
+Dialyzer
+We now introduce the static analysis tool that is Dialyzer. Section 2.4.1 deﬁnes how we interpret the
+concepts of soundness and completeness in type checking. We then introduce the concept of success
+typings in section 2.4.2 and describe how Dialyzer’s analysis works in practice in section 2.4.4.
+Erlang and Elixir are dynamically typed languages that determine variable and function types at
+runtime. Therefore, introducing a static analysis tool becomes signiﬁcantly more challenging than in
+statically typed languages. To introduce the static analysis concepts into Erlang, Tobias Lindahl and
+Konstantinos Sagonas developed the initial version of Dialyzer in 2004 (DIscrepancy AnaLYZer for
+13
+==PAGE:18==
+ERlang programs)[1], along with the concept of success typings[9]. Today Dialyzer is an integrated
+part of the Erlang/OTP, which is available with Erlang installed.
+Lindahl and Sagonas developed Dialyzer with these important criteria in mind[1]:
+• Dialyzer should provide sound warnings rather than being complete.
+• Dialyzer should be fast.
+• Dialyzer should work without guidance or modiﬁcations from the user, i.e., the code should
+require no function annotation or modiﬁcation for Dialyzer to work.
+When they introduced Dialyzer, Erlang was already a well-established programming language used
+by large telecommunication companies. The developers might be discouraged from using the tool if
+it reported warnings in parts of the code, they had seen run successfully in production for a long
+time. Dialyzer should therefore provide sound warnings. Also, they might be less inclined to use
+the tool actively, if the analysis was very slow and required too much e↵ort and code changes for
+the tool to work.
+Soundness and completeness are relevant when discussing type systems. In the next section, we
+will formally deﬁne how we interpret the concepts of soundness and completeness in type checking
+throughout this paper. With that established, we will dive into the algorithm and principles used in
+Dialyzer. Finally, we will discuss how this is put together and carried out in practice. The description
+of success typings, and the examples used to explain this, are heavily inspired by Lindahl’s and
+Sagonas’ paper on success typings[9].
+2.4.1
+Soundness and Completeness of Type Checking
+Important properties of any type system are the notions of soundness and completeness. We will
+refer to these properties throughout the paper and explain the interpretation of the two terms we
+will be using.
+First, we will establish what false positives and negatives mean. A false positive warning is a warning
+reported that is not a real code error and will never occur during runtime. On the other hand, a
+false negative warning is a real code error, that the type checker does not catch and will cause a
+runtime error.
+Typically, when discussing type systems, compilers, and type checkers, these terms will be used to
+describe the properties of the tool. Di↵erent pieces of literature have di↵erent interpretations for
+soundness and completeness, but one thing is always persistent. The relation between soundness
+and completeness is always the same.
+Two common interpretations of soundness and completeness are the following.
+Notice how the
+interpretations merely reverse their respective deﬁnitions of sound and complete:
+14
+==PAGE:19==
+Interpretation 1:
+• Soundness: A sound type system will reject all programs that will encounter a runtime error
+(no false negatives).
+• Completeness: A complete type system will never reject a program that will not encounter a
+runtime error (no false positives).
+Interpretation 2:
+• Soundness: A sound type system will never reject a program that will not encounter a runtime
+error (no false positives).
+• Completeness: A complete type system will reject all programs that will encounter a runtime
+error (no false negatives).
+Interpretation 1 is most used when reading about compilers and type checkers in general. However,
+we have seen both interpretations used in multiple academic articles and believe both are valid.
+This paper will refer to soundness and completeness based on interpretation 2. Even though this is
+not the most commonly used in the literature, we saw interpretation 2 ﬁrst. Interpretation 2 is the
+interpretation that Dialyzer uses in its documentation. The following is a direct quote from Erlang’s
+webpage regarding Dialyzer: ”Dialyzer bases its analysis on the concept of success typings, which
+allows for sound warnings (no false positives).”[10]. As they deﬁne sound as no false positives, it
+implies that completeness should read no false negatives.
+2.4.2
+Success typings
+Dialyzer uses success typings to infer types. Tobias Lindahl and Konstantinos Sagonas introduced
+success typings[9] as a new way to infer types in dynamically typed languages, without having to type
+annotate programs. They based success typings on the idea of an unrestricted sub-typed system.
+It was necessary because a uniﬁcation-based type system in the tradition of Hindley and Milner
+would require code rewrites to work - which was not a realistic approach as an introduction to a
+type system for Erlang.
+Uniﬁcation based type systems. In the tradition of Hindley and Milner, uniﬁcation-based type
+systems try to solve type constraints in the form of ↵= β. Here ↵and β are arbitrary types.
+Subtyping systems. Contrary to Hindley and Milner-type systems, subtyping systems try to solve
+constraints in the form of ↵⊆β. It makes subtyping systems more general than Hindley and Milner
+type systems since all types expressed in Hindley Milner can also be expressed in a subtyping system.
+The following example shows a limitation of a uniﬁcation-based type system:
+1
+send(Pg , Mess) when
+is_atom(Pg) ->
+2
+global:send(Pg , {send , self (), Mess});
+3
+send(Pg , Mess) when
+is_pid(Pg) ->
+4
+Pg ! {send , self (), Mess}.
+Listing 7: Showing an example of a subtyping system implementation.
+In the example above, Pg can be either an atom or a pid (process identiﬁer). Because of this, a
+constructor-based type system like Hindley and Milner would not be able to infer types for the
+15
+==PAGE:20==
+function send/2. It would be necessary to create a declarative super-type to match on Pg. This
+declarative type should have constructors for both pid and atom to properly match the expression,
+which alone requires much rewriting in the code, which again is not acceptable for large Erlang
+applications.
+Instead, subtyping systems come to the rescue in this given situation. A subtyping system that
+allows for the disjunction of types could infer the type of Pg as atom ￿pid.
+The general idea of success typings. Unlike statically-typed systems, success typings are not
+about guaranteeing complete type safety. The concept of success typings tries to capture the largest
+set of terms for which it can guarantee that type errors will occur at runtime. It does so by using
+an algorithm that infers the compliment, namely an over-approximation of all the possible types
+a function can evaluate to. The domain of the function signature includes all possible values the
+function can accept as parameters, and its range includes all possible return values for this domain.
+The largest type of success typings is the type any while the smallest type is the type none. Fun-
+damentally, the concept of success typings di↵ers from statically typed systems, as success typings
+capture all intended usages of a function, even those not intended by the user. It means that a
+function invoked with types not allowed by its success typings is guaranteed to fail. Furthermore,
+this makes success typings great as a documentation tool, as it will capture all possible uses of a
+function - no matter how unintended.
+We now compare the types inferred by success typings and a Hindley-Milner based type system with
+the example below:
+1
+and(true , true) -> true;
+2
+and(false , _) -> false;
+3
+and(_, false) -> false.
+Listing 8: Implementation of and/2.
+A static type checker based on Hindley-Milner would have to infer the type: (bool(),bool()) →bool().
+This is a general problem with static type checkers, namely that it limits the intended usage of the
+function. E.g., the function invocation and(false, foo) will succeed and return false - however,
+this will not be allowed in a statically typed language.
+On the contrary, success typings will optimistically infer the type: (any(),any()) →bool(). Notice
+how this will not catch the runtime exception thrown when invoking and(foo, bar). It will, how-
+ever, catch any wrong pattern matches on the return type, e.g., 5 = and(false, true) will not be
+allowed by success typings.
+The formal deﬁnition for success typings can be seen below:
+Deﬁnition 1 A success typing of a function f is a type signature, ¯↵→β, such that whenever
+an application f(¯p) reduces to a value v, then v ∈β and ¯p ∈¯↵. [9]
+In other words, a success typing of a function f is a type signature for the function that expresses
+all possible domains and values for that function.
+Success typings work by ﬁrst generating a set of constraints.
+The solution to these constraints
+16
+==PAGE:21==
+eventually ends up being the success typings. If no solution is possible for the set of constraints,
+then there is a type discrepancy, and we infer the type none for the function.
+The algorithm to infer types.
+The algorithm that success typings use to infer the types of
+constructs in a program consists of:
+1. Generating a call graph based on the modules to be analyzed.
+2. Generating type constraints that the program must satisfy
+3. Solving the generated type constraints. The solution to the generated constraints is the success
+typings.
+4. Reﬁning the inferred types by a forward-ﬂowing analysis.
+Success typings work by generating the constraints that the constructs of a program must satisfy
+and then solving the constraints to end up with an inferred type of that speciﬁc construct. The
+modules to be analyzed are transformed into a directed graph before the constraints are generated.
+This directed graph is called the call graph. Each function is a node in the call graph, and there
+is an edge e(f,g) if function f depends on function g. The call graph is condensed to a graph of
+strongly connected components (SCC) (e.g., if function f and g are mutually dependent, they are
+condensed to a single node in the graph), so it ends up being a Directed Acyclic Graph (DAG). The
+graph is sorted topologically, and the analysis infers success typing for the functions by analyzing
+the nodes (the SCCs of the call graph) in a bottom-up fashion.
+An example of a type inferred by success typings can be seen in the example in listing 9 below:
+1
+%% (integer () | list ()) -> integer () | atom ()
+2
+foo(X) when
+is_integer (X) -> X + 1.
+3
+foo(X) -> list_to_atom (X).
+Listing 9: Example of a type inferred by success typings.
+The inferred type (integer() | list()) -> integer() | atom() speciﬁes that function foo/1
+accepts either integers or lists and produces integers or atoms. There is no mapping that shows
+that the function returns integer when called with parameter of type integer, even though this
+seems obvious looking at the implementation. This is a design-choice made by Tobias Lindahl and
+Konstantinos Sagonas to prioritize simplicity and readability instead of expressiveness. This means
+that 5 = foo([4]) is allowed by the success typing, but it will result in a runtime error. The success
+typings will however reject all incovations with other parameters than lists or integers, and it will
+only allow pattern matches of integers and atoms.
+Reﬁning the inferred types. We have now established that success typings is a valuable type
+inference system for dynamically typed languages - especially with the restrictions and goals it sets
+to meet. The algorithm described above already generates a very general type information. As
+stated, the inferred type information captures all possible uses of a function and not necessarily the
+intended uses. As an example, we will look at this tail-recursive function that calculates the length
+of an arbitrary list in listing 10 below:
+17
+==PAGE:22==
+1
+length_1(List) -> length_2(List , 0).
+2
+3
+length_2([], N) -> N;
+4
+length_2([_|T], N) -> length_2(T, N + 1).
+Listing 10: Example of a tail-recursive function.
+The call graph dictates that length_2 should be analyzed before length_1. The success typing
+for length_2 will take a very general form because of the ﬁrst clause of the function. This results
+in an inferred type of (list(), any()) →any(). Secondly length_1 is analyzed, and since it will
+utilize the information that length_2 returns any, and accepts list as the ﬁrst parameter, it will
+have its type inferred to (list()) →any(). This very general type information inferred for the two
+functions is technically not wrong, but it is not very speciﬁc and does not capture the developer’s
+intention. The success typings algorithm uses a dataﬂow analysis to reﬁne the success typings. The
+dataﬂow analysis analyzes the functions from caller to callee, which is the opposite of the initial
+success typings algorithm. Furthermore, the analysis takes its starting point in escaping functions
+(i.e., functions that are available outside the module deﬁned in). Considering the length functions
+again, we assume that only length_1 is an escaping function, and only length_1 calls the auxiliary
+helper function length_2.
+The dataﬂow analysis will start by analyzing length_1. When length_1 calls length_2, the analysis
+will pause and wait for the analysis of length_2. This time however, the function, length_2, will
+be analyzed with the initial type information that is passed from length_1, namely (list(), 0). The
+analysis uses the new type information to continue the analysis. Eventually, it will call length_2
+again, this time with the type information (list(), 1).
+The analysis continues while new type
+information is being parsed into the function or until a ﬁxpoint is reached. In this case, a ﬁxpoint
+will be the union limit for integers. The example in listing 11 below shows the analysis steps for a
+union limit of 3.
+1
+length_2(list (), 0) : 0 | length_2(list (), 1),
+2
+length_2(list (), 1) : 0 | 1 | length_2(list (), 2),
+3
+length_2(list (), 2) : 0 | 1 | 2 | length_2(list (), 3)
+4
+length_2(list (), 3) : integer ().
+Listing 11: Showing how the information is expanded until the union limit of 3 of is reached.
+The example shows how the type information of length_2 iteratively expands. When the analysis
+reaches the union limit of 3 it will infer the super type integer and stop this part of the analysis.
+From here on, length_1 will continue its analysis; now, with the reﬁned success typing of length_2,
+it will receive a newly reﬁned success typing of its own, namely (list()) →integer().
+The reﬁnement part of the success typings is potent, as it better captures the developer’s intention
+by analyzing actual uses of non-escaping functions. It is, however, important to mention that if
+we export the function length_2, making it an escaping function, the analysis will not reﬁne the
+success typing, and the inferred type will be (list(), any()) →any(). It makes sense, as Dialyzer
+cannot determine and analyze all possible uses of length_2 when it is an escaping function.
+The formal deﬁnition for reﬁned success typings can be seen below:
+18
+==PAGE:23==
+Deﬁnition 2 Let f be a function with success typing (¯↵) →β. A reﬁned success typing for f is
+a typing of the form (ˆ↵′) →β′ such that
+1. ˆ↵′ ⊆ˆ↵and β′ ⊆β, and
+2. for all ˆp ∈ˆ↵′ for which the application f(ˆp) reduces to a value, f(ˆp) ∈β′ [9]
+In other words, a reﬁned success typing is a more speciﬁc version of the general success typing. Since
+the reﬁned success typing domain is restricted, the value of the reﬁned success typing might also be
+restricted.
+Overall, success typings provide useful type information, and it does not rely on any speciﬁcations.
+Although the algorithm seems to infer vast types, the reﬁnement of success typings narrows the
+usage of all non-escaping functions down, allowing the algorithm to provide helpful information in
+most cases.
+2.4.3
+Persistent Lookup Table
+Before we describe how the notion of success typings works in Dialyzer, we will brieﬂy introduce the
+Persistent Lookup Table (PLT), which is an essential part of the Dialyzer analysis.
+Dialyzer uses and stores inferred type information during the analysis in the PLT. The PLT is a
+collection of tables in the Erlang built-in Term Storage (ETS)[11]. The PLT is a key-value dictionary,
+where the key is a composite key consisting of the tuple with: Module, Function, and Arity (MFA).
+E.g., a function length in the module list, which takes a single argument, will be represented in
+an MFA like {list, length, 1}. The value in the table is the type information for the function
+represented by the MFA. The value is a tuple on the form {return-type, [input-types]}.
+The PLT provides a more speciﬁc type information for the analysis when using modules that are not
+available at analysis time. Because of this, when using Dialyzer, the user should parse a reference
+to an existing PLT to the tool. It serves as the base PLT and contains information that will be
+relevant for the analyzed modules.
+In the following section, we will present an example of some information available in the PLT.
+2.4.4
+Dialyzer in practice
+Having introduced some background of Dialyzer, we now want to explain how Dialyzer uses the
+algorithm to provide type information. Just as the success typings algorithm, Dialyzer’s analysis is
+carried out in a set of similar steps:
+1. The call graph is generated based on the modules to be analyzed.
+2. Type inference is based on the bottom-up constraint solving algorithm on each SCC of the call
+graph (which is referred to as ”Typesig”).
+3. The types that have been inferred are reﬁned based on a forward ﬂowing analysis, that uses
+a ﬁxpoint computation to determine when to terminate for a function. The analysis is per-
+formed on each module, taking its starting point in escaping functions (which is referred to as
+”Dataﬂow”).
+19
+==PAGE:24==
+The analysis begins by creating a call graph for all the analyzed functions. The SCCs of the call
+graph is then reduced, turning the graph into a DAG. The rest of the analysis carries out in two parts:
+Typesig and Dataﬂow. Typesig is the bottom-up analysis described for the general success typings
+algorithm and is short for ”Type signature.” We will continuously refer to this term as ”Typesig”
+below since this is the term that Dialyzer uses. The Typesig analysis runs on each node of the DAG,
+where a node is an SCC. When this analysis is complete, the Dataﬂow analysis begins. The Dataﬂow
+analysis is the reﬁnement of the success typings produced in Typesig. The Dataﬂow analysis carries
+out modularly, taking a starting point in escaping functions only - just as the reﬁnement of success
+typings. The Dataﬂow analysis is a forward-ﬂowing analysis and uses ﬁxed-point computation to
+determine when to stop the analysis for a speciﬁc function. Suppose the inferred result contains new
+information, the analysis repeats while this is the case. The analysis continues while new information
+is being generated and stops once a ﬁxpoint is reached, i.e., the analysis can generate no further
+information.
+Furthermore, Dialyzer operates optimistically, meaning that if no type information is available for a
+function, Dialyzer will use the term any for both input- and return type. This behavior is a design
+choice to help ensure soundness in the analysis.
+We will revisit the tail recursive functions for computing the length of a list to investigate the exact
+behavior of Dialyzer. Recalling the length functions shown in 10 functions, we now add them to the
+module moduleA:
+1
+-module(moduleA).
+2
+-export([length_1 /1]).
+3
+4
+length_1(List) -> length_2(List , 0).
+5
+6
+length_2([], N) -> N;
+7
+length_2([_|T], N) -> length_2(T, N + 1).
+Listing 12: Example of a tail-recursive function in a module.
+As no functions are mutually dependent in the example, each SCC will only consist of one function.
+Figure 1 shows the call graph for the module.
+Figure 1: Call graph produced by Dialyzer for the module moduleA. The red outline is for exported
+functions. The black outline is for non exported functions.
+20
+==PAGE:25==
+Typesig. The ﬁrst part of Dialyzer’s analysis is Typesig. The analysis is done on each SCC in a
+bottom-up fashion. This means that the node {moduleA, length_2, 2} will be analyzed before
+{moduleA, length_1, 1}. Looking into the PLT during the Typesig analysis, we will see that the
+type information stored in the PLT for {moduleA, length_2, 2} is:
+{moduleA, length_2, 2} : {any,[{c,list,[any,{c,nil,[],unknown}],unknown},any]}
+This means that the function produces the term any and it accepts a list, which can contain types
+any, and a second argument, which can be any. length_1 will use the available type information
+of length_2. Because length_1 returns what length_2 produces, surely the return-type of the
+two functions are equal. Furthermore, as the only argument for length_1 is parsed into length_2,
+it must have the same type information as the ﬁrst argument of that function, namely the list.
+Therefore the type information available after the Typesig analysis of length_1 is:
+{moduleA, length_1, 1} : {any,[{c,list,[any,{c,nil,[],unknown}],unknown}]}
+The above result matches the type information we discussed in section 2.4.2, but obviously, it is not
+very speciﬁc, and it misses the developer’s intentions.
+Dataﬂow. Dataﬂow improves the type information inferred by Typesig. Based on the already
+inferred type information, Dataﬂow analyzes the functions in a forward-ﬂowing analysis to reﬁne
+the types. It runs modularly, using all escaping functions as starting points. Each function call
+pauses the current analysis until the function called has been analyzed. The type information stored
+in the PLT is updated according to the reﬁned information. Taking a look at the PLT after the
+Dataﬂow-analysis we have:
+{moduleA, length_1, 1} : {{c,number,{int_rng,0,pos_inf},integer},
+[{c,list,[any,{c,nil,[],unknown}],unknown}]}
+First, the type information for length_2 has been used to reﬁne the inferred type for length_1.
+After this, because the function is not exported, the information is no longer needed in the analysis.
+The information is therefore removed from the PLT. Furthermore, the PLT now contains the reﬁned
+type information for length_1. Using this information, the analysis infers that the function returns
+a positive integer using this information.
+2.5
+Gradualizer
+While Dialyzer is widely used for both Erlang and Elixir and is integrated into the Erlang/OTP,
+other tools provide a di↵erent type of analysis. The most well-known alternative is Gradualizer[12].
+Gradualizer uses the principles of gradual typing, where some variables and expressions may be given
+types while others may be left untyped. Only variables or expressions that have been given a type are
+type checked at compile-time (static type checking). In contrast, type errors in untyped expressions
+are only reported at runtime (dynamic type checking). The idea is that only parts of the program
+that have been statically type annotated by the developer are type checked at compile-time. With
+no annotation, no static type checking is done. Consequently, an unannotated part of the program
+can be blamed whenever a runtime error occurs in a gradually typed program. This is known as a
+gradual guarantee and means that type errors can never occur at runtime, in parts of the code that
+21
+==PAGE:26==
+has been statically type annotated. However, the analysis is not sound because Gradualizer may
+reject a type error in a typed part of the program that will never be reached at runtime.
+Like Dialyzer, Gradualizer aims to integrate well into existing codebases in a non-intrusive way.
+Dialyzer does so by using the concept of success typings and can provide some static type checking
+without annotating any part of the program. While Gradualizer does not require developers to type
+annotate their code, only parts of the program that have been annotated are statically analyzed.
+However, since it still works with only parts of the code annotated, it is becoming a popular way of
+introducing static types to otherwise dynamically typed programs.
+22
+==PAGE:27==
+3
+Analysis
+In the following sections, we will thoroughly analyze the problem at hand. First, we will describe the
+motivation that led to this project, which is three discrepancies given to us by Motorola Solutions
+that Dialyzer is not able to detect. Then, we want to deﬁne the scope of the project (section 3.2)
+and the three requirements the produced tool must satisfy. Finally, we will justify our approach to
+reach the overall objective (section 3.4), as well as outline and discuss alternative approaches that
+were not chosen (3.5).
+3.1
+Motivation for the project
+As mentioned, the motivation for this project came from three discrepancies provided by Motorola
+Solutions that Dialyzer failed to detect. Discrepancy 1 and 2 are both related to the gen_server
+behavior. Discrepancy 3 is an example of how Dialyzer cannot detect discrepancies when a func-
+tion can return multiple types. Like Dialyzer, Gradualizer can not detect the gen_server-related
+discrepancies 1 and 2. However, Gradualizer can warn about the type clash in discrepancy 3.
+The three discrepancies were initially written in Elixir since this is the programming language that
+Motorola Solutions use. In this paper, we mainly work with Erlang examples, as previously stated.
+We have therefore translated the Elixir discrepancies to equivalent Erlang code.
+3.1.1
+Discrepancy 1
+The ﬁrst gen_server-related discrepancy identiﬁed by Motorola Solutions concerns the argument
+type sent from the client API to the server implementation.
+The client sends an integer as an
+argument, and the server receives the argument and performs the built-in string:uppercase()
+function on it. There is, of course, no deﬁned way to uppercase an integer. Below discrepancy 1 is
+shown:
+23
+==PAGE:28==
+1
+-module( discrepancy1 ).
+2
+-behaviour( gen_server ).
+3
+-export([ start_link /0, my_api /2, init/1, handle_call /3, handle_cast /2]).
+4
+5
+% client
+APIs
+6
+-spec
+start_link () -> pid ().
+7
+start_link () ->
+8
+{ok , Pid} = gen_server :start_link ({local , discrepancy1 }, discrepancy1 , [ok], []),
+9
+Pid.
+10
+11
+-spec
+my_api(pid (), integer ()) -> unicode:chardata ().
+12
+my_api(Pid , Arg) ->
+13
+gen_server :call(Pid , {my_api , Arg}).
+14
+% server
+implementation
+15
+init(ok) ->
+16
+{ok , my_state}.
+17
+18
+handle_call ({my_api , Arg}, _From , State) ->
+19
+Res = uppercase(Arg),
+20
+{reply , Res , State}.
+21
+22
+handle_cast (_Msg , State) ->
+23
+{noreply , State}.
+24
+25
+-spec
+uppercase(unicode:chardata ()) -> unicode:chardata ().
+26
+uppercase(Arg) ->
+27
+string:uppercase(Arg).
+Listing 13: Erlang Discrepancy 1 from Motorola Solutions.
+In the listing 13 above, the client API my_api receives a pid and an integer as an argument, as
+speciﬁed by the speciﬁcation of the my_api function on line 12. The function sends a request to the
+server containing the integer argument, and the handle_call server implementation on line 21 calls
+the function uppercase, which of course, returns the uppercase of the argument received. This is
+where the discrepancy occurs, since the uppercase function expects to receive a string (presented
+as unicode:chardata() in Erlang).
+The discrepancy, therefore, seems to occur since Dialyzer cannot determine if the type sent by the
+client API matches the type that the server implementation expects.
+3.1.2
+Discrepancy 2
+The second gen_server-related discrepancy identiﬁed by Motorola Solutions is similar to discrep-
+ancy 1. The discrepancy is now between the type that the client API expects and the actual return
+type of the server. In the example, the server responds to the request with an integer, and the client
+API expects the server response to be a string. Below discrepancy 2 is shown:
+24
+==PAGE:29==
+1
+-module( discrepancy2 ).
+2
+-behaviour( gen_server ).
+3
+-export([ start_link /0, my_api /2, init/1, handle_call /3, handle_cast /2]).
+4
+5
+% client
+APIs
+6
+7
+-spec
+start_link () -> pid ().
+8
+start_link () ->
+9
+{ok , Pid} = gen_server :start_link ({local , discrepancy2 }, discrepancy2 , [ok], []),
+10
+Pid.
+11
+12
+-spec
+my_api(pid (), integer ()) -> unicode:chardata ().
+13
+my_api(Pid , Arg) ->
+14
+gen_server :call(Pid , {my_api , Arg}).
+15
+16
+% server
+implementation
+17
+18
+init(ok) ->
+19
+{ok , my_state}.
+20
+21
+-spec
+handle_call ({my_api , integer ()}, _From , my_state) -> {reply , integer (), my_state}.
+22
+handle_call ({my_api , Arg}, _From , State) ->
+23
+Res = Arg + 1,
+24
+{reply , Res , State}.
+25
+26
+handle_cast (_Msg , State) ->
+27
+{noreply , State}.
+Listing 14: Erlang Discrepancy 2 from Motorola Solutions.
+In the discrepancy above, the client API my_api sends a request to the server containing the argument
+Arg of type integer. The server increments the argument received by 1 and sends it back to the
+client. However, the speciﬁcation of my_api on line 12 states that the client API expects the server
+to respond with a string.
+Similarly to discrepancy 1, Dialyzer seems unable to catch this discrepancy since it cannot determine
+the type the client API and server implementation send to and receive from each other.
+3.1.3
+Discrepancy 3
+The third discrepancy di↵ers from the two other discrepancies since it is not a concurrency-related
+error with the gen_server behavior. Instead, it concerns the case where only a single function clause
+satisﬁes the expected return type of the function. Dialyzer will emit no warnings, even though other
+function clauses return incorrect types. Below discrepancy 3 is shown:
+1
+-spec
+safe_div(integer (), integer ()) -> {ok , integer ()} | {error , unicode:chardata ()}.
+2
+safe_div(_, 0) ->
+3
+{error , 0};
+4
+safe_div(X, Y) ->
+5
+{ok , X div Y}.
+Listing 15: Erlang Discrepancy 3 from Motorola Solutions.
+In listing 15 above, the safe_div function must return either the tuple {ok, integer()} or the
+tuple {error, unicode:chardata()}, as speciﬁed in the speciﬁcation on line 1. The return type of
+the ﬁrst clause of safe_div is neither of these types and is, therefore, a discrepancy. However, since
+25
+==PAGE:30==
+an integer divided by an integer is still an integer, the second clause of safe_div returns a tuple of
+the type {ok, integer()}, which matches one of the expected return types. Since a single clause
+satisﬁes the expected return type of the function, Dialyzer states that there are no discrepancies.
+This discrepancy seems to be caused by the way that Dialyzer generally determines the return type
+of a function with multiple clauses. Since the return type must be a union of the return types of
+the clauses that make up the function, as soon as a single one of the clauses is satisﬁed, Dialyzer
+reports no warnings, even though one or more clauses do not satisfy the speciﬁcation.
+As mentioned, the analysis provided by Gradualizer catches this discrepancy. Running Gradualizer
+on the discrepancy gives the following error:
+”.../discrepancy3.erl: The tuple on line 6 at column 5 is expected to have type {ok,
+integer} ￿{error, unicode:chardata} but it has type {error, 0}”
+The above discrepancy is an example where Gradualizer provides better static type checking than
+Dialyzer, because the function has been type annotated.
+Summarizing the discrepancies. Looking at the three discrepancies provided by Motorola Solu-
+tions, it is clear that the type checking currently available in Erlang with Dialyzer and Gradualizer
+is not complete. Both tools fail to detect the gen_server-related discrepancies in discrepancies 1
+and 2, and only Gradualizer can warn about discrepancy 3. It would be ideal for a programmer
+only to have to use a single tool to catch the largest amount of discrepancies without having to type
+annotate the entirety of the codebase.
+3.2
+Scope of the project
+Based on the background and the three discrepancies above, we now want to deﬁne this project’s
+scope clearly. From the three discrepancies, it is clear that the gen_server behavior is not currently
+being analyzed properly by any of the commonly used static analysis tools for Erlang. Furthermore,
+because of the over-approximating nature of success typings that Dialyzer uses, there are some
+general errors not related to concurrency that Dialyzer cannot ﬁnd. Gradualizer, on the other hand,
+was able to ﬁnd the type clash in discrepancy 3.
+As the project mainly aims to improve the static analysis of concurrency-related errors, the main fo-
+cus will be on discrepancies 1 and 2. Concurrency in Erlang is a broad topic and can be implemented
+in numerous ways. However, as explained, a very frequently used behavior is the gen_server behav-
+ior (described in section 2.1.3), which developers use to build client-server applications. Client-server
+applications are common in large, real-world Erlang applications mainly because Erlang has built-in
+support for concurrency and distribution, and the client-server model follows a distributed appli-
+cation structure. Discrepancies 1 and 2 also use this behavior. In the gen_server module we will
+focus on the server callbacks handle_call and handle_cast and correspondingly the gen_server
+module functions gen_server:call and gen_server:cast. We will focus on these because they
+make up most of the use cases when using the gen_server behavior.
+It will be helpful for most Erlang developers to improve the detection of discrepancies between client
+APIs and server implementations when using the gen_server behavior. It could potentially help
+26
+==PAGE:31==
+detect and ﬁx many code bugs before deploying critical applications to production.
+Since Motorola Solutions already use Dialyzer to provide type checking, and Dialyzer is integrated
+into the Erlang/OTP and is widely used, we wanted the tool produced in this project to follow
+the notable characteristics of Dialyzer. Namely, the analysis should provide sound warnings, the
+analysis should be fast, the analysis should require no modiﬁcations to existing code to work, and
+the analysis should require little to no annotations or guidance from the user. We can now clearly
+state the main objective of the project and the requirements that the produced tool must satisfy:
+Main objective:
+• Improve the detection of discrepancies between client APIs and server implementations in
+Erlang and Elixir, when using the gen_server behavior.
+Requirements:
+1. The tool should remain sound, i.e., no false positives.
+2. The tool should remain fast.
+3. The tool should require minimal, preferably no, annotations or modiﬁcations from the user.
+3.2.1
+The requirement of soundness
+Dialyzer is a sound type checker.
+Soundness was especially important since Dialyzer was ﬁrst
+introduced long after the creation of Erlang. Developers could easily be discouraged from using
+Dialyzer if it reported errors in parts of the code, that they had seen run successfully in production
+for a long time. If large Erlang-based projects were to adopt Dialyzer, it would need to be without
+the complication of modifying existing working code because of false positive warnings. As we want
+the Erlang community to adopt our tool in the future, we believe that the same requirement of no
+false positives must be satisﬁed by our tool.
+3.2.2
+The requirement of the analysis being fast
+In computer science, one of the most important factors is the time it takes to complete a task. The
+longer a task takes, the more of an inconvenience it becomes. The same is especially true with
+regards to analyzing large codebases. Dialyzer should be used as an active part of the development
+process of Erlang programs, and the same applies to our tool. If the time to complete the analysis
+is too large, developers will likely not use the tool.
+The requirement of the analysis being fast is also essential since most Erlang projects in the telecom
+industry are huge codebases with thousands of lines of code. Even small ineﬃciencies in our tool
+could make the runtime explode when analyzing large projects.
+3.2.3
+The requirement of little to no annotations or modiﬁcations from the user
+Using a tool to aid in the development process, often becomes a trade-o↵between the ease of use
+of the tool and the help it provides. When Lindahl and Sagonas introduced Dialyzer, it required
+no code modiﬁcation for it to work. Later, Dialyzer was able to consider speciﬁcations during its
+analysis, but it has never been a requirement for the tool to work. Because of this, it requires no
+27
+==PAGE:32==
+e↵ort to start using Dialyzer in a project. Furthermore, if our tool forced the users to type annotate
+their Erlang and Elixir programs, it would signiﬁcantly increase the e↵ort required, making them
+less likely to use it. Also, they would be limited in the freedom of expression that dynamically typed
+languages such as Erlang and Elixir provide.
+The requirement of no annotations or modiﬁcations is therefore very important to increase the
+chance that more developers will use it actively.
+The three requirements for the tool listed above will inﬂuence the choices we make when choosing
+an approach to solve the overall objective. Later, we will provide measurements to justify that we
+meet the objective while satisfying the three requirements of the tool (see section 7).
+3.3
+Analyzing the information available in Dialyzer
+Dialyzer is already widely used in the Erlang community and generally provides a very powerful anal-
+ysis to detect many discrepancies, like typos and many type errors (however, not in the gen_server
+behavior as shown). Therefore, we started by analyzing what information was already available in
+Dialyzer.
+Dialyzer stores the type information it infers during its analysis in the PLT (as described in section
+2.4.3). As we primarily focus on discrepancies in client-server applications with gen_server, we
+wanted to see what type information Dialyzer currently stored about the server implementations
+(handle_call and handle_cast) in the PLT.
+Figure 2: Available information for the module discrepancy1 stored in ETS table plt info.
+The type information seen in ﬁgure 2 is the type information that Dialyzer has inferred and stored,
+for the functions of the discrepancy1 module.
+Two rows to notice in the ﬁgure are the rows with keys:
+{discrepancy1, handle_call, 3}
+and {discrepancy1, my_api, 2}.
+These two rows show the available information for the rele-
+vant functions in the discrepancy example. The available type information for my_api is listed as
+{any, [any, any]}. This type information is the information found by the success-typing algo-
+rithm that Dialyzer builds its analysis upon, as described in section 2.4.2. Based on this analysis, it
+seems that Dialyzer has not produced any speciﬁc type information for my_api, which would explain
+why the speciﬁcation given to my_api could be speciﬁed with mismatching type information without
+Dialyzer ﬁnding the discrepancy. We did expect that this would be the case based on the type of
+discrepancies that Dialyzer can not ﬁnd.
+28
+==PAGE:33==
+The inferred information for handle_call shows that type information of the server implementa-
+tions is available in the PLT, indicating that Dialyzer has inferred types for the client and server
+implementation but does not compare these.
+To summarize, when analyzing the call gen_server:call, Dialyzer is not using the available type
+information from handle_call. The same seemed true when using gen_server:cast and corre-
+spondingly handle_cast. It appears that the developers of Dialyzer have chosen not to deal with
+type checking in these speciﬁc cases. A reason Dialyzer might work this way can be explained by the
+fact that gen_server is merely one of many behaviors available in Erlang/OTP. It would require an
+immense amount of work to adjust the analysis of Dialyzer to consider all of the available behaviors.
+Instead, it defaults to its optimistic approach and always states that a request to the server using
+gen_server:call accepts and returns the type any. Similarly with gen_server:cast, Dialyzer
+always states that the server implementation accepts any and returns the atom ok.
+3.4
+The Chosen Approach
+The approach we chose to improve the detection of discrepancies with gen_server was to extend
+the already well-established tool Dialyzer. Dialyzer builds on top of the Erlang/OTP, which is an
+open-source project. The Erlang/OTP has plenty of documentation on building local versions of the
+tool, allowing developers to extend or modify the tool themselves.
+Even though Dialyzer cannot detect certain discrepancies, the analysis is extremely powerful overall.
+During our analysis of Dialyzer, we discovered that Dialyzer already infers type information for the
+server implementation, which we can utilize in our extension. Furthermore, this approach would
+make much sense since Motorola Solutions and many large projects already use Dialyzer as part
+of their development. Therefore, it would be simple for users of Dialyzer to use our tool, as no
+modiﬁcation to their code should be required, and running a separate analysis tool would not be
+necessary after running Dialyzer.
+Another strength of extending Dialyzer is the fact that Dialyzer works on BEAM ﬁles, which both
+Erlang and Elixir compile to (see section 2.1.2). Making our tool work on Erlang and Elixir would
+therefore require minimal modiﬁcations.
+3.5
+Outlining Alternative Approaches
+Even though it was clear early on that the most sensible approach was to extend Dialyzer, we
+thoroughly researched and considered other possible solutions.
+Below we list some of the alternatives to the approach chosen and justify why we did not choose
+these:
+3.5.1
+Transforming the gen server server requests
+The ﬁrst approach we thought of was translating the requests to the server implementations to
+a ”regular” function call.
+With the gen_server behavior, a request is sent to the server using
+gen_server:call or gen_server:cast. Suppose we translated these at compile-time to call the
+requested server implementation in a direct function call. In that case, Dialyzer should be able to
+29
+==PAGE:34==
+provide some type checking on both the input and return type. This translation would only be
+relevant for the analysis and not run the code.
+For example in discrepancy 1, the server is requested using gen_server:call as seen below:
+gen_server:call(Pid, {my_api, Arg}).
+This could be translated to directly invoke the handle_call with the Request argument containing
+the atom my_api. The request could therefore be translated to the following function call:
+handle_call({my_api, Arg}, Pid, state).
+If we transform the call in discrepancy 1 in this manner, Dialyzer now gives the following warning:
+1
+discrepancy1 .erl :14:2:
+Invalid
+type
+specification
+for
+function
+discrepancy1 :my_api /2.
+2
+The
+success
+typing is
+3
+(_,
+4
+binary () |
+5
+maybe_improper_list (binary () |
+6
+maybe_improper_list (any (), binary () | []) |
+7
+char (),
+8
+binary () | [])) ->
+9
+{’reply ’,
+10
+binary () |
+11
+maybe_improper_list (binary () |
+12
+maybe_improper_list (any (),
+13
+binary () | []) |
+14
+char (),
+15
+binary () | []),
+16
+_}
+Listing 16: The warning raised by Dialyzer when transforming the gen server:call to a direct
+function call.
+This warning correctly states that my_api does not meet the speciﬁcations, as handle_call expects
+a string rather than an integer, which is sent in the Request argument from my_api
+This approach seems relatively simple and only requires an extra step of translating the relevant
+modules before performing the analysis. However, this works poorly in cases where the Request
+argument in the server implementation is a variable.
+In these cases, it would be impossible to
+determine the correct server implementation at compile-time. The translation is not possible in this
+case. Furthermore, there is an increased overhead, which might explode in large projects with many
+server requests. It also requires separate approaches for Erlang and Elixir, as they di↵er in syntax.
+This approach had many weaknesses, and we, therefore, dismissed it.
+3.5.2
+Building a new tool
+Building a new tool would allow us to work from a clean slate, where we could shape the tool to ﬁt
+our requirements. Extending already well-established tools can be complicated, as the overhead of
+understanding the individual system components can be pretty signiﬁcant.
+However, building a tool from the ground up would not allow us to use the available information that
+these well-established tools already provide. An approach could either be to build a tool that fully
+replaces Dialyzer, which realistically would not be possible within the given time frame, given the
+30
+==PAGE:35==
+magnitude and complexity of Dialyzer. Instead, we could build a tool that compliments Dialyzer,
+but this would decrease the ease of use, as it would require developers to use multiple tools to get a
+complete analysis.
+3.5.3
+Extending Gradualizer
+As mentioned, an alternative to Dialyzer for static type checking in Erlang programs is Gradualizer.
+It works by using gradual typing, which requires the user to annotate their code, and only type
+annotated code is type checked. Gradualizer violates requirement 3 for the project: the tool should
+require little to no annotations from the user. Furthermore, Gradualizer provides complete warnings
+and may give false positives, violating requirement 1 for our tool: that the warnings should be sound.
+Finally, in contrast to Dialyzer, Gradualizer is not widely used, and a stable version of Gradualizer
+is yet to be released. According to the author, it is only close to a beta release[12].
+Since Gradualizer violates two of three requirements for the project, this approach would not be a
+viable solution.
+31
+==PAGE:36==
+4
+Design
+This section will outline how we designed our tool. Speciﬁcally, we will outline how we plan to
+extend Dialyzer, making sure we do not break any of the existing functionality while still providing
+better type information during the analysis. In section 4.2 we will describe a speciﬁc gen_server
+pattern that we require for our analysis to work.
+4.1
+Extending Dialyzer
+Having looked into Dialyzer, how it structures its analysis and how type information is saved and
+fetched during the analysis, we wanted to sketch an overall implementation idea.
+The discrepancies not caught by Dialyzer seemed to be caused by a missing link between client
+APIs and server implementations, when using the gen_server behavior. If we could link the client
+function with the server implementation, we should be able to let Dialyzer detect type mismatches
+between client and server. We should be able to do this by using the MFA that contains the correct
+information rather than the generic MFA used when looking up type information for gen_server
+functions.
+We must make sure that the analysis executes in the correct order. That is, ensuring that Dialyzer
+analyzes the server implementations before the client APIs. It should be possible as Dialyzer creates
+a directed graph before analyzing the di↵erent components. Here we should be able to add edges
+from the client functions and to the server implementations to ensure a correct execution order.
+4.2
+Supported gen server pattern
+When using the gen_server behavior, the client APIs and the server implementations are usually
+deﬁned in the same Erlang module.
+However, gen_server:call and gen_server:cast take a
+server reference (e.g., a pid) as an argument to specify the server that is requested, and this server
+might be deﬁned in a di↵erent module. Creating requests to servers in modules other than where
+the client API is deﬁned greatly complicates our planned approach to linking client and server
+implementations.
+We know that Dialyzer looks for the type information in the PLT using the
+form {Module, Function, Arity} (MFA), and often we cannot determine the module where the
+requested server implementation is deﬁned. A server reference can be supplied in many di↵erent
+ways, and in most cases, there is currently no way of knowing the module that is referenced2. Section
+8.1.4 of Future Work will discuss a possible approach to allow the analysis to handle sending requests
+to server implementations in di↵erent modules.
+The typical pattern for the gen_server behavior is to have both client and server implementation
+within the same module. This pattern is also typically seen in many open source Erlang and Elixir
+projects. Because of this, we determined that we could limit our extension to Dialyzer to only work
+on gen_server patterns, where client APIs and server implementations are deﬁned in the same
+module. This approach will hopefully prove practical and valuable for many Erlang projects.
+2The server ref() type in Erlang can be seen in the documentation (https://www.erlang.org/doc/man/gen_
+server.html#type-server_ref). This type covers ﬁve subtypes, only one of which contains information about the
+module.
+32
+==PAGE:37==
+It is important to note that this does not mean that large modules using the gen_server behavior
+cannot be separated into di↵erent, smaller modules. Related parts can still be grouped in small
+modules to improve maintainability, while the server implementations and client APIs are located
+in the same module.
+Our tool might report a false positive, if the pattern described is violated. The false positive is a
+product of Dialyzer’s analysis and the module information available throughout the analysis. In
+order to illustrate the problem, we designed two modules: module1 and module2 which can be seen
+in listings 17 and 18 respectively.
+1
+-module(module1).
+2
+-export([ handle_cast /2]).
+3
+-export([ my_module1 /0,
+add_to_state ()]).
+4
+5
+% Client
+functions
+6
+my_module1 () ->
+7
+Module_2_pid = module2: get_module (),
+8
+gen_server :cast(Module_2_pid , {and_to_state , false}).
+9
+10
+add_to_state () ->
+11
+gen_server :cast (? MODULE , {add_to_state , 1}).
+12
+13
+% Server
+functions
+14
+-spec
+handle_cast ({add_to_state , number ()}, number ()) -> {noreply , number ()}.
+15
+handle_cast ({add_to_state , Number}, State) ->
+16
+State1 = State + Number ,
+17
+{noreply , State1}.
+Listing 17: module1 showing part of the anti pattern for gen server because the cast function is
+called cross module. The complete example can be found in appendix A4.1.
+1
+-module(module2).
+2
+-export([ handle_cast /2]).
+3
+-export([ get_module /0]).
+4
+5
+% Client
+functions
+6
+-spec
+get_module () -> ’module2 ’.
+7
+get_module () ->
+8
+?MODULE.
+9
+10
+% Server
+functions
+11
+-spec
+handle_cast ({and_to_state , boolean ()}, boolean ()) -> {noreply , boolean ()}.
+12
+handle_cast ({and_to_state , Bool}, State) ->
+13
+State1 = State
+and Bool ,
+14
+{noreply , State1}.
+Listing 18: module2 showing the gen server implementation that is invoked by module1. The
+complete example can be found in appendix A4.3.
+In short, module1 contains a client function my_module1 that invokes gen_server:cast cross-
+module to module2. We consider the example an anti-pattern, as we have just established. When
+the function invocation on line 8 in module1, of gen_server:cast using the Request argument
+{add_to_state, false}, is analyzed, it will look up type information based on the MFA for the
+handle_cast function in module1, namely {module1, handle_cast, 2}. However, the intended
+MFA for this call is actually {module2, handle_cast, 2} because the cast is directed to and han-
+dled by module2.
+33
+==PAGE:38==
+The MFA above is not the correct MFA that should be used for the lookup in the PLT. There-
+fore, when the anti-pattern shown above is used, we will not be able to guarantee that the tool
+remains sound.
+In this speciﬁc example, Dialyzer will throw a warning because handle_cast
+in module1 (which is the type information that we will be available to ﬁnd) expects the tuple
+{add_to_state, number()} but is given {and_to_state, false}.
+The warning thrown by Dialyzer is a false positive, as no runtime exception would happen in this
+example. The example runs as intended where module1 invokes the handle_cast located in module2
+to modify the state of module2. The execution trace below shows the following:
+1
+Eshell
+V12 .2.1
+(abort
+with ^G)
+2
+1> c(module1).
+3
+{ok ,module1}
+4
+2> c(module2).
+5
+{ok ,module2}
+6
+3> module1:start ().
+7
+{ok , <0.91.0 >}
+8
+4> module2:start ().
+9
+{ok , <0.93.0 >}
+10
+5> module2:list ().
+11
+true
+12
+6> module1:my_module1 ().
+13
+ok
+14
+7> module2:list ().
+15
+false
+16
+8>
+Listing 19: Execution trace of module1 and module2.
+We can, however, achieve the same functionality while still adhering to the supported pattern.
+We will now rewrite the two modules to let module1 invoke the functionality in module2 via a client
+function rather than directly invoking the server functionality. The refactored versions of module1
+and module2 is seen in listing 20 and 21 respectively.
+1
+-module(module1).
+2
+-export([ handle_cast /2]).
+3
+-export([ my_module1 /0,
+add_to_state /0]).
+4
+5
+%% Client
+functions
+6
+my_module1 () ->
+7
+module2: and_to_state (false).
+8
+9
+add_to_state () ->
+10
+gen_server :cast (? MODULE , {add_to_state , 1}).
+11
+12
+%% Server
+functions
+13
+-spec
+handle_cast ({add_to_state , number ()}, number ()) -> {noreply , number ()}.
+14
+handle_cast ({add_to_state , Number}, State) ->
+15
+State1 = State + Number ,
+16
+{noreply , State1}.
+Listing 20: Showing the refactored version of module1 that adheres to the deﬁned pattern for the
+gen server client-server pattern. The complete example can be found in appendix A4.2.
+34
+==PAGE:39==
+1
+-module(module2).
+2
+-export([ handle_cast /2]).
+3
+-export([ and_to_module /1]).
+4
+5
+%% Client
+functions
+6
+-spec
+and_to_state (boolean ()) -> ok.
+7
+and_to_state (Bool) ->
+8
+gen_server :cast (? MODULE , {and_to_state , Bool}),
+9
+ok.
+10
+11
+%% Server
+functions
+12
+-spec
+handle_cast ({and_to_state , boolean ()}, boolean ()) -> {noreply , boolean ()}.
+13
+handle_cast ({and_to_state , Bool}, State) ->
+14
+State1 = State
+and Bool ,
+15
+{noreply , State1}.
+Listing 21: Showing the refactored version of module2 that exports a client function to enable
+communication to the server while still adhering to the gen server client-server pattern.
+The
+complete example can be found in appendix A4.4.
+Because we have replaced the gen_server:cast invocation from my_module1() with a client func-
+tion invocation, we have eliminated the warning emitted by Dialyzer, while still preserving the same
+behavior of the program.
+Since this is an enforced pattern we have introduced, we will ensure that a ﬂag can toggle our
+extensions to Dialyzer. That will allow users of our tool to design their client-server applications in
+any way they see ﬁt. However, our tool only guarantees soundness in projects that adhere to the
+gen_server pattern of deﬁning client APIs and server implementations in the same module.
+4.3
+Fault tolerance
+As we are extending a widely used, well-established production-grade tool, it is very important that
+we do not cause breaking changes in any of the analysis steps.
+Because of this, we will design
+the tool to always default to the traditional behavior of Dialyzer when the extended analysis is
+missing information. What we mean by this, is, that if anything unexpected happens throughout
+our extended part of the analysis, instead of crashing or reporting warnings, we aim to fall back
+to the default behavior of Dialyzer, letting it carry out that part of the analysis. E.g., suppose
+Dialyzer cannot ﬁnd the correct type information in our extension. In that case, Dialyzer will fall
+back to the default implementation, namely that it accepts any and returns any. By doing this, we
+believe that we will, worst case, have an analysis that produces the same results as Dialyzer, and
+best case, we will detect more discrepancies. This approach adheres to the general spirit of success
+typings. Success typings optimistically type checks the code and will only report warnings that are
+guaranteed to exist.
+35
+==PAGE:40==
+5
+Implementation
+This section will describe how we implemented the extension to Dialyzer to improve the overall de-
+tection of discrepancies when using the gen_server behavior. The ﬁrst improvement we introduced
+is explained in sections 5.2.1 and 5.2.2. Then, we will introduce the concept of MFAAA in section
+5.2.3, which enabled our tool to provide much more precise type information.
+During the implementation of Dialyzer, we continuously iterated on the process and the changes.
+We discovered new uncaught discrepancies throughout the implementation, which helped shape the
+product. The implementation of the extension to Dialyzer consisted of two main phases.
+The ﬁrst phase of the implementation creates a connection between the client- and server implemen-
+tation in the gen_server behavior. This connection allows us to ﬁnd the uncaught discrepancies in
+the examples provided by Motorola Solutions, introduced in section 3.1.1 and 3.1.2. This approach
+includes using another MFA to get the correct type information when analyzing the gen_server
+client functions.
+The next phase of the implementation tries to make our analysis more speciﬁc without sacriﬁcing the
+soundness of our tool. We came up with a way to tell di↵erent server implementations apart. This
+part of the implementation extends the well-known MFA to the MFAAA, providing more precise
+type information for gen_server client APIs and server implementations.
+Speciﬁcally, this will
+improve the analysis to properly handle the return type information when analyzing the gen_server
+callbacks. The idea, heavily inspired by Erlangs’ general way of grouping functions, identiﬁes the
+functions by their name, arity, and the Request argument.
+Besides these two phases, we will review some of the changes made to our extension to ensure the
+best user experience and ease of use.
+5.1
+Locally building Erlang/OTP
+To introduce the extension of the analysis of Dialyzer, we chose to modify the current implementation
+of the tool.
+However, the ability to modify Dialyzer directly was not the most straightforward
+approach.
+Dialyzer is written in plain Erlang but is built directly into the source code of the
+Erlang/OTP runtime. Therefore in order to modify Dialyzer, we needed to have the ability to build,
+compile and run the whole Erlang/OTP locally.
+The Erlang/OTP source code is edited and tracked through git and hosted on GitHub as an open-
+source project[13].
+Therefore, creating our copy of the Erlang/OTP project involved creating a
+forked version of the git repository. The forked version of the Erlang/OTP source code enabled us
+as a team to make any modiﬁcations required to improve the analysis. The general source code of
+Erlang/OTP is open source and relies on the modiﬁcation by any interested individual that has the
+time and interest in improving the project. The project includes multiple guides and tools to locally
+build and run the modiﬁed source code on di↵erent architectures of machines. These guides and
+tools enabled us with few issues to get the modiﬁcations to the Dialyzer tool to run locally with the
+ability to debug and analyze how our new modiﬁcation performed.
+36
+==PAGE:41==
+5.2
+Extending Dialyzer with gen server
+Dialyzer works upon the concept of success typings (as described in section 2.4.2) and relies on the
+input and return types of the di↵erent functions and modules saved in the PLT. Dialyzer bases its
+analysis on an existing PLT. Building the PLT is done by running Dialyzer on Erlang applications
+that the PLT should include. Often the default PLT contains type information for Erlang standard
+libraries, but it can also be helpful to include personal projects that are not frequently changed.
+The PLT will provide type information for modules that are not necessarily part of the analysis.
+The standard libraries include the gen_server module, which a project can use to implement the
+generic part of the server.
+5.2.1
+Mapping the gen server functions
+During our project analysis, we established that Dialyzer already analyzes the handle_call and
+handle_cast implementations.
+These functions are analyzed because the gen_server behavior
+dictates that exporting the server implementation is required, and all exported functions are by
+default analyzed by Dialyzer.
+Therefore, our ﬁrst goal in extending Dialyzer was to map gen_server:call and gen_server:cast
+to the requested server implementations. By default, when Dialyzer needs information for a function
+invocation, the MFA-tuple of that function is used to search in the PLT. For gen_server:call that
+would be either {gen_server, call, 2} or {gen_server, call, 3}, depending on an optional
+Timeout parameter that can be parsed to the function. For handle_cast the MFA-tuple would be
+{gen_server, cast, 2}. As gen_server is a generic module meant for server implementations,
+no speciﬁc type information can be fetched from these MFA’s as the type information currently
+available for the gen_server methods, is too broad and has no connection to the actual server
+implementations.
+Speciﬁcally, the type information available for gen_server:call will be that
+input and output can be of any type.
+For gen_server:cast, the input type can be any type.
+However, the return type is limited to the atom ok.
+Instead, we want to fetch the available information for the server implementations. We will do this
+by intercepting all functions that invoke gen_server:call or gen_server:cast and modifying how
+it looks for information in the PLT. Using pattern-matching in Erlang, we can overload the existing
+functionality with a speciﬁc case for gen_server-speciﬁc function invocations. We will search the
+PLT with an MFA speciﬁc to the module we are currently analyzing for these speciﬁc function
+invocations. Returning to the module introduced in example 2 of the uncaught discrepancies in
+section 3.1, this will mean that instead of searching for the key {gen_server, call, 2}, we will
+look for the key {discrepancy2, handle_call, 3}.
+Because we have introduced a pattern requiring the location of the client and server implementation
+to be within the same module, and because the arity of handle_call is consistent when using
+the gen_server module, we know that the PLT lookup {discrepancy2, handle_call, 3} always
+should contain meaningful information. Looking at the PLT information available with the new
+PLT lookup, we can see the following available type information:
+37
+==PAGE:42==
+{{c,tuple,
+[{c,atom,[reply],unknown},{c,number,any,unknown},any],
+{3,{c,atom,[reply],unknown}}},
+[{c,tuple,
+[{c,atom,[my_api_server],unknown},{c,number,any,unknown}],
+{2,{c,atom,[my_api_server],unknown}}},
+any,any]}
+Recalling the PLT stores the type information in the tuple as:
+{ReturnTypes, [InputTypes]}
+The function handle_call takes three arguments: Request, From, and State. Since From and
+State are not used in the function, it makes sense that these are inferred to the type any. The ﬁrst
+element of the input types speciﬁes that it accepts a tuple containing the atom my_api_server, and
+a number. The ﬁrst element is the speciﬁc type information we are interested in mapping to provide
+the correct type information. Looking at the return type, it is a tuple containing three elements.
+First the atom reply, which is speciﬁc for handle_call in the gen_server behavior to inform that
+the function executed successfully. The second is the returned return type to the caller. In this
+example, it is the type number. The last element is the type information for the State, but no type
+information can be inferred for the State, it makes sense that it is any.
+Based on this, we made sure to map the correct type information during the interception. I.e. we
+disregard the type information for State and From and the atom reply, as it is not relevant for the
+caller function. This information is required for the gen_server module to work properly. Finally,
+taking a look at the information used to analyze gen_server:call, we will produce the following:
+{{c,number,any,unknown},
+[any,{c,tuple,[{c,atom,[my_api_server],unknown},{c,number,any,unknown}],
+{2,{c,atom,[my_api_server],unknown}}}]}
+That means, the gen_server:call PLT lookup information that we provide, is that the execution
+will return a value of type number. The input to the function should be two arguments. The ﬁrst
+argument, which should be the server reference, can be of any type (for simplicity). In contrast, the
+second argument uses the type information available by the success typings, which is that it should
+contain a tuple with the ﬁrst element being the atom my_api_server and the second argument
+should be a number.
+5.2.2
+Modifying the analysis call graph
+Having altered the way that Dialyzer looks for type information in the PLT whenever gen_server
+behavior functions are invoked, we have introduced new function dependencies. Recalling section
+2.4.2, Dialyzer initially creates a call graph that helps dictate the order of the analysis. Speciﬁcally,
+there is an edge in the call graph e(f,g) if function f calls function g, or in other words, when
+function f depends on function g. Since functions with gen_server:call/cast statements now
+explicitly need access to the information of the server implementation, we need to introduce an edge
+from a function containing the statement to the actual server implementation. Without this edge,
+38
+==PAGE:43==
+there is no guarantee that handle_call is analyzed before the information is required in a function
+invoking gen_server:call.
+Using discrepancy 2 again, we want to introduce an edge, e(my_api/2, handle_call/3), stating that
+there is a dependency between the client implementation and the server implementation. To conﬁrm
+this missing link, we used the built-in ﬂag exposed by Dialyzer, --dump_callgraph, to investigate
+the call graph used by Dialyzer when analyzing discrepancy2. Unsurprisingly, the generated call
+graph is empty - or rather, it consists of several nodes with no edges connecting them. Dialyzer,
+by default, does not register any dependencies between functions within this module. The lack of
+dependencies is due to the usage of the gen_server pattern.
+We solved this by adding an edge in the call graph for a function, f, whenever it contained either
+the statement gen_server:call, to the function handle_call, and correspondingly we created an
+edge to handle_cast if f contains the statement gen_server:cast. After this introduction, the call
+graph now has an edge representing the added dependency. This is seen in ﬁgure 3, showing how
+an edge from function my_api/2 to handle_call/3 is now present, because my_api/2 contains the
+statement gen_server:call.
+Figure 3: Showing the call graph after introducing the dependency in the module discrepancy2.
+Red outline is for exported functions.
+Having introduced this dependency, we are sure that the order of the analysis is correct, and the
+information needed to analyze gen_server behavior functions will be available when required.
+The interceptor functionality introduced in section 5.2.1 along with the correct function dependen-
+cies introduced, signiﬁcantly improved the capabilities of Dialyzer in gen_server modules. Specif-
+ically, Dialyzer can now detect if the wrong input type is provided to either gen_server:call or
+gen_server:cast. Furthermore, we can detect that the correct return type is expected in the client
+API when creating a request with gen_server:call. However, because of the MFA nature of Dia-
+lyzer, multiple handle_call implementations will have their return types unioned. When sending
+a request to a speciﬁc server implementation, the current implementation will determine the return
+type to be the union of all the handle_call return types in the module.
+39
+==PAGE:44==
+5.2.3
+Improving the server implementation types: from MFAs to MFAAAs
+The MFA implementation described above analyzes all the handle_call implementations as a single
+function.
+This behavior follows the principle of MFAs in Dialyzer (as explained in section 2.4)
+because all handle_call clauses have an arity of 3.
+The return type of a gen_server:call is
+always the union of all the handle_call server implementations. This can be seen below, where
+Dialyzer does not detect the discrepancies in the functions test_a and test_b. We will use the
+example throughout the rest of this section:
+1
+-module( handle_call_union_extended ).
+2
+-export([test_a /1, test_b /1]).
+3
+-export([ handle_call /3]).
+4
+5
+% Discrepancy : test_a
+actually
+returns a.
+6
+-spec
+test_a(pid ()) -> b.
+7
+test_a(Pid) ->
+8
+gen_server :call(Pid , a).
+9
+10
+% Discrepancy : test_b
+actually
+returns b.
+11
+-spec
+test_b(pid ()) -> a.
+12
+test_b(Pid) ->
+13
+gen_server :call(Pid , {b}).
+14
+15
+% Server
+implementations
+16
+handle_call (a, _From , _State) ->
+17
+{reply , a, no_state};
+18
+handle_call ({a, 5}, _From , _State) ->
+19
+{reply , a_5 , no_state};
+20
+handle_call ({a, Num}, _From , _State) ->
+21
+{reply , 5 + Num , no_state};
+22
+handle_call ({b}, _From , _State) ->
+23
+{reply , b, no_state}.
+Listing 22: The module shows an example where the MFA approach explained above, is not able to
+detect the discrepancies in the client APIs.
+Recall from section 2.1.3 that when sending a request to the server with gen_server:call, the
+second argument is used to match against the ﬁrst argument of the handle_call clauses.
+We
+refer to this as the Request argument. In the example above in function test_a(Pid), the atom
+a is provided as the Request argument in gen_server:call(Pid, a) to speciﬁcally match the
+ﬁrst clause handle_call(a, _From, _State).
+However, Dialyzer infers the return type of the
+request to be the union of all handle_call clauses. In the example, the return type is therefore
+a | a_5 | number() | b. The speciﬁcation stating that the function returns b is therefore valid
+in the current implementation.
+Splitting the server implementations. To improve upon this, we want Dialyzer to analyze and
+save the type information of the handle_call clauses as separate functions when their Request
+argument is di↵erent. We, therefore, want to extend upon the MFA concept to include the atom
+and arity of the pattern matching argument of the handle_call. We call this construct MFAAA
+and the two added A’s correspond to the Atom and Arity of the Request argument. The following
+cases are possible for the Request argument:
+40
+==PAGE:45==
+• The Request argument is a single term: E.g., my_atom.
+We deﬁne the arity of this argument to be 1.
+• The Request argument is a tuple with an atom as the ﬁrst element, followed by any number
+of arguments: E.g., {my_atom, Arg1, ..., ArgN}.
+We deﬁne the arity of this argument to be the length of the tuple, i.e., N + 1.
+If the Request argument does match any of the cases above, the MFAAA information is discarded.
+Only the MFA for the handle_call is then saved in the PLT.
+The motivation for the MFAAA construct comes from how Dialyzer analyzes functions. Multiple
+function clauses with the same name and arity are treated as the same function. The arity of a
+handle_call clause is always 3, and all handle_call implementations are therefore treated as the
+same function. Function clauses with the same name but di↵erent arities are treated as separate
+functions. The MFAAA for a handle_call clause allows the server implementations to be seen as
+separate functions. This concept of using MFAAA to separate the functions can be shown as an
+example by using normal Erlang functions. Looking at the listing 23 below, we have four implemen-
+tations of the handle_call function, with di↵erent Request arguments. These implementations
+are translated into four separate functions internally, as seen in listing 24, to give Dialyzer a better
+ability to di↵erentiate input and return types of the individual handle_call implementations.
+1
+handle_call (a, _From , _State) -> ...
+2
+handle_call ({a, 5}, _From , _State) -> ...
+3
+handle_call ({a, Num}, _From , _State) -> ...
+4
+handle_call ({b}, _From , _State) -> ...
+Listing
+(23)
+MFAAA
+functions
+before
+internal
+translation.
+1
+handle_call_a () -> ...
+2
+handle_call_a (5)
+-> ...
+3
+handle_call_a (Num) -> ...
+4
+handle_call_b () -> ...
+Listing
+(24)
+MFAAA
+functions
+after
+internal
+translation.
+Please note that this example only demonstrates how the MFAAA concept is treated internally by
+Dialyzer and the PLT as separate functions.
+Looking at the example in listing 22 again, the handle_call clauses and their corresponding MFAAA
+constructs can be seen in the table below:
+ModuleName:handle call(Arg, From, State)
+MFAAA
+module1:handle call(a, From, State)
+{module1, handle call, 3, a, 1}
+module1:handle call({a, 5}, From, State)
+{module1, handle call, 3, a, 2}
+module1:handle call({a, Num}, From, State)
+module1:handle call({b}, From, State)
+{module1, handle call, 3, b, 1}
+Table 1: Showing what MFAAA each handle call function implementation from listing 22 translates
+into.
+All of the handle_call clauses above have the same MFA: {module1, handle_call, 3}. Notice
+how there are now three distinct MFAAAs. The clauses handle_call({a, 5}, _From, _State)
+and handle_call({a, Num}, _From, _State) have the same MFAAA, since they have the same
+41
+==PAGE:46==
+atom, a, and the same arity, 2. Clauses with the same MFAAA will be analyzed and stored in the
+PLT as the same function, and the return type will therefore be the union of the return types of the
+grouped clauses. The two other clauses have their MFAAA and will be saved separately.
+MFAAA and the PLT. As explained in section 2.4.3, Dialyzer saves the inferred type information
+for a function in the PLT, with the MFA as the key. The MFAAA is saved in the same way:
+PLT key: MFAAA
+PLT type information
+{module1, handle call, 3, a, 1}
+(a, any(), any()) →a
+{module1, handle call, 3, a, 2}
+({a, number()}, any(), any()) →a 5 ￿number()
+{module1, handle call, 3, b, 1}
+(b, any(), any()) →b
+Table 2: Showing what type information is available in the PLT for each MFAAA.
+Table 2 shows the type information saved in the PLT for the di↵erent MFAAAs of the handle_call
+implementations. Besides these three MFAAA entities, the original MFA is still saved in the PLT
+and will be used in the analysis if a PLT lookup does not directly match any of these three MFAAAs.
+When analyzing the requests sent to the server with gen_server:call, the inferred types for the
+handle_call clauses were retrieved using only the MFA from the PLT. After implementing the
+concept of MFAAA, the process of retrieving the type information from the PLT was changed to
+involve three steps, using a ”fallback pattern.” The pattern will return the ﬁrst successful result
+fetched.
+1. PLT lookup for MFAAA: Contains the most detailed type information.
+2. PLT lookup for MFA: Contains the unioned type information for all handle_call implemen-
+tations in the server.
+3. Use the type information that the default version of Dialyzer gives gen_server: any
+The following ﬁgure 5 describes how the PLT type information for gen_server:call is carried out
+with the fallback pattern.
+42
+==PAGE:47==
+Figure 5: Showing how type information is fetched from the PLT in the call gen server:call.
+Figure 5 shows a boiled-down example of the fallback pattern that ensures Daialyzer will ﬁnd the
+most speciﬁc successful result. In the ﬁgure, we highlighted the default behavior that Dialyzer used
+before implementing our changes. Normally the gen_server module is a part of the default PLT
+that is built as a base for any analysis. Even if it is not present in the PLT, the resulting types of
+the type inference for gen_server:call will evaluate to any. This again shows Dialyzer’s optimistic
+behavior.
+5.3
+Supporting Elixir
+After introducing the concept of MFAAA in Dialyzer, we saw that we could detect signiﬁcantly more
+discrepancies in the gen_server behavior in Erlang programs. We then wanted to ensure that the
+improved analysis worked on Elixir programs as well.
+The extension to Dialyzer improves the analysis of the gen_server pattern, a built-in behavior in
+Erlang/OTP. However, in Elixir, the corresponding gen_server behavior is called GenServer. This
+di↵erence results in di↵erent MFAs, speciﬁcally the module, M, when analyzing Erlang and Elixir
+programs, as the implementation of the gen_server behavior is slightly di↵erent. For example, the
+MFA for a request to the server implementations is {’Elixir.GenServer’, call, 3} in Elixir, and
+{gen_server, call, 3} in Erlang.
+When Dialyzer performs the improved analysis, the input and return types of the server implemen-
+tations are inferred and stored in the PLT, using MFAAA and MFA. Then, whenever a client API
+creates a request to the server, we intercept it to determine which server implementation the client
+API is calling. We then use either the MFAAA or MFA to determine the input type the server
+implementation accepts and the type it returns.
+Supporting Elixir was therefore done by also intercepting requests to the server implementations with
+the ’Elixir.GenServer’ module name. This simple modiﬁcation allowed the analysis to retrieve
+the correct type information in Elixir programs, thus providing the same improved analysis as in
+Erlang.
+43
+==PAGE:48==
+5.4
+Toggleable gen server Analysis
+As discussed in section 4.2, our analysis requires that the client APIs and their corresponding server
+implementations are deﬁned in the same module. We consider deﬁning them in di↵erent modules
+as an anti-pattern. However, some Erlang and Elixir programmers may disagree with this idea.
+Analyzing codebases that use this anti-pattern might produce false positive warnings. Requirement
+1 for our tool states that it should never produce false positives.
+Therefore we decided to add an option to enable and disable our extension to Dialyzer easily. With
+this option, we believe there is a higher possibility of the tool being accepted in the Erlang community
+and integrated into the Erlang/OTP.
+To enable and disable the additional analysis of the gen_server behavior, we added a warning ﬂag
+that can be speciﬁed in the command to start Dialyzer’s analysis. When the ﬂag is not included,
+Dialyzer works precisely the way it did before introducing any changes. When it is included, all
+the components of the improved analysis are performed by Dialyzer. The MFAAA constructs for
+the server implementations are generated and stored in the PLT. The call graph is modiﬁed, so the
+analysis occurs in the correct order. All requests to the server are intercepted and type checked.
+The ﬂag is implemented similarly to the existing ﬂags that can be speciﬁed when running Dialyzer.
+Developers should therefore easily be able to enable and disable our extended analysis, given that
+they are already familiar with Dialyzer.
+5.5
+Distributing our tool
+Having implemented the improvements to Dialyzer, we looked into the options of how we could enable
+easy distribution of our tool to allow projects to get started using the modiﬁcation e↵ortlessly. Our
+modiﬁcations are directly written into the source code of Erlang/OTP and can thereby easily be
+distributed by building and compiling Erlang directly from the source code. However, this process is
+not straightforward and does not allow us to easily enable projects to run our modiﬁcations without
+running a list of commands to prepare and build Erlang directly from the source and using the built
+binaries.
+To better distribute the tool and allow for, e.g., the possibility of running the tool as part of a
+project’s automatic pipelines to validate code before human review, we implemented and built a
+Docker[14] image. Using this Docker image, we enabled the possibility of distributing and running
+our modiﬁcations to Dialyzer on all types of machines without having to conﬁgure and recompile
+Erlang directly from the source code on each machine. The usage of Docker allowed us to create a
+platform-independent runtime for our modiﬁcation to Dialyzer to easily run our tool on any project
+without the hassle of recompiling from scratch on each independent machine.
+44
+==PAGE:49==
+6
+Testing
+In the following sections, we will elaborate on the di↵erent test approaches used in the development
+of the tool and evaluate how they helped ensure a high-quality result. Section 6.2 describes how we
+improved our tool by testing on real-world applications. We encountered two curious bugs in this
+process, which we will elaborate upon in sections 6.2.1 and 6.2.2. The ﬁrst was an implementation
+mistake, in our tool, we corrected, whereas the second eventually proved to be an unusual behavior
+in Dialyzer that developers should be aware of when using Dialyzer.
+We ran systematical tests throughout the development process to ensure our tool’s quality. Speciﬁ-
+cally, whenever we introduced implementation changes to the tool, we used two di↵erent approaches
+to test the changes. First, we created a folder of Erlang modules that was supposed to test the
+fundamental behavior of our tool. We continuously extended this test module with new test cases
+throughout the process. Secondly, we would run our tool on large real-world applications to ensure
+that our tool would not break because of an unhandled edge case.
+6.1
+Self created test-modules
+Early in the development process, we saved di↵erent Erlang modules suitable to test various analysis
+properties. The purpose of the modules was to display multiple types of discrepancies in simple
+examples. These modules would allow us to quickly determine whether our changes had improved
+our tool’s ability to discover discrepancies.
+Throughout the project, we continuously added new modules as we discovered new types of discrep-
+ancies that would be relevant to test in future versions of the tool.
+Whenever we introduced changes to the tool, we made sure to use our tool to analyze all of the
+produced examples. As we have a clear expectation of the analysis result for each module, we could
+use this to verify that the tool continuously improved and that we did not break any functionality
+along the way.
+We have gathered the test modules on our GitHub[15]
+6.2
+Real-world applications
+We could quickly determine that Dialyzer behaved as we expected by testing our custom-tailored
+Erlang modules. However, it was challenging to ensure that our tool was bug-free. To minimize the
+bugs in our code, we extensively tested our tool on large real-world applications. These tests would
+help us detect bugs caused by things such as unhandled edge cases in our code.
+We found two curious bugs during testing on Motorola Solutions code base. One of them proved
+to be because of a bug in our implementation, which we luckily detected and ﬁxed early in the
+process. The second, however, was an unusual behavior of Dialyzer that we were unaware of before
+development, but it helped us understand the tool in greater detail.
+We will dive into these two separate bugs in the following sections.
+45
+==PAGE:50==
+6.2.1
+Overshadowing function clause
+During testing, we discovered a bug where our extension to the tool would discard some of the type
+information generated during the analysis.
+We realized that Dialyzer discarded the information
+because of the way we ordered the grouped type information. The following listing shows a simple
+example of where this would go wrong:
+1
+-module( handle_call_catch_all ).
+2
+-export([my_api /2, handle_call /3]).
+3
+4
+% client
+APIs
+5
+-spec
+my_api(pid (), atom ()) -> a.
+6
+my_api(Pid , Arg) ->
+7
+gen_server :call(Pid , {my_api_server , Arg}).
+8
+9
+% server
+implementation
+10
+handle_call ({my_api_server , a}, _From , State) ->
+11
+{reply , a, State};
+12
+handle_call ({my_api_server , _Atom}, _From , State) ->
+13
+{reply , b, State}.
+Listing 25: Showing an example of a handle call discrepancy due to an overshadowing bug.
+There are no discrepancies in this module, however Dialyzer would report the following warning:
+handle_call_catch_all.erl:5:2: Invalid type specification for function
+handle_call_catch_all:my_api/2. The success typing is (_, _) -> ’b’
+Even though the warning relates to the function my_api, Dialyzer emits the warning because it
+believes that handle_call can only return the atom, ’b’. We can see in the implementation that
+when handle_call is invoked with {my_api_server, a}, it returns the atom ’a’.
+The actual cause of this false positive discrepancy is that when we introduced the MFAAA concept to
+Dialyzer, we forgot to adhere to the order of the handle_call-clauses in the code. In this example,
+Dialyzer would analyze the handle_call-clause with the more generic ”catch-all” variable _Atom
+as if it was the ﬁrst clause. As Erlang, and therefore Dialyzer, evaluates function clauses from the
+top, developers should list the most speciﬁc clauses at the top and then list the less speciﬁc clauses
+afterward. Suppose one places the more general clause above a less general clause. In that case,
+it will overshadow the less general clause. During our analysis, we would reorder the clauses by
+accident, resulting in Dialyzer believing that handle_call would only be able to return the atom
+’b’ because the clause returning ’b’ would overshadow the other clause.
+This misbehavior of our extension to Dialyzer could have gone under the radar for a long time if
+we had not tested the tool on large real-world applications. The number of di↵erent scenarios and
+cases that apply to gen_server is signiﬁcant, and it would almost be impossible to come up with a
+representation of them all. However, with these stress tests on large real-world applications, we can
+detect these scenarios in most cases, ensuring a bug-free implementation.
+6.2.2
+Indirect false positives
+We encountered another bug during testing. This time, however, we discovered that it was not
+our extension causing the bug, even though our extension uncovered it. We located the bug in a
+46
+==PAGE:51==
+gen_server server implementation, and because our extension to Dialyzer correctly analyzes these
+functions, the bug presented itself.
+It was the nowarn_function Dialyzer annotation that caused the bug.
+Developers can use the
+annotation on the functions to dictate that Dialyzer should not emit warnings for that speciﬁc
+function. However, this annotation introduces some undesired behavior in the analysis, one that
+caused a false positive warning in this example.
+The example below shows two modules that illustrate the bug that we encountered.
+1
+-module( no_warn_example ).
+2
+-export([functionA /0, functionB /1, functionC /1]).
+3
+4
+functionA () ->
+5
+functionB(true).
+6
+7
+functionB(true) ->
+8
+functionC("hello , world!");
+9
+functionB(false) ->
+10
+"hello , erlang!".
+11
+12
+-dialyzer({nowarn_function , functionC /1}).
+13
+functionC(Arg) ->
+14
+no_warn_example_2 :foo(bar),
+15
+Arg.
+1
+-module( no_warn_example_2 ).
+2
+-export([foo /1]).
+3
+4
+-spec
+foo(integer ()) -> any ().
+5
+foo(Var) ->
+6
+Var.
+Figure 6: Showing an example where Dialyzer emits a warning because the nowarn function
+annotation is used.
+Looking at the listing to the right in ﬁgure 6, we have deﬁned the function foo that takes the
+argument Var and returns it. This function will work with any given input, and the success typing for
+the function will be: (any()) →any(). In this example, however, we chose to add the speciﬁcation
+to the function, dictating that the function only accepts integer.
+Because of the speciﬁcation, Dialyzer will warn that no_warn_example_2:foo(bar) on line 14 in
+the listing to the left will fail, and therefore Dialyzer emits a warning.
+However, we know the
+function invocation is valid and will succeed at runtime. Because of this, we add the annotation
+-dialyzer({nowarn_funciton, functionC/1}) to instruct Dialyzer to ignore the warning. Adding
+this annotation should ﬁx our problem, but it does not. Below we have listed the warning emitted
+when running Dialyzer on the two modules present in ﬁgure 6.
+no_warn_example.erl:4:1: Function functionA/0 has no local return
+no_warn_example.erl:5:13: The call no_warn_example:functionB
+(’true’) will never return since it differs in the 1st argument
+from the success typing arguments: (’false’)
+We can read from the warning that functionA will not succeed, and it is because the call to
+functionB on line 5 will not succeed because functionB does not accept the argument true. The
+problem is that functionB has a clause accepting the atom true, but Dialyzer seems to have removed
+this clause from the type information.
+Investigating this example showed us that because Dialyzer determines that functionC will fail,
+Dialyzer will reduce the available type information to none (which typically indicates a discrepancy).
+Continuing the function chain, the ﬁrst clause of functionB that invokes functionC will receive the
+47
+==PAGE:52==
+same type information, namely none. Because functionB has another clause that Dialyzer does not
+deem faulty, that clause will be the only one stored in the PLT. Finally, because Dialyzer removed
+the ﬁrst clause of functionB, it makes sense that functionA will not be able to use that same clause,
+and it will eventually cause functionA to fail.
+The example shown in ﬁgure 6 is dubious, and one might ask why the speciﬁcation for the function
+foo is not just corrected.
+Unfortunately, it is not always the case that the consumer of those
+modules develops the modules that contain the wrong function speciﬁcations. If we can not correct
+the speciﬁcation, we can only use the module by instructing Dialyzer to ignore any warnings it
+produces.
+We discovered this behavior because the analyzed project used the Dialyzer annotation to prevent a
+warning. Before our extension, Dialyzer would not correctly analyze the function, so Dialyzer missed
+the bug. We asked the project developers if the annotation was required, and unfortunately, it seemed
+that the module they were using did not correctly use the speciﬁcations in their code. Namely, the
+module used speciﬁcations for documentation purposes rather than specifying the correct types of
+functions.
+6.3
+GitHub Actions of Erlang/OTP
+We used Erlang/OTP’s own GitHub Actions to check if our code changes adhered to the coding
+standard set by Erlang’s authors. Running the automated actions showed us parts of the code that
+we could improve, ensuring consistency in the code. Furthermore, running these actions will make it
+easier in the future if we were to try to create a pull request to get our changes into the Erlang/OTP.
+The Erlang/OTP GitHub Actions, combined with the vast number of Dialyzer projects we analyzed
+with our tool, ultimately ensured the best possible product, given the project’s time frame. We
+could detect bugs in our implementation that we corrected in time. Also, we learned a lot about the
+nature of Dialyzer, which ultimately helped us shape our solution to be even better.
+48
+==PAGE:53==
+7
+Evaluation & Results
+We will now present the results we obtained from thoroughly testing our tool. We will use these
+results to evaluate the main objective and requirements set for the project. In section 7.1 we will
+provide measurements to show that we managed to complete the main objective, and sections 7.2,
+7.3 and 7.4 will show that the produced tool satisﬁes the requirements.
+With the code changes implemented and thoroughly tested, we now want to evaluate the produced
+tool. In section 3.2 we deﬁned the main objective of this project, as well as three requirements we
+wanted our tool to satisfy. For the sake of convenience, we enumerate them again:
+Main objective:
+• Improve the detection of discrepancies between client APIs and server implementations in
+Erlang and Elixir, when using the gen_server behavior.
+Requirements:
+1. The tool should remain sound, i.e., no false positives.
+2. The tool should remain fast.
+3. The tool should require minimal, preferably no, annotations or modiﬁcations from the user.
+We thoroughly tested many di↵erent Erlang and Elixir repositories to ensure we accomplished the
+objective and requirements. These repositories consisted of numerous popular open-source projects
+and Motorola Solutions’ code base. Motorola Solutions uses Dialyzer as a part of their development
+process, ensuring a code base with no Dialyzer warnings. The Motorola Solutions code base also
+heavily relies on the gen_server behavior and therefore served as a perfect test suite to see if our
+extended version of Dialyzer would ﬁnd any gen_server related discrepancies. In the following
+sections, we will present our results after running tests and argue how they can verify the success of
+our implemented tool.
+7.1
+Improvement of discrepancy detection in the gen server behavior
+After running our tool on the Motorola Solutions codebase, we saw the following results:
+• Number of repositories analyzed: 9
+• Number of discrepancies found by our tool: 17
+Detecting 17 discrepancies in a seemingly bug-free, high-quality codebase that runs in production
+shows just how e↵ective our improved analysis is.
+In those nine di↵erent repositories, we analyzed 237 gen_server:call and 378 gen_server:cast
+requests.
+7.1.1
+The discrepancies our tool detected
+The discrepancies caught by our analysis were all related to speciﬁcation discrepancies. The type
+speciﬁcation and the implementation of the function are out of sync. However, a runtime error will
+not occur since the client API and server implementation are aligned. The risk for future mistakes
+49
+==PAGE:54==
+increases because developers are inclined to use the function as the speciﬁcation states, which will
+cause a runtime error.
+Listing 26 shows an example that explains the general type of discrepancies that our tool caught:
+1
+-module( gen_server_wrong_spec ).
+2
+-export([my_api /2, handle_call /3]).
+3
+4
+% client
+APIs
+5
+-spec
+my_api(pid (), integer ()) -> integer ().
+6
+my_api(Pid , Arg) ->
+7
+gen_server :call(Pid , {my_api_server , Arg}).
+8
+9
+% server
+implementation
+10
+-spec
+handle_call ({my_api_server , integer (), atom ()}, _From , my_state) -> {reply , integer (),
+my_state}.
+11
+handle_call ({my_api_server , Arg}, _From , State) ->
+12
+Res = Arg + 1,
+13
+{reply , Res , State}.
+Listing 26:
+Showing a discrepancy due to an incorrect number of arguments provided in the
+speciﬁcation.
+The discrepancy occurs since the Request argument contains the incorrect number of arguments,
+compared to the speciﬁcation. Speciﬁcally, Dialyzer emits the following warning:
+gen_server_wrong_spec.erl:10:2: Invalid type specification for function
+gen_server_wrong_spec:handle_call/3. The success typing is
+({’my_api_server’, number()}, _, _) -> {’reply’, number(), _}
+The warning says that the speciﬁcation does not match the success typing for the function. In the
+provided example, the speciﬁcation contains an additional argument in the Request tuple, which
+was a typical discrepancy encountered in the Motorola Solutions repositories. The discrepancies
+found in Motorola Solutions’ codebase were related to the Request tuple having a mismatching
+number of arguments.
+Though these discrepancies are not the most business-critical errors, ﬁxing the speciﬁcations would
+still improve the code base, as they usually serve as an excellent documentation tool. It also decreases
+the likelihood of introducing critical runtime errors in the future.
+7.1.2
+More explicit type information metrics
+Besides catching previously uncaught discrepancies, our tool will help the developer be more conﬁ-
+dent in the code they write, when using the gen_server behavior. During the analysis, we collected
+information, displaying how often our tool used more explicit type information for the gen_server
+requests, than was previously available. Looking at these results, we saw that:
+• Our tool analyzed 100% of the 237 gen_server:call requests with more explicit type infor-
+mation than the default information available in Dialyzer.
+• Our tool analyzed 74% of the 378 gen_server:cast requests with more explicit type infor-
+mation than the default information available in Dialyzer.
+50
+==PAGE:55==
+In the following section, we will break down the numbers presented above. We will also explain why
+the results show improvement on all gen_server:call and only on 74% of the gen_server:cast.
+Recalling the analysis phases in Dialyzer (described in section 2.4), the analysis consists of two
+phases: Typesig and Dataﬂow. Our implementation a↵ects both parts of the analysis, and because
+of this, we chose to count the amount of successful gen_server type information lookups in both
+analysis phases. Looking at table 3 and table 4 we show the results produced by the analysis for
+gen_server:call and gen_server:cast respectively.
+Analysis phase
+PLT information
+Lookups
+Successful
+Unsuccessful
+Typesig
+Improved information
+237
+225
+12
+Typesig
+Dialyzer Default
+12
+12
+0
+Dataﬂow
+Improved information
+929
+929
+0
+Dataﬂow
+Dialyzer Default
+0
+0
+0
+Table 3: Showing the amount of successful and unsuccessful gen server:call lookups for the im-
+proved gen server information in the PLT both for Typesig and Dataﬂow.
+Analysis phase
+PLT information
+Lookups
+Successful
+Unsuccessful
+Typesig
+Improved information
+378
+281
+97
+Typesig
+Dialyzer Default
+97
+97
+0
+Dataﬂow
+Improved information
+0
+0
+0
+Dataﬂow
+Dialyzer Default
+0
+0
+0
+Table 4: Showing the amount of successful and unsuccessful gen server:cast lookups for the im-
+proved gen server information in the PLT both for Typesig and Dataﬂow.
+We can see in table 3 that even though the Typesig analysis fails to ﬁnd improved information
+on 12 examples, the Dataﬂow analysis successfully ﬁnds improved information on every call. As
+Dialyzer runs both Typesig and Dataﬂow on the same functions, we can be sure that since Dataﬂow
+successfully analyzes all functions with extended information, Dialyzer has analyzed all functions
+with more details. Hence we can say that on 100% of the analyzed gen_server:call, we can use
+more explicit type information than Dialyzer would use by default.
+Looking at the same information in table 4 that displays the results for gen_server:cast, we can
+see that the two rows for Dataﬂow are all zeros. Unfortunately, the missing results for Dataﬂow are
+because we had a bug in the implementation that we did not identify until late in the project. It would
+eventually mean that Dialyzer would not analyze gen_server:cast during Dataﬂow. However, we
+identiﬁed and ﬁxed the bug in our extension of Dialyzer. Unfortunately, we detected the bug very
+late in the process. Because running the tests on the Motorola Solutions repositories was very time-
+consuming, we, unfortunately, did not have the time to redo all the tests. Therefore, we cannot tell
+how many of the 97 missed type information lookups Dialyzer would ﬁnd during Dataﬂow. However,
+we are convinced that our tool would ﬁnd most of these missed type lookups during the Dataﬂow
+51
+==PAGE:56==
+analysis if we reran the same tests.
+Looking into the failed lookups during Typesig, we realized that Dialyzer would not analyze any
+mutually dependent gen_server client APIs and server implementations during Typesig. This is
+a design choice in Dialyzer and the information will eventually be reﬁned during Dataﬂow, as we
+already saw for gen_server:call. Unfortunately, we have seen multiple examples of implementa-
+tions where handle_cast functions are involved in a circular dependency, which would explain the
+high amount of failed lookups.
+7.2
+The requirement of soundness
+Requirement 1 for our tool states that it should provide sound warnings. We ensured that our tool
+satisﬁed this by running tests extensively on both open-source and Motorola Solutions projects. We
+ran tests both before, during, and after all implementation changes. We thoroughly analyzed every
+discrepancy warned by Dialyzer during these tests to ensure that we did not introduce any false
+positives in our tool. We included the code developers for the Motorola Solutions projects to ensure
+that the found discrepancies were factual.
+It happened once that our tool would report a false
+positive discrepancy; however, after having analyzed the related functions thoroughly, it turned out
+that the false positive warning was unrelated to our extensions to the tool. However, we discovered
+the discrepancy because we have broadened the analysis of Dialyzer.
+This discrepancy was the
+example described in detail in section 6.2.2.
+7.3
+The requirement of the analysis being fast
+To ensure that our tool satisﬁed requirement 2 of being fast, we compared the runtime to the runtime
+of the original version of Dialyzer.
+As mentioned, we allowed developers to enable or disable the gen_server-detection using a ﬂag,
+which developers can include in the Dialyzer command. We wanted to test our tool both with and
+without the gen_server-detection. Therefore, we wanted to compare three di↵erent versions of the
+Dialyzer tool:
+• Default Dialyzer.
+• Modiﬁed Dialyzer: gen_server-detection disabled.
+• Modiﬁed Dialyzer: gen_server-detection enabled.
+When ﬁnding open source projects for the analysis, we generally found that Elixir projects were the
+most relevant. First of all, most of the open-source projects we found were Elixir projects, which
+makes sense since it is often large industrial applications such as telecommunications that use Erlang.
+Those projects are typically not open-source. Second, most of the Erlang projects we found were
+not actively using Dialyzer or had at least not run Dialyzer on the project for a long time. In some
+cases running the default version of Dialyzer on the project resulted in several hundred (occasionally
+in thousands) emitted warnings, making it somewhat unmanageable to use the results. The many
+warnings were also present for some Elixir projects, but we did discover some projects that used
+Dialyzer actively. Furthermore, when running Dialyzer (through Dialyxir) in Elixir, a total count of
+warnings produced by Dialyzer is emitted, making it much easier to identify new errors. Lastly, it
+52
+==PAGE:57==
+was often simpler to run Dialyzer on the Elixir projects since it only required adding the Dialyxir
+dependency to the Mix-project3 and then run Dialyzer using Mix. Running Dialyzer using Mix
+would automatically build the required PLT, run the analysis and report the time each step took.
+In Erlang projects, it was often necessary to manually specify how the PLT should be built, compile
+the Erlang ﬁles to BEAM-ﬁles, and then select all the ﬁles Dialyzer should analyze. Alternatively,
+the analysis can run on raw Erlang ﬁles, possible by specifying the --src ﬂag. Running the analysis
+in this fashion was rather frustrating, mainly when the analysis then resulted in a large number of
+type warnings. Furthermore, the result of our comparison analysis should not di↵er whether we ran
+our tool on Erlang and Elixir projects.
+The time it takes to run Dialyzer on a project is not entirely consistent, and the time results can
+vary. It is by a tiny factor, but it is important to note that the runtime can be slightly irregular.
+To get a more reliable comparison, we ran each version of Dialyzer on the same project ten times.
+Rather than averaging the ten-time recordings for each version of Dialyzer, we displayed the results
+as boxplots. The boxplots graphically demonstrate the runs’ locality, spread, and skewness to more
+precisely conclude from the results.
+Below are three boxplots displaying the results obtained from ten runs of each version of Dialyzer
+on the three open-source repositories: Credo4, Oban5, and Eventstore6.
+(a) Credo
+(b) Oban
+(c) Eventstore
+Figure 7: Boxplots showing resulting runtime measurements from ten runs on each version of Dia-
+lyzer. Each boxplot can be seen in full size in appendix section A5.
+3Adding the dependency to the project merely needed adding the :dialyxir-dependency in the dependencies in
+the mix.exs ﬁle. The mix.exs ﬁle is the foundation of a Mix project and deﬁnes the version and speciﬁcations of the
+Mix projects, as well as its dependencies.
+4(a) https://github.com/rrrene/credo
+5(b) https://github.com/sorentwo/oban
+6(c) https://github.com/commanded/eventstore
+53
+==PAGE:58==
+It is diﬃcult to draw a clear conclusion from the boxplots at ﬁrst glance. As mentioned, the results
+are highly irregular from run to run, but only di↵ers by a small margin in runtime. The boxplot in
+ﬁgure 7a even shows that our tool had a faster runtime than the default version of Dialyzer. The
+faster results were even achieved both with and without the gen_server-detection ﬂag enabled.
+Theoretically, our tool should not be able to be faster than the default version of Dialyzer. At best,
+the runtime of our tool should be identical to Dialyzer’s runtime, when gen_server is not used in
+the project. At worst, we do expect a slight increase in runtime. However, because the margin
+generally is so tiny when comparing our tool to the Default Dialyzer, we believe that the analysis
+of our tool is still very fast.
+We do want to mention that Dialyzer has a ﬂag called race_conditions which can be enabled for
+the analysis7. This ﬂag will provide warnings if possible race conditions can occur during runtime.
+Enabling this ﬂag can, however, drastically increase the runtime of the analysis. Speciﬁcally, the
+documentation states that:
+”Include warnings for possible race conditions. Notice that the analysis that ﬁnds data races performs
+intra-procedural data ﬂow analysis and can sometimes explode in time. Enable it at your own risk.”
+We suspect that the additional amount of edges added during the ﬁrst phase of Dialyzer might
+contribute to the explosion in runtime. We saw that for one project that used the race_conditions
+warning ﬂag, the runtime of the analysis drastically increased with our ﬂag (gen_server) enabled
+as well. As Erlang already disclaimed in the Erlang/OTP that the runtime can explode, we did not
+investigate this issue in greater detail. Out of all the repositories analyzed, it was only one repository
+that drastically increased in runtime.
+7.4
+The requirement of minimal annotations or modiﬁcations
+Requirement 3 was essential to make it as easy as possible for developers to adopt our tool. If using
+our tool requires too many changes or e↵ort to make it work, many users might be discouraged from
+using it.
+Because we introduced a required pattern to use our tool, we can not conclude that we adhere
+entirely to this requirement. However, we believe the enforced pattern is a common design choice,
+and most projects already comply with the pattern. Furthermore, because we hide the analysis
+behind a ﬂag, we believe that our extension still complies with Dialyzer’s behavior. Integrating our
+tool into Dialyzer would not break it and its principles.
+Besides the required pattern, we did not encounter any projects where it would require a code
+rewrite to use our tool.
+Our tool extends the capabilities of Dialyzer, and the success typings
+algorithm automatically infers all the information used throughout the analysis. The information
+used to analyze the gen_server modules properly does not rely on speciﬁcations but is a product
+of modifying the already available type information in Dialyzer.
+To summarize, we believe that our tool adheres to the essential parts of requirement 3. As we will
+also discuss later in section 8.1.4, it could be interesting to investigate the possibilities of cross-
+7Erlang removed the race conditions ﬂag in Erlang/OTP version 25.0 released May 18, 2022 (https://www.erlang.
+org/patches/otp-25.0#dialyzer-5.0). We implemented the improvements described in this project on top of Er-
+lang/OTP version 24.3.4.
+54
+==PAGE:59==
+module calling between gen_server modules. But for most projects, what we have done already
+with the analysis, will be plenty useful for developers to use in their projects, and it will work on
+most Erlang and Elixir projects.
+55
+==PAGE:60==
+8
+Conclusion & Future Work
+In this project, we have extended the already well-established, static analysis tool Dialyzer, to
+improve the detection of concurrency-related discrepancies in Erlang and Elixir, when using the
+gen_server behavior. We decided on three requirements that our produced tool should satisfy: 1)
+It should be sound, i.e., report no false positives. 2) It should be fast. 3) It should require minimal,
+preferably no, annotations or modiﬁcations from the user. These are the exact requirements that
+Dialyzer satisﬁes, making it e↵ortless for the Erlang and Elixir communities to adopt our extended
+tool.
+We improved the analysis in two ways: First, we used the type information about the client APIs
+and server implementations of gen_server, which was already available in Dialyzer using the MFA.
+This change already signiﬁcantly improved the number of discrepancies that our tool was able to
+detect. Second, we introduced an extension to the MFA, namely the MFAAA (Module, Function,
+Arity, Atom, Arity), to improve the analysis further. The MFAAA construct provided signiﬁcantly
+more precision in the type information of the return types of the server implementations, to detect
+even more discrepancies.
+To measure the e↵ectiveness of our tool, Motorola Solutions allowed us to analyze their actual
+production codebase. From this, we can conclude that all of the synchronous gen_server requests,
+and the majority of the asynchronous requests in their codebase, were analyzed with more type
+information than was previously available in Dialyzer.
+Furthermore, we were able to catch 17
+discrepancies in their codebase.
+The discrepancies found during analysis and testing were thoroughly inspected and veriﬁed as actual
+code errors, ensuring that we have not introduced any false positives. We described what we deﬁne
+as an anti-pattern, namely deﬁning the gen_server client APIs and server implementations in
+di↵erent modules. As long as this anti-pattern is not used, the produced tool satisﬁes requirement
+1 of soundness.
+Applying our tool to several open-source projects and measuring the runtime, we could conclude
+that the analysis was still fast, thereby satisfying requirement 2.
+Lastly, since we require developers not to use the gen_server anti-pattern, we made it easy to enable
+and disable our extended analysis. This allows all projects to adopt and use our tool, without having
+to modify existing code. The tool thereby satisﬁes requirement 3.
+The fact that our tool could ﬁnd discrepancies in Motorola Solutions’ seemingly bug-free, high-
+quality codebase that runs in production, proves how e↵ective it is. This is especially true since the
+tool requires no modiﬁcations or guidance from the user, while still providing a fast analysis with
+sound warnings.
+56
+==PAGE:61==
+8.1
+Future Work
+The following section will discuss several ways that the work we presented in this thesis, can be
+improved with future work.
+Sections 8.1.2, 8.1.3 and 8.1.4 describe ways that our speciﬁc extension to Dialyzer could be improved,
+to improve detection of concurrency-related errors with the gen_server behavior and in general.
+Section 8.1.5 describes some more general improvements that could be incorporated into Dialyzer,
+to catch more discrepancies not necessarily related to concurrency or gen_server.
+8.1.1
+Integrating the modiﬁcations into Erlang/OTP
+In order to correctly distribute our tool as part of the source of Erlang/OTP, the changes made
+to incorporate our improvements would need to be accepted and merged into the main repository
+of Erlang/OTP. In this project, we did not create a pull request to get our tool integrated into
+Erlang/OTP. However, it could be completed in the future to enable all Erlang and Dialyzer users
+to get these improvements natively with their Erlang installation.
+However, to introduce new functionality to the Erlang/OTP, it is required that the subject of the
+functionality is discussed in the community.
+We believe this project can be used as a proof of
+concept to start the discussion on concurrency-related discrepancies in Dialyzer. We already ran
+the Erlang/OTP’s GitHub Actions, ensuring that we did not introduce any breaking changes to
+Dialyzer. Furthermore, the GitHub Actions ensures that we adhere to the development rules of the
+Erlang/OTP project.
+8.1.2
+Enabling more generic behaviors
+The current implementation of our extension to Dialyzer only supports the gen_server behavior
+in Erlang and Elixir. However, multiple di↵erent behavior modules exist for generic concurrency
+concepts in Erlang and Elixir, such as the gen_event- and the gen_statem behavior.
+These two patterns follow the same concept as the gen_server pattern, that client APIs call server
+implementations using generic functions.
+Therefore, as we saw with gen_server, Dialyzer does
+not use the correct type information when analyzing the client APIs and server implementations.
+Along with this, the gen_statem- and gen_event behaviors further extend the complexity of the
+analysis by creating conditional and dynamic e↵ects based on the program’s current state.
+For
+example, when utilizing the gen_event behavior, the individual handlers are dynamically added
+to the process. Therefore, Dialyzer would have to track and detect which handlers are added to
+individual processes to analyze the modules correctly. Enabling Dialyzer to analyze more of these
+generic concepts would further increase its e↵ectiveness.
+8.1.3
+General concurrency type analysis
+The extension we added to Dialyzer focused on improving the overall analysis of programs utiliz-
+ing the gen_server behavior. The extension, however, is built around a supported pattern that
+developers must adhere to when implementing gen_server behavior modules. We introduced and
+described the pattern in section 4.2. The pattern was introduced because Dialyzer cannot assign
+57
+==PAGE:62==
+type information to the speciﬁc process identiﬁer used when invoking the functions. This inability
+for Dialyzer to store and detect information about process identiﬁers is a general shortcoming of
+Dialyzer, which will disregard all information when a program is using message passing in their
+implementation.
+In order to further improve upon Dialyzer and potentially increase the amount of information avail-
+able in Dialyzer, the ability to analyze and store information related to process identiﬁers would
+add a more comprehensive analysis of message passing errors. Maria Christakis and Konstantinos
+Sagonas already did some exciting work on this subject, which could serve as great inspiration when
+addressing this issue. They describe it in their paper Detection of Asynchronous Message Passing
+Errors Using Static Analysis[16].
+Generally, when talking about the concept of message passing, we use the notation of !, receive,
+and spawn to send, receive and spawn processes to send messages from one process to another.
+Creating a process is done using the spawn function built into Erlang, the module, function, and
+the arguments are speciﬁed to create a new process. This process can be a function that includes
+the receive to enable other processes to send messages and, based on pattern matching, perform
+di↵erent actions. To improve the general concept of detecting concurrency errors in Dialyzer, we
+could potentially use the information passed to the spawn function when initially creating the process.
+Detecting discrepancies in message passing should be possible since when initially performing the
+spawn operation, we are specifying the module and function along with the original arguments to
+which the process should be linked. Therefore, we should be able to give Dialyzer some insights as
+to which processes point to which modules and functions to improve the general concurrency type
+discrepancy detection.
+8.1.4
+Cross-module gen server calling
+The extension we made to Dialyzer only ensures sound warnings when developers do not violate the
+pattern we described in section 4.2. Therefore, some developers might not be inclined to disable the
+features we introduced in our extension of Dialyzer.
+To improve the extension, the ability to call server implementations in di↵erent modules could remove
+the pattern criteria, enabling all projects to utilize the extension we introduced fully. Extending
+our analysis to support all gen_server behavior patterns would be an excellent extension to be
+designed and implemented alongside the general concurrency type analysis described in section 8.1.3.
+Combining these implements could improve the e↵ectiveness because when utilizing the gen_server
+pattern, the calling of the server implementation will take a server reference as the ﬁrst argument to
+identify which server the generic server is referencing. Having the concept of the general concurrency
+type analysis, the ability to directly infer the module could potentially be available to Dialyzer when
+performing the analysis, instead of always relying on the design pattern that the client APIs and
+the server implementation must live within the same modules.
+8.1.5
+Improving the overall Dialyzer analysis
+During the project, we found multiple shortcomings in Dialyzer that generally could be improved to
+give a much better result. We found the concepts described here while developing and running our
+58
+==PAGE:63==
+improved analysis of Dialyzer upon multiple projects. However, they are generic to Dialyzer and do
+not relate to any of the work done in this project. We believe that further investigation into these
+concepts will improve the Dialyzer experience by catching more discrepancies.
+Anonymous functions
+A concept that Dialyzer currently is not optimal at detecting discrepancies around is the concept of
+anonymous functions. Invoking a function within an anonymous function (of any kind), then only
+one invocation of the function must be valid for Dialyzer to approve every request. Since Dialyzer
+only requires one invocation to be valid, it means that if we look at listing 27 below when running
+Dialyzer against this code, it will result in ”No discrepancies found”:
+1
+-module( discrepancy1 ).
+2
+-export([ handle_stuff /2, function /2]).
+3
+4
+handle_stuff (Arg , _Arg2) ->
+5
+my_api(Arg , {my_api_1 , _Arg2}),
+6
+my_api(Arg , {my_api , _Arg2}).
+7
+8
+my_api(Arg , Command) ->
+9
+Test = fun (Arg2) -> function(Arg2 , Command) end ,
+10
+Test(Arg).
+11
+12
+function(_Arg , {my_api , _Arg2})
+->
+13
+10.
+Listing 27: Showing a module where Dialyzer is unable to detect the discrepancy on line 5.
+There is, however, a discrepancy on the call on line 5: my_api(Pid, {my_api_1, _Arg2}). There
+is no match case for function that expects the atom my_api_1 - however, because there is a valid
+call on the following line, Dialyzer will ignore the ﬁrst invalid case, and thereby the discrepancy is
+not found. Dialyzer will detect the discrepancy if we either:
+• Remove the valid invocation of my_api() (leaving only the faulty invocation behind)
+• Adding a spec my_api() that speciﬁes the expected atom and arity
+In order to further improve the overall experience when using Dialyzer, the improvement of enabling
+Dialyzer to catch discrepancies found when using anonymous functions correctly will help detect
+more discrepancies generally.
+Partitioning of types
+Currently, Dialyzer stores and looks for information in the PLT based on the MFA, meaning that
+each function sharing the same module, name, and arity is stored together. Storing the information
+using the MFA means that if a function is created for, e.g., pattern matching, it might split multiple
+implementations based on the speciﬁc input type or value. Doing this, Dialyzer cannot correctly
+link the input type with the return type of the speciﬁc input type that might generate.
+If we take a look at the listing 28 below, we see an example where Dialyzer cannot partition the
+input and return types of functions.
+59
+==PAGE:64==
+1
+eats () ->
+2
+carrot = animal(monkey).
+3
+4
+animal(monkey) ->
+5
+banana;
+6
+animal(rabbit) ->
+7
+carrot.
+Listing 28: Showing an example where Dialyzer cannot detect the discrepancy on line 2.
+In the example, in listing 28, we have a pattern-matching function called animal, which will return
+the speciﬁc food the animal eats based on the input animal. Here we are sure that the atom monkey
+will return the atom banana. However, Dialyzer will return no discrepancies when the eats function
+is analyzed. This concept of partitioning input and return types in Dialyzer would give a better
+error detection result for users of the Erlang programming language as more discrepancies could be
+detected.
+T. Lindahl and K. Sagonas describe this concept of not being able to connect the input type to the
+return type in their paper on success typings[9]. They speciﬁcally state that ”we currently sacriﬁce
+expressiveness for simplicity and readability”. However, we believe that introducing matching input
+types to return types will give a much more detailed analysis result.
+Discrepancies in function speciﬁcations
+Suppose we look back at the provided discrepancy in section 3.1.3, where we have the implementation
+of the function safe_div, which takes two arguments and utilizes pattern matching on the second
+argument. Here Dialyzer will correctly detect that the function safe_div will take two integers
+as arguments. However, it is unable to correctly detect that it should return either the tuple of
+{ok, integer()} or the tuple of {error, unicode:chardata()}, the last of which is violated by
+the implementation.
+This discrepancy happens when Dialyzer tries to connect and report errors when comparing the
+success typing of a function with the speciﬁed speciﬁcations for that function. In the example of
+the function safe_div, if we ask Dialyzer to output the inferred success typing of the function, it
+will correctly generate the expected type of {’error’, 0} | {’ok’, integer()}. However, this
+return type and the return type of the function speciﬁcation do not overlap.
+Enabling Dialyzer to correctly detect if a function can return multiple di↵erent return types, if the
+function speciﬁcation and the success typing have at least a single mismatch, could generally improve
+the ability of users to catch more errors when writing Erlang programs.
+The inability to detect inconsistencies between speciﬁcations and implementations generally seems
+to be an issue, with Dialyzer being unable to handle errors when speciﬁcations and success typings
+clash if a function can return multiple di↵erent types.
+Dialyzer will report no errors since the
+implementation of the case where the argument Y is not zero will return the correctly speciﬁed type
+{’ok’, integer()} from the speciﬁcation. However, suppose we changed the speciﬁcation to not
+being correct on any of the expected return types. In that case, Dialyzer will correctly report a
+discrepancy that the implementation and the speciﬁcation do not match.
+60
+==PAGE:65==
+9
+References
+[1]
+T. Lindahl and K. Sagonas. “Detecting Software Defects in Telecom Applications Through
+Lightweight Static Analysis: A War Story”. In: APLAS’04 (2004), pp. 86–101.
+[2]
+Erlang. https://www.erlang.org/. Accessed: 15-06-2022.
+[3]
+Design Principles - gen server. https://erlang.org/documentation/doc-4.9.1/doc/
+design_principles/gen_server.html. Accessed: 15-06-2022.
+[4]
+The Elixir programming language. https://elixir-lang.org/. Accessed: 15-06-2022.
+[5]
+Introduction to Mix.
+https : / / elixir - lang . org / getting - started / mix - otp /
+introduction-to-mix.html. Accessed: 15-06-2022.
+[6]
+Hex: The package manager for the Erlang ecosystem. https://hex.pm/. Accessed: 15-06-2022.
+[7]
+Dialyxir. https://github.com/jeremyjh/dialyxir. Accessed: 15-06-2022.
+[8]
+Robin Milner.
+“A theory of type polymorphism in programming”.
+In: Journal of Com-
+puter and System Sciences 17.3 (1978), pp. 348–375. issn: 0022-0000. url: https://www.
+sciencedirect.com/science/article/pii/0022000078900144.
+[9]
+T. Lindahl and K. Sagonas.
+“Practical Type Inference Based on Success Typings”.
+In:
+PPDP’06 (2006), pp. 167–178.
+[10]
+Erlang/OTP 24.1. https://erlang.org/documentation/doc-12.1/doc/. Accessed: 15-06-
+2022.
+[11]
+Erlang - ETS. https://www.erlang.org/doc/man/ets.html. Accessed: 15-06-2022.
+[12]
+Gradualizer: A Gradual Type System for Erlang. https://github.com/josefs/Gradualizer.
+Accessed: 15-06-2022.
+[13]
+Erlang/OTP Github. https://github.com/erlang/otp. Accessed: 15-06-2022.
+[14]
+Docker. https://www.docker.com/. Accessed: 15-06-2022.
+[15]
+Test Modules.
+https : / / github . com / Fehrnovic / master - thesis / tree / master /
+playground-erlang/src/tests. Accessed: 15-06-2022.
+[16]
+M. Christakis and K. Sagonas. “Detection of Asynchronous Message Passing Errors Using
+Static Analysis”. In: PADL’11 (2011).
+[17]
+Erlang System Architecture Introduction.
+https : / / www . erlang . org / doc / system _
+architecture_intro/sys_arch_intro.html. Accessed: 15-06-2022.
+[18]
+GitHub Actions - Automate your workﬂow from idea to production. https://github.com/
+features/actions. Accessed: 15-06-2022.
+61
+==PAGE:66==
+A
+Appendix
+A1
+Discrepancies provided by Motorola Solutions in Elixir
+This section contains the discrepancies originally provided by Motorola Solutions in their full length.
+A1.1
+Elixir Discrepancy 1
+1
+defmodule
+Discrepancy1
+do
+2
+use
+GenServer
+3
+4
+# client
+APIs
+5
+6
+@spec
+start_link :: pid
+7
+def
+start_link
+do
+8
+{:ok , pid} = GenServer.start_link (__MODULE__ , :ok)
+9
+pid
+10
+end
+11
+12
+@spec
+my_api(pid , integer) :: String.t()
+13
+def
+my_api(pid , arg) do
+14
+GenServer.call(pid , {:my_api , arg})
+15
+end
+16
+17
+# server
+implementation
+18
+19
+@impl
+true
+20
+def
+init(:ok) do
+21
+{:ok , :my_state}
+22
+end
+23
+24
+@impl
+true
+25
+def
+handle_call ({:my_api , arg}, _from , state) do
+26
+res = uppercase(arg)
+27
+{:reply , res , state}
+28
+end
+29
+30
+@spec
+uppercase(String.t()) :: String.t()
+31
+defp
+uppercase(arg) do
+32
+String.upcase(arg)
+33
+end
+34
+end
+Listing 29: Elixir Discrepancy 1.
+62
+==PAGE:67==
+A1.2
+Elixir Discrepancy 2
+1
+defmodule
+Discrepancy2
+do
+2
+use
+GenServer
+3
+4
+# client
+APIs
+5
+6
+@spec
+start_link :: pid
+7
+def
+start_link
+do
+8
+{:ok , pid} = GenServer.start_link (__MODULE__ , :ok)
+9
+pid
+10
+end
+11
+12
+@spec
+my_api(pid , integer) :: String.t()
+13
+def
+my_api(pid , arg) do
+14
+GenServer.call(pid , {:my_api , arg})
+15
+end
+16
+17
+# server
+implementation
+18
+19
+@impl
+true
+20
+def
+init(:ok) do
+21
+{:ok , :my_state}
+22
+end
+23
+24
+@impl
+true
+25
+@spec
+handle_call ({:my_api , integer}, GenServer.from (), :my_state) ::
+26
+{:reply , integer , :my_state}
+27
+def
+handle_call ({:my_api , arg}, _from , state) do
+28
+res = arg + 1
+29
+{:reply , res , state}
+30
+end
+31
+end
+Listing 30: Elixir Discrepancy 2.
+A1.3
+Elixir Discrepancy 3
+1
+defmodule
+Discrepancy3
+do
+2
+@spec
+safe_div(integer , integer) :: {:ok , integer} | {:error , String.t()}
+3
+def
+safe_div(_, 0) do
+4
+{:error , 0}
+5
+end
+6
+7
+def
+safe_div(x, y) do
+8
+{:ok , div(x, y)}
+9
+end
+10
+end
+Listing 31: Elixir Discrepancy 3.
+A2
+gen server dictionary example
+This section contains the complete examples used to describe the gen_server concept by imple-
+menting a dictionary
+63
+==PAGE:68==
+A2.1
+The server module
+1
+-module(server).
+2
+-export([start /3, stop/1, loop/3, call /2]).
+3
+4
+start(Name , F, State) ->
+5
+register(Name , spawn(server , loop , [Name , F, State])).
+6
+7
+stop(Name) ->
+8
+exit(whereis(Name), kill).
+9
+10
+call(Name , Query) ->
+11
+Name ! {self (), Query},
+12
+receive
+13
+{Name , Reply} ->
+14
+Reply
+15
+end.
+16
+17
+loop(Name , F, State) ->
+18
+receive
+19
+{Pid , Query} ->
+20
+{Reply , State1} = F(Query , State),
+21
+Pid ! {Name , Reply},
+22
+loop(Name , F, State1)
+23
+end.
+Listing 32: The full server module.
+A2.2
+The dictionary module
+1
+-module(dictionary).
+2
+-export([start /0, stop/0,
+handle_event /2]).
+3
+-export([add_value /2, get_value /1])
+4
+5
+start () -> server:start(xx1 ,
+6
+fun(Event , State) ->
+7
+handle_event (Event , State)
+8
+end ,
+9
+[]).
+10
+11
+stop () -> server:stop(xx1).
+12
+13
+add_value(Key , Value) -> server:call(xx1 , {add_value , Key , Value}).
+14
+get_value(Key) -> server:call(xx1 , {get_value , Key}).
+15
+16
+handle_event ({add_value , Key , Value}, State) ->
+17
+State1 = update_dictionary (Key , Value , State),
+18
+{ok , State1};
+19
+handle_event ({get_value , Key}, State) ->
+20
+Value = lookup(Key , State),
+21
+{Value , State}.
+22
+23
+% Auxiliary
+functions
+for
+interacting
+with
+the
+dictionary
+24
+update_dictionary (Key , Value , [])
+-> [{Key ,Value}];
+25
+update_dictionary (Key , Value , [{Key , _}|T]) -> [{Key , Value}|T];
+26
+update_dictionary (Key , Value , [H|T])
+-> [H| update_dictionary (Key , Value , T)].
+27
+28
+lookup(_, [])
+-> not_found;
+29
+lookup(Key , [{Key , Value}|_]) -> {value , Value};
+30
+lookup(Key , [_|T])
+-> lookup(Key , T).
+Listing 33: The full dictionary module.
+64
+==PAGE:69==
+A2.3
+The dictionary module using the gen server behavior
+1
+-module( my_dict_gen_server ).
+2
+-behaviour( gen_server ).
+3
+-export([start /0, add_value /2, get_value /1]).
+4
+-export([init/1, handle_call /3, handle_cast /2]).
+5
+6
+start () -> gen_server :start({local , xx2}, my_dict_gen_server , [], []).
+7
+8
+% client
+APIs
+9
+add_value(Key , Value) ->
+10
+gen_server :cast(xx2 , {add_value , Key , Value}).
+11
+12
+get_value(Key) ->
+13
+gen_server :call(xx2 , {get_value , Key}).
+14
+15
+% server
+implementations
+16
+init(_) -> {ok , []}.
+17
+18
+handle_cast ({add_value , Key , Value}, State) ->
+19
+State1 = update_dictionary (Key , Value , State),
+20
+{noreply , State1}.
+21
+handle_call ({get_value , Key}, _, State) ->
+22
+Value = lookup(Key , State),
+23
+{reply , Value , State}.
+24
+25
+% Auxiliary
+functions
+for
+interacting
+with
+the
+dictionary
+26
+update_dictionary (Key , Value , [])
+-> [{Key ,Value}];
+27
+update_dictionary (Key , Value , [{Key , _}|T]) -> [{Key , Value}|T];
+28
+update_dictionary (Key , Value , [H|T])
+-> [H| update_dictionary (Key , Value , T)].
+29
+30
+lookup(_, [])
+-> not_found;
+31
+lookup(Key , [{Key , Value}|_]) -> {value , Value};
+32
+lookup(Key , [_|T])
+-> lookup(Key , T).
+Listing 34: The full dictionary module using the gen server behavior.
+A3
+The callbacks of gen server
+This section contains a list of all gen_server module functions and the callback functions that the
+developer can implement. The callback functions are all described after ﬁgure 8.
+65
+==PAGE:70==
+Figure 8: Showing available gen server module functions and their respective callback handlers[3].
+In the following, we will brieﬂy touch upon each of the callback functions of the gen_server behavior,
+shown in the ﬁgure 8 above.
+Module:init/1: Callback function used to initialize the server whenever gen_server:start,
+gen_server:start_monitor, or gen_server:start_link is called. This callback can speciﬁcally
+be used to initialize the default state for the server.
+Module:terminate/2: Callback function called just before the server shuts down by the call
+gen_server:stop. The function should be used to handle any cleanup required before termination.
+Module:handle_call/3: Callback function that handles synchronous server requests. The function
+parameters are the Request, From, and State.
+Throughout this paper, we will be looking a
+lot at the Request argument, as it will play a crucial role in distinguishing di↵erent handle_call
+implementations. The Request is a term8, which typically is an atom or a tuple containing an atom
+in the ﬁrst tuple value. This atom can be seen as the identiﬁer for the callback implementation.
+Any trailing terms in the tuple are typically used as arguments necessary for the callback function.
+From contains information that is required by the gen_server module to return the response to
+the callee.
+State is the current state of the server.
+Both From and State is provided by the
+8term can be all possible Erlang terms. It is a synonym for any.
+66
+==PAGE:71==
+gen_server behavior module.
+Module:handle_cast/2: Callback function that handles asynchronous server requests. The function
+parameters are the Request and State. The Request and State parameter works similarly to
+handle_call/3 described above.
+Module:handle_info/2: This callback function is called by gen_server if either a timeout occurs
+or the server receives an unexpected message. This callback is implemented in the gen_server
+module, and an explicit implementation is not required.
+Module:handle_continue/2: This callback is called by gen_server whenever a previous callback
+returns the tuple {continue, Continue}. It can be used to splitting callback work into multiple
+callback functions, thereby updating the process state for each step.
+Module:code_change/3: This callback is used to update the structure of the state during release
+upgrade/downgrade.
+As handle_call and handle_cast are the main callback functions used for client/server communi-
+cation, these will be the callbacks in focus throughout this paper.
+A4
+Anti Pattern examples
+This section contains the two modules displaying the anti-pattern in gen_server in their full length.
+Both the faulty as well as the corrected patterns are listed.
+A4.1
+Anti Pattern Example of module1
+1
+-module(module1).
+2
+-behavior( gen_server ).
+3
+-export([ handle_cast /2, init/1, handle_call /3]).
+4
+-export([ my_module1 /0,
+add_to_state /0, start /0]).
+5
+6
+% Client
+functions
+7
+start () -> gen_server : start_link({local , ?MODULE}, ?MODULE , [], []).
+8
+9
+my_module1 () ->
+10
+Module_2_pid = module2: get_module (),
+11
+gen_server :cast(Module_2_pid , {and_to_state , false}).
+12
+13
+add_to_state () ->
+14
+gen_server :cast (? MODULE , {add_to_state , 1}).
+15
+16
+% Server
+functions
+17
+-spec
+handle_cast ({add_to_state , number ()}, number ()) -> {noreply , number ()}.
+18
+handle_cast ({add_to_state , Number}, State) ->
+19
+State1 = State + Number ,
+20
+{noreply , State1}.
+21
+22
+init(_Args) ->
+23
+{ok , 0}.
+24
+25
+handle_call (_Request , _From , _State) ->
+26
+erlang:error( not_implemented ).
+Listing 35: Anti Pattern Example of module1.
+67
+==PAGE:72==
+A4.2
+Anti Pattern Example of module1 - Corrected
+1
+-module(module1).
+2
+-behavior( gen_server ).
+3
+-export([ handle_cast /2, init/1, handle_call /3]).
+4
+-export([ my_module1 /0,
+add_to_state /0, start /0]).
+5
+6
+% Client
+functions
+7
+start () -> gen_server : start_link({local , ?MODULE}, ?MODULE , [], []).
+8
+9
+my_module1 () ->
+10
+module2: and_to_state (false).
+11
+12
+add_to_state () ->
+13
+gen_server :cast (? MODULE , {add_to_state , 1}).
+14
+15
+% Server
+functions
+16
+-spec
+handle_cast ({add_to_state , number ()}, number ()) -> {noreply , number ()}.
+17
+handle_cast ({add_to_state , Number}, State) ->
+18
+State1 = State + Number ,
+19
+{noreply , State1}.
+20
+21
+init(_Args) ->
+22
+{ok , 0}.
+23
+24
+handle_call (_Request , _From , _State) ->
+25
+erlang:error( not_implemented ).
+Listing 36: Anti Pattern Example of module1 - Corrected.
+A4.3
+Anti Pattern Example of module2
+1
+-module(module2).
+2
+-behavior( gen_server ).
+3
+-export([ handle_cast /2, init/1, handle_call /3]).
+4
+-export([ get_module /0, start /0, list /0]).
+5
+6
+% Client
+functions
+7
+-spec
+get_module () -> ’module2 ’.
+8
+get_module () ->
+9
+?MODULE.
+10
+11
+list () -> gen_server :call (? MODULE , list).
+12
+13
+start () -> gen_server : start_link({local , ?MODULE}, ?MODULE , [], []).
+14
+15
+% Server
+functions
+16
+-spec
+handle_cast ({and_to_state , boolean ()}, boolean ()) -> {noreply , boolean ()}.
+17
+handle_cast ({and_to_state , Bool}, State) ->
+18
+State1 = State
+and Bool ,
+19
+{noreply , State1}.
+20
+21
+init(_Args) ->
+22
+{ok , true}.
+23
+24
+handle_call (list , _From , State) ->
+25
+{reply , State , State}.
+Listing 37: Anti Pattern Example of module2.
+68
+==PAGE:73==
+A4.4
+Anti Pattern Example of module2 - Corrected
+1
+-module(module2).
+2
+-behavior( gen_server ).
+3
+-export([ handle_cast /2, init/1, handle_call /3]).
+4
+-export([start /0, list/0,
+and_to_state /1]).
+5
+6
+% Client
+functions
+7
+list () -> gen_server :call (? MODULE , list).
+8
+9
+start () -> gen_server : start_link({local , ?MODULE}, ?MODULE , [], []).
+10
+11
+-spec
+and_to_state (boolean ()) -> ok.
+12
+and_to_state (Bool) ->
+13
+gen_server :cast (? MODULE , {and_to_state , Bool}),
+14
+ok.
+15
+16
+% Server
+functions
+17
+-spec
+handle_cast ({and_to_state , boolean ()}, boolean ()) -> {noreply , boolean ()}.
+18
+handle_cast ({and_to_state , Bool}, State) ->
+19
+State1 = State
+and Bool ,
+20
+{noreply , State1}.
+21
+22
+init(_Args) ->
+23
+{ok , true}.
+24
+25
+handle_call (list , _From , State) ->
+26
+{reply , State , State}.
+Listing 38: Anti Pattern Example of module2 - Corrected.
+A5
+Boxplots of runtimes on open source projects
+This section displays the boxplots presented in section 7.3 in full size.
+Figure 9: Full size boxplot displaying the results of running Dialyzer on the project: Credo.
+69
+==PAGE:74==
+Figure 10: Full size boxplot displaying the results of running Dialyzer on the project: Oban.
+Figure 11: Full size boxplot displaying the results of running Dialyzer on the project: Eventstore.
+70

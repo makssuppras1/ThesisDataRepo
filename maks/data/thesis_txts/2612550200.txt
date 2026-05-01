@@ -1,0 +1,1717 @@
+==PAGE:1==
+Design of a Dynamic
+Reconﬁgurable Architecture and
+Manager for FPGA-based
+Acceleration
+Anders Møller Struck
+Kongens Lyngby 2021
+==PAGE:2==
+Technical University of Denmark
+Department of Applied Mathematics and Computer Science
+Richard Petersens Plads, building 324,
+2800 Kongens Lyngby, Denmark
+Phone +45 4525 3031
+compute@compute.dtu.dk
+www.compute.dtu.dk
+==PAGE:3==
+Summary (English)
+The goal of the thesis is to illustrate the usefulness of partial reconﬁguration in
+FPGA technology, by implementing a system that can conﬁgure reconﬁgurable
+modules on demand. The system runs a Linux operating system and provides
+a Linux kernel module for triggering the reconﬁguration.
+The reconﬁgurable modules are used to illustrate the usefulness of a software
+application that can be accelerated by accelerators that are implemented in
+hardware. The implemented accelerators are based on an HLS version of the
+Sobel edge detection algorithm, and the histogram equalization.
+==PAGE:4==
+ii
+==PAGE:5==
+Preface
+This thesis was prepared at DTU Compute in fulﬁlment of the requirements for
+acquiring an M.Sc. in Engineering.
+The thesis work was carried out in collaboration with the Technical University
+of Denmark under the supervision of Associate Professor Alberto Nannarell.
+Lyngby, 15-January-2021
+Anders Møller Struck
+==PAGE:6==
+iv
+==PAGE:7==
+Acknowledgements
+A special thanks to my supervisor Alberto Nannarelli for giving me the oppor-
+tunity to make this thesis, and for his support throughout the project. The
+experience of working on this project has allowed me to get a much deeper
+understanding of the technology and has greatly expanded my skills and knowl-
+edge.
+I would also like to thank my dearest friends and family for their support and
+understanding during the most time consuming and frustrating parts of the
+project.
+A special thanks go to my girlfriend, who has been very supportive and helpful
+throughout the whole thesis.
+==PAGE:8==
+vi
+==PAGE:9==
+Contents
+Summary (English)
+i
+Preface
+iii
+Acknowledgements
+v
+1
+Introduction
+1
+2
+Background
+5
+2.1
+Xilinx ZC702 Evaluation Board . . . . . . . . . . . . . . . . . . .
+5
+2.2
+ZYNQ processor
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+2.2.1
+Processing System . . . . . . . . . . . . . . . . . . . . . .
+8
+2.2.2
+Programmable Logic . . . . . . . . . . . . . . . . . . . . .
+8
+2.3
+Partial Reconﬁguration
+. . . . . . . . . . . . . . . . . . . . . . .
+8
+2.3.1
+Conﬁguration interface . . . . . . . . . . . . . . . . . . . .
+10
+2.3.2
+Dynamic Function eXchange
+. . . . . . . . . . . . . . . .
+10
+2.4
+Petalinux
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+2.4.1
+Linux Kernel Modules . . . . . . . . . . . . . . . . . . . .
+11
+2.4.2
+User applications . . . . . . . . . . . . . . . . . . . . . . .
+11
+3
+Design methodology
+13
+3.1
+Vivado . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+13
+3.1.1
+Dynamic Function eXchange
+. . . . . . . . . . . . . . . .
+15
+3.2
+Petalinux
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+3.2.1
+Device tree . . . . . . . . . . . . . . . . . . . . . . . . . .
+19
+3.2.2
+Device drivers . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+3.2.3
+User Applications
+. . . . . . . . . . . . . . . . . . . . . .
+21
+==PAGE:10==
+viii
+CONTENTS
+4
+Implementation
+23
+4.1
+Hardware Implementation . . . . . . . . . . . . . . . . . . . . . .
+23
+4.1.1
+Block design
+. . . . . . . . . . . . . . . . . . . . . . . . .
+24
+4.1.2
+Floorplan . . . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+4.1.3
+Reconﬁgurable Modules . . . . . . . . . . . . . . . . . . .
+28
+4.2
+Software Implementation . . . . . . . . . . . . . . . . . . . . . . .
+29
+4.2.1
+DFX Controller LKM . . . . . . . . . . . . . . . . . . . .
+30
+4.2.2
+Device Tree . . . . . . . . . . . . . . . . . . . . . . . . . .
+30
+4.2.3
+Test Applications . . . . . . . . . . . . . . . . . . . . . . .
+32
+5
+Results
+35
+6
+Conclusion
+45
+6.1
+Future Developments . . . . . . . . . . . . . . . . . . . . . . . . .
+46
+Bibliography
+47
+==PAGE:11==
+Chapter 1
+Introduction
+The computing industry is in a rapid expansion, with a greater requirement for
+faster processing, lower latency, while often requiring high eﬃciency. Depending
+on the speciﬁc requirements, several solutions come to mind. If faster processing
+is the main area of interest, the modern solution is to oﬄoad the processing to a
+dedicated circuit, that is fast at processing that speciﬁc application. A historic
+example of this is seen, when dedicated sound microchips and dedicated graph-
+ics microchips were introduced into the personal computer. These microchips
+oﬄoaded the computation of sound or graphics from the central processing unit
+(CPU). The dedicated microchips came with a huge performance beneﬁt, but
+also some disadvantages. They were expensive to develop, and lacked the ability
+to be upgraded, as they were implemented as an application-speciﬁc integrated
+circuit (ASIC). ASICs are considered the fastest implementation, and when pro-
+duced on large scale, often quite cheap per device. A big disadvantage is the
+lack of upgradability since once the circuit is printed, it cannot be changed. Al-
+though this can be mitigated, with the support for ﬁrmware inside the circuit,
+this strategy will also make the whole circuit much more complex.
+In newer times other technologies have become a good alternative to ASICs.
+The use of FPGA technology, which historically was mostly used for prototyp-
+ing hardware circuits, because of its ability to be reconﬁgured to another circuit
+design. But today FPGA technology has become cheaper, faster, and larger
+than ever, making the technology much more widespread and available. This
+==PAGE:12==
+2
+Introduction
+means that FPGA is used for much more than prototyping. If a business has
+a speciﬁc application it wants to be accelerated, the application can be devel-
+oped in a hardware description language (HDL) and implemented in FPGA
+technology, instead of using a much longer time on a less versatile ASIC imple-
+mentation. This makes FPGA chips very versatile but is not as fast, nor eﬃcient
+as ASICs. But for small scale implementation use, an FPGA implementation is
+much cheaper than an ASIC implementation.
+Another solution to accelerate a system is to add more dedicated chips, FPGA
+or ASIC, to do the desired applications.
+This has the clear disadvantage of
+requiring more physical space and require more power. Sometimes the chips are
+not even being used, because there is no need for the accelerator at that time,
+hence resources being wasted. To tackle this, several chips may be combined
+into one FPGA, and the accelerator conﬁgured on demand. This technique is
+part of a new paradigm that has formed. A paradigm that divides the FPGA
+into smaller sections, or partitions, that can be conﬁgured on-demand. When
+the demand for a particular accelerator disappears, the resources it occupied is
+put back to the available resource pool. This paradigm provides even more ver-
+satility to the FPGA technology, allowing an FPGA chip to accelerate multiple
+applications on-demand at the same time.
+When splitting an FPGA into multiple partitions, some resources outside the
+partitions are used to connect the partitions to other logic. This part of the
+design is the static part and is persistent across all accelerators. The partitions
+contain the dynamic part of the design, this is where the accelerator is im-
+plemented and can be dynamically conﬁgured into the FPGA. When a partial
+conﬁguration is done, only the dynamic part is changed, and the static part is
+unchanged. The amount of partitions that ﬁt in an FPGA is limited by the chip
+resources, size of each partition, and the size of the static design.
+Several managing schemes can be used, ranging from using a static schedule, to a
+more complex implementation using a scheduler that in real-time determines the
+demand. When using a static schedule, the ﬂexibility of the system is lost, but
+this kind of schedule is very easy to implement. A demand-driven conﬁguration
+scheme requires a system-wide low-level implementation of a manager, that
+determines the demand in real-time, and conﬁgures the partitions depending on
+this information. Depending on how deep the manager implementation is, it
+requires a deeper knowledge of the operating system.
+In works related to partial reconﬁguration, [Pan15] showed that when accel-
+erating convolution tasks with FPGA technology, the speedup is about 33x,
+when compared to software computation. And 10x when compared to software
+with NEON acceleration. The thesis [Pan15], also showed the diﬀerent software
+code optimizations and their speedup. And also show that NEON acceleration
+==PAGE:13==
+3
+provides about 2-10x speedup, above pure software computation. Although it
+researched it, the thesis did not implement any partial reconﬁguration, because
+of missing procedures at the time.
+The thesis [Lom16] dived into partial reconﬁguration using the ICAP interface,
+and implemented their own ICAP conﬁguration controller, that transfers the
+bitstream from system memory to the ICAP interface. Their implementation
+has a theoretical throughput of 400MB/s (at 100MHz), and even overclocked it
+to 180MHz, reaching a theoretical throughput of 720MB/s. The thesis imple-
+mented a couple of accelerators, and the speedup was shown to be from 1.3x
+to 271x. depending on the speciﬁc accelerator. Using ICAP to conﬁgure an
+F4 module ( [Lom16] speciﬁc sizing), the latency was about 430-450us when
+the ICAP is operated at 100MHz. Although not directly comparable, they also
+found that using PCAP to conﬁgure a larger F1 module (Again [Lom16] spe-
+ciﬁc sizing), the latency was 18ms, and the throughput of PCAP was 110MB/s,
+limited by the theoretical PCAP throughput of 145MB/s.
+In [Esp16] a partial reconﬁguration design was implemented running with petal-
+inux, but they needed to use PCAP to load the module conﬁguration, because
+of the lack of a Linux driver for their custom ICAP controller. They show no
+measurement of conﬁguration latency.
+The Thesis [Edo18] used partial reconﬁguration to implement a cryptographic
+engine, supporting the RSA and Blowﬁsh algorithms. The accelerators showed
+a speedup ranging from 10-63x compared to CPU only computation.
+This thesis will evaluate the possibilities and limitations of partial reconﬁgu-
+ration and the Xilinx speciﬁc methodology Dynamic Function eXchange when
+working from a Linux environment. The work will involve developing a couple
+of sample reconﬁgurable modules, that will illustrate the use of this technology.
+The modules will be provided as illustration only, and not as a showcase of their
+respective performance or abilities.
+The structure of this thesis is divided into chapters, where chapter 2 will in-
+troduce the basic background knowledge to follow this thesis. chapter 3 will
+introduce the design methodology when working with partial reconﬁguration
+and Petalinux, and all of its parts. In chapter 4 the implementation is discussed
+in detail. The results found will be presented in chapter 5, and a conclusion
+formed in chapter 6.
+==PAGE:14==
+4
+Introduction
+==PAGE:15==
+Chapter 2
+Background
+In the following sections, the background understanding will be established.
+We will start by covering the important parts of the Xilinx ZC702 board and
+the Zynq system-on-a-chip. Later partial reconﬁguration and the conﬁguration
+interfaces.
+Lastly, the operating system Petalinux, device drivers, and user
+applications will be detailed.
+2.1
+Xilinx ZC702 Evaluation Board
+This thesis will evolve around the Xilinx Zynq-7000 SOC ZC702 evaluation
+board. The board includes many features, where the most signiﬁcant are, the
+Zynq processor, 1GB DDR3 memory, an HDMI output, 1Gbit ethernet, several
+LEDs and switches, and an SD card slot. These features make the board great
+for projects that use video pipelines when expanded with an FMC HDMI input.
+The powerful system-on-a-chip (SoC) Zynq processor provides a whole other
+usecase than traditional FPGA boards because of the included two ARM cores.
+Other features may be found in [Xil19], and the block diagram of the board is
+shown in Figure 2.1. This Figure also shows that the Zynq processor is split
+into a processing system and the programmable logic, both of which are detailed
+later.
+==PAGE:16==
+6
+Background
+Figure 2.1: ZC702 Evaluation Board. Credit: [Xil19]
+==PAGE:17==
+2.2 ZYNQ processor
+7
+Figure 2.2: Zynq 7000 processor. Credit: [Xil19]
+2.2
+ZYNQ processor
+The evaluation board includes an SoC from the Zynq 7000 series by Xilinx. The
+part number of the speciﬁc chip used on the Xilinx ZC702 evaluation board is
+XC7Z020-CLG484-1, more details of this SoC are discussed later. The Zynq
+processor is a system-on-a-chip implementation, consisting of an ARM process-
+ing system (PS) block and an FPGA programming logic (PL) block. The PS
+and PL are connected with several interconnects between the two. The intercon-
+nects used are mostly using the AXI protocol, but other ports, like interrupts,
+are also available. Figure 2.2 shows a detailed block diagram of the Zynq 7000
+processor. The upper part shows the processing system, and the lower part is
+showing the programmable logic.
+==PAGE:18==
+8
+Background
+2.2.1
+Processing System
+The processing system includes two ARM Cortex-A9 cores running at 667MHz.
+The processing system includes 32KB L1 instruction and 32KB L1 data caches,
+a 512KB L2 cache, and supports external memory. Connected to the processing
+system is 1GB of DDR3 RAM operating at 533MHz. The processing system
+is able to run code inside an operating system, or on a standalone platform by
+using Xilinx provided tools, e.g. Xilinx Vitis, to run code directly. When using
+an operating system, the system consists of many more layers, which create a
+greater distance from the applications to the hardware. But the beneﬁt of an
+operating system is that it greatly improves the ﬂexibility of the system, al-
+lowing for multitasking, and for services and applications to run in parallel. A
+standalone platform provides less abstraction, thus fewer layers, and it is, there-
+fore, easier to manipulate the hardware components directly. But a standalone
+system might also lack basic functionality, that the user will have to implement,
+if not already implemented by Xilinx.
+2.2.2
+Programmable Logic
+The programmable logic is the generic name for the integrated Artix-7 series
+FPGA, which for this Zynq processor part, includes 85K logic cells, 53200 lookup
+tables (LUT), 106400 ﬂipﬂops (FF), 140x 36Kb Block ram (Bram) at a total
+of 4.9 Megabits and 220 Digital Signal Processors (DSP). In addition to the
+above primitives, the PL also includes other types of primitives that can be
+instantiated in a design. Primitives include clock managers, one ICAPE2, and
+others. For partial reconﬁguration, the ICAPE2 primitive is an important part
+of the PL, since this is the component that allows the design to use the ICAP
+interface for partial conﬁguration of the system.
+2.3
+Partial Reconﬁguration
+A partial conﬁguration stands in contrast to a full conﬁguration, which is the
+traditional method of conﬁguring the programming logic.
+As the name im-
+plies, a partial conﬁguration can be used to conﬁgure a smaller partition of the
+programming logic, thereby greatly reducing the conﬁguration latency, and in-
+creasing the versatility of the implementation. When we expand conﬁguration
+to the term reconﬁguration, it means that, after an initial full conﬁguration, we
+can reconﬁgure a smaller partition of the logic, without changing or interrupting
+the rest of the design.
+==PAGE:19==
+2.3 Partial Reconﬁguration
+9
+ Interfaces
+Figure 2.3: Static and dynamic logic of the system
+In a design that utilizes partial reconﬁguration, the programmable logic is split
+into two, the static logic and the dynamic logic. The static logic of the design
+is only changed when a full conﬁguration occurs. However, the dynamic logic
+is the partition that can be reconﬁgured on demand, each implementation of
+logic inside the partition is referred to as a reconﬁgurable module (RM), and
+the partition as a reconﬁgurable partition. Figure 2.3 shows an example of the
+static logic, with the dynamic logic inside it. If desired multiple RPs can be
+included in parallel inside the static logic.
+When an interface crosses the RP barrier, it is a good idea to isolate the signals
+before reconﬁguring, because the interface may ﬂoat, thus putting unwanted
+signals into the rest of the system. More on this topic later.
+The typical conﬁguration interface used is the Processor Conﬁguration Ac-
+cess Port (PCAP), which can only be used from the processing system side.
+An alternative conﬁguration port is the Internal Conﬁguration Access Port
+(ICAP), which uses the ICAPE2 primitive component that resides inside the
+programmable logic.
+==PAGE:20==
+10
+Background
+2.3.1
+Conﬁguration interface
+The PCAP interface port is only available on Zynq processors and is allowing
+for the processing system to conﬁgure the FPGA resources either by doing a full
+or partial conﬁguration. The ICAP interface is only available from inside the
+programmable logic and only allows for partial conﬁguration because the ICAP
+interface has to be driven from logic inside the PL. Both [Lom16] and [Esp16]
+used a custom made ICAP controller because the oﬃcial ICAP controllers (Xil-
+inx AXI_HWICAP) available at the time, were too slow, and faster IPs were
+either not available or they required special licensing for use. However, Xilinx
+has since ﬁxed this problem.
+The PCAP interface has a maximum theoretical bandwidth of 145MB/s but
+is further limited by the PS AXI interconnect, thus the real throughput is
+about 110MB/s. [Xil18, Lom16] The ICAP interface can accept 32Bits every
+clock cycle.
+The ICAPE2 component is rated at an operating frequency of
+100MHz. This means that the interface has a theoretical maximum throughput
+of 3.2Gbit/s or 400MB/s. Please be aware of the diﬀerence between MB and
+MiB, where the latter uses 1024 bytes pr kilobyte, and the former uses 1000.
+The numbers given above are all in MB/s or Gb/s.
+2.3.2
+Dynamic Function eXchange
+A couple of years ago, Xilinx improved its design methodology for partial re-
+conﬁguration. They chose to call it Dynamic Function eXchange (DFX). This
+action simpliﬁed and automated the methodology when implementing a par-
+tial reconﬁguration system. Along with the DFX methodology, Xilinx chose
+to include the licensing of DFX technology and IPs in their standard licens-
+ing, making the technology readable available to everyone. The DFX design
+methodology is described below and in more detail in [Xil20e].
+Xilinx has included four DFX IPs in the license, but the DFX methodology
+does not strictly require any of the IPs.
+The IPs are provided to ease the
+implementation of a DFX system for the user.
+A central DFX IP component is the DFX controller, which once triggered, col-
+lects the bitstream data via an AXI channel, and pushes it to the ICAP inter-
+face. Additionally, the controller can optionally handle the decouple, startup,
+and shutdown sequences of the reconﬁgurable module. To isolate the interfaces
+of the RP, a DFX Decoupler can be used, to decouple the interfaces when the
+DFX Controller is reconﬁguring a new RM. More detail about the IPs may be
+==PAGE:21==
+2.4 Petalinux
+11
+found in [Xil20a,Xil20b].
+2.4
+Petalinux
+Petalinux is an operating system that uses the Linux kernel and is made by
+Xilinx. Petalinux is made to run natively on the processing system and is made
+to ease the steps required to support custom hardware in the programmable
+logic. The latest Petalinux versions are typically running a long-term stable
+(LTS) Linux kernel and are well developed.
+2.4.1
+Linux Kernel Modules
+A Linux Kernel Module (LKM), is an extension of the functionality of the kernel
+and is a module that is generally used to communicate with hardware, it can
+also be called a device driver. As the name implies, the module is running in
+kernel space, which means it has escalated permissions. By running in kernel
+space, the driver is allowing more control but may also have catastrophic results.
+If implemented incorrectly, the system may experience instabilities, crashes, and
+corrupted data. Thus caution has to be given when designing an LKM, especially
+when manipulating system and device memory.
+2.4.2
+User applications
+Compared to LKM, user applications run in user space, which is less privileged
+and is safer to use in regards to system stability. In general, user applications are
+common applications, ran by the user. The user application can communicate
+with hardware through the LKM using system calls, either by reading/writing
+directly to a device driver, or using a system call.
+==PAGE:22==
+12
+Background
+==PAGE:23==
+Chapter 3
+Design methodology
+In this chapter, the design methodology for implementing a partial reconﬁgu-
+ration system that uses the Petalinux operating system will be presented. In
+basic terms, Vivado is needed to create the hardware platform, and on top of
+it, Petalinux is used as the operating system. Device drivers control the custom
+hardware, and the user application sends instructions to the hardware through
+the device driver.
+Because these types of projects include the use of many diﬀerent tools, only
+the tools that are the most important to partial reconﬁguration and its reliance
+will be described. This means that tools like Vitis HLS and the design method-
+ology of it, will not be described, as the reader is expected to have a general
+understanding of the tools used for FPGA projects. The basic Xilinx Vivado
+workﬂow will only be touched upon lightly because it sets the premise for further
+methodology explanations.
+3.1
+Vivado
+Vivado is part of the Xilinx Vivado Design Suite and is used to synthesize and
+simulate a hardware description language (HDL), to implement it and verify it
+==PAGE:24==
+14
+Design methodology
+Figure 3.1: An example of a block design.
+Several components are shown,
+connected to each other in an easy and manageable fashion
+is working as intended. The choice of HDL is between VHDL and Verilog.
+Xilinx has included an IP catalog into Vivado, that can include IP blocks into the
+design to ease implementation. The IP catalog works in both VHDL/Verilog
+descriptions and block designs.
+A block design is a modern addition to the
+traditional HDL design process. The block design uses a module-based interface,
+where it is easy to include IP cores from the IP catalog and connect them within
+seconds. User-created IP can be included in the IP catalog, thus making it a
+very strong tool.
+An example of a block design is shown in Figure 3.1, and shows the ease of
+including IP modules and connecting them.
+A simpliﬁed workﬂow of a standard HDL design using Vivado is shown below.
+1. Add sources
+2. Run Synthesis
+3. Run Implementation
+4. Generate bitstream
+5. Program device and/or Export hardware
+First, the sources of the design are added to the project. Then the standard
+Vivado methodology is to run the Synthesis process, implementation, and ﬁnally
+generate the bitstream. The last thing to do is either to program the device with
+the bitstream or export the hardware for use in a software development tool, like
+==PAGE:25==
+3.1 Vivado
+15
+Vitis for a standalone platform, or Petalinux Tools for a Linux based operating
+system.
+Additional steps, including simulation and testing, are not included in the list
+above.
+3.1.1
+Dynamic Function eXchange
+The DFX workﬂow is largely the same as a non-DFX workﬂow, but with some
+additional steps and some limitations. A simpliﬁed workﬂow when creating a
+Vivado project using the DFX methodology is shown below. More details than
+described in this section can be found in [Xil20e,Xil20f].
+1. Add sources (only one RM)
+2. Enable Dynamic Function eXchange
+3. Create Partition Deﬁnition
+4. Run Synthesis
+5. Assign a pblock to the partition and assign properties
+6. Add more reconﬁgurable modules with the DFX Wizzard
+7. Run Implementation
+8. Generate bitstream
+9. Export hardware
+10. Generate binary ﬁles of the partial bitstreams
+During project creation, add only one of the reconﬁgurable modules to the design
+together with the rest of the sources.
+After project creation, DFX will have to be enabled by selecting
+Tools -> Enable Dynamic Function eXchange
+Now we have to tell Vivado which part of the design is the reconﬁgurable par-
+tition. This is done by right-clicking on the RM in the Sources hierarchy and
+selecting Create Partition Deﬁnition and give it a name. Now synthesis can be
+run.
+After the end of the synthesis run, open the synthesized design, and right-click
+the reconﬁgurable partition in the netlist tab, and select
+==PAGE:26==
+16
+Design methodology
+Floorplanning -> Draw Pblock
+Now draw the Pblock at the location and dimensions desired for the application.
+Make sure there are enough resources available for the RM inside the Pblock.
+An example of a Pblock named Partition_0 is shown in Figure 3.2. Enable the
+Pblock property RESET_AFTER_RECONFIG and set SNAPPING_MODE
+to routing.
+Click the Dynamic Function eXchange Wizzard in the ﬂow navigator, and add
+the other RMs to the design and create the conﬁguration runs. Now the imple-
+mentation and bitstream generation can be run as normal. After completion,
+export hardware, as a ﬁxed platform with the bitstream included.
+The last step is to generate the binary ﬁles for each partial bitstream. Run the
+TCL commands below to generate the binary ﬁles in the project’s root directory
+for two example RMs.
+cd <Vivado_Project_directory>/
+write_cfgmem -force -interface SMAPx32 -format BIN -disablebitswap
+-loadbit "up 0x0
+<PROJECT_NAME>.runs/impl_1/<RP_NAME>_<RM_NAME>_partial.bit"
+output_name.bin
+write_cfgmem -force -interface SMAPx32 -format BIN -disablebitswap
+-loadbit "up 0x0
+<PROJECT_NAME>.runs/child_0_impl_1/<RP_NAME>_<RM_NAME>_partial.bit"
+output_name.bin
+The DFX methodology comes with some limitations and severe unsupported
+features, that have to be considered when implementing the reconﬁgurable mod-
+ules. Included in the list below are the unsupported features that a user is the
+most likely to stumble into when using Vivado 2020.1 and designing a DFX
+project. Support for these features may be added in future releases of Vivado.
+• IP sources cannot be top level in the RM, they have to be at a lower level.
+• Block diagrams cannot be included in RMs at all.
+• Modules within a block diagram cannot be set as RMs.
+• Simulation is not supported within the project.
+==PAGE:27==
+3.2 Petalinux
+17
+Figure 3.2: Pblock Partition_0 marked in the ﬂoorplan
+An important note when designing multiple RMs for the same RP is that the
+interface ports of the RP cannot be changed when reconﬁguring the RP. This
+means that the RMs can only use the interface ports provided by the RP. This
+should not be a problem, since the designer of the RP and RMs, determines the
+need for interface ports. There is no strict limitation on the type and amount
+of I/O ports, other than what is physically possible.
+3.2
+Petalinux
+The methodology description of Petalinux will not include the installation nor
+installation requirements of Petalinux, the requirements for Petalinux is well
+described in [Xil20c,Xil20d], as well as an installation guide. Petalinux has to
+be installed in a Linux environment, for Petalinux 2020.1 it is recommended to
+use Ubuntu 18.04 LTS.
+==PAGE:28==
+18
+Design methodology
+Once the Petalinux tools are installed, a project can be created by
+petalinux-create –type project –template zynq –name <project name>
+After successful project creation, all commands described below, have to be
+issued from within the project directory.
+The ﬁrst thing to do is to include the .xsa hardware description ﬁle that has
+been exported from Vivado. This is done by issuing the command
+petalinux-conﬁg –get-hw-description=<Path to hardware description
+directory>
+The command has to point to the directory that contains the .xsa ﬁle, and
+not directly to the ﬁle. The above command has to be used every time the
+hardware description changes. Before the command ﬁnishes, a conﬁguration
+window appears. For ﬁrst time conﬁguration, edit
+DTG Settings –> MACHINE_NAME = ZC702
+when using a ZC702 board. If the conﬁguration menu has to be accessed at a
+later time, use the petalinux-conﬁg command without any arguments.
+petalinux-conﬁg
+The conﬁgurator can also change the conﬁguration of other components of the
+system. The rootfs component holds the conﬁguration of the ﬁle system. That
+is, it conﬁgures which applications, modules, libraries, etc. will be included in
+the ﬁnal build of the system image. The kernel conﬁgurator is used to alter the
+kernel.
+petalinux-conﬁg -c rootfs
+petalinux-conﬁg -c kernel
+When the conﬁguration has ﬁnished, the whole system can be built using the
+petalinux-build command. This will build the kernel, and all the applications
+==PAGE:29==
+3.2 Petalinux
+19
+and modules included in the conﬁguration stage. Every time a change is made
+to the source ﬁles, a new build command has to be issued before they can be
+packaged into the images.
+petalinux-build
+When the build ﬁnishes, the system can be packaged into boot images, that can
+be used for booting the system from an SD card.
+petalinux-package –boot –fsbl –fpga –u-boot –force
+When the images have been packaged, the following three ﬁles will have to be
+copied to the SD card.
+<PROJECT_ROOT>/images/linux/BOOT.BIN
+<PROJECT_ROOT>/images/linux/boot.scr
+<PROJECT_ROOT>/images/linux/image.ub
+The Petalinux workﬂow is described in more detail in [Xil20c,Xil20d].
+3.2.1
+Device tree
+When a hardware description ﬁle includes AXI capable devices in the pro-
+grammable logic, the petalinux-build command will create the device tree ﬁle
+pl.dtsi which can be found inside the components directory. The ﬁle will include
+all the AXI devices that the PS can address, i.e. all AXI slaves, as seen from
+the PS, but only the slaves that is part of a block design.
+<PROJECT_ROOT>/components/plnx_workspace/device-tree/device-
+tree/pl.dtsi
+It is important to note that changes to this ﬁle is not allowed, and will be
+overwritten.
+So if we want to make changes to the device tree components
+included in the pl.dtsi device-tree ﬁle, we have to add the changes in the user-
+editable device-tree ﬁle that is located at
+==PAGE:30==
+20
+Design methodology
+<PROJECT_ROOT>/project-spec/meta-user/recipes-bsp/device-
+tree/ﬁles/system-user.dtsi
+The system-user.dtsi ﬁle is where the changes or additions to the device tree has
+to be made, to be included in the project. Entries of AXI capable devices that
+reside outside the block diagram has to be added in this way, to be recognized
+by the operating system. As the DFX RMs cannot be part of a block design,
+this means that an entry has to be made for each AXI device in each RP.
+3.2.2
+Device drivers
+When communicating with hardware, there are two choices.
+Use a custom
+created LKM or use the UIO framework. The LMM is often used when more
+freedom, speed, and control is wanted but is more time consuming to develop.
+The UIO framework makes the process easier since it allows for a user application
+to talk to devices directly.
+To create a LKM for petalinux, issue the command below. The suﬃx –enable
+is used to enable the module in the rootfs, and stands in place of a separate call
+to petalinux-conﬁg -c rootfs to enable the module.
+petalinux-create –type modules –name <Module_Name> [–enable]
+A default module is created in
+<PROJECT_ROOT>/project-spec/meta-user/recipes-
+modules/Module_Name/
+When using a UIO driver the implementation process is much faster and easier.
+First, we have to edit the system-user.dtsi device tree ﬁle and add the following
+section
+chosen {
+bootargs = "console=ttyPS0,115200 earlyprintk
+uio_pdrv_genirq.of_id=generic-uio";
+};
+This makes the UIO framework driver look for the generic-uio compatibility
+on our device-tree component. This also means that the device we want to be
+==PAGE:31==
+3.2 Petalinux
+21
+controlled from a UIO driver, has to match this compatibility, by setting the
+device compatibility setting to generic-uio instead of (or in addition to) the
+previous value.
+compatible = "generic-uio"
+In fact, the generic-uio string can be anything, as long as it matches the two
+places.
+When creating an IP with Vitis HLS the IP comes with a driver by default if the
+design includes an axilite slave interface. The driver supports both standalone
+and Linux operations. But when using a Linux operating system the driver will
+rely on the UIO device driver framework.
+3.2.3
+User Applications
+To create a user application issue the petalinux-create command below. It needs
+a name, and optionally a template can be speciﬁed. The –enable suﬃx, is used
+to enable the application in the rootfs, and is used instead of a subsequent call
+to petalinux-conﬁg -c rootfs to enable the application manually.
+petalinux-create –type apps –name <Application_Name> [–template
+c|c++|install] [–enable]
+Upon completion the root directory of the application will be located in
+<PROJECT_ROOT>/project-spec/meta-user/recipes-
+apps/Application_Name/
+Where the source code is located in the sub-directory ﬁles/, and can be changed
+from there. If a template is speciﬁed, a simple template in either C or C++ is
+included here.
+When the application is communicating with an LKM, the ioctl system call is
+used to pass predeﬁned requests codes with arguments. The system call ioctl,
+takes three arguments, a ﬁle descriptor, a predeﬁned device-dependent request
+code, and an argument. The return value of the command is zero when success,
+and a negative value when an error occurred.
+==PAGE:32==
+22
+Design methodology
+When the application communicates with a UIO driver, the driver has to be
+included in the application source code at compile time.
+This can be done
+by moving the driver ﬁles directly into the ﬁles/ sub-directory, and including
+them as source ﬁles in the ﬁle Application_Name.bb in the application root
+directory.
+This ﬁle controls which sources and libraries are included in the
+compilation/build process of the application.
+==PAGE:33==
+Chapter 4
+Implementation
+The explanation of the system this thesis has implemented will be split into
+sections. First the hardware implementation, including its components, recon-
+ﬁgurable modules, and block design. will be explained in detail. Next is the
+software implementation, which includes the DFX Control Linux kernel module,
+the device tree alterations, and the user test applications. The test applications
+are used for generating some results and are used as a showcase for the DFX
+technology. The emphasis of the implementation is not put on the functionality
+of the reconﬁgurable modules or the application they accelerate.
+4.1
+Hardware Implementation
+The hardware implementation starts at the top module of the system.
+The
+limitations of the DFX methodology restricts the top module to not be a block
+diagram. And as the RP cannot be part of a block diagram, we have to use the
+top module of the Vivado project, to connect the block design wrapper, to the
+ICAP instantiation, and the reconﬁgurable partition. The contents of the RMs
+will be explained later. The external ports of the top module connect to the
+DDR component, ﬁxed IO, and the LEDs of the board. An illustration of the
+top module connections is shown in Figure 4.1.
+==PAGE:34==
+24
+Implementation
+32bit AXI Lite
+64bit AXI
+ICAP Interface
+LED[7:0]
+Clk and Reset
+Figure 4.1: Top module wrapper
+The top wrapper also connects Partition_0 to the clock generated by the pro-
+cessing system in the block design, and to the reset generated by the DFX
+Controller. The block design is where most of the hardware is implemented.
+4.1.1
+Block design
+Of the block design, the main components are the Zynq processing system, the
+DFX controller, two AXI interconnects, and two DFX Decouplers.
+The processing system is conﬁgured to output a 100MHz clock, which is used in
+the rest of the hardware implementation. The PS block is conﬁgured to include
+one AXI slave, and one AXI master interface, as well as an interrupt input.
+The AXI master interface uses 32bit addresses, and 32bit data width, and is
+only connected to AXI lite components, through an AXI interconnect.
+The
+AXI slave interface uses 32bit addresses, and a 64bit data width, and is used for
+high-performance connection to the PS. The theoretical bandwidth of the slave
+interface operating at 100MHz is 800MB/s.
+The DFX Controller is conﬁgured to include one virtual socket, previously called
+reconﬁgurable partition, that holds two reconﬁgurable modules.
+Two AXI Interconnects, are placed in the design, to allow for AXI devices to
+communicate with each other. Two DFX Decouplers are also included in the
+design. These devices decouple the interfaces of the RP, when a new module is
+==PAGE:35==
+4.1 Hardware Implementation
+25
+Resource
+Partition_0
+LUT as Logic
+15600
+LUT as Memory
+5000
+Registers as FF
+31200
+BRAM36
+40
+BRAM18
+80
+DSP
+60
+Table 4.1: Available resources of the Partition_0 pblock
+being loaded into it, to ensure that the signals won’t inﬂuence the rest of the
+system, making it unstable.
+The block diagram also includes a custom created AXI counter, that is used to
+measure the conﬁguration delay of the reconﬁgurable modules. It does so, by
+counting every clock, for as long as the decouple signal of the DFX Controller is
+active. Once the counter has ﬁnished counting, the count is available from the
+AXI lite interface, and from this, it can be calculated how high the conﬁguration
+delay was.
+Figure 4.2 shows the block design, also showing the connections between all of
+the IP modules. The connections to the RP are also shown here and shows
+as external interfaces because the RP is not part of the block design. On the
+left three m_axi_ interfaces, as well as one, interrupt coming in, and on the
+right one s_axi_control together with the clock and RM reset signal. All these
+signals are routed through the top wrapper to the RP. The other output signals
+are used for the board components, and the ICAP instantiation, which is also
+done in the top wrapper, as previously shown in Figure 4.1.
+4.1.2
+Floorplan
+The reconﬁgurable partition is assigned to the Pblock Partition_0, and its ge-
+ometry is shown in Figure 4.3. The available resources of the Partition_0 Pblock
+are listed in Table 4.1.
+Partition_0 is a large Pblock that allows for a range of RMs to be implemented
+without having to consider the resource utilization of each RM to much. The
+Pblock is intentionally made larger than needed, to make it easier for Vivado to
+route the design, and meet timing constraints.
+==PAGE:36==
+26
+Implementation
+DDR
+FCLK_CLK0_0
+FIXED_IO
+ICAP_0
+axi_counter_0
+axi_counter_v1.0 (Pre-Production)
+S00_AXI
+count_en
+s00_axi_aclk
+s00_axi_aresetn
+axi_interconnect_0
+AXI Interconnect
+S00_AXI
+M00_AXI
+S01_AXI
+S02_AXI
+S03_AXI
+ACLK
+ARESETN
+S00_ACLK
+S00_ARESETN
+M00_ACLK
+M00_ARESETN
+S01_ACLK
+S01_ARESETN
+S02_ACLK
+S02_ARESETN
+S03_ACLK
+S03_ARESETN
+dfx_controller_0
+DFX Controller
+ICAP
+M_AXI_MEM
+s_axi_reg
+clk
+reset
+icap_clk
+icap_reset
+vsm_VS_0_rm_shutdown_req
+vsm_VS_0_rm_shutdown_ack
+vsm_VS_0_rm_decouple
+vsm_VS_0_rm_reset
+vsm_VS_0_event_error
+vsm_VS_0_sw_shutdown_req
+vsm_VS_0_sw_startup_req
+dfx_decoupler_0
+DFX Decoupler
+s_intf_0
+rp_intf_0
+s_intf_1
+rp_intf_1
+s_intf_2
+rp_intf_2
+decouple
+decouple_status
+dfx_decoupler_1
+DFX Decoupler
+s_intf_0
+rp_intf_0
+decouple
+decouple_status
+interrupt
+m_axi_1
+m_axi_2
+m_axi_3
+proc_sys_reset_0
+Processor System Reset
+slowest_sync_clk
+ext_reset_in
+aux_reset_in
+mb_debug_sys_rst
+dcm_locked
+mb_reset
+bus_struct_reset[0:0]
+peripheral_reset[0:0]
+interconnect_aresetn[0:0]
+peripheral_aresetn[0:0]
+processing_system7_0
+ZYNQ7 Processing System
+DDR
+FIXED_IO
+USBIND_0
+M_AXI_GP0
+S_AXI_ACP
+TTC0_WAVE0_OUT
+TTC0_WAVE1_OUT
+TTC0_WAVE2_OUT
+M_AXI_GP0_ACLK
+S_AXI_ACP_ACLK
+IRQ_F2P[0:0]
+FCLK_CLK0
+FCLK_CLK1
+FCLK_RESET0_N
+ps7_0_axi_periph
+AXI Interconnect
+S00_AXI
+M00_AXI
+M01_AXI
+M02_AXI
+ACLK
+ARESETN
+S00_ACLK
+S00_ARESETN
+M00_ACLK
+M00_ARESETN
+M01_ACLK
+M01_ARESETN
+M02_ACLK
+M02_ARESETN
+s_axi_control
+system_ila_0
+System ILA
+SLOT_0_AXI
+SLOT_1_AXI
+clk
+resetn
+vsm_VS_0_rm_reset_0
+xlconcat_0
+Concat
+In0[0:0]
+dout[0:0]
+Figure 4.2: The implemented block design, showing the IP components of the
+system
+==PAGE:37==
+4.1 Hardware Implementation
+27
+Figure 4.3: Partition_0 Pblock ﬂoorplan
+==PAGE:38==
+28
+Implementation
+Figure 4.4: Sobel HLS IP
+4.1.3
+Reconﬁgurable Modules
+Since the emphasis of this thesis is not the accelerator implemented, an easy
+solution but a useful accelerator was implemented using the Vitis HLS tool with
+the help of the Xilinx Computer Vision library, which is an HLS translation of
+the OpenCV library.
+The ﬁrst RM is an edge detector using the Sobel kernel with a 3x3 ﬁlter. An
+edge detector is used to detect sharp changes in brightness in images and is
+often used to aid in the analysis of images or video in computer vision. The IP
+block is pictured in Figure 4.4.
+The second RM contains a histogram equalization core. Histogram equalization
+is an image processing method that improves the contrast of an image. The IP
+block is pictured in Figure 4.5.
+The Sobel edge detector can process one pixel each clock cycle, while histogram
+equalization can process eight pixels every clock.
+Both RMs have one AXI Lite slave interface, that the PS uses to communicate
+with the IP. Three AXI master interfaces are used to collect and deliver the
+image used for computation from the system memory.
+It is possible to use
+less than three AXI masters, but since the beneﬁt from reducing the amount is
+minimal, it was not done.
+Both RM implementations work on both colour and grey-scale images at up to a
+resolution of 4096x2160. However, only the edge detector will output the image
+in colour. As explained earlier each RM has to be wrapped in an RTL wrapper,
+when using the DFX methodology. The wrapper simply passes the signals of
+the IPs through, to the interface of the RP. Each RM has some additional
+logic implemented in the wrapper, that is coupled to the LEDs of the board for
+debugging purposes.
+==PAGE:39==
+4.2 Software Implementation
+29
+Figure 4.5: Histogram Equalization HLS IP
+Resource
+Partition_0
+Sobel RM
+Hist Equal RM
+LUT as Logic
+15600
+6018
+8992
+LUT as Memory
+5000
+276
+296
+Registers as FF
+31200
+8013
+13605
+BRAM36
+40
+12
+15.5
+DSP
+60
+20
+18
+Table 4.2: Resource utilization of each Reconﬁgurable Module compared to
+the Partition_0 Pblock
+The uncompressed binary bitstreams for the RMs, have the same size of 1801548Bytes,
+or about 1.72MB. The size of each binary is directly aﬀected by the size of the
+Partition_0 Pblock. The size can be lowered by using compression in the cre-
+ation of the binary ﬁle. The estimated gain from compression is from 30% to
+70% as estimated by Xilinx in [Xil20a].
+4.2
+Software Implementation
+The software implementation is based on Petalinux, with one LKM for the DFX
+Controller, and a couple of test applications. Only changes and additions to the
+default Petalinux build will be described. The LKM is used to control the DFX
+Controller from the applications and is described below. The test applications
+are used to test the reconﬁgurable modules, and to obtain the performance
+of each of them.
+The applications are also used to compute the equivalent
+operation in software, so the two can be compared in chapter 5.
+==PAGE:40==
+30
+Implementation
+4.2.1
+DFX Controller LKM
+The DFX Controller Linux kernel module is a fully custom developed device
+driver, that has basic functionality used to control the Xilinx DFX Controller
+IP. When the LKM is loaded into the running kernel, it will register the device
+driver, then map the DFX controller’s AXI slave address into local memory.
+The last thing it will do is enable the ICAP interface, by resetting bit 27 of
+the devcfg_CRTL register (0xf8007000), as the default conﬁguration interface
+is PCAP, and the two conﬁguration interfaces are mutual exclusive.
+Once the module is loaded, a node has be created for it, to let applications talk
+to the driver, and this is done by issuing the command:
+mknod /dev/dfx_control c ### 0
+Where ### is the major number of the driver when loaded. For this Petalinux
+implementation, the major number has always been 244, but be aware, that the
+number can change if other modules are loaded beforehand.
+Now the driver is ready to accept commands via the ioctl system call from
+an application. The accepted ioctl commands of the DFX controller are listed
+in Table 4.3. Some of the commands take an argument, of either the address
+of the bitstream or the size of the bitstream. The address argument must be
+the physical address of the bitstream in memory, because the DFX Controller
+component, only handles physical memory. The size argument is the size of the
+bitstream for that reconﬁgurable module and is measured in bytes.
+There are two triggers, that are used to instruct the DFX Controller to begin
+the conﬁguration of an RM. One command will pull the running status of the
+DFX Controller, and another command will collect the information stored in
+the DFX Controller of the reconﬁgurable modules. The latter two commands
+are mostly used for debugging.
+4.2.2
+Device Tree
+Since we have implemented several AXI devices in the hardware, we have to
+tell the kernel what to do with these devices. The ﬁrst thing to do is to tell
+the UIO framework that it has to look for device compatibility generic-uio, as
+mentioned in chapter 3. Second, we tell the kernel that we want some reserved
+==PAGE:41==
+4.2 Software Implementation
+31
+Command
+Argument
+IOCTL_TRIGGER_RM_0
+-
+IOCTL_CONFIG_ADDR_RM_0
+Physical memory address of RM 0 bitstream
+IOCTL_CONFIG_SIZE_RM_0
+Size of the bitstream for RM 0
+IOCTL_TRIGGER_RM_1
+-
+IOCTL_CONFIG_ADDR_RM_1
+Physical memory address of RM 1 bitstream
+IOCTL_CONFIG_SIZE_RM_1
+Size of the bitstream for RM 1
+IOCTL_DFX_STATUS
+-
+IOCTL_DFX_RM_INFO
+-
+Table 4.3: DFX supported IOCTL commands
+memory, for our hardware devices, this is later mapped into a memory region
+in the device entry of the device-tree.
+The DFX control entry changes the compatibility setting to dfx-control, and
+the reserved memory region is mapped into the device. The memory region is
+16MiB is size, and is used as storage for both RM bitstreams. An entry of the
+physical register space of the DFX Controller is also added, with its size.
+The device-tree entry part0 compatibility is changed to generic-uio to match
+the string that the UIO framework checks for. A register space entry with the
+size is also added. A reserved memory pool of 96MiB is also assigned to this
+device. The memory region is used to store the raw images of both input and
+output and is made larger than needed to support at least three 4096x2160
+colour images.
+/ {
+#address-cells = <0x1>;
+#size-cells = <0x1>;
+compatible = "xlnx,zynq-7000";
+model = "linDebug";
+chosen {
+bootargs = "console=ttyPS0,115200 earlyprintk
+uio_pdrv_genirq.of_id=generic-uio";
+};
+};
+/ {
+reserved-memory {
+#address-cells = <1>;
+#size-cells = <1>;
+ranges;
+==PAGE:42==
+32
+Implementation
+/* 16MiB reserved for the dfx controller*/
+dfx_reserved: dfx_memory@38000000 {
+reg = <0x38000000 0x1000000>;
+};
+/* 3x32MiB reserved for Partition 0*/
+Part0_reserved: Part0_memory@39000000 {
+reg = <0x39000000 0x6000000>;
+};
+};
+amba_pl: amba_pl {
+#address-cells = <1>;
+#size-cells = <1>;
+compatible = "simple-bus";
+ranges ;
+dfx_controller_0: dfx_controller@43c00000 {
+clock-names = "clk", "icap_clk";
+clocks = <&clkc 15>, <&clkc 15>;
+compatible = "dfx-control";
+memory-region = <&dfx_reserved>;
+reg = <0x43c00000 0x10000>;
+xlnx,xdevicefamily = "zynq";
+};
+partition_0: part0@43c10000 {
+clock-names = "ap_clk";
+clocks = <&clkc 15>;
+compatible = "generic-uio";
+interrupt-names = "interrupt";
+interrupt-parent = <&intc>;
+interrupts = <0 29 4>;
+memory-region = <&Part0_reserved>;
+reg = <0x43c10000 0x10000>;
+xlnx,s-axi-control-addr-width = <0x7>;
+xlnx,s-axi-control-data-width = <0x20>;
+};
+};
+};
+4.2.3
+Test Applications
+A couple of applications are created to test the performance of the RMs and com-
+pare them to a purely OpenCV software implementation, of the same algorithm.
+==PAGE:43==
+4.2 Software Implementation
+33
+The OpenCV library is used in both hardware and software implementations.
+The hardware uses OpenCV for reading and decoding the images, and for writ-
+ing and encoding images back to the persistent storage, and uses the hardware
+for the computation. The software implementation makes use of OpenCV for
+all of the operations, including the computation.
+The test application dataﬂow for the hardware test is shown below.
+1. Use OpenCV to read and decode an image from persistent storage.
+2. Use OpenCV to allocate local memory for the output of the IP core.
+3. Copy image to physical memory address.
+4. Conﬁgure the IP core with the size of the image, and location in memory.
+5. Start the IP core computation, and wait until completion.
+6. Copy the output image from physical memory to the previously allocated
+memory.
+7. Use OpenCV to encode and write the output image to persistent storage.
+Because the hardware accelerators fetch the data with the AXI bus, which only
+operates with physical memory addresses, the image data has to be loaded in
+a known memory location.
+But since user applications in Linux use virtual
+address space, a physical address of the data cannot be obtained from local
+data. Therefore a workaround has to be added, where the applications have to
+ﬁrst load and decode the data into local memory space with the use of OpenCV,
+then copy the data to a known physical memory address, where the accelerator
+can fetch the data, and push the output to another known physical address.
+Once the accelerator is done with the computation, the application has to copy
+the data from physical memory back to the virtual address space of the OpenCV
+matrix, before it can be saved in persistent storage. This workaround means
+that the hardware implementation wastes some time on a lot of copy operations.
+The resource managing scheme implemented in the test applications is a simple
+static implementation. When the application wants to use hardware accelera-
+tion, it sends the trigger request to the DFX Controller via the ioctl system call
+and awaits its success. Once done it can use the accelerator, until a new trigger
+request is issued to reconﬁgure to the other RM.
+For comparison, the test application dataﬂow for the software test is shown
+below.
+==PAGE:44==
+34
+Implementation
+1. Use OpenCV to read and decode an image from persistent storage.
+2. Use OpenCV to allocate local memory for the output of the IP core.
+3. Use OpenCV to do the computation.
+4. Use OpenCV to encode and write the output image to persistent storage.
+To measure the latency of each step in the dataﬂow, a class is implemented in
+the applications. The class Timer controls the starting and stopping of a timer,
+that uses the time.h API. The operation of interest is wrapped by start/stop
+commands, The timer uses the monotonic clock of the Linux system.
+==PAGE:45==
+Chapter 5
+Results
+The latency of conﬁguring the uncompressed binary of each RM should be the
+same since they have the same size. The only variable is how fast the DFX
+Controller can fetch the data on the AXI bus. The latency can be high if the
+AXI bus or the memory are busy.
+For measurement of the conﬁguration delay, we use the custom AXI counter
+implemented in the block design. The counter will count the cycles that the
+enable signal is high, and make the result available on the AXI lite interface.
+The enable signal used for the counter, is the decouple output of the DFX
+controller, which is high when a module is being loaded and should provide a
+reasonable measure of the conﬁguration latency [Xil20a]. The latency results
+of both RMs are shown in Table 5.1. The counting clock is the same as the
+rest of the system at 100MHz, which means that every increment of the counter
+equates to 10ns.
+As seen in Table 5.1 the conﬁguration latency of both RMs is similar in time,
+both being 4.5ms. The throughput is very close to the 400MB/s limit of the
+ICAP interface. This means that the DFX Controller is not limited by other
+components of the system or the much faster AXI interface. The throughput
+measurement also tells us that the DFX Decoupler signal, which drives the
+enable signal of the AXI Counter, is a good enough measure of the conﬁguration
+time.
+==PAGE:46==
+36
+Results
+Sobel Edge Detector RM
+Histogram Equalization RM
+Bitstream size
+1801548
+1801548
+Count
+451556
+450445
+Conﬁg Latency [µs]
+4515.56
+4504.45
+Throughput [MB/s]
+398.96
+399.95
+Table 5.1: The conﬁguration latency of each RM
+The latency of the test application steps listed earlier is measured for each RM
+with four sizes of images. The measurements for colour images with a resolution
+of 128x128 and 512x512 are listed in Table 5.2 and Table 5.3 for colour images
+with a resolution of 1920x1080 and 3840x2160. The software only computations
+of the same images are listed for comparison.
+Because the processing system is cache enabled by default in Petalinux, the
+measurements are made in an alternating fashion for the hardware and software
+computations, so there is less chance of the image already being in the system
+cache. This is done, to give a realistic result, where the accelerators would not
+be run on the same image over and over.
+Other than the processor caches,
+the Linux kernel uses system memory for caching of ﬁles, and that complicates
+things a bit. If the image and other information are already in the system cache
+or memory cache, the image read and write computations has been found to
+ﬁnish about 30% faster, for both hardware and software computations.
+The numbers in Table 5.2 and Table 5.3, are measured after a system startup to
+ensure that none of the data is in any of the caches. An alternative method is
+to use a separate image ﬁle for each run. Nonetheless, every measurement has
+been veriﬁed several times. The numbers may vary slightly within ±10% from
+run to run and is expected when the application is run in Petalinux.
+The same OpenCV operations of reading, decoding, writing, and encoding the
+image, are used for both the software and hardware implementations, and thus
+are equal in latency. The reading and writing of the images are slowed down
+due to storage being bandwidth limited. Thus these metrics are only included
+for the completeness of the measurements.
+The colour image with the resolution of 512x512 being processed is shown in
+Figure 5.1, and the output components of the Sobel edge detector may be found
+in Figure 5.2,
+The 3840x2160 image is shown in Figure 5.3, where the left pane is the colour
+image, and the right pane shows the image in grayscale. The output of the
+histogram equalization is shown in Figure 5.4. A clear improvement in contrast
+==PAGE:47==
+37
+128x128 Pixel Image
+Sobel Edge
+Detection [µs]
+Histogram
+Equalization [µs]
+Hardware
+OpenCV Read & decode
+10385
+10383
+OpenCV allocation
+43
+11
+Copy input Image
+175
+92
+Core Conﬁguration
+11
+11
+Hardware Compute
+265
+103
+Copy output Image
+406
+62
+OpenCV Write & encode
+7817
+2202
+Compute + core conﬁg
+319
+125
+Total without r/w
+900
+279
+Total
+19102
+12864
+Software
+OpenCV Read & decode
+10450
+11413
+OpenCV allocation
+42
+11
+OpenCV Compute
+9193
+1038
+OpenCV Write & encode
+8791
+2789
+Total
+28476
+15251
+512x512 Pixel Image
+Sobel Edge
+Detection [µs]
+Histogram
+Equalization [µs]
+Hardware
+OpenCV Read & decode
+29369
+18490
+OpenCV allocation
+108
+54
+Copy input Image
+2767
+837
+Core Conﬁguration
+13
+15
+Hardware Computation
+2735
+912
+Copy output Image
+7164
+1246
+OpenCV Write & encode
+87537
+21413
+Compute + core conﬁg
+2748
+981
+Total without r/w
+12679
+3064
+Total
+129693
+42967
+Software
+OpenCV Read & decode
+31278
+18085
+OpenCV allocation
+84
+55
+OpenCV Compute
+109012
+5092
+OpenCV Write & encode
+76421
+21298
+Total
+216795
+44530
+Table 5.2: The latency of each operation and computation on colour images
+with 128x128 and 512x512 resolutions computed on both Hard-
+ware and software implementations.
+==PAGE:48==
+38
+Results
+1920x1080 Pixel Image
+Sobel Edge
+Detection [µs]
+Histogram
+Equalization [µs]
+Hardware
+OpenCV Read & decode
+219179
+126728
+OpenCV allocation
+87
+64
+Copy input Image
+21417
+7220
+Core Conﬁguration
+14
+12
+Hardware Computation
+20982
+6671
+Copy output Image
+56086
+9385
+OpenCV Write & encode
+593054
+169072
+Compute + core conﬁg
+21083
+6747
+Total without r/w
+98586
+23352
+Total
+910819
+319152
+Software
+OpenCV Read & decode
+219626
+127967
+OpenCV allocation
+48
+64
+OpenCV Compute
+939642
+22992
+OpenCV Write & encode
+586241
+166813
+Total
+1745557
+317836
+3840x2160 Pixel Image
+Sobel Edge
+Detection [µs]
+Histogram
+Equalization [µs]
+Hardware
+OpenCV Read & decode
+666204
+286956
+OpenCV allocation
+85
+59
+Copy input Image
+85056
+28302
+Core Conﬁguration
+14
+14
+Hardware Computation
+83374
+26309
+Copy output Image
+224528
+37291
+OpenCV Write & encode
+2089297
+575382
+Compute + core conﬁg
+83473
+26382
+Total without r/w
+393057
+91975
+Total
+3148558
+954313
+Software
+OpenCV Read & decode
+667776
+287767
+OpenCV allocation
+86
+61
+OpenCV Compute
+4294505
+77717
+OpenCV Write & encode
+2076067
+576053
+Total
+7038434
+941598
+Table 5.3: The latency of each operation and computation on colour images
+with 1920x1080 and 3840x2160 resolutions computed on both
+Hardware and software implementations.
+==PAGE:49==
+39
+Figure 5.1: Test Image with a resolution of 512x512
+Figure 5.2: Sobel Edge detection outputs for a 512x512 colour image. (Left) is
+shown the vertical component of the Sobel Edge Detector. (Right)
+is shown the horizontal component of the Sobel Edge Detector
+==PAGE:50==
+40
+Results
+Figure 5.3: Test image with a resolution of 3840x2160 (Left) Image in colour.
+(Right) Image converted to grayscale.
+Figure 5.4: Histogram equalization output for a 3840x2160 resolution colour
+image.
+can be seen, when comparing the grayscale image in Figure 5.3 to Figure 5.4.
+The speedup is calculated for each RM and all four resolutions. The results are
+found in Table 5.4.
+For the Sobel Edge Detection, we see, a speedup of 35-51x when only the com-
+putation is compared.
+When we include the core conﬁguration the speedup
+lowers to 28-51x, and this result should be considered the best case if a ﬁx for
+the workaround is found. When we include the memory copy workaround in the
+calculations of the speedup, the results are lowered to 8-11x. This last result
+should be considered the real speedup of this accelerator because we have to use
+the memory copy workaround.
+For the Histogram Equalization core we see, a speedup of 3-10x when only the
+computation is compared. When we include the core conﬁguration the speedup
+lowers to 3-8x, and this result should be considered the best case if a ﬁx for the
+workaround is found. When we include the memory copy workaround in the
+calculations of the speedup, the results are lowered to 0.85-3.7x. This last result
+should be considered the real speedup of this accelerator because we have to use
+==PAGE:51==
+41
+the memory copy workaround.
+Including the bandwidth-limited storage into the calculation, we see speedups
+of up to 124% for Sobel, and up to 19% for histogram equalization.
+For Sobel edge detection, we clearly see that the speedup increases as the image
+resolution grow, but for histogram equalization, the speedup decreases drasti-
+cally when increasing the resolution.
+In Figure 5.5 two graphs are shown, which show the computation time of both
+hardware and software as a function of the number of pixels in the image. These
+results only look at the raw computation times for the hardware and software
+implementations, and thus not including any of the allocation or movement of
+the data. These graphs clearly show that the Sobel Edge Detection hardware
+computation has the same curve steepness as the software computation, while
+for histogram equalization, the hardware computation has a steeper curve, than
+the software computation. This results in the two results narrowing, thus mak-
+ing the speedup lower for the histogram equalization hardware implementation
+with larger images. This means that the OpenCV implementation of histogram
+equalization gets more eﬃcient than the hardware implementation, with greater
+image resolutions.
+==PAGE:52==
+42
+Results
+Speedup over OpenCV compu-
+tation with 128x128 Image
+Sobel
+Edge
+Detection
+Histogram
+Equalization
+Hardware compute
+34.7
+10.08
+Hardware compute + core conﬁgu-
+ration
+28.9
+8.39
+Hardware compute + core conﬁgu-
+ration + copy to and from memory
+workaround
+10.3
+3.76
+Hardware and Software totals com-
+pared
+1.49
+1.19
+Speedup over OpenCV compu-
+tation with 512x512 Image
+Sobel
+Edge
+Detection
+Histogram
+Equalization
+Hardware compute
+39.9
+5.58
+Hardware compute + core conﬁgu-
+ration
+38.2
+5.25
+Hardware compute + core conﬁgu-
+ration + copy to and from memory
+workaround
+8.53
+1.68
+Hardware and Software totals com-
+pared
+1.67
+1.04
+Speedup over OpenCV compu-
+tation with 1920x1080 Image
+Sobel
+Edge
+Detection
+Histogram
+Equalization
+Hardware compute
+44.8
+3.45
+Hardware compute + core conﬁgu-
+ration
+44.6
+3.42
+Hardware compute + core conﬁgu-
+ration + copy to and from memory
+workaround
+9.53
+0.99
+Hardware and Software totals com-
+pared
+1.92
+1.00
+Speedup over OpenCV compu-
+tation with 3840x2160 Image
+Sobel
+Edge
+Detection
+Histogram
+Equalization
+Hardware compute
+51.5
+2.95
+Hardware compute + core conﬁgu-
+ration
+51.4
+2.95
+Hardware compute + core conﬁgu-
+ration + copy to and from memory
+workaround
+10.93
+0.85
+Hardware and Software totals com-
+pared
+2.24
+0.99
+Table 5.4: Speedup of the 128x128 colour image, when compared to the
+OpenCV implementaion
+==PAGE:53==
+43
+Figure 5.5: Comparison of the growth of computation time compared to the
+size of the image. (top) Results for the Sobel edge detector. (bot-
+tom) Results for the histogram equalization.
+==PAGE:54==
+44
+Results
+==PAGE:55==
+Chapter 6
+Conclusion
+This thesis work has dealt with partial reconﬁguration and the methodologies
+of the paradigm, and the Xilinx proprietary Dynamic Function eXchange has
+been explored in depth. The basics of partial reconﬁguration are covered, and
+the methodologies and their limitations are detailed.
+The work also integrated the paradigm into a Linux driven operating system,
+Petalinux, creating a Linux kernel module for controlling the DFX controller, as
+well as several test applications, that uses the UIO framework to communicate
+with the reconﬁgurable modules.
+Two reconﬁgurable modules have been created, that provide a use-case in the
+real world. The Sobel RM provided a high speedup over the OpenCV imple-
+mentation, and the histogram equalization RM saw a moderate speedup. We
+learned that having fast storage is important when computing.
+For the partial reconﬁguration side of things, the conﬁguration latency was
+shown to be larger than expected, but we also saw that the full bandwidth of
+the ICAP interface was utilized. Which means that the high latency is caused
+by the large size of the Pblock and the corresponding partial bitstream.
+In conclusion, an interesting subject, that has many real-world applications and
+use-cases. It’s certainly a subject that deserves more research and development.
+==PAGE:56==
+46
+Conclusion
+6.1
+Future Developments
+Because of many issues with the implementation in other parts of the system,
+the more advanced managing schemes have not been implemented, thus only a
+simple managing scheme was included.
+For faster RM conﬁguration with the DFX Controller, compression can be used
+to minimize the size of the binary bitstreams. The size reduction is estimated by
+Xilinx [Xil20a] to be between 30% and 70%. Alternatives to using compression
+could also be to try and minimize the Pblock, since that will make smaller binary
+ﬁles. It may not be possible to make the Pblock much smaller, since the RMs
+already ﬁlls much of it, and timing and routing could likely be a problem.
+A performance drop is caused because the PL is not able to address virtual
+memory locations, and the workaround was implemented. Maybe either, sup-
+port for virtual addresses can be implemented in the PL, or more likely, a way
+to load the data directly into the physical memory from user applications can
+be implemented.
+==PAGE:57==
+Bibliography
+[Edo18] Isak Edo. Fpga-based accelerators for cryptography, Jun 2018. Tech-
+nical University of Denmark.
+[Esp16]
+Angelo Esposito. Audio signal processing applications by dynamically-
+loaded hardware library (hll) on reconﬁgurable system-on-chips. Mas-
+ter’s thesis, Technical University of Denmark, Sep 2016.
+[Lom16] Andrea Lomuscio. The dynamically-loaded hardware library (hll) per-
+formance characterization and applications. Master’s thesis, Technical
+University of Denmark, Apr 2016.
+[Pan15] Federico M. Pandolﬁ. The dynamically-loaded hardware library (hll)
+technology approach to fpga acceleration. Master’s thesis, Technical
+University of Denmark, Sep 2015.
+[Xil18]
+Xilinx. UG585 - Zynq-7000 SoC - Technical Reference Manual. Xilinx,
+(v1.12.2) edition, Jul 2018.
+[Xil19]
+Xilinx. UG850 - ZC702 Evaluation Board for the Zynq-7000 XC7Z020
+SoC - User guide. Xilinx, (v1.7) edition, Mar 2019.
+[Xil20a] Xilinx. PG374 - Dynamic Function eXchange Controller v1.0 Logi-
+CORE IP - Product Guide - Vivado Design Suite. Xilinx, (v1.0) edi-
+tion, June 2020.
+[Xil20b] Xilinx.
+PG375 - Dynamic Function eXchange Decoupler v1.0 Logi-
+CORE IP - Product Guide - Vivado Design Suite. Xilinx, (v1.0) edi-
+tion, June 2020.
+==PAGE:58==
+48
+BIBLIOGRAPHY
+[Xil20c] Xilinx. UG1144 - PetaLinux Tools Documentation - Reference Guide.
+Xilinx, (v2020.1) edition, Jul 2020.
+[Xil20d] Xilinx. UG1157 - PetaLinux Tools Documentation - Command Line
+Reference Guide. Xilinx, (v2020.1) edition, Jun 2020.
+[Xil20e] Xilinx. UG909 - Vivado Design Suite User Guide Dynamic Function
+eXchange. Xilinx, (v2020.1) edition, Jun 2020.
+[Xil20f] Xilinx. UG947 - Vivado Design Suite Tutorial - Dynamic Function
+eXchange. Xilinx, (v2020.1) edition, Sep 2020.

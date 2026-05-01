@@ -1,0 +1,1670 @@
+==PAGE:1==
+Topology optimisation with
+cut finite elements
+Niels Brummerstedt
+s144426
+Department of Mechanical Engineering
+Technical University of Denmark
+January 6th, 2022
+Submitted as partial fulfilment to the requirements for the degree of
+Master of Science in Engineering
+==PAGE:2==
+Contents
+1
+Introduction
+2
+1.1 Topology optimisation ..........................................................
+2
+1.2 Fictitious domain methods and cut finite elements ............................
+3
+1.3 Objectives for this project.......................................................
+5
+2
+Subdividing and integrating cut finite elements
+6
+2.1 The marching cubes algorithm .................................................
+6
+2.2 On polyhedra ....................................................................
+8
+2.3 Tetrahedra generation ...........................................................
+8
+2.4 On topologically correct representations....................................... 11
+2.5 Subdivision into hexahedra, pyramids, and wedges ........................... 13
+2.6 Subdivision of tetrahedra ....................................................... 14
+2.7 Quadrature rules................................................................. 14
+2.8 Space conversion and weighing of integration points ......................... 16
+3
+Parsing of input surfaces
+17
+3.1 Surface descriptions............................................................. 17
+3.2 Distance query................................................................... 18
+3.3 Bounding Search Tree .......................................................... 19
+3.4 Heap priority queue ............................................................. 19
+4
+Level set based finite element formulations and PETSc
+22
+4.1 Implementation using PETSc framework ...................................... 22
+4.2 Linear elastic deformation problem ............................................ 23
+4.3 Level-set representation with very few elements .............................. 25
+4.4 Validation of Finite Element Analysis ......................................... 25
+5
+Implementation into topology optimisation framework
+28
+5.1 On topology- and shape optimisation .......................................... 28
+5.2 Perturbation of the level as a design variable .................................. 30
+5.3 Sensitivity of volume and compliance ......................................... 31
+5.4 An actual optimisation .......................................................... 33
+6
+Conclusion
+36
+6.1 Summary ........................................................................ 36
+6.2 Lessons .......................................................................... 37
+6.3 Perspective....................................................................... 38
+6.4 Further work..................................................................... 38
+References
+39
+1
+==PAGE:3==
+Chapter 1
+Introduction
+Humans have always worked to improve things—it may even be considered a trademark
+characteristic of our species. From the earliest days, new and improved technologies have
+been invented, and this process continues today. Unfortunately, for the last century or so,
+humans have been primarily focused on improving one thing: economic growth. This
+focus has undoubtedly bettered many things such as living standards and food safety,
+but perpetual growth has also been associated with a continuous increase in resource
+consumption which caused the current ecological tragedy and climate crisis.
+We have a great challenge in front of us. We need to dramatically reduce the global
+use of resources, but it would be unrealistic to ask anyone to accept a decrease in living
+standard, or to deny the rapidly developing parts of the world access to the standard of
+living we enjoy in the richest areas. We need to be more clever; we need to use resources
+optimally.
+The field of mechanical engineering has an enormous responsibility in this regard, as
+many resource consuming devices are engineered mechanisms. Fortunately, mechan-
+ical and structural engineering also has a great potential to contribute to improvements
+in all of the most consuming and polluting industries: generating energy, transporting
+goods, construction of buildings and infrastructure, even producing food. The mech-
+anical engineer can contribute by designing structures that perform better and use less
+material.
+Topology optimisation algorithms are among the tools we need to do so. And so, refining
+these tools is an appropriate place to direct the human desire to improve things.
+1.1
+Topology optimisation
+Topology optimisation is in a very general sense a computational method that systemat-
+ically generates a design with the best possible performance on some desired parameter.
+In the context of mechanical engineering, topology optimisation (or structural optim-
+isation) is often concerned with creating a structure optimised for material use against
+strength, fatigue, heat transfer, or other mechanical properties.
+In more concrete terms, topology optimisation is the application of numerical algorithms
+to find a solution to a boundary value problem that minimises some quantity of interest.
+2
+==PAGE:4==
+The boundary value problem (a set of differential field equations with prescribed beha-
+viour on the domain boundary) is itself solved numerically using finite element analysis.
+In recent years, topology optimisation has rapidly found its way to industrial applica-
+tions. The simultaneous advances in additive manufacturing technologies have made it
+possible to manufacture still more complicated geometries, and optimised designs that
+were previously not viable from a production standpoint are now attractive contenders
+to classic designs.
+The usability of topology optimisation is restricted by the required computational power.
+The problem is the design resolution. The number of degrees of freedom for a required
+level of detail increases O(n3) with the length scale of the design domain.
+To put things in perspective, consider the naïve optimisation of the internals structure
+in an aircraft wing, and imagine a desired resolution of 1 mm. Approximated wing di-
+mensions of a large commercial airliner are 35 m × 10 m × 1 m amounting to 350×109
+voxels. Just storing a single scalar field with values at each node in a computer in double
+precision requires about 2.8 terabytes, preferably on the fast volatile memory. If that is
+the required space for storage, it is easy to imagine that attempting to perform computa-
+tions on such amounts of data requires impressive hardware. Now, consider including
+the fuselage in the optimisation.
+There are essentially two things that can be done about the computation problem. Either
+obtain more powerful hardware, or reduce the detail. In recent years, much effort has
+gone into techniques for handling the truly large scale optimisation problems using
+multi-grid techniques along with distributing computations with sophisticated parallel
+algorithms [1; 2; 5]. The results of these efforts continue to break size records, expanding
+the range of problems that topology optimisation can be used on.
+The present work deals with the other option. What can be done to achieve fidelity
+without increasing computational resolution?
+1.2
+Fictitious domain methods and cut finite elements
+Any geometry treated using the finite element framework must be represented by a mesh.
+As long as the mesh makes physical sense, there are practically no restrictions on the
+mesh from a geometry description point of view. Topology optimisation algorithms,
+however, will require many iterations, and the intermediate geometry must be represen-
+ted in each iteration.
+There are, of course, several alternative ways of describing a geometry, as shown in
+fig. 1.1. The simplest for humans to comprehend fig. 1.1a is the (analytical) paramet-
+ric description of surfaces and volumes using simple concepts such as spheres, boxes
+sweeps along Bézier-curves, etc. This is a typical format for CAD systems [10]. Un-
+fortunately, this way of thinking does not support a numerical optimisation very well,
+which is why discretised triangulated surfaces and conforming finite element meshes are
+used for numerics fig. 1.1b.
+For topology optimisation, this is a problem because the mesh has to be re-computed in
+each iteration. Therefore, it is common in topology optimisation to use a regular (or at
+3
+==PAGE:5==
+least constant) background mesh with the geometry represented as a density field [8; 9],
+shown in fig. 1.1c. This way of thinking solves most problems related to meshing cost,
+but introduces staircase features in the optimised design, which must be handled in post
+processing.
+This report focuses on a fourth strategy: the geometry boundary is defined by an iso-
+contour of a scalar field sampled in all nodes of a constant background mesh, as seen
+in fig. 1.1d. This contour is free to slice through individual finite elements, and as such
+the geometry boundary is ”immersed” in the background mesh. Because the geometry
+representation can cut elements in arbitrary angles, its surface can be represented con-
+siderably smoother than it could at the same resolution in its density-based counterpart.
+(a) Bézier-Spline representation
+(b) Bodyfitted mesh
+(c) Density field on regular mesh
+(d) Immersed piecewise linear boundary
+Figure 1.1 – Various ways of describing geometry
+The immersed boundary technique implies that all finite elements not touching the bound-
+ary are either completely inside or outside the geometry, and the have constant stiffness.
+On the other hand, the boundary-intersecting elements need special treatment because
+their interior contain two phases, and it is not trivial to construct a local stiffness matrix
+for these elements.
+4
+==PAGE:6==
+1.3
+Objectives for this project
+In this project, an extension to the standard 8-node hexahedron element will be developed
+to be used for topology optimisation in the PETSc framework presented by Aage et al.
+[1]. The element will be developed as a C++ class capable of returning a numerical
+integration rule for an arbitrary cut through the element by an immersed boundary.
+In order to successfully perform numerical integrations on a finite element that is only
+partially contained in the physical geometry, a strategy must be devised for representing
+the boundary within the finite element. Subdivision and piecewise integration on each
+side of the boundary is a natural choice. The objective is therefore to devise a method to
+subdivide a finite element into several smaller elements that can be used for piecewise
+integration of the original.
+The practical part of this project is heavily focused on developing a piece of software.
+The following requirements and properties for the implementation will serve as a guideline
+for development choices. The focus will be on (in order of priority) speed, robustness,
+numerical stability, predictability, and accuracy.
+The method will be designed to interact with the PETSc framework [1]. Therefore, it
+should use first order elements. The method should be fast, and sophisticated schemes
+will not be considered unless their benefit obviously far outweighs the cost. A simple
+hexahedron subdivided into tetrahedrons will suﬀice (for now).
+The method should be robust to perturbations of the input values. For the element to
+be useful to a topology optimisation algorithm, its sensitivity to design perturbations
+must be predictable, and preferably continuous. The method should produce consistent
+divisions such that the division of two adjacent elements does not create gaps or overlaps.
+Some of the requirements above have conflicting implications (e.g. speed and accuracy).
+The next chapter will attempt to document such conflicts and the choices made in trade-
+off situations.
+5
+==PAGE:7==
+Chapter 2
+Subdividing and integrating cut finite
+elements
+2.1
+The marching cubes algorithm
+The marching cubes algorithm was originally presented by Lorensen and Cline [23] as
+a means for generating triangulated iso-surfaces from e.g. CT and MR scans. Since its
+inception, variants of the algorithm has been widely applied in computer visualisation.
+Marching Cubes takes as input a set of discrete sample points of the field in interest. As
+the name indicates, the sample points are arranged in a lattice forming cubes, and each
+cube is (naturally) defined by eight sample points. Since topology optimisation normally
+operates on exactly this arrangement of samples, Marching Cubes is a natural choice.
+The algorithm was originally conceived for an equally spaced sample set (voxels), be-
+cause this is the type of result one would get from a computed tomography scan [24],
+but in principle the sample points do not need to have equal spacing, i.e. cubes are not
+strictly required. In fact, the strategy behind the algorithm can be generalised to work
+on voxels with any shape (boxes, tetrahedra, prisms, etc.), and thus on any conceivable
+mesh generated from any point cloud. This makes the algorithm very useful for level-set
+based approaches in all finite element settings.
+The level set
+To the computational domain Ωis associated a continuous scalar indicator field, ϕ. We
+call the value of the field at a sample point, s, the level of the point, and call the collection
+of values for all points in a discretised field a level-set. The field will have the property
+that the boundary between the physical (solid) domain and the non-physical (void) do-
+main takes a constant value, ϕ0. That is, the boundary is an iso-contour of the level-set.
+It is usually convenient to set this threshold value as ϕ0 = 0. Then, a sample point is
+considered inside the physical domain if its level s ⩾ϕ0.
+6
+==PAGE:8==
+Figure 2.1 – The computational domain with physical and void domains indicated by the value
+of the zero contour of the level-set. The analogy to an island in the ocean is obvious.
+Intersected elements
+For each element in the computational mesh, each vertex has a level. Elements that
+are entirely inside either the solid or void can be treated as normally. The zero contour
+intersects the set of elements that contain levels on both sides of the threshold ϕ0. These
+elements are ”cut” into a solid and a void part.
+The subdivision works by first identifying edges intersected by the iso-surface, which are
+those edges that have endpoints on opposite sides of the boundary. On each such edge,
+a temporary vertex is constructed at the point where the linear interpolation between the
+endpoint values is equal to the threshold value. The edge vertices and the eight corner
+vertices are then used to construct a set of sub-elements.
+x
+y
+z
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+1
+2
+3
+4
+5
+6
+7
+8
+Figure 2.2 – A hexahedron element with node and edge numbering.
+7
+==PAGE:9==
+Case detection and permutations
+Given eight nodes that can be either inside or outside of the physical domain, there are
+28 = 256 combinations to consider. The 256 combinations will be referred to as the cut
+cases. The cut cases can be numbered easily, for example by using local node numbering
+to indicate bit location, setting bits to true if the corresponding node is inside the domain
+and false otherwise, and interpreting the sequence of 8 bits as an integer. It should be
+noted that in converting the scalar level to a boolean at this stage, a simplification is made.
+We will come back to this shortly.
+An overview of the 256 combinations are shown in fig. 2.3. It is clear that each of the 256
+individual cases can be obtained as various orientations (permutations) of a smaller set
+of more general base cases. Possible permutations are sequences of solid body rotations,
+mirroring about the planes defined by coordinate axes, and simultaneous inversion of the
+sign of all nodal levels. 48 unique permutations exist. Using these, the cut cases can be
+grouped into 14 base cases, presented in fig. 2.4.
+The fundamental idea behind the marching cubes algorithm is to associate each cut case
+to its corresponding subdivision in a lookup table. In practical implementations, two
+tables are used; one to map from cut case to base case, and one to map base case to
+subdivision. Each base case is therefore associated with a predefined and constant sub-
+division into tetrahedra. The task is now to generate the list of subdivisions.
+2.2
+On polyhedra
+To a mathematician, a polyhedron is a volume enclosed by flat polygonal faces. The finite
+element hexahedron does not generally have flat faces, and it is not formally a polyhedron.
+In normal finite element settings, this is a irrelevant fact, since hexahedrons are mostly
+used in structured grids where the faces are either truly flat, or where the curvature of a
+face is of no consequence.
+However, for the piecewise integration rules of subdivided finite elements, it becomes
+relevant to ask what domain will actually be integrated. Tetrahedons have triangular
+faces which are inherently flat (it takes three points to define a plane), but if tetrahedrons
+are used to subdivide a ”hexahedron” with curved faces, they will not span the original
+domain.
+The problem is most important for the internal phase boundary in a cut element. This
+surface is defined by an iso-level of the trilinear interpolant of eight nodal values. It is
+usually a curved surface, with the exception of triangular cuts in case B and E of fig. 2.4.
+Therefore, it can only be approximately represented by the piecewise flat triangular sur-
+faces of the sub-tetrahedra. Nevertheless, this project uses tetrahedral sub-elements. In
+section 2.5, other subdivisions will be discussed.
+2.3
+Tetrahedra generation
+The subdivision starts by identifying each edge intersected by the zero-level. These edges
+have opposite signs on their two nodes. In constructing the a-priori subdivision table,
+endpoint levels are unknown, so the actual location of the intersection is also unknown.
+8
+==PAGE:10==
+Figure 2.3 – 256 cut cases. A black dot in a node indicates that ϕ ⩾ϕ0
+This is in fact a serious issue for the robustness of the subdivision scheme, but this issue
+will be ignored for now. To perform a subdivision, a proxy intersection point is placed in
+the midpoint of all intersected edges, such that the cloud of points in a subdivided base
+case is constant. This will allow tetrahedra to be computed once, a priori, as opposed to
+each time a cut element is encountered.
+To convert a cloud of points into the constant lookup table of sub-tetrahedra, the obvi-
+ous choise was to use the Delunay-based algorithm TetGen [27]. It can of course also
+be done by hand, but anyone who attempts this will very soon see why an automated
+9
+==PAGE:11==
+A: Solid or void
+2 permutations
+B: Single point
+16 permutations
+C: One edge
+24 permutations
+D: One face diagonal
+24 permutations
+E: One box diagonal
+8 permutations
+F: Three points in face
+48 permutations
+G: Edge and one opposite point
+48 permutations
+H: Boxed triangle
+16 permutations
+I: One complete face
+6 permutations
+J: One complete corner
+8 permutations
+K: Opposite edges
+6 permutations
+L
+24 permutations
+M
+24 permutations
+N: Opposite diagonals
+2 permutations
+Figure 2.4 – 14 base cases. Each case can be permuted by inverting solid and void phases,
+rotating, mirroring, and combinations thereof. Often, different combinations of permutations are
+equivalent, and do not contribute twice to the final permutation count. For example, all rotations
+of case A are equivalent, and a mirror of case I is equivalent to inverting phases.
+10
+==PAGE:12==
+algorithm is attractive. Unfortunately, TetGen is released under the AGPL v3 license, so
+the actual source code of TetGen is not included in the source code of this project. Only
+the resulting output generated by TetGen is used in the lookup table, and the output is
+fortunately not restricted by the license.
+The lookup table returns a list of tetrahedrons, of which an example is shown in fig. 2.5.
+Each tetrahedron is defined by four local node-numbers, using the following convention:
+Nodes 1 to 8 are the corner nodes, nodes 9-20 are nodes positioned on each of the 12
+edges of the hexahedron, such that the number is equal to the edge number plus eight.
+Node and edge numbers were indicated in fig. 2.2.
+Having obtained a connectivity for the tetrahedrons, the actual location of the nodes is
+computed run-time when a cut element is encountered: for each intersected edge, the
+intersection point is obtained by linear interpolation of the endpoint levels.
+When the tetrahedron is fully defined, it can be used to construct the unique integration
+rule for the particular cut element.
+2.4
+On topologically correct representations
+As mentioned earlier, the binary consideration of a point as either inside or outside of
+the geometry is a simplification: information about the actual level is not used in con-
+structing the connectivity.
+Upon further investigation of the topologies represented by the 14 base cases, it turns out
+that many of them are in fact ambiguous. For example, considering case N in fig. 2.4,
+it is easy to convince oneself that if the two slots grow large enough, they will form a
+tunnel in the middle. Another example is shown in fig. 2.6, which corresponds to case
+E.
+As noted by Natarajan [25], a lattice using the 14 cases from Lorensen and Cline [23]
+can produce C0 discontinuities (holes) in the surface of the geometry. Further, even if
+all C0 discontinuities are eliminated, the result is still topologically ambiguous. That is,
+one base case can represent several distinct topologies. The issue is that the trilinear in-
+Figure 2.5 – Mesh of sub-tetrahedra generated using midpoints of intersected edges. The grey
+surface indicates the interface between solid and void.
+11
+==PAGE:13==
+(a) Disc
+(b) Tunnel
+Figure 2.6 – Two different topologies with the same cut case [22]. The disc case corresponds to
+what is shown in fig. 2.4, case E.
+terpolant can have saddle points, which are completely ignored in the original algorithm.
+Barrera and Maute [6] deals extensively with strategies for resolving these ambiguities.
+Chernyaev’s table
+Chernyaev [13] resolves the ambiguities with the ”Marching Cubes 33” algorithm, provid-
+ing thirty-three base-cases with which topological consistency is preserved. Lopes and
+Brodlie [22] points out and resolves that only 31 cases are unique, and Custodio et al.
+[17] provides some further enhancements to the treatment.
+All ambiguities are associated with the appearance of saddle-points in the trilinear in-
+terpolant of nodal values. The resolution of the ambiguities revolves around evaluating
+the interpolant at these points. For a positive-valued saddle-point, a bridge is formed,
+whereas two islands are separated in the opposite case. This situation is illustrated in
+fig. 2.7.
+(a) Saddle point above zero level
+(b) Saddle point below zero level
+Figure 2.7 – Distinguishing between two topologies with the same base case using Steiner points,
+illustrated in 2D. Contour lines for positive values are black and negative values are grey. Like
+the bilinear interpolant can have a saddle point, so can the trilinear.
+12
+==PAGE:14==
+Steiner points
+To further enhance the quality of the subdivision, one can calculate two Steiner points
+inside the element. These points are, just like the edge intersection points, temporarily
+used to create sub-tetrahedra, but are never stored. The location of the Steiner points
+can for example be chosen to preserve volume, or according to some rule that is com-
+putationally eﬀicient. This is covered in [22], who chose the intersection point of the
+hyperbolic zero-contour and the straight line from the saddle-point to the corner. This
+point is fairly easy to compute, and has the nice property that it minimises the difference
+in area between the hyperbola and its polygon representation.
+Unfortunately, implementation of the expanded subdivision table was outside the scope
+and time constraints of this project.
+2.5
+Subdivision into hexahedra, pyramids, and wedges
+The issue of spanning the integrated volume with the sub-elements can partly be ad-
+dressed by employing better suited polyhedra as sub-elements. Figure 2.8 shows two
+such examples. The wedge replaces three tetrahedra, and the pyramid replaces two tet-
+rahedra, in both cases reducing the number of integration points necessary.
+Another interesting property is that these geometries have surfaces with four nodes,
+which can capture the curvature of an internal surface. Used along with sub-hexahedra,
+the number of sub-elements for some cuts can be significantly reduced, and integration
+rules can more accurately represent the integrand.
+One can obtain an integration rule for these elements without writing new code by treat-
+ing them as degenerate hexahedra, but specialised (and better) integration rules are read-
+ily available [18; 20; 21], and should naturally be favored.
+Unfortunately, the implementation of specialised sub-elements is more complicated than
+obtaining good integration rules. The issue lies in the technical details of how one would
+structure the program for the processor. In order to be fast, a processor relies heavily on
+guessing what it will be asked to do next, and preparing for it. But whenever a branch is
+met, where two different pieces of code will run depending on the input, the processor
+cannot prepare, and speed will decrease. Avoiding this situation is referred to as ”branch-
+less” or ”vectorised” code.
+r
+s
+t
+(a) Wedge
+r
+s
+t
+(b) Pyramid
+Figure 2.8 – Polyhedra
+13
+==PAGE:15==
+In a subdivision using only tetrahedra, almost everything is pre-calculated, and branching
+is minimal, leading to very fast execution of the program. In a subdivision leading to
+a heterogeneous collection of sub-elements, branching is more diﬀicult to avoid (but
+not theoretically impossible). Care must be taken in order for the benefits from better
+elements to be worthwhile. This project did not implement specialised sub-elements.
+Information on tessellation into polyhedral meshes can be found in [14].
+2.6
+Subdivision of tetrahedra
+In many optimisation algorithms, the computational mesh is not a regular lattice of hexa-
+hedra, but instead a composed of tetrahedra. This is particularly true if the computational
+domain is defined by a mesh generated from a commercial software. This case is very
+relevant to industry, where the design domain may be a complex shape defined in CAD
+software.
+In such cases, it will be necessary to subdivide tetrahedra. Fortunately, this is consider-
+ably easier than subdividing hexahedra, since only 24 = 16 unique cases exist, which are
+permutations of only three base cases: fully solid or void, one node with opposite phase,
+or two nodes in each phase. Subdivision tables can be generated by hand, and when a
+subdivision is available, the logic behind numerical integration is exactly the same as for
+hexahedra. The three base cases for tetrahedra are shown in fig. 2.9.
+2.7
+Quadrature rules
+Ultimately, the purpose of any finite element method is to perform a piecewise numerical
+integration of a domain by constructing a numerical integration scheme for each finite
+element. Research in the field of finite elements is still today producing more elabor-
+ate, numerically stable, and specialised integration rules. The method of subdividing
+elements, considered in this text, is no exception: The entire goal is to construct a nu-
+merical scheme that can integrate a field with a few discontinuities inside the element.
+At this point, it will be convenient to list some standard integration rules for integrating
+finite elements to first order. An extensive collection of quadrature rules can for example
+be found in the Python package Quadpy [26]. All integration rules used in this project
+are quadratic rules, meaning that they integrate the weakly formulated finite element
+r
+s
+t
+r
+s
+t
+(a) All solid or all void
+r
+s
+t
+(b) One solid or one void
+r
+s
+t
+(c) Two solid and two void
+Figure 2.9 – Three base-cases of the cut tetrahedron
+14
+==PAGE:16==
+problem (first order derivatives) with first order shape functions to machine precision
+[30].
+Tetrahedrons are the simplest convex geometry (simplex) in three dimensions. For the
+purposes of this project, the integration rule chosen is the simple four-point integration
+rule, as also found in Cook et al. [15]. The hexahedron rule used is the classical Gauss
+rule. Table 2.1 lists the used 3D integration rules.
+When operating in 3D, it is also necessary to have 2D- and 1D integration rules available.
+A 2D integration will for example facilitate implementation of surface loads (pressure
+and traction), and a 1D integration may be useful for volume loads that operate along
+a line, for example in electro-magnetics, or a heat source from a resistive wire. In any
+case, integration rules are required. Table 2.2 lists integration rules for quadrilaterals,
+triangles, and line segments.
+r
+s
+t
+w
+1
+−α
+−α
+−α
+1.
+2
+α
+−α
+−α
+1.
+3
+α
+α
+−α
+1.
+4
+−α
+α
+−α
+1.
+5
+−α
+−α
+α
+1.
+6
+α
+−α
+α
+1.
+7
+α
+α
+α
+1.
+8
+−α
+α
+α
+1.
+(a) Hexahedron,
+α = 1/
+√
+3
+r
+s
+t
+w
+1
+α
+β
+β
+1/4
+2
+β
+α
+β
+1/4
+3
+β
+β
+α
+1/4
+4
+β
+β
+β
+1/4
+(b) Tetrahedron,
+α = (5 + 3
+√
+5)/20,
+β = (5 −
+√
+5)/20
+Table 2.1 – Integration rules in 3D using intrinsic coordinates (r, s, t) and weight w.
+r
+s
+w
+1
+α
+α
+1
+2
+−α
+α
+1
+3
+−α
+−α
+1
+4
+α
+−α
+1
+(a) Quadrilateral,
+α = 1/
+√
+3
+r
+s
+w
+1
+1/6
+1/6
+1/3
+2
+4/6
+1/6
+1/3
+3
+1/6
+4/6
+1/3
+(b) Triangle
+r
+w
+1
+α
+1
+2
+−α
+1
+(c) Segment,
+α = 1/
+√
+3
+Table 2.2 – Integration rules in 2D for quadrilateral and triangle, and in 1D for a segment.
+15
+==PAGE:17==
+2.8
+Space conversion and weighing of integration points
+The integration points for a sub-element cannot be used directly, as the element itself is
+virtual with missing nodal values. The integration points must be converted from the iso-
+parametric space of the sub-element to the iso-parametric space of the parent element,
+and their weight must be scaled appropriately.
+Using the shape functions of the sub-element along with its nodal coordinates given in the
+iso-parametric space of the parent element, the integration point can easily be mapped.
+If the shape functions evaluated at the sub-element integration point, P = [rl, sl, tl], is
+listen in the row vector
+N = N(rl, sl, tl) = [ N1, N2, · · · , Ni ]
+(2.8.1)
+and if the coordinates of the sub-element nodes in the parent space are vectors x, y, and
+z, then the location of the integration point in parent space (r, s, t) is simply the inner
+product of the shape functions and the coordinates
+(r, s, t) = [ Nx, Ny, Nz ]
+(2.8.2)
+The original weight of the integration point is then multiplied by the sub-element Jac-
+obian at the integration point, and then scaled with the volume of the iso-space of the
+sub-element. For a tetrahedron, the volume of the iso-space is 1/6, and the Jacobian is
+constant and related to the volume by det (J) = 6V , where J is the Jacobian matrix and
+V is the volume of the iso-space.
+The void material phase
+There is a solid and a void phase in every cut element. Setting the weight of the void
+phase to zero would cause a numerical problem. The use of ghost penalties (cf. [11])
+has been proposed and used to solve the issue within a cut element. However, in order
+to maintain all nodes in a background mesh for a topology optimisation at all times, the
+purely void region cannot be discarded. Instead, in this project, an Ersatz material model
+is used, where the void phase has a real but negligible stiffness. Practical implementation
+involves scaling the weight of integration points in the void phase with some small value,
+for example 1×10−6.
+A
+B
+C
+D
+E
+F
+(a) Physical space
+r
+s
+D
+E
+F
+(b) Child space
+E
+F
+A
+B
+C
+D
+r
+s
+(c) Parent space
+Figure 2.10 – Mapping from child to parent
+16
+==PAGE:18==
+Chapter 3
+Parsing of input surfaces
+Importing a predefined geometry is a frequent task in finite element and topology optim-
+isation work-flows. It might be the geometry specification of an existing part, the defini-
+tion of a computational domain, or some initial guess for the optimisation algorithm. In
+any case, such a geometry description is usually given in a format not directly compatible
+with the implementation of the optimisation. Some parsing is necessary.
+3.1
+Surface descriptions
+Triangulations
+Geometries used in numerical analysis (as opposed to CAD) are usually defined using
+a discretised triangulated surface mesh (also known as a ”trimesh”, or to topologists
+simply a ”triangulation”). The surface representation can be used to recover the volume
+geometry as long the surface does not self-intersect, and as long as there is a consistent
+notion on what is exterior and interior of the surface. Formally, the surface triangulation
+must be a closed orientable piecewise-linear 2-manifold.
+A triangulation where all triangles are in agreement about interior and exterior is an
+orientable manifold. It is conventional to define orientation by associating a triangle
+with its normal vector, which by convention points towards the exterior. It is useful to
+avoid storing the actual normal by instead encoding the normal in the order in which
+the vertices are given following the right hand rule. When doing so, the normal must
+of course be calculated whenever required, but the storage requirement is reduced with
+25%. Depending on what the triangulation is used for, one strategy or the other may be
+most suitable.
+Representing a volume with a surface requires that the surface is closed in addition to
+orientable. A triangulation where all triangles have an odd number of neighbouring
+triangles on all edges is closed. A triangulation where all triangles have exactly one
+neighbour on all edges is in fact a sharper restricting, but very useful for reasonably
+engineering geometries.
+Lastly, a reasonable requirement on a surface representing a physical object is that it does
+not self-intersect. This check is easy to implement, but painfully diﬀicult to implement in
+17
+==PAGE:19==
+a fast way, and it cannot be enforced by triangulation file formats. In this case, one must
+hope that the triangulation is generated by software capable of handling this requirement.
+File formats
+Common formats for storing geometries by polygonised surface description include STL,
+OBJ, PLY, AMF, and OFF. Each format has its own list of benefits and drawbacks, and
+many other proprietary formats exist.
+STL, released in 1987 as the native file format for the software Stereolitography CAD
+by 3D Systems, is used even today despite its obvious wastefulness, primarily because
+it is extremely simple to implement. The format simply stores a list of triangles, for
+each explicitly listing: its normal vector in 12 bytes, its three vertices each in 12 bytes,
+and finally 2 bytes for auxiliary information. The format is not concerned with handling
+connectivity, surface closure, or consistent orientation. The format stores each vertex
+several times, and potentially with small numerical gaps.
+OBJ, released by Wavefront in the 1990s, and designed for 3D graphics software, is a
+more sophisticated format, capable of optionally storing a range of information about
+objects and surfaces. It was used in this project because it works well with the C++ lib-
+rary GEL [12], which the input parsing in this project depends on. OBJ is a face-vertex
+type format, which stores each vertex once and defines polygons by listing vertex indices
+counter-clockwise. OBJ stores face normals implicitly, and is not limited to storing tri-
+angles, but can store any polygon. In addition, OBJ can optionally store explicit vertex
+normals, permitting the definition of curved surfaces. The primary drawback of this flex-
+ibility is that information is not evenly spaced as for the STL. Therefore, the OBJ format
+must be parsed.
+AMF was not used in this project, but is mentioned here with the intention of recommend-
+ing the format. AMF (Additive Manufacturing Format) is a fairly new format, developed
+in the early 2010s as a replacement for STL. AMF is essentially a ZIP-compressed XML-
+format with the features of OBJ. Additionally, it handles multiple materials well, and has
+improved support for curved faces and edges using Bézier-curves in B-splines.
+3.2
+Distance query
+The purpose of the preceding discussion was to highlight that it is not a trivial task to rep-
+resent a physical object in computer memory—many solutions exist for many purposes.
+It was also intended to facilitate the distinction between storage and computation. The
+purpose is not just to store the geometry surface, but to perform computations and ad-
+justments on the geometry solid. To perform a levelset-based topology optimisation, the
+geometry must be parsed to and represented in the computer as a scalar level-set. This
+level-set be used as the design variable for the optimisation algorithm.
+The intuitive approach is to initialise the level-set with the signed distance to the surface,
+such that a (negative) distance in the interior maps to a positive level, and the exterior to
+a negative level.
+Unfortunately, for the signed distance approach to be robust, a distance must be queried
+at every single design point in the design domain, and there may be billions of those.
+18
+==PAGE:20==
+Root
+A
+AA
+AAA
+AAB
+AB
+ABA
+ABB
+B
+BA
+BAA
+BAB
+BB
+BBA
+Figure 3.1 – A binary search tree (two children in each branch). The root node is the bounding
+box containing the entire geometry. The tree is then structured with branches of progressively
+smaller bounding-boxes, with all internal nodes being tight bounding-boxes on their sub-tree.
+End nodes are the bounding boxes for the individual triangles in the surface triangulation. If the
+triangles are distributed such that the tree will be balanced, search times can be reduced from
+Θ(n) to a worst-case Θ(lg n), where n is the number of nodes in the tree, and Θ() is the notation
+for the asymptotically tight bound, cf. [16].
+To make matters worse, the signed distance is the distance with the smallest absolute
+value to any of the faces in the triangulation. A realistic simple geometry contains tens
+of thousands of faces, and there is no trivial way to exclude faces from the distance
+evaluation. There is, however, non-trivial ways, and the library GEL implements one
+such method. It was, with only few adjustments, seamlessly implemented in the PETSc
+environment.
+3.3
+Bounding Search Tree
+In order for a distance query on a polygon surface to be eﬀicient, the polygons must be
+structured in a way that minimises the number of distance evaluations. For this purpose
+a search tree structure is used.
+Specifically, GEL uses a binary search tree (fig. 3.1), where each internal node is a geo-
+metrical bounding box for all its children, all the way down to the leaf nodes, which
+contain the surface polygons. The bounding box can be either oriented in space (SOBB)
+or axis-aligned (AABB). The oriented box provides tighter bounding leading to fewer
+distance evaluations at the cost of a larger storage overhead and more expensive evalu-
+ations. The axis-aligned box has very fast distance evaluations, but will generally need
+to perform more comparisons in order to find the closest polygon. This project uses an
+axis-aligned box. An internal node and its two child nodes is shown in fig. 3.2.
+3.4
+Heap priority queue
+Traversing the bounding tree to find the nearest node is conveniently done by maintaining
+a heap of possible candidates [16]. The heap is treated as a priority queue, where the
+first element is always processed in every step. The heap is a so-called ”min-heap”,
+19
+==PAGE:21==
+Figure 3.2 – AABB-tree. An internal node, which is itself a bounding box, is divided in two on
+its longest dimension (dotted line). The threshold for division is snapped to the vertex closest to
+the threshold. Facets are distributed into a left and right branch based on the centre-point of the
+individual facet relative to the threshold.
+indicating that if some measure a < b, then a has priority over b. The measure is the
+smallest distance between a query point and the bounding box of the node in question.
+Initially, the queue contains only the root bounding box. Then, while the queue has not
+been emptied, the first (smallest) element in the queue is removed (we say that the ele-
+ment is popped from the min-heap), and its two children are then considered for addition
+to the queue.
+Each boundary box in the queue has associated a minimum and a maximum distance
+to the query point. Each box is known to contain some part of the triangulated surface,
+with a distance to the query point bounded by the minimum and maximum values. At
+any moment, the smallest encountered maximum value is maintained, because it serves
+as an upper bound, or threshold, for addition to the queue. A child node is not added
+to the queue if its smallest distance to the query point is larger than the already known
+upper bound. The situation is illustrated in fig. 3.3.
+If a child node passes the threshold, it is added to the back of the queue, and then moved
+forward until the element in front has a shorter minimum distance to the query point. We
+say that it is pushed into the min-heap.
+20
+==PAGE:22==
+AA
+AB
+BA
+BB
+Q
+max (AA)
+min (BA)
+Figure 3.3 – Exclusion principle of the heap search. The thick curved line represents a surface.
+The surface is recursively split into bounding boxes. When traversing the tree, only bounding
+nodes with a minimum distance to the query point Q smaller than the currently known shortest
+maximum distance will be considered. In this way, branches in the search tree can be very ef-
+ficiently pruned, avoiding a large number of distance evaluations. In the illustration, if box AA
+has been seen, box BA and BB will never be explored.
+21
+==PAGE:23==
+Chapter 4
+Level set based finite element
+formulations and PETSc
+The preceding chapters have described how to represent a geometry boundary using a
+level-set, how to subdivide a boundary-intersecting finite element into parts that are not
+intersecting the boundary, how to obtain numerical integration rules for the boundary-
+intersecting element, and how to obtain a signed-distance based level-set from a trian-
+gulated surface. This chapter will be concerned with solving a finite element problem
+using the above techniques.
+4.1
+Implementation using PETSc framework
+The implementation builds upon Aage et al. [1], which based on the results from An-
+dreasen et al. [4] was adapted to a level-set design variable in Aage et al. [3]. The core
+framework for computations is PETSc [28], which is a high-performance parallel sci-
+entific computing framework. PETSc handles all the practicalities of data communica-
+tion, which is not part of the topic in this project, as well as large-scale linear algebra
+(i.e. solving the global equation system).
+The purpose was to create a plug-in tool that could be directly used by PETSc in the
+already existing level-set based version with minimal adjustments.
+Practically, this
+was done by programming a Hexahedron with subdivision features as a (mostly) self-
+encapsulated C++ class. A C++ class is an abstract formulation of a data structure along
+with all operations that are logically tied to it. An object of the class stores the nodal co-
+ordinate information, and the class exposes subroutines for generating integration rules
+and their perturbations based on an input level-set.
+From the perspective of the PETSc program, all the details explained in chapter 2 are
+irrelevant. The only knowledge necessary is that a hexahedron object H can be created
+given the nodal coordinates x, y, and z,
+H = Hexahedron(x, y, z)
+(4.1.1)
+and that, given a nodal level-set, s, a variable length vector of integration points P can
+be generated
+P = H. subIntegrationPoints(s, i, v)
+(4.1.2)
+22
+==PAGE:24==
+where an element of P, contains the list [(r, s, t), w], where (r, s, t) is an integration point
+in the hexahedron iso-parametric space, ans w is the weight of this point. The optional
+inputs i and v are the nodal index and scale value of a level perturbation. A few other
+subroutines were exposed for convenience, most notably
+H. populateStiffness(ke, s, i, v)
+(4.1.3)
+which integrates the local stiffness matrix and inserts values into the vector ke with length
+24 × 24 = 576.
+Considering the amount of considerations that has to be made to perform the subdivision,
+the fact that it can all be reduced to a few convenient calls to some functions with few
+input arguments is, in my humble opinion, quite wonderful. Of course, this is the entire
+rationale behind the object oriented programming paradigm, and nothing new. Moreover,
+more complexity will naturally be added if one wishes to have external control over
+the iso-level where the cut is made, the order of the numerical integration rules, or the
+material properties used for the stiffness integration.
+4.2
+Linear elastic deformation problem
+The selected problem is the deflection of a cantilever beam positioned in the design
+domain shown in shown in fig. 4.1. The domain has dimensions [x, y, z] = [2, 1, 1], is
+fixed with prescribed deflection u = 0 for all degrees on freedom in the plane x = 0, and
+is loaded evenly on the line x = 2, z = 0 with a total load in the z-direction of Pz = −1.
+Two geometries are considered. A more complex geometry, shown in fig. 4.2, is a pre-
+optimised cantilever. The purpose of this geometry is to test the subdivided elements in a
+setting where many different cut cases are encountered. Not all cases will be encountered
+(some cases are really unlikely), but enough of the likely cases should be covered to be
+able to draw some conclusions on the quality of the implementation.
+For the purpose of evaluating predictable deflections, even with very few elements, such
+that the quality of the integration rule can be tested in the limit where all elements are cut,
+x
+y
+z
+P
+(0, 0, 0)
+(2, 1, 1)
+Figure 4.1 – Design domain
+23
+==PAGE:25==
+a tapered beam with flat surfaces is used. This beam is shown in fig. 4.3. The practicality
+of this choice comes from the fact that it can be discretised with two elements that are
+both cut, such that fully solid or void elements will not hide potential problems. Addi-
+tionally, this geometry can use the same boundary conditions as the complex geometry.
+This is very convenient for testing, since the PETSc framework at present doesn’t provide
+an interface for dynamically defining boundary conditions (they are hard-coded).
+x
+y
+z
+P
+Figure 4.2 – Pre-optimised cantilever, provided in the STL format at the resolution shown.
+(a) Shown with body-fitted mesh. The mesh is
+swept mesh from a free quadrilateral mesh on
+the front surface. Empty space not meshed or
+included in computation.
+(b) Shown as a solid immersed in a regular back-
+ground mesh.
+Sub-tetrahedra are not shown,
+only intersections between the background ele-
+ments and the solid.
+Figure 4.3 – Tapered cantilever. The cantilever tapers off from a thickness of 1 at the base (left)
+to a thickness of 0.3 at the tip (right).
+24
+==PAGE:26==
+4.3
+Level-set representation with very few elements
+The level-set representation suffers from a critical issue when the length scale of the
+problem approaches the length-scale of the element. Under such conditions, elements
+may exist that are supposed to model a partly solid region, but where the only ”solid”
+nodes lie exactly at the interface with level zero This is for example the situation of the tip
+elements in fig. 4.3b. Such elements will not according to the subdivision rules outlined
+in this project be considered solid.
+Since we wish to test the immersed boundary method for single elements, a solution is
+required. The quickest solution, utilising the input file capabilities presented in chapter 3,
+is to make an input geometry which is much larger than the design domain, but where the
+part that the design domain intersects is identical. This way, the levels of the geometry
+boundary nodes located on the boundary of the design domain in fig. 4.3b have positive
+values, the distance to the sloped surface. For the pre-optimised geometry in fig. 4.2, it
+is more diﬀicult to solve the problem, and the simplest strategy is to work with a high
+enough resolution.
+4.4
+Validation of Finite Element Analysis
+The finite element analysis was validated against the commercial software COMSOL.
+Material parameters were in both cases E = 1 (Pa), ν = 0.3, and the total load was
+P = 1 (N). The validation is based on checking that tip deflection converges to the
+same value on increasing resolution.
+When comparing the optimised geometry, the tip deflection in the point (2, 0.5, 0.0) was
+chosen. This point exhibits maximum deflection in the high-resolution solutions. When
+comparing the tapered beam, the tip deflection was measured at (2, 0.5, 0.3). This was
+done to distribute the effect of the very localised edge loading in the bottom—but it
+should be of no consequence to the conclusions. Measurement was done for the PETSc
+solutions in the software Paraview, using its built in probe tool. If the probe point is
+not part of the mesh, a linear interpolation is used, which is perfect for the present case.
+Measurement in COMSOL can be somewhat more cumbersome, but it can also be done,
+and the principle is the same.
+Tapered cantilever
+Figure 4.4 shows the relative error of the solution versus degrees of freedom for both a
+swept free quadrilateral mesh in COMSOL (fig. 4.3a) and an immersed boundary on a
+fixed background mesh in PETSc (fig. 4.3b). Relative error is measured against a conver-
+gence value calculated by means of least squared error. It should be noted that COMSOL
+was set to use linear elements to compare on equal terms. The smallest number of de-
+grees of freedom was 36, which corresponds to two adjoining hexahedra.
+It is observed that the implementation in this project benchmarks well against COMSOL
+for the simple beam deflection problem, with almost exactly the same behaviour at a
+convergence rate of 2/3.
+25
+==PAGE:27==
+102
+103
+104
+105
+106
+107
+10−4
+10−3
+10−2
+10−1
+Degrees of freedom, n
+Relative error of tip deflection
+PETSc
+6.2764n−0.6607
+R2 = 0.9992
+COMSOL
+6.6898n−0.6679
+R2 = 0.9996
+Figure 4.4 – Convergence of the Finite Element Analysis for the tapered beam.
+Pre-optimised cantilever
+For the case of the pre-optimised cantilever, convergence is shown in fig. 4.5. The rate of
+convergence is clearly not as strikingly pretty as it was for the simple case. There are at
+least two good reasons for this. Firstly, for low resolutions, the cantilever is simply rep-
+resented poorly by the mesh due to sharp curvatures. This is true for both representations,
+both a body-fitted mesh and an immersed boundary.
+Secondly, the geometry is given as an input file with limited resolution (see fig. 4.2).
+Increasing the resolution above this limit will change what is actually refined in the con-
+vergence analysis. Initially, the representation of the geometry is improved along with
+the mesh refinement, but at some point the geometry is completely represented (it is
+a collection of flat triangles). At this point, further mesh refinement will be purely an
+h-refinement (cf. [15]). The background mesh resolution that the optimised cantilever
+exists on is (64×32×32) elements, corresponding to 212 355 degrees of freedom, after
+which the immersed boundary representation achieves no further geometry detail. It is
+observed that the convergence of the immersed boundary representation actually flattens
+out at this point.
+Regardless, the solution does converge, and it does agree with commercial software,
+indicating that the subdivided finite elements return valid integration rules for a wide
+range of cut cases and level-set values.
+26
+==PAGE:28==
+104
+105
+106
+10−2
+10−1
+Degrees of freedom, n
+Relative error of tip deflection
+PETSc
+COMSOL
+Figure 4.5 – Convergence of the Finite Element Analysis for the pre-optimised beam. Note that
+the number of degrees of freedom for the PETSc case is the entire design domain. Void elements
+are also modelled.
+27
+==PAGE:29==
+Chapter 5
+Implementation into topology
+optimisation framework
+The optimisation problem is formulated as a compliance minimisation
+min
+s
+:
+ϕ = uTKu
+s.t. :
+Ku = f
+V /V ∗−1 ≤0
+(5.0.1)
+where ϕ = ϕ(s) is the compliance, s is the design variable vector, K = K(s), is the global
+stiffness matrix, f is the loading vector, u is the displacement field vector, V = V (s) is
+the design volume fraction, and V ∗is the volume fraction constraint.
+5.1
+On topology- and shape optimisation
+In fig. 2.1, the analogy between the level-set representation and the concept of geo-
+graphical elevation was introduced. This analogy is very effective for highlighting a
+fundamental issue with the level-set representation: the lack of sensitivity away from
+the boundary. If one wants to build an artificial island in the middle of the ocean, one
+might ask how much land area is gained by dumping one cubic meter of material. Un-
+fortunately, if the material is not placed on the shoreline, the answer is zero—no matter
+if the ocean depth is 2 m or 2 km.
+The analogy of course breaks down when it is observed that, for a structural design,
+even if an island of material could be created, it would have no impact on the structural
+stiffness if it was not connected to said structure. In other words, when operating in a
+levelset-based framework, changes to the design can only occur on the boundary. This
+is a fundamental condition of working with a crisp boundary, as opposed to the dens-
+ity method, where intermediate densities can connect islands so they contribute to the
+overall behaviour.
+When a structural optimisation only moves the boundary, it is not a topology optim-
+isation, but a shape optimisation. However, as pointed out by Aage et al. [3], when a
+levelset-based framework like the one described in this project is used in 3D, surfaces
+28
+==PAGE:30==
+can collide and merge, forming holes, or tunnels can close the entrance to leave a cavity.
+That is, topological changes occur naturally. The level-set approach can therefore claim
+the title of a true topology optimisation.
+However, the basic working principle of evolving the boundary in the level-set approach
+still has consequences. One very notable is that an optimised design is highly dependent
+on the initial design configuration—different starting guesses will find different local
+minima. Although the different solutions are in themselves valid solutions, there may
+be a significant differences in performance. Aage et al. [3, figs. 6,9,10] produced an
+example where an initial design with pre-seeded holes performed around 6% better than
+an initial design with no holes.
+It in in the interest of the engineer to find the best possible local minimum (robustness
+et cetera being equal). Mechanisms that can push the optimiser towards such solutions
+might therefore be considered. Since holes can easily be closed and merged during op-
+timisation, a natural starting point may be to pre-seed the design with plenty of holes,
+as don in [3]. Another approach may be to dynamically nucleate cavities during the op-
+timisation, for example like done by Andreasen et al. [4] for the 2D case, where holes
+cannot naturally emerge. This is also discussed in Barrera et al. [7]. It should be noted
+that the trigger conditions for such a hole nucleation is not necessarily cheap or trivial to
+compute.
+A third approach is to start an optimisation with a density based method, but to stop early
+and switch over to the levelset-based approach. The fuzzy density-field will already after
+a few design cycles have indicative features that can be used as an initial level-set. While
+these features are by no means near an optimum (then no further work would be needed),
+they might serve as a better starting point than the above strategies. This strategy has the
+advantage of circumventing the fact that the initial few iterations from a block design are
+quite expensive for the levelset-method compared to the density-method. Additionally,
+constructing a useful initial design respecting the volume constraint can be quite diﬀicult.
+One may of course initially violate the volume constraint, but then special attention must
+be given to the MMA penalty parameters [3].
+The density-based starting guess might be particularly useful if some infill strategy [29]
+can be devised to produce rudimentary infill in the very early design cycles. The key is
+to find a balance between quickly switching to the (assumed) much faster levelset-based
+approach, and obtaining a good initial design. It should also be noted that the immersed
+boundary method has most of its merit in solving crisp interface problems, for which the
+density method cannot be relied upon anyway.
+A fourth idea, quite unlikely at the present moment, and purely speculative, is to use gen-
+erative neural networks to produce heuristic initial designs. Semi-heuristic approaches
+such as ant-colony optimisation might also produce fast initial guesses. In both cases, it
+would be up to the designer of such approaches to take on the discussion of optimality.
+If one cannot document how a starting guess was conceived, how can one then prove
+that it is a good one?
+In any case, the methods outlined do not remove any property of evolving boundary
+methods. They merely address an associated weakness the best they can. Solutions to
+the optimisation problem should still be treated with healthy scepticism.
+29
+==PAGE:31==
+5.2
+Perturbation of the level as a design variable
+The optimisation cycle is based upon a gradient-based perturbation of design variables.
+That is, a sensitivity provides information about the design change in the next step. The
+sensitivity of the objective (compliance) ϕ to the design vector s, is computed with a
+simple linear finite difference approximation.
+∂ϕ
+∂s
+
+i
+≈ϕ(s) −ϕ(si)
+h
+(5.2.1)
+where si is the design vector perturbed by an amount h in index i. The perturbed state is
+calculated locally for each design variable by solving the adjoint problem.
+In the levelset-based approach, a perturbation of a nodal level will lead to a slightly per-
+turbed collection of integration points (integration rule) for an element if the element is
+a cut element. For uncut elements, nothing changes, and sensitivity is zero. The integ-
+ration rule is used to construct the local stiffness matrix, hence, for a given design the
+local compliance sensitivity for an element to a perturbation of a single design variable
+with index i is, from the solution of the adjoint problem
+∂(uTKu)
+∂s
+
+i
+≈
+∆(uTKu)
+h
+
+i
+= uT
+K(s) −K(si)
+h
+
+u
+(5.2.2)
+The sensitivity of a node receives contributions from all the elements it is connected to.
+In a structured hexahedral mesh, each internal node is connected to eight elements.
+The critical point to be made when working with subdivided elements is that since the
+objective function must be differentiable, it cannot have discontinuities. This implies
+that the underlying subdivision must never change when an integration rule is required
+for a perturbed level-set. Such a situation could cause a finite difference approximation
+to return very large sensitivities.
+In the implementation, which uses tabulated cut cases, the subdivision changes when a
+nodal level changes sign (zero is positive). With an evolving boundary, it is likely that the
+boundary will at some point be closer to a node than the finite difference tolerance. To
+avoid this, the direction of a level-perturbation must always be away from the zero-level.
+This project implemented a convenient perturbation feature deeply embedded and hidden
+away from the user (less risk of errors), but a more liberal approach could also have been
+adopted, where the end user is responsible for perturbing in the correct direction.
+30
+==PAGE:32==
+5.3
+Sensitivity of volume and compliance
+In order to test that the implementation achieves correct sensitivities, a finite difference
+check is employed. In essence, one reduces the perturbation size gradually, and expects
+to see the resulting derivative converge until the step size is so small that the division
+causes numerical errors to take over. The convergence rate (the slope in a log-log plot)
+should match the order of the finite difference approximation.
+The volume sensitivity is relatively easy to compute for a single element. Choosing a
+level-set for the nodes, the corresponding tetrahedral subdivision is obtained from the
+program. Each tetrahedron has an analytical expression for its volume in terms of its
+nodal coordinates. Defining three vectors a, b, and c, from one node to each of the three
+others, the volume is
+V = |a · (b × c)|
+6
+(5.3.1)
+and expanded
+V =
+ x4 −x1
+ (y2 −y1)(z3 −z1) −(z2 −z1)(y3 −y1)
+
+6
++
+ y4 −y1
+ (z2 −z1)(x3 −x1) −(x2 −x1)(z3 −z1)
+
+6
++
+ z4 −z1
+ (x2 −x1)(y3 −y1) −(y2 −y1)(x3 −x1)
+
+6
+The coordinates of the intermediate (edge) nodes are then expressed in terms of variable
+levels. Setting all levels constant, except for one node of interest (lets give that variable
+the name x), and summing the volumes of all tetrahedra together, one can with some
+simplification obtain a rather friendly-looking expression. For example, setting the level
+of node 3 and 7 to −1 and all others to 1 gives base case C (cf. figs. 2.2 and 2.4). Then
+letting x be the level of node 7, we obtain
+V (x) = 17x2 −44x + 23
+24(x −1)2
+(5.3.2)
+and its derivative
+∂V
+∂x =
+5x −1
+12(x −1)3
+(5.3.3)
+such that the derivative (sensitivity) at the original level evaluates to
+∂V
+∂x
+
+x=−1
+= 1
+16
+The volume is integrated numerically by calling the subroutine for integration points, and
+integrating the field f(x, y, z) = 1, which is just a sum of the integration point weights
+multiplied by their respective jacobians. The sensitivity is calculated for a range of per-
+turbation values, by again calling the subroutine for integration points this time supplied
+a perturbation node index and perturbation value. The two volumes are subtracted and
+31
+==PAGE:33==
+10−10
+10−9
+10−8
+10−7
+10−6
+10−5
+10−4
+10−3
+10−2
+10−1
+100
+10−8
+10−7
+10−6
+10−5
+10−4
+10−3
+10−2
+10−1
+Step size, ∆s
+Relative error
+Figure 5.1 – Finite difference check of single element volume sensitivity. Error measured against
+analytical value. A characteristic ”tick-mark” is observed with a slope of 1, behaving like expec-
+ted.
+divided with the step size. The resulting finite difference check is shown in fig. 5.1. The
+relative error is scaled to the analytical result.
+The observed behaviour is as expected, with nice convergence towards the analytical
+value. The sensitivity computation with finite differences is as such validated. Because
+the volume was integrated using the subroutine for the perturbed integration rule, it can
+be concluded that the integration rule resulting from the perturbed design variable is
+computed correctly—at least for this cut case with the selected ”pretty” values.
+The conclusion does unfortunately not extend to all cut cases (there might be an error in
+a data table somewhere) or to all cut locations (it may be problematic if a nodal level is
+very close to, but not exactly, zero). But those are potential issues in the sub-division
+methodology, and not strongly linked to the perturbation and finite difference approxim-
+ation. Therefore, it makes more sense to verify those things by applying the program
+to a larger scale problem. Incidentally, that is exactly what was done in chapter 4 by
+validating the solution of a large-scale problem against commercial software.
+Together, the two validations (the deflection problem and the volume sensitivity) already
+make a strong case for the correctness of the program. There are however a few more
+things that should be done. First, integrating the volume is to integrate a constant, and
+the locations of the integration points are therefore irrelevant as long as the weights are
+correct. The unperturbed integration point are known to be correctly positioned from the
+results in chapter 4, but the position of perturbed integration points still lack validation.
+The compliance sensitivity ∆(uTKu) /h will validate that the perturbed integration
+points are positioned correctly. The analysis is first performed on a single element, with
+the same cut configuration as for the volume. The three solid phase bottom nodes were
+fixed in all degrees of freedom, and a load was prescribed in node 5 (cf. fig. 2.2) to
+obtain the deflection vector u. The result is shown in fig. 5.2.
+The sensitivity analysis on the compliance also converges with a rate corresponding to
+32
+==PAGE:34==
+10−8
+10−7
+10−6
+10−5
+10−4
+10−3
+10−2
+10−1
+100
+10−7
+10−6
+10−5
+10−4
+10−3
+10−2
+10−1
+100
+Step size, ∆s
+Relative error
+Figure 5.2 – Finite difference check of single element compliance sensitivity. Here, the value
+that the relative error is measured against is chosen such that the monotonically decreasing part
+has the best possible fit in a least squares sense.
+the order of the finite difference scheme (one). Like for the volume sensitivity, the fi-
+nite difference approximation converges for a step size factor down to 1×10−6 before
+numerical errors take over.
+Having validated the finite difference approximation on isolated elements gives confid-
+ence that the perturbation implementation is correct. The last thing to check is that the
+sensitivity analysis works well in the topology optimisation framework, where a global
+array of design sensitivities must be constructed.
+This is conveniently done by actually solving for the compliance (and volume) of the
+entire system in both an unperturbed and finitely perturbed state. The finite difference in
+the actual compliance (divided by the step size) is then measured against the predicted
+value from the adjoint analysis. This is done for a range of decreasing step-sizes, and
+convergence should be expected. Figure 5.3 displays the results of this analysis in the
+actual implementation. The behaviour is as expected, by which the sensitivity analysis
+is considered validated.
+5.4
+An actual optimisation
+Working with software is often frustrating and filled with unexpected obstacles, which
+slow progress down. This is especially true, if one has to work with code written by
+others. It is natural and should be expected, even planned for.
+In the case of this project, a functional and validated program was achieved at the very
+last minute, and there was no more time to tune optimisation parameters. Without good
+parameters, an optimisation is likely to take advantage of some loophole in the numerics
+that represent physics. For the case of level-set based subdivided elements, one such
+33
+==PAGE:35==
+10−8
+10−7
+10−6
+10−5
+10−4
+10−3
+10−2
+10−1
+100
+10−7
+10−6
+10−5
+10−4
+10−3
+10−2
+10−1
+100
+Step size, ∆s
+Relative error
+Volume sensitivity
+Compliance sensitivity
+Figure 5.3 – Finite difference check of
+loophole is very thin structures, approaching infinitely thin, which will still transfer loads,
+and will in fact be quite stiff, through the subdivided formulation.
+Figure 5.4 features selected steps in the only optimisation that was run before the deadline.
+It can be seen how material is lumped towards the edges of the support surface, while it
+appears that the optimiser is not disturbed at all by the fact that the load is detached from
+the support after only a few iterations. But to the optimiser, the load is not detached. In
+fig. 5.5, the last design from the sequence is shown, but this time with the threshold level
+offset to reveal how the (filtered) design field looks just behind the threshold. Behind
+the curtains, the optimiser found a way to keep the structure attached and obtain high
+stiffness with feature sizes below the element scale.
+This is a, however, a known issue [4] with level-set based topology optimisation, and
+Figure 5.4 – Evolution of a design in an optimisation with bad parameters.
+34
+==PAGE:36==
+Figure 5.5 – The last design from fig. 5.4, with the threshold value changed to 0.1 below the
+datum value of 0.87. Although the design in fig. 5.4 appears completely detached, it is still
+connected in the numerical representation.
+was expected. One solution is to implement a robust approach with an enforced design
+scale, as is done in [3].
+35
+==PAGE:37==
+Chapter 6
+Conclusion
+6.1
+Summary
+This project set out to implement a hexahedral finite element with support for discon-
+tinuous fields within the element by piecewise integration. The purpose was to use it in
+a level-set based topology optimisation.
+The implementation used a subdivision of tetrahedra with a subsequent mapping of in-
+tegration points to the parent element. The elements can be initialised eﬀiciently, gener-
+ate custom integration rules on the fly, and be destructed from memory again at end of
+scope with no trace or side effects. In computer science lingo, the implementation does
+not leak.
+Implemented this way, the mesh representation and design field never carries informa-
+tion about the tetrahedra, so no book-keeping is necessary. Therefore a crisp immersed
+boundary could be implemented on a fixed background mesh in a large-scale 3D topo-
+logy optimisation framework (Aage et al. [1], based on PETSc), with very little effort,
+except that required to switch from an element-based design field to a nodal representa-
+tion.
+A significant amount of time was spent on providing a plug-and-play solution of import-
+ing a pre-defined geometry into a signed-distance based level-set. The library GEL was
+successfully adapted for this purpose.
+The project focused much attention on generating a general list of integration points for
+any physics setting. Once created, the focus was put on the linear elastic problem, and the
+integration rules were put to work in a stiffness integration. Solutions to the deflection
+problem were benchmarked against production software with good results.
+The stiffness integration was exposed in a simple API such that the usage in the topology
+optimisation framework required minimal effort. The tools necessary for solving the
+adjoint problem in a sensitivity analysis was developed, and given a perturbation to a
+nodal level, the framework could perform the sensitivity analysis on design variables.
+Performance of the implementation was validated with good results. Evaluation was
+done both for select individual elements directly against analytical values and using finite
+difference checks.
+36
+==PAGE:38==
+The sensitivity analysis was applied to the minimal compliance problem under volume
+constraint. The optimisation algorithm was shown to run in a predictable manner, but
+unfortunately not with useful results. No more optimisation was done, as time ran out.
+6.2
+Lessons
+Crispness and length scales
+Immersed boundary level-set based topology optimisation has in recent years received
+much attention, probably because it is a very attractive way to escape the curse that a
+crisper design requires a crisper resolution, which for a voxel-based representation grows
+in computer requirements with order O(n3).
+The immersed boundary does help. This project did not reach the stage of benchmarking
+run-times, much to the authors regret, but it is obvious from a few simple illustrations like
+fig. 1.1 that at least some curved geometries can be represented well using significantly
+fewer variables using a piecewise linear boundary.
+Having said that, some structures are ill suited for this representation. Features with
+length scales less than the background mesh can only be represented if they happen to
+coincide with the nodes of the mesh, resulting in positive levels. If the feature happens to
+begin and end inside one element, it will be lost. That is, unless some very sophisticated
+higher order methods are used in combination with a significant amount of communica-
+tion between neighbouring elements.
+And even if small features can be represented using the level-set, it does not mean that
+they should. First order finite elements never perform well on single-element scales, so
+no engineer in his right mind would trust a calculation based on an over-integration on a
+sub-element scale. No. Unfortunately, without guidance, the optimisation algorithm is
+not an engineer in his right mind. Sub-scale elements are stiff, and will be used unless
+penalised.
+In order to expect sensible results, level-set based topology optimisation requires length-
+scale control.
+Topology changes and local minima
+The use of a moving boundary representation is of course limiting when working in
+2D. As Stephen Hawking once observed, one cannot in a 2D universe carve a tunnel
+through an object without completely disconnecting the two sides (so creatures who rely
+on intestines for eating would have a problem [19]).
+In 3D, this is not a problem. As is clear even from the not-so-usefull optimisation ex-
+ample in this project (fig. 5.4), topologies can change very easily. But as was discussed,
+the change of morphology is not as free when it is restricted to a moving boundary as it
+is for a changing density. This has the consequence of rendering the method susceptible
+to getting caught in local minima. Some recent literature on the subject (e.g. [3; 7]) fo-
+cus on navigating the solution landscape using good initial designs and intelligent hole
+nucleation. Any optimisation made for non-convex problems has to deal with this issue,
+but moving boundaries are more sensitive.
+37
+==PAGE:39==
+In order to expect high-performance results, level-set based topology optimisation re-
+quires mechanisms for avoiding local minima.
+6.3
+Perspective
+Aage et al. [2] performed a full optimisation of an aircraft wing with a reported compu-
+tation resource consumption of 8.000 CPUs (let us assume that the author means CPU
+cores) for up to five days. This is of course an extreme case, but it will serve an im-
+portant point. For the sake of argumentation with simple numbers, suppose a 10 core
+CPU consumes 100 W. Then, 8.000 cores consumes 80 kW. Four days is approximately
+100 hours, which gives us 8000 kWh, or around DKK 16.000,- of power consumption at
+current price levels, or roughly 3500 kgs of CO2. This number is assuming full load on
+all cores all the time, and is a very rough estimate. Then, factor in the expected lifetime
+of the processor, its life-cycle and environmental footprint.
+The point is that computing can be expensive when accumulated. If all major manu-
+facturing companies in the world wants to optimise all their products using mega- to
+giga-scale resolutions, we may very well end up with material savings and very light
+aircraft, but we may also have emptied some rare-earth mines and melted a data-center
+or two.
+I do not wish to indicate that optimisation should not be done. On the contrary. I wish
+to deliver the message that we need to optimise optimisation itself too. That will often
+mean knowing what type of optimisation is most suited for a problem. But it also means
+that there is a present need for perfecting the tools. Compared to what we have available
+at the present, January 2022, much further work needs to be done
+6.4
+Further work
+First and foremost, this project is in severe lack of actual optimisation results. Obtaining
+optimised designs using the in this project developed and thoroughly validated code is an
+obvious next step. I have made my code available to my supervisors, and I do hope that it
+can serve as a short-cut for future students, who can instead spend their time optimising.
+Really, without observing what the optimisation actually does, everything is just theory.
+This is my biggest regret.
+Secondly, it makes no sense talking about a potentially faster method without bench-
+marking speed. The CPU time required to obtain useful designs should at least see an
+improvement over the density method for some problems to compensate for the pitfalls
+of the method. Otherwise, it is just an academic curiosity.
+When that is done, I will propose looking into better sub-elements. Some specific cuts
+would probably benefit in both speed and stability by subdividing to, for example hexa-
+hedra. Related is the topic of resolving ambiguities better, for example by implementing
+Chernyaev’s table (see Custodio et al. [17]).
+38
+==PAGE:40==
+References
+[1]
+Niels Aage, Erik Andreassen, and Boyan Stefanov Lazarov. Topology optimiz-
+ation using PETSc: An easy-to-use, fully parallel, open source topology optim-
+ization framework. Structural and Multidisciplinary Optimization, 51(3):565–
+572, 2015. ISSN 16151488, 1615147x. doi: 10.1007/s00158-014-1157-0.
+[2]
+Niels Aage, Erik Andreassen, Boyan Stefanov Lazarov, and Ole Sigmund. Giga-
+voxel computational morphogenesis for structural design. Nature, 550(7674):
+84–86, 2017. ISSN 14764687, 00280836. doi: 10.1038/nature23911.
+[3]
+Niels Aage, Reinier Giele, and Casper Schousboe Andreasen. Length scale
+control for high-resolution three-dimensional level set–based topology optim-
+ization. Structural and Multidisciplinary Optimization, apr 2021. doi: 10.1007/
+s00158-021-02904-4.
+[4]
+Casper Schousboe Andreasen, Martin Ohrt Elingaard, and Niels Aage. Level
+set topology and shape optimization by density methods using cut elements
+with length scale control. Structural and Multidisciplinary Optimization, 62:
+685–707, 3 2020. doi: 10.1007/s00158-020-02527-1.
+[5]
+Mads Jacob Baandrup, Ole Sigmund, Henrik Polk, and Niels Aage. Closing
+the gap towards super-long suspension bridges using computational morpho-
+genesis. Nature Communications, 11(1):2735, 2020. ISSN 20411723. doi:
+10.1038/s41467-020-16599-6.
+[6]
+Jorge L. Barrera and Kurt Maute. Ambiguous phase assignment of discretized
+3d geometries in topology optimization. Computer Methods in Applied Mech-
+anics and Engineering, 369:113201, 2020. ISSN 00457825, 18792138. doi:
+10.1016/j.cma.2020.113201.
+[7]
+Jorge L. Barrera, Markus J. Geiss, and Kurt Maute.
+Hole seeding in level
+set topology optimization via density fields. Structural and Multidisciplinary
+Optimization, 61(4):1319–1343, 2020. ISSN 16151488, 1615147x. doi: 10.
+1007/s00158-019-02480-8.
+[8]
+M. P. Bendsøe. Optimal shape design as a material distribution problem. Struc-
+tural Optimization, 1:193–202, 1989.
+[9]
+Martin P. Bendsøe and Ole Sigmund.
+Topology Optimization - The-
+ory,
+Methods,
+and Applications.
+Springer Verlag,
+2003.
+ISBN
+3540429921, 9783540429920, 364207698x, 3662050862, 9783642076985,
+9783662050866.
+[10]
+Martin Philip Bendsøe and Noboru Kikuchi. Generating optimal topologies
+in structural design using a homogenization method.
+Computer Methods
+in Applied Mechanics and Engineering, 71(2):197–224, 1988.
+ISSN 0045-
+7825. doi: https://doi.org/10.1016/0045-7825(88)90086-2. URL https://
+www.sciencedirect.com/science/article/pii/0045782588900862.
+[11]
+Erik Burman. Ghost penalty. Comptes Rendus Mathematique, 348(21-22):
+1217–1220, 2010. ISSN 17783569, 1631073x. doi: 10.1016/j.crma.2010.10.
+006.
+[12]
+J. Andreas Bærentzen. Gel. URL https://github.com/janba/GEL.
+39
+==PAGE:41==
+[13]
+E Chernyaev. Marching cubes 33: construction of topologically correct isosur-
+faces. 1995.
+[14]
+David Contreras and Nancy Hitschfeld-Kahler.
+Generation of polyhedral
+delaunay meshes. Procedia Engineering, 82:291–300, 2014. ISSN 18777058.
+doi: 10.1016/j.proeng.2014.10.391.
+[15]
+Robert Davis Cook, David S. Malkus, and Michael E. Plesha. Concepts and
+applications of finite element analysis. Wiley, 2002. ISBN 9780471356059.
+[16]
+Thomas H. Cormen, Charles Eric Leiserson, Ronald Linn Rivest, and Clifford
+Stein. Introduction to Algorithms. MIT Press, 2009. ISBN 9780262033848.
+[17]
+Lis Custodio, Sinesio Pesco, and Claudio Silva. An extended triangulation to
+the marching cubes 33 algorithm. Journal of the Brazilian Computer Society,
+25(1):6, 2019. ISSN 16784804, 01046500. doi: 10.1186/s13173-019-0086-6.
+[18]
+Carlos Felippa. A compendium of fem integration formulas for symbolic work.
+Engineering Computation, 21(8):867–890, 2004. URL https://doi.org/
+10.1108/02644400410554362.
+[19]
+Stephen W. Hawking. A brief history of time :. Bantam Books„ 1988. ISBN
+055305340x, 9780553053401.
+[20]
+Ethan J. Kubatko, Benjamin A. Yeager, and Ashley L. Maggi. New computa-
+tionally eﬀicient quadrature formulas for pyramidal elements. Finite Elements
+in Analysis and Design, 65:63–75, 2013. ISSN 18726925, 0168874x. doi:
+10.1016/j.finel.2012.10.012.
+[21]
+Ethan J. Kubatko, Benjamin A. Yeager, and Ashley L. Maggi. New compu-
+tationally eﬀicient quadrature formulas for triangular prism elements. Com-
+puters and Fluids, 73:187–201, 2013.
+ISSN 18790747, 00457930.
+doi:
+10.1016/j.compfluid.2013.01.002.
+[22]
+Adriano Lopes and Ken Brodlie. Improving the robustness and accuracy of
+the marching cubes algorithm for isosurfacing. Ieee Transactions on Visualiz-
+ation and Computer Graphics, 9(1):16–29, 2003. ISSN 19410506, 10772626,
+21609306. doi: 10.1109/TVCG.2003.1175094.
+[23]
+William E. Lorensen and Harvey E. Cline. Marching cubes: A high resolution
+3d surface construction algorithm. SIGGRAPH Comput. Graph., 21(4):163–
+169, August 1987. ISSN 0097-8930. doi: 10.1145/37402.37422. URL https:
+//doi.org/10.1145/37402.37422.
+[24]
+Muhammad Maqbool.
+An Introduction To Medical Physics - Chapter 8:
+Computed Tomography.
+Springer International Publishing, 2017.
+ISBN
+9783319615400. doi: 10.1007/978-3-319-61540-0.
+[25]
+B. K. Natarajan.
+On generating topologically consistent isosurfaces from
+uniform samples.
+Visual Computer, 11(1):52–62, 1994.
+ISSN 14322315,
+01782789, 14328726. doi: 10.1007/BF01900699.
+[26]
+Nico Schlömer.
+Quadpy, 2021.
+URL https://github.com/nschloe/
+quadpy.
+[27]
+Hang Si. Tetgen, a delaunay-based quality tetrahedral mesh generator. ACM
+Trans. Math. Softw., 41(2), February 2015.
+ISSN 0098-3500.
+doi: 10.
+40
+==PAGE:42==
+1145/2629697. URL https://doi-org.proxy.findit.dtu.dk/10.1145/
+2629697.
+[28]
+UChicago Argonne LLC and the PETSc Development Team.
+Petsc.
+URL
+https://petsc.org.
+[29]
+Jun Wu, Niels Aage, Ruediger Westermann, and Ole Sigmund. Infill optim-
+ization for additive manufacturing - approaching bone-like porous structures.
+Ieee Transactions on Visualization and Computer Graphics, 24(2):1127–1140,
+2018.
+ISSN 19410506, 10772626, 21609306.
+doi: 10.1109/TVCG.2017.
+2655523.
+[30]
+O. C. Zienkiewicz, R. L. Taylor, and J.Z. Zhu. The Finite Element Method:
+Its Basis and Fundamentals.
+Butterworth-Heinemann, 8 2013.
+ISBN
+9781856176330.
+41

@@ -1,0 +1,2954 @@
+==PAGE:1==
+Improving Tool Calling Accuracy via Struc­
+tured Output with Embedded Reasoning
+Master Thesis
+DTU Compute
+Department of Mathematics and Computer Science
+==PAGE:2==
+==PAGE:3==
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+Master Thesis
+September 2025
+By
+Qixin Ma
+Copyright:
+Reproduction of this publication in whole or in part must include the cus­
+tomary bibliographic citation, including author attribution, report title, etc.
+Cover photo:
+Vibeke Hempler, 2012
+==PAGE:4==
+Approval
+This thesis has been prepared over six months at the Section for Software Systems En­
+gineering, Department of Applied Mathematics and Computer Science of the Technical
+University of Denmark, DTU, in partial fulfillment for the degree Master of Science in En­
+gineering, MSc Eng
+Qixin Ma ­ s194751
+Signature
+Date
+ii
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:5==
+Abstract
+Large Language Models (LLMs) such as GPT have demonstrated strong capabilities in
+invoking external tools based on user requests. However, they often face accuracy chal­
+lenges, such as selecting the wrong tool, omitting necessary ones, or generating incom­
+plete arguments, particularly in multi­step tasks or conversations that rely on prior context.
+A key reason for these difficulties lies in a limitation of the current tool calling API, which
+forces the model to output either a text response or a tool call in a given turn, but not both
+simultaneously.
+This restriction prevents the inclusion of explicit reasoning alongside tool calls, reducing
+interpret­ability and hindering error diagnosis. As a result, developers gain little insight
+into why a model chose a particular tool or produced specific arguments, complicating
+debugging and limiting trust in LLM­powered agents.
+This thesis addresses these challenges by introducing a reasoning­augmented structured
+output. The proposed schema extends the tool calling response to include both a tool call
+and an embedded, Chain­of­Thought (CoT) style reasoning trace in a single response.
+Evaluation is conducted using the Xlam and Gorilla benchmark, both widely used re­
+sources for assessing LLM­based tool invocation. Its diverse and standardized tasks
+allow systematic testing across single­step, multi­step, and multi­turn scenarios.
+Our evaluation shows that both our agent and the default tool calling agent achieve strong
+accuracy across general­purpose models, with only a small margin between them. Com­
+pared to expensive reasoning models, however, our approach delivers stronger perfor­
+mance while enabling non­reasoning models such as GPT­4o to generate explicit reason­
+ing during tool calling.
+In summary, our approach overcomes the limitations of current tool calling, while also
+delivering lower latency, reduced cost, and transparent reasoning.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+iii
+==PAGE:6==
+Acknowledgements
+Qixin Ma, MSc Computer Science and Engineering, DT
+First and foremost, I am deeply grateful to Prof. Andrea Burattin, who has been both my
+academic supervisor and mentor throughout this project and over my five years of study
+at DTU. His guidance, constructive feedback, and constant encouragement have been
+invaluable for both the implementation of this work and the writing of this thesis. Beyond
+academic support, he has always provided motivation and confidence during challenging
+moments, and his mentorship has been central to my growth, from a beginner programmer
+to a young engineer.
+I am also sincerely thankful to him for introducing me to Microsoft and giving me the
+opportunity to work on such an exciting industrial problem. This experience would not
+have been possible without his support and generosity in sharing his network.
+Secondly, I would like to express my deepest gratitude to Dr. Mohammadreza Fani Sani,
+who served as my primary industrial supervisor and manager in Microsoft throughout
+this project. He not only taught me the technical skills needed for this work, but also
+showed me what it means to be a good engineer. His weekly meetings and thoughtful
+concern always made me excited to engage with the project. I am especially grateful for
+his recognition and guidance throughout this project, and I am delighted that this work has
+been integrated into the product at Microsoft Copilot Studio.
+Thirdly, I would like to sincerely thank Dr. Bahram Zarrin and the Microsoft Research
+Hub for giving us the opportunity to work on this project from Microsoft.
+I am also grateful to my colleague Xinyi Liu from my research group, who provided valu­
+able ideas for addressing the challenges of the multi­turn scenario. In addition, I would
+like to thank Carina and Jagoda for sharing activities with me and helping me become
+part of the community at Microsoft.
+Finally, I wish to express my deepest gratitude to my parents and to my girlfriend, Cenxi
+Li, whose constant support in both life and work gave me the courage to complete this
+project over the past few months.
+iv
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:7==
+Contents
+Preface . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ii
+Acknowledgements
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iv
+1
+Introduction
+1
+1.1
+Background . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+1
+1.2
+Problem Statement . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+1.3
+Research Objective
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4
+1.4
+Thesis Structure
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+2
+Related Work
+7
+2.1
+Large Language Models and Reasoning . . . . . . . . . . . . . . . . . . . .
+7
+2.2
+Prompt Engineering
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+2.3
+Structured Output
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+3
+Methodology
+11
+3.1
+Research Design . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+3.2
+Data preparation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+3.3
+Technology Stack and Tools . . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+4
+Conceptual Solution
+15
+4.1
+Prompt Design . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 15
+4.2
+Structured Output Schema Design . . . . . . . . . . . . . . . . . . . . . . . 18
+5
+Implementation of the Conceptual Solution
+23
+5.1
+Runtime Orchestration Workflow . . . . . . . . . . . . . . . . . . . . . . . . 23
+5.2
+Dataset Preparation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+5.3
+Prompt Integration and Schema Enforcement . . . . . . . . . . . . . . . . . 27
+5.4
+Tool Call Generator . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+5.5
+Tool Call Evaluator . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 29
+5.6
+Multi­Turn Pipeline . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 30
+6
+Evaluation
+33
+6.1
+Evaluation objective . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 33
+6.2
+XLam Benchmark Evaluation . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+6.3
+Gorilla Benchmark Evaluation . . . . . . . . . . . . . . . . . . . . . . . . . . 44
+7
+Conclusion and Future Work
+47
+7.1
+Conclusion
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 47
+7.2
+Future Work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 48
+Bibliography
+49
+A Response Schema Specification
+51
+B Agent Prompt
+53
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+v
+==PAGE:8==
+vi
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:9==
+1
+Introduction
+This chapter provides an overview of the research context and objectives. It begins by
+introducing the background of Large Language Models (LLMs) and their role in tool calling,
+followed by a discussion of the key challenges that motivate this work. The research
+objectives and questions are then presented to clearly define the scope of the thesis.
+Finally, the chapter concludes with an outline of the overall thesis structure.
+1.1
+Background
+The Transformer architecture introduced by Vaswani et al. [1] played a central role in the
+rise of large language models (LLMs). It allowed models to be trained more efficiently on
+massive amounts of text and opened the way for scaling to much larger systems. Models
+such as GPT­3 showed that increasing size and training data enable LLMs to perform well
+across a wide variety of language tasks [2, 3, 4]. However, these models remain limited
+when tasks require external information or the reliable execution of specific actions [5].
+This limitation has motivated the shift from text­only LLMs to tool­augmented systems,
+where the model is empowered to interact with external functions, databases, or APIs.
+Instead of producing answers purely from its internal parameters, an LLM can now trigger
+external computations or retrieve up­to­date information, a process commonly referred to
+as tool calling or function calling [6]. Throughout this thesis, the term tool calling will be
+used for consistency.
+Tool calling enables LLM to move beyond plain text generation by recognizing when an
+external action is required and producing a structured request to invoke the appropriate
+tools [7].
+A tool definition typically consists of three parts: a meaningful function name that clearly
+reflects the operation to be performed, a description that outlines the intended purpose
+and appropriate usage of the tool, and a JSON schema that specifies the parameters
+required for execution.
+In the case of the get_weather example in listing 1.1, the schema illustrates how different
+types of parameters shape the behavior of the tool. The field location is marked as re­
+quired, meaning that a valid tool call must always include this input in order for the function
+to identify the target city. The field unit, by contrast, is defined as optional, it enriches the
+call with additional detail when provided, but the tool will default to Celsius if it is omitted.
+Finally, the schema is configured with additionalProperties: true, which permits arguments
+not explicitly listed in the schema, such as a hypothetical field for forecast_days. This de­
+sign choice highlights the trade­off between strict validation and flexibility, as it enables
+future extensions without modifying the core schema.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+1
+==PAGE:10==
+Listing 1.1 shows an example of a get_weather tool definition.
+1
+{
+2
+"type": "function",
+3
+"function": {
+4
+"name": "get_weather",
+5
+"description": "Get the current weather",
+6
+"parameters": {
+7
+"type": "object",
+8
+"properties": {
+9
+"location": {
+10
+"type": "string",
+11
+"description": "The city and state, e.g. San Francisco , CA
+"
+12
+},
+13
+"unit": {
+14
+"type": "string",
+15
+"enum": ["celsius", "fahrenheit"],
+16
+"description": "Optional. Temperature unit. Defaults to
+celsius if not provided."
+17
+}
+18
+},
+19
+"required": ["location"],
+20
+"additionalProperties": true
+21
+}
+22
+}
+23
+}
+Listing 1.1: Example of a tool with optional parameter and flexible schema
+By supplying tool specifications, developers can extend the model’s capabilities with data
+retrieval or complex computations. Users can then interact with the system in natural
+language, while the model generates structured tool calls and the backend executes the
+corresponding functions seamlessly.
+To illustrate this process in practice, Figure 1.1 summarizes the overall workflow, which
+can be described in five main steps:
+1. Tool Definition and User Message: The developer provides a tool definition, for ex­
+ample get_weather(location), and the user asks “What is the weather in Paris?”.
+2. Tool Call Generation: The model interprets the query and produces a tool call, e.g.,
+get_weather("paris").
+3. Function Execution: The backend executes the function with the given arguments
+and returns the result, e.g., {"temperature": 14}.
+4. Result Submission: The output is passed back to the model together with the prior
+conversation context.
+5. Final Response Generation: The model integrates the result and replies in natural
+language, e.g., “It is currently 14°C in Paris.”.
+2
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:11==
+Figure 1.1: Tool calling workflow
+Tool calling has broad applicability across domains. In data analysis pipelines, LLMs can
+dynamically query databases or invoke statistical functions [8]. In robotics, tool calling al­
+lows natural language interfaces to trigger low­level control actions [9, 10].In autonomous
+agent frameworks such as LangChain [11] agents, tool invocation is central to enabling
+long­horizon planning and execution [10]. These examples illustrate the potential of tool­
+augmented LLMs. At the same time, they highlight the importance of ensuring that tool
+calls are accurate, reliable, and interpretable, a challenge that directly motivates the prob­
+lem addressed in this thesis.
+1.2
+Problem Statement
+While LLM­based tool calling shows great promise, its current implementations are con­
+strained by several key limitations.
+First, in the current tool calling API, the model can produce responses in two formats: plain
+text or a structured tool call object. This constraint prevents developers from accessing
+the model’s reasoning process when selecting tools or constructing arguments, limiting
+transparency and making it harder to diagnose or verify outputs.
+1
+completion.choices[0].message.tool_calls
+2
+3
+[
+4
+{
+5
+"id": "call_12345xyz",
+6
+"type": "function",
+7
+"function": {
+8
+"name": "get_weather",
+9
+"arguments": "{\"latitude\":48.8566,\"longitude\":2.3522}"
+10
+}
+11
+}
+12
+]
+Listing 1.2: Example of a tool call response
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+3
+==PAGE:12==
+Listing 1.2 shows an example of a tool call object corresponding to the workflow in Fig­
+ure 1.1. A tool call object specifies which function should be invoked and the arguments
+required for execution. It typically contains the function name along with a JSON­encoded
+string of arguments. In workflows involving multiple tools, several tool call objects can be
+returned together as a list under the tool_calls field.
+Alternatively, as shown in Listing 1.3, the model can directly generate a natural language
+response to answer the user’s query.
+1
+completion.choices[0].message.content
+2
+3
+"The current temperature in Paris is 14°C (57.2°F)."
+Listing 1.3: Example of a text response
+Second, tool calling performance depends not only on correct tool selection but also on
+accurate argument construction that adheres to predefined schemas. Prior work, such as
+Gorilla [12], has shown that LLMs often produce malformed or incomplete arguments,
+especially when the user input is ambiguous or requires transformation.
+Such errors
+can cause execution failures or lead to incorrect results, reducing the reliability of LLM­
+powered agents.
+Third, in multi­turn and multi­step scenarios, the absence of explicit reasoning traces limits
+the model’s ability to iteratively refine its tool calls. Without an intermediate representation
+of its decision process, the model must either re­interpret the original user request from
+scratch or rely solely on past outputs, both of which increase the likelihood of compounding
+errors.
+Consequently, there is a clear need for a mechanism that allows LLMs to simultane­
+ously produce (1) a structured, machine­readable tool call and (2) an embedded, human­
+readable reasoning trace. This combined output would improve transparency, enable
+better error diagnosis, and facilitate iterative correction in complex workflows.
+1.3
+Research Objective
+This project aims to address the above challenges by integrating Chain­of­Thought (CoT)
+reasoning with OpenAI’s structured output feature. The goal is to enforce schema adher­
+ence while enhancing the model’s tool selection accuracy and argument completeness,
+particularly when using lightweight models such as GPT­4o that lack native reasoning
+capabilities.
+The specific research questions addressed in this project are as follows:
+• RQ1: How can we design a tool calling approach that returns both the tool call and
+the supporting reasoning behind it?
+• RQ2: What is the effect of embedding chain­of­thought reasoning on tool selection
+and argument invocation?
+• RQ3:How can we design and enforce a structured output schema that conforms to
+a specific tool call format while embedding reasoning without breaking parsing?
+• RQ4: Can structured output with embedded reasoning enable non­reasoning mod­
+els (e.g., GPT­4o) to approach the tool call accuracy of reasoning­augmented mod­
+els (e.g., GPT­o4)?
+4
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:13==
+1.4
+Thesis Structure
+The remainder of this thesis is structured as follows:
+• Chapter 2: Related Work reviews prior works that underpin our approach. It first
+surveys large language models and emerging reasoning behaviors, then covers
+prompt engineering methods. Finally, it examines how LLMs invoke external func­
+tions with structured output techniques.
+• Chapter 3: Methodology outlines the research design, dataset preparation, and
+summarizes the technology stack used for orchestration and evaluation.
+• Chapter 4: Conceptual Solution introduces the proposed reasoning­augmented
+structured output approach. It details the prompt design, schema enforcement, and
+the role of embedded reasoning in improving tool invocation accuracy.
+• Chapter 5: Implementation describes how the conceptual framework was realized
+in practice. It covers dataset filtering, system configuration, schema integration, and
+the development of the tool call generator, evaluator, and multi­turn memory logging
+system.
+• Chapter 6: Evaluation presents the experimental setup and quantitative results. It
+begins with an overview of error cases and excluded outputs, then reports results
+for tool invocation and argument invocation. Comparisons are made across model
+generations, model scales, and model types, supported by detailed error analysis.
+• Chapter 7: Conclusion and Future Work summarizes the main findings relative to
+the research questions, highlights the thesis contributions, and discusses limitations
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+5
+==PAGE:14==
+6
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:15==
+2
+Related Work
+This chapter reviews prior work most relevant to our approach. We organize the discus­
+sion into three topics. First, we survey findings on reasoning in large language models,
+including the emergence of step­by­step problem solving and methods that aggregate
+multiple reasoning paths. Second, we cover prompt engineering techniques, such as
+Chain­of­Thought (CoT) and ReAct.Third, we review structured output mechanisms that
+constrain a model’s responses to predefined schema.
+2.1
+Large Language Models and Reasoning
+Research on large language models (LLMs) has shown that scaling model size and train­
+ing data can lead to reasoning abilities beyond simple text generation. Jason Wei [13]
+demonstrated that LLMs can exhibit step­by­step problem­solving behaviors, which in­
+spired prompting strategies such as CoT [14]. CoT encourages models to generate in­
+termediate reasoning steps, improving performance on arithmetic, logical, and multi­step
+tasks. Building on this idea, Xuezhi Wang [15] introduced self­consistency, where multiple
+reasoning paths are sampled and aggregated for more reliable results.
+Other work has extended reasoning further. Kojima [16] showed that even without fine­
+tuning, zero­shot prompts can elicit reasoning traces. Ofir Press [17] explored composi­
+tional reasoning, which underpins tasks such as tool use and retrieval­augmented gener­
+ation.
+Reasoning­augmented models, such as GPT­o4, directly integrate these ideas by produc­
+ing rationales before their answers. While effective, these methods come with trade­offs.
+They increase computation and latency, since generating reasoning traces requires more
+tokens. They are also typically tied to specialized model variants, leaving lightweight
+models such as GPT­4o without transparent reasoning support. This limitation motivates
+research into methods that can provide reasoning in a structured, accessible way without
+relying on expensive reasoning­augmented models.
+2.2
+Prompt Engineering
+Prompt engineering refers to the practice of designing input instructions that guide large
+LLM to perform specific tasks without additional fine­tuning [18]. Since LLMs are typically
+trained on general­purpose data, prompt engineering allows developers to control the
+model’s behavior by crafting effective input prompts. It has become a widely used strategy
+for enabling zero­shot or few­shot learning in large models [19].
+Early prompting strategies included zero­shot prompting, where the model is given only
+a task description, and few­shot prompting, where a handful of examples are provided in
+the prompt.
+To improve reasoning performance on complex tasks, CoT prompting was introduced [14].
+CoT guides the model to break down a problem into intermediate reasoning steps before
+producing a final answer, significantly improving accuracy on arithmetic and logic­based
+tasks.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+7
+==PAGE:16==
+Figure 2.1: Example of chain of thought prompting [14]
+Other techniques have extended this idea to interactive or tool­augmented settings. For
+example, ReAct [20] interleaves reasoning and tool use by prompting the model to pro­
+duce both natural language ”thoughts” and function calls in a single prompt.
+Figure 2.2: Example of ReAct prompting [20]
+The development of CoT and ReAct prompting illustrates how guiding models to reveal
+intermediate steps can significantly enhance task performance. Building on this insight,
+our work applies the same principle within the domain of tool calling. By embedding
+reasoning into structured outputs, we create a framework where tool selection is both
+justified and verifiable.
+8
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:17==
+2.3
+Structured Output
+By default, when developers use an OpenAI model for tool calling, the model returns either
+natural language text or a tool call object. While developers have little control over the
+structure of the output.
+To offer more precise control, OpenAI recently introduced a feature called structured out­
+put [21], supported in newer models such as GPT­4o. This feature allows developers to
+specify the response format when making API calls. Instead of generating plain text or tool
+call object, the model is instructed to return a machine­readable JSON object that con­
+forms to a developer­defined structure. This makes the output deterministic, parseable,
+and easier to integrate into downstream applications.
+Below is an example schema for a math reasoning task, where the model must return a
+list of reasoning steps and a final answer, both as strings.
+1
+response_format = {
+2
+"type": "json_schema",
+3
+"json_schema": {
+4
+"name": "math_reasoning",
+5
+"schema": {
+6
+"type": "object",
+7
+"properties": {
+8
+"steps": {
+9
+"type": "array",
+10
+"items": {
+11
+"type": "object",
+12
+"properties": {
+13
+"explanation": { "type": "string" },
+14
+"output": { "type": "string" }
+15
+},
+16
+"required": ["explanation", "output"],
+17
+"additionalProperties": false
+18
+}
+19
+},
+20
+"final_answer": { "type": "string" }
+21
+},
+22
+"required": ["steps", "final_answer"],
+23
+"additionalProperties": false
+24
+},
+25
+"strict": true
+26
+}
+27
+}
+Listing 2.1: Example of structured output schema
+To demonstrate how structured output can be used in practice, we present a working
+example where a linear equation is solved using a structured JSON response format.
+The model adheres strictly to the schema, returning a sequence of reasoning steps and
+a final answer.
+1
+# Testing with an example question
+2
+question = "how can I solve 8x + 7 = -23"
+3
+result = get_math_solution(question)
+4
+print(result.content)
+Listing 2.2: Math example
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+9
+==PAGE:18==
+Consequently, the model’s response includes not only the calculation steps but also the
+reasoning behind each step. This means the output provides both the intermediate ex­
+planations and the final result together in a single structured response.
+1
+{
+2
+"steps": [
+3
+{
+4
+"explanation": "Start by isolating the term with the variable. Subtract
+7 from both sides to do this.",
+5
+"output": "8x + 7 - 7 = -23 - 7"
+6
+},
+7
+{
+8
+"explanation": "Simplify both sides. On the left side, 7 - 7 cancels out
+, and on the right side, -23 - 7 equals -30.",
+9
+"output": "8x = -30"
+10
+},
+11
+{
+12
+"explanation": "Next, solve for x by dividing both sides by 8, which
+will leave x by itself on the left side.",
+13
+"output": "8x/8 = -30/8"
+14
+},
+15
+{
+16
+"explanation": "Simplify the fraction on the right side by dividing both
+the numerator and the denominator by their greatest common divisor ,
+which is 2.",
+17
+"output": "x = -15/4"
+18
+}
+19
+],
+20
+"final_answer": "x = -15/4"
+21
+}
+Listing 2.3: Example output using structured response format
+In short, structured output lets developers decide the exact format of the response instead
+of relying on free text or tool calls alone. This control makes the output predictable and
+easy to parse. More importantly, this flexibility is the foundation of our work. It gives us
+the idea to design a schema that combines both a tool call and its reasoning within the
+same response turn.
+10
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:19==
+3
+Methodology
+This chapter outlines how the study was conducted. We first describe the research design,
+an iterative design–build–evaluate cycle used to develop and test the agent. We then
+detail the data preparation pipeline, moving from a controlled synthetic suite to public
+benchmarks. Finally, we summarize the technology stack and tooling that underpin the
+experiments.
+3.1
+Research Design
+Following the principles of Design Science Research [22], this work adopted an iterative
+design–develop–evaluate methodology structured around six key stages: explicating the
+problem, defining requirements, designing and developing the artefact, demonstrating the
+artefact, evaluating the artefact, and refining the solution through iterative feedback.
+Figure 3.1: Research design pipeline [22]
+Explicate Problem
+The initial challenge addressed in this research was the low ac­
+curacy and limited interpretability of large language models (LLMs) in tool calling tasks.
+Prior work had demonstrated that models often produce valid tool calls but fail to include
+reasoning that justifies their choices. This gap motivated the need for a methodology
+that integrates explicit reasoning with tool invocation to improve both transparency and
+reliability.
+Define Requirements
+From this problem analysis, we derived key requirements for
+the artefact: (1) the system must generate structured output defined by developer. (2)
+structured output must include reasoning content that can be verified. (3) the methodol­
+ogy must support diverse evaluation benchmarks and API formats. and (4) the iterative
+process should reduce recurring errors such as incomplete arguments or inconsistent
+reasoning.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+11
+==PAGE:20==
+Design and Develop Artefact
+The core artefact developed was an orchestrator pipeline
+capable of generating tool calls with embedded reasoning. Multiple prompt variants and
+output schemas were designed to align with the orchestrator’s parsing logic and bench­
+mark definitions. Implementation followed principles from Test­Driven Development (TDD)
+and iterative prototyping, enabling rapid feedback and incremental improvements.
+Demonstrate Artefact
+The artefact was tested through controlled experiments across
+multiple benchmark datasets, with test categories divided into single­turn and multi­turn.
+Failure and exception cases were logged, and the responses were manually analyzed.
+Evaluate Artefact
+After each demonstration, a systematic evaluation was conducted.
+Performance was assessed using quantitative metrics such as tool selection accuracy
+and argument completeness, as well as qualitative analysis of reasoning consistency.
+Special attention was given to recurring error patterns, for example, when the correct tool
+was selected but arguments were incomplete, or when reasoning content conflicted with
+tool calls.
+3.2
+Data preparation
+Two complementary data preparation strategies were adopted to support the evaluation
+of the proposed tool­calling framework. In the initial phase, a synthetic dataset was gen­
+erated using the large language model to create diverse domains, tool definitions, and
+queries. This approach offered full control over scenario design, allowing systematic test­
+ing of specific reasoning challenges such as multi­step dependencies, missing arguments,
+and partial tool coverage. However, its artificial nature meant that tool definitions lacked
+grounding in real­world APIs, and the scenarios, while varied, did not always reflect au­
+thentic user requests.
+To address these limitations, the second phase employed established public benchmarks,
+including the xLAM­Function­Calling dataset [23] and Gorilla­LLM­Leaderboard [24]. These
+resources provided large­scale, domain­diverse, and API­grounded examples, enabling
+evaluation under more realistic and externally validated conditions. Before integration into
+our pipeline, both datasets underwent a series of refactoring and preprocessing steps to
+ensure compatibility with our structured output schema and experimental setup.
+3.3
+Technology Stack and Tools
+The implementation of the proposed framework was carried out entirely in Python (ver­
+sion 3.11), chosen for its mature ecosystem of libraries supporting natural language pro­
+cessing, data transformation, and evaluation workflows. The orchestration pipeline was
+integrated with the Azure OpenAI Service, rather than the public OpenAI API, due to Mi­
+crosoft’s internal policy and security requirements.
+Within this setup, GPT-4o was selected as the primary target model for evaluation because
+it is the current model deployed in Microsoft Copilot Studio, making it directly relevant for
+benchmarking against an industry standard application.
+For dataset preprocessing and cleaning, pandas was used extensively to load, filter, nor­
+malize, and restructure both synthetic and benchmark datasets into the unified schema
+required by the evaluation pipeline. Data analysis scripts also included logic for pars­
+ing tool usage patterns from JSON records and aggregating them into frequency distri­
+butions. Visualization tasks, such as generating bar plots of tool usage statistics, were
+implemented using matplotlib.
+12
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:21==
+Version control was maintained using Git, following a structured branching strategy to
+isolate experimental features. For experiments involving external benchmarks and eval­
+uation pipelines, an isolated Python environment was also maintained using Conda, en­
+suring consistent dependency management across different stages of the project.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+13
+==PAGE:22==
+14
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:23==
+4
+Conceptual Solution
+This chapter introduces our conceptual solution for making LLM tool calling both accurate
+and interpretable. Section 4.1 addresses RQ2 by presenting a reasoning­aware prompt
+that guides tool selection and surfaces missing inputs. Section 4.2 addresses RQ3 by
+defining a strict JSON schema that embeds the reasoning while remaining fully compatible
+with OpenAI tool calls.
+4.1
+Prompt Design
+This section aims to answer RQ2: What is the effect of embedding chain­of­thought rea­
+soning on tool selection and argument invocation?
+The core of this solution lies in a prompt design that emphasizes reasoning as a prerequi­
+site for action. In contrast to default prompting strategies that ask the model to immediately
+output a tool call, we structure the prompt to guide the model through an explicit thought
+process. The primary objective is to ensure that the LLM not only selects the correct
+tool but also justifies its choice and clearly identifies any missing information. To achieve
+this, we adopt a CoT approach, placing reasoning at the center of the prompt design. This
+technique has proven especially effective in reducing hallucinated arguments and guiding
+the model toward verifiable, structured decisions.
+The prompt itself is composed of four conceptual components, each introduced as a result
+of iterative refinement during experimentation. The full version of the prompt is in the
+Appendix.
+Figure 4.1: Prompt structure
+4.1.1
+Identity Declaration
+The first component provides a high­level identity declaration, briefly describing the role
+of the LLM and the nature of the task it is expected to perform. This component serves to
+contextualize the interaction and ensures that the LLM frames its behavior within the tool
+calling scenario.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+15
+==PAGE:24==
+4.1.2
+Reasoning Guidelines
+The second component delivers a detailed reasoning guideline. Here, we instruct the
+model to not only explain which tools are selected and why, but also to assess whether
+the user’s query includes sufficient information to invoke the tool meaningfully. This part
+of the prompt also specifies how the model should behave in edge cases.
+For example, if the model recognizes the correct tool but detects that some required ar­
+guments are missing from the query, it is asked to produce a partial tool call by filling in
+the fields it is confident about, while setting the missing fields to empty strings.
+Importantly, the model is explicitly discouraged from guessing or hallucinating information,
+an issue frequently observed in non­reasoning prompts.
+(a) Without Reasoning
+(b) With Reasoning
+Figure 4.2: Tool calling with missing required arguments
+This instruction is based on empirical failures encountered during earlier testing. In the
+absence of reasoning guidance, LLMs often returned responses filled with fabricated con­
+tent, although known as hallucination.
+After we added Chain­of­Thought (CoT) to the prompt, the behavior changed. When
+inputs were missing, the model stopped guessing. It now either returns no tool calls or it
+makes a partial call and marks the missing fields as empty on purpose. The reasoning
+text also says what is missing. This is still a failed execution, but it is a clean failure. We
+can see the boundary: the model knew it could not proceed. That makes the system safer
+and easier to audit. Reviewers can tell whether the problem was missing inputs, a bad
+tool choice, or a schema issue.
+In multi­step settings, our prompt design is especially valuable because it makes the
+model plan before it acts. The model writes down the sub­tasks, orders them, and notes
+which outputs feed the next inputs. Across turns, that reasoning serves as a running plan,
+it marks what is done, what is next, and what information is still missing from the user or
+tools. As shown in Figure 4.3, the agent retrieves temperatures via get_weather and
+subsequently uses a second tool to add them together.
+16
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:25==
+Figure 4.3: Tool chain invocation with CoT
+In summary, our reasoning guidelines expose the model’s decision path, making errors
+diagnosable.
+4.1.3
+Schema­Aligned Output Specification
+The third component of the prompt is the response format specification. Rather than hard­
+coding examples, we describe the structure of the expected output in natural language,
+aligned with our predefined JSON format. This schema consists of two fields: a reasoning
+string and a list of tool calls, each with a name and stringified arguments. By defining
+the format in prose rather than examples, the model is encouraged to generalize and
+internalize the response structure rather than mimic specific inputs.
+4.1.4
+Prohibited Patterns
+Finally, the prompt includes a section on prohibited patterns, developed through extensive
+testing and analysis of common error cases. One such issue is tool name corruption.
+For instance, when multiple tools are defined in a parallel execution setup, the model
+occasionally prepends incorrect module paths to the tool names. This mismatch leads to
+execution failures when the tool name does not match the system’s internal registry.
+(a) Without rule: prefixed tool names
+(b) With rule:schema valid tool calls.
+Figure 4.4: Parallel tool calling
+A more severe failure mode arises when the model enters an infinite reasoning loop. This
+often occurs in complex tasks where the model attempts to over­explain or repeatedly
+reformulate sub­questions, even after it has already reached a valid solution. To prevent
+this, we include a firm instruction in the prompt stating that if a correct tool call has already
+been formed with valid arguments, it should not be repeated unnecessarily. Furthermore,
+we explicitly introduce the notion of a “penalty” for redundant tool calls. The choice of the
+word “penalty” is intentional: it acts as a behavioral constraint that signals to the model
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+17
+==PAGE:26==
+that repetition is discouraged and that minimalism in tool usage is preferred when the task
+is already complete.
+(a) Without penalty
+(b) With penalty
+Figure 4.5: Tool calling with missing arguments
+These prompt components are not purely theoretical constructs. They emerged from
+repeated experimentation and refinement based on observed model behavior. Each de­
+sign decision reflects a response to concrete problems encountered during tool invoca­
+tion, such as hallucinated data, missing arguments, schema mismatches, and runaway
+reasoning.
+4.2
+Structured Output Schema Design
+This section aims to answer RQ3: How can we design and enforce a structured output
+schema that conforms to a specific format while embedding reasoning without breaking
+parsing?
+One of the core contributions and innovations of this research is the integration of the exact
+OpenAI tool call object structure into the structured output schema, requiring that every
+element of the model’s response conform precisely to the OpenAI tool calling specification.
+This strict adherence ensures that the returned output is immediately executable by the
+target system without post processing or structural conversion. This schema formalizes
+the structure and constraints of the model’s responses, enabling deterministic parsing,
+enforcement of tool calling validity, and transparent reasoning.
+The schema defines a top­level object with two required fields: reasoning and tool_calls.
+The reasoning field is a string that captures a detailed natural language explanation of
+the model’s decision process. This explanation must include justification for tool selec­
+tion, identification of any missing information in the user query, and a final summary in
+the form of a numbered list of tool calls (e.g., “tools should be called: 1­ ..., 2­ ..., etc.”).
+The inclusion of these requirements ensures that the reasoning is both comprehensive
+and actionable. Moreover, the field is expected to be between 50 and 500 words, which
+encourages the model to produce substantial but bounded rationales.
+The second field, tool_calls, is an array that contains the structured tool invocations
+derived from the reasoning process. Each item in the array represents a single tool call
+and adheres to OpenAI’s tool calling format. Every tool call object is required to include
+three fields: an id (a UUID that uniquely identifies the call), a type (which must always
+be “function”), and a function object that specifies the name and arguments of the tool
+18
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:27==
+being invoked. The function field itself contains two required subfields: name, the exact
+identifier of the tool as registered in the system, and arguments, a stringified JSON object
+containing the input parameters for the function. To ensure consistency and validation
+safety, no additional properties are permitted beyond those explicitly defined.
+1
+{
+2
+"type": "json_schema",
+3
+"json_schema": {
+4
+"name": "response_format",
+5
+"strict": true,
+6
+"schema": {
+7
+"type": "object",
+8
+"properties": {
+9
+"reasoning": { "type": "string" },
+10
+"tool_calls": {
+11
+"type": "array",
+12
+"items": {
+13
+"type": "object",
+14
+"properties": {
+15
+"id":
+{ "type": "string" },
+16
+"type": { "const": "function" },
+17
+"function": {
+18
+"type": "object",
+19
+"properties": {
+20
+"name": { "type": "string" },
+21
+"arguments": { "type": "string" }
+22
+},
+23
+"required": ["name", "arguments"],
+24
+"additionalProperties": false
+25
+}
+26
+},
+27
+"required": ["id", "type", "function"],
+28
+"additionalProperties": false
+29
+}
+30
+}
+31
+},
+32
+"required": ["reasoning", "tool_calls"],
+33
+"additionalProperties": false
+34
+}
+35
+}
+36
+}
+Listing 4.1: Response format (simplified)
+Beyond structural correctness, the schema also encodes behavioral expectations. For
+example, the tool_calls field includes a description that explicitly discourages repetition,
+with a warning that redundant tool calls are penalized during evaluation. This constraint
+helps reduce unnecessary repetition, especially in multi­step queries where tool calls have
+already been resolved. By embedding these behavioral signals into the schema itself,
+rather than merely into the prompt, we strengthen the alignment between the model’s
+output and the system’s operational expectations. The full version of the schema is shown
+in the Appendix.
+In addition, two settings are important to our schema: strict mode and the “additional
+properties” setting. With strict mode turned on, the model is required to produce output
+that matches the schema exactly, no extra prose, no format drift, so the structured output
+pipeline remains stable. Furthermore, setting additional properties to false, both at the
+top level and inside each tool­call definition, closes the schema so that a tool call can
+contain only the expected fields in the required list. The model cannot invent new keys in
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+19
+==PAGE:28==
+response to the user’s phrasing.
+(a) strict mode: true & additional property: false
+(b) strict mode: true & additional property: true
+Figure 4.6: Impact of additionalProperty
+Overall, the schema plays a dual role. On one hand, it provides a syntactic and semantic
+specification that ensures tool calls are machine­executable and human­auditable. On
+the other hand, it acts as a behavioral regulator that complements the prompt­based rea­
+soning guidance.
+4.2.1
+Conceptual System Overview
+The structured output framework proposed in this work is supported by a modular agent
+design composed of two principal components: the Tool Call Generator and the Tool Call
+Evaluator. These components operate within a coordinated system that is responsible for
+processing the data, interacting with the LLM, and evaluating their correctness against a
+structured ground truth.
+At a high level, the system can be viewed as an intelligent agent that receives user instruc­
+tions and produces a structured output in response. The output consists of two elements:
+a natural language explanation of the reasoning behind the model’s decisions, and a set
+of tool invocations conforming to a predefined schema.
+Tool Call Generator, which serves as the core interface between the language model
+and the tool registry. The generator is responsible for assembling the prompt, structured
+output schema, and submitting them to the language model along with the user’s query
+and tools from the data set. Once the model returns a structured response, the generator
+parses and validates the output to ensure it complies with the predefined schema.
+The second core component is the Tool Call Evaluator, which provides an external mecha­
+nism for assessing the quality and correctness of the model’s output. While the generator
+ensures that the outputs are syntactically valid and well­formed, the evaluator performs
+semantic verification. It compares the predicted tool calls with a ground truth reference to
+determine whether the model has selected the correct tools and provided complete and
+accurate arguments.
+20
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:29==
+Figure 4.7: Conceptual system overview
+In summary, the generator encapsulates the model’s inference behavior, governed by
+prompt and schema design. The evaluator serves as a diagnostic layer, capturing errors,
+mismatches, or reasoning inconsistencies. In subsequent chapters, we detail how this
+conceptual framework is realized in practice.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+21
+==PAGE:30==
+22
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:31==
+5
+Implementation of the Conceptual
+Solution
+This chapter details how the conceptual framework presented earlier is realized in prac­
+tice. While the preceding chapter introduced the design principles and modular compo­
+nents of the system, here the emphasis shifts to the runtime orchestration that governs
+how user inputs are transformed into structured tool calls, how these predictions are eval­
+uated against ground­truth references, and how the entire process is logged to ensure
+transparency and reproducibility. The objective of this chapter is answing RQ1:How can
+we design a tool calling approach that returns both the tool call and the supporting rea­
+soning behind it?
+The chapter unfolds in four parts. We begin with the runtime orchestration workflow, which
+explains the sequential processing of benchmark test cases from dataset ingestion to final
+evaluation. The following section describes dataset preparation, moving from exploratory
+prototyping with synthetic queries to the adoption and normalization of the xLAM bench­
+mark dataset as the foundation for robust experiments. Next, the mechanisms for prompt
+integration and schema enforcement are presented, illustrating how reasoning guidance
+and output validation are combined to control the model’s behavior. Building on this, we
+describe the tool call generator and evaluator, which together operationalize generation
+and verification under both reasoning­enabled and baseline conditions. Finally, we ex­
+tend the discussion to the multi­turn pipeline, where conversational history is maintained
+across multiple queries, enabling evaluation of more realistic dialogic settings.
+5.1
+Runtime Orchestration Workflow
+The runtime orchestration of the system follows a sequential, dataset­driven workflow in
+which each test case is processed from input to evaluation in a structured manner. The
+process begins with the retrieval of a test case, including the user query, the available tool
+definitions, and the corresponding ground truth.
+In the generation stage, the system constructs a structured prompt that incorporates the
+system role, reasoning guidelines, and the exact OpenAI tool calling schema, ensuring
+that every generated tool invocation strictly matches the expected format. The language
+model then receives this prompt together with the user query and produces a structured
+response consisting of two elements: a reasoning field, providing a natural language ex­
+planation of the decision making process, and a set of tool invocation objects conforming
+to the schema.
+Following generation, the workflow transitions to the evaluation stage. Here, the predicted
+tool calls are compared against the ground truth reference, with two complementary as­
+sessments. The first measures whether the correct tools were selected, and the second
+verifies whether the provided arguments are both complete and accurate. These evalua­
+tions produce quantitative metrics, such as confusion matrices, and also generate detailed
+records of successes and errors for later analysis.
+The final layer of the orchestration process is dedicated to logging. At this stage, the
+system persistently records two complementary forms of information. First, the complete
+message history of each interaction is stored, capturing user queries, model reasoning
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+23
+==PAGE:32==
+traces, tool invocations, and execution results. This log preserves the full decision mak­
+ing context and allows the reconstruction of multi­turn exchanges in detail. Second, the
+system maintains structured test result logs that document the raw model responses for
+every case, irrespective of whether the output is successful or erroneous. These logs
+ensure that both valid predictions and failure cases are retained for later inspection.
+5.2
+Dataset Preparation
+5.2.1
+Exploratory Dataset Prototyping with Synthetic Queries
+The project initially began with the design of a synthetic dataset to support controlled ex­
+perimentation with function calling under diverse conditions. We constructed a generation
+pipeline that defined over 100 hypothetical industry domains, each paired with five syn­
+thetic tools. For each domain, a set of queries was constructed to simulate common and
+challenging tool invocation scenarios observed in practical use cases.
+The motivation behind defining these scenarios was to systematically test the model’s
+ability to handle typical user requests in tool­augmented environments. Users often sub­
+mit composite queries that require multi­step reasoning, parallel tool calls, or handling
+of incomplete or ambiguous input. Our dataset aimed to cover this diversity through the
+following representative scenarios:
+• Single­tool execution: The query can be resolved by invoking a single tool with a
+complete set of arguments. This serves as a baseline scenario.
+• Parallel multi­tool execution: The query requires invoking the same tool multiple
+times in parallel with different arguments. This scenario evaluates the model’s ability
+to recognize and decompose queries into multiple tool call objects.
+• Nested or dependent multi­tool execution: The output of one tool is needed to
+form the input for another. This tests the model’s ability to reason over sequential
+dependencies.
+• Missing argument handling: The query omits required fields, either implicitly or
+explicitly, to assess how well the model can infer or request missing data.
+• Tool unavailability: The query asks for an action without a corresponding tool de­
+fined, simulating cases where fallback behavior or user feedback is expected.
+• Partial tool coverage: The query involves multiple tasks, but tools are only avail­
+able for some of them. This scenario tests the model’s ability to selectively generate
+tool call only for solvable sub­tasks. .
+Although the synthetic dataset supported controlled experimentation, it exhibited two crit­
+ical limitations that rendered it unsuitable for robust end­to­end evaluation. First, the tool
+definitions lacked any connection to actual backend functionality, meaning that once tool
+call objects were generated, their execution could only be simulated through mock func­
+tions. This prevented a realistic assessment of tool usage within a complete pipeline.
+Second, while the dataset was designed to simulate real­world domains, the industry
+definitions and associated tools were themselves generated by a language model, result­
+ing in scenarios that were often disconnected from actual industrial practices. For these
+reasons, the dataset served well as an exploratory sandbox, but proved inadequate for
+rigorous evaluation of structured reasoning and tool alignment.
+24
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:33==
+5.2.2
+Adoption of the xLAM Benchmark Dataset
+To address the shortcomings of synthetic data, we adopted the xLAM­Function­Calling­
+60K benchmark [23], a large­scale dataset generated via the APIGen pipeline and pub­
+lished by Salesforce. This dataset consists of over 60,000 natural language queries paired
+with grounded tool definitions derived from real­world APIs, representing 3,673 distinct
+tools across 21 industry categories. Each entry in the dataset includes (1) a natural lan­
+guage instruction, (2) a list of available tools defined with typed parameters, and (3) a
+ground truth tool call response.
+While xLAM is well­curated, not all entries are equally challenging. In particular, over
+65% of the dataset involves only a single­tool invocation. For this project, we sought to
+focus on multi­tool reasoning scenarios, where tool selection and argument completion
+require a deeper understanding of query semantics. Therefore, we filtered the dataset to
+retain only those examples in which at least five tools were available to the model during
+generation. This subset provides a more realistic environment for evaluating tool selection
+under ambiguity, where multiple tools could satisfy different aspects of the user’s query.
+The filtered dataset, containing approximately 6000, was serialized into a dedicated eval­
+uation set. Each entry was validated for schema completeness, correct tool formatting,
+and usable argument structure. This subset became the foundation for all further evalu­
+ation in our pipeline.
+(a) Data category distribution
+(b) Number of tools provided vs tools used
+Figure 5.1: (a) shows the distribution of task categories, and subfigure (b) highlights the
+distribution of tool usage.
+5.2.3
+Tool Definition Normalization
+One major data processing step in this project was the reconstruction of tool definitions
+from the xLAM dataset into a format compatible with OpenAI’s tool calling schema. Al­
+though xLAM already provides structured metadata for each tool, its representation fol­
+lows a custom format that differs from OpenAI’s expected JSON schema.
+As illustrated in Figure 5.3, the original xLAM definition (Listing 5.1) specifies each tool with
+attributes such as name, description, and parameters, where parameter types are loosely
+defined (e.g., str, optional) and may include default values. While this representation
+is descriptive, it lacks the strict structure required for direct use in OpenAI’s tool calling
+framework.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+25
+==PAGE:34==
+To bridge this gap, we reconstructed xLAM definitions into OpenAI’s schema. This pro­
+cess involved several key adjustments:
+• Wrapping each tool within a type: function and nested function object.
+• Converting parameter specifications into a JSON Schema format, including type,
+properties, and explicit required fields.
+• Enforcing primitive JSON types (string, number, boolean) in place of loosely de­
+fined types such as str, optional.
+• Removing or refactoring default values where not directly supported, while ensuring
+semantic alignment with the original specification.
+• Applying the constraint additionalProperties: false to prevent undefined argu­
+ments during execution.
+Through this reconstruction, xLAM’s descriptive but inconsistent tool definitions were nor­
+malized into a strict, OpenAI standard schema. This not only enabled direct integration
+into our structured output framework but also ensured compatibility with runtime validation
+and tool invocation.
+1
+{
+2
+"name": "company_search",
+3
+"description": "Search for
+companies by name using the
+Indeed API.",
+4
+"parameters": {
+5
+"company_name": {
+6
+"description": "The name of the
+company to search for.",
+7
+"type": "str",
+8
+"default": "Microsoft"
+9
+},
+10
+"locality": {
+11
+"description": "Select the
+Indeed 's country subdomain
+to search within. The
+default value is 'us'.",
+12
+"type": "str, optional",
+13
+"default": ""
+14
+}
+15
+}
+16
+}
+Listing 5.1: Xlam tool definition
+1
+{
+2
+"type": "function",
+3
+"function": {
+4
+"name": "company_search",
+5
+"description": "Search for
+companies by name using the
+Indeed API.",
+6
+"parameters": {
+7
+"type": "object",
+8
+"properties": {
+9
+"company_name": {
+10
+"type": "string",
+11
+"description": "The name of
+the company to search
+for."
+12
+},
+13
+"locality": {
+14
+"type": "string",
+15
+"description": "Select the
+Indeed 's country
+subdomain to search
+within."
+16
+}
+17
+},
+18
+"required": [
+19
+"company_name"
+20
+],
+21
+"additionalProperties": false
+22
+},
+23
+"strict": false
+24
+}
+25
+}
+Listing 5.2: OpenAI tool definition
+Figure 5.2: Example of reconstruct tool definition
+26
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:35==
+With the dataset filtered and normalized into OpenAI’s tool calling schema, we established
+a consistent evaluation environment. This prepared foundation enabled us to move be­
+yond data preparation and into the design of evaluation methodologies, where we exam­
+ine how structured output with embedded reasoning affects tool call accuracy.
+5.3
+Prompt Integration and Schema Enforcement
+To operationalize the structured output solution described in Chapter 5.44, we needed
+to ensure that the language model consistently produced outputs that were both inter­
+pretable to humans and reliably parseable by machines. This required two complemen­
+tary steps: guiding the model’s behavior through prompt design and enforcing structural
+compliance through schema validation.
+In OpenAI’s tool calling architecture, model interactions are managed through a sequence
+of role­based messages such as system, user, and assistant. The system message is
+of particular importance, as it provides the highest­level instruction context that persists
+across the entire conversation. In our implementation, the reasoning­guided prompt de­
+signed in Chapter 4 was injected as a system message, ensuring that the model con­
+sistently prioritized structured reasoning, tool selection, and ambiguity handling. A typical
+inference cycle began with constructing a message sequence in which the system prompt
+established global behavioral rules, followed by the user query providing the task­specific
+instruction:
+1
+MESSAGE = [
+2
+{"role": "system", "content": prompt},
+3
+{"role": "user", "content": user_query}
+4
+]
+Listing 5.3: Message sequence construction for prompt injection
+While the system prompt guided the model’s behavior, schema enforcement ensured
+that its outputs adhered to a strict structure. OpenAI’s API supports this through the
+response_format parameter, which allows the user to pass a JSON schema against
+which the model’s outputs are validated. The inference call is shown below:
+1
+completion = client.chat.completions.create(
+2
+model=deployment ,
+3
+messages=MESSAGE ,
+4
+tools=tools,
+5
+response_format=SCHEMA_OBJECT ,
+6
+max_tokens=1000,
+7
+)
+Listing 5.4: Schema enforcement during model inference
+By combining prompt injection with schema enforcement, the implementation ensures that
+the model follows clear instructions while producing outputs in a strictly validated format.
+The prompt ensures that the model explains and justifies its actions in natural language,
+while the schema guarantees that these actions are expressed in a form that downstream
+components can consume without additional post­processing.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+27
+==PAGE:36==
+5.4
+Tool Call Generator
+The tool call generator operationalizes the prompting and schema strategies described in
+the previous section by implementing them in a pipeline that can be applied consistently
+across large sets of test queries. This component supports two complementary modes:
+a structured­output mode that enforces reasoning and schema compliance, and a normal
+mode that follows OpenAI’s default tool calling behavior without schema enforcement.
+The comparison between these two modes provides a baseline for evaluating the impact
+of structured output on tool call accuracy.
+In the structured­output mode, the process unfolds in three steps. First, each user query
+is paired with a system prompt that embeds reasoning instructions, creating the message
+sequence that directs the model’s behavior. Second, this sequence is submitted to the API
+together with the tool registry and a schema definition. By enabling the response_format
+parameter, the model is compelled to produce outputs that include both an explicit reason­
+ing trace and a list of candidate tool calls in structured JSON. Finally, the raw response is
+parsed and normalized into a uniform format, ensuring that tool names, arguments, and
+reasoning follow consistent conventions.
+Figure 5.3: Tool Call Generator with structured output Mode
+In contrast, the normal mode relies only on a lightweight normalization prompt and uses
+the API’s built­in tool_choice mechanism. Here, the model generates tool calls directly
+without schema enforcement or explicit reasoning traces. While this approach aligns more
+closely with OpenAI’s default tool calling API, it lacks the strict guarantees of consistency
+that structured output provides.
+Across both modes, normalization ensures that outputs are standardized before eval­
+uation, abstracting away minor differences in formatting and preserving comparability.
+Errors such as malformed responses or failed API calls are captured in structured logs,
+providing transparency and reproducibility throughout the experimental process.
+28
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:37==
+5.5
+Tool Call Evaluator
+Once the agents generate tool call responses, an evaluation mechanism is required to as­
+sess their correctness against the annotated ground truth. To this end, we implemented a
+tool call evaluator that relies on a confusion matrix formulation, allowing us to capture pre­
+cision, recall, and F1 score as the primary accuracy metrics. The evaluator was designed
+in parallel to the two agent pipelines introduced earlier: one for the reasoning­enabled
+structured output agent, and one for the baseline agent without reasoning. This dual de­
+sign ensures that both approaches are tested under identical conditions while preserving
+their distinct output formats.
+The evaluation process unfolds in two stages. First, the model’s predicted tool calls are re­
+trieved, either as a structured JSON object containing both reasoning and tool calls in the
+case of the So­agent, or as a direct list of tool invocations in the case of the normal agent.
+In both cases, the predictions are parsed and aligned against the reference annotations.
+Second, the evaluator compares predicted tool names with the ground truth, computing
+the quantities that populate the confusion matrix. Beyond tool names, the evaluator also
+Figure 5.4: Tool Call Evaluator with structured output mode
+examines the correctness of arguments supplied to each tool. Here, the same matching
+logic is extended to parameter values: correctly predicted arguments are counted as true
+positives, missing parameters as false negatives, and incorrect or extraneous values as
+false positives. By aggregating these results, the evaluator computes precision, recall,
+and F1 not only at the tool level but also at the argument level. Evaluating both levels is
+crucial, since a model can select the correct tool yet fail to provide valid arguments.
+Throughout the evaluation, all case results are recorded in structured logs. Each test
+query produces a JSONL entry that captures the ground­truth tool calls, the predicted
+outputs, and the evaluation outcome, including the reasoning trace when available. Sep­
+arate log files are maintained for the reasoning agent and the normal agent, ensuring that
+downstream analysis can be carried out independently or compared side by side. Once
+evaluation across the dataset is complete, the logs are summarized to yield aggregate
+statistics, providing an overall view of model performance.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+29
+==PAGE:38==
+5.6
+Multi­Turn Pipeline
+While the single­turn pipeline demonstrates how an individual query can be mapped to
+reasoning traces and tool calls, many realistic scenarios unfold over multiple user turns.
+To address this, we implemented a multi­turn pipeline that maintains conversational mem­
+ory and allows the agent to reason across sequential interactions. This design enables the
+evaluation of more complex settings where tool calls and final answers are not determined
+in isolation but depend on the accumulated history of the session.
+The pipeline builds on the same principles of structured output and schema enforcement
+introduced earlier, but extends them with a session­level memory system. To simulate
+this interaction in a controlled manner, we define a list of user queries that are processed
+sequentially. Each query in the list can represent either a single­step request, resolvable
+through one tool call, or a multi­step request requiring several invocations. By iterating
+through this list, the pipeline effectively reproduces a multi­turn dialogue between a user
+and the LLM, in which the model must not only generate reasoning traces and tool calls
+but also reuse and integrate outputs from prior turns.
+The multi­turn interaction unfolds in three interconnected stages. First, the current user
+query is combined with the accumulated conversation history, which is flattened into con­
+text and passed to the model together with a reasoning­oriented system prompt. This
+prompt instructs the model to either continue tool usage or, if sufficient evidence already
+exists in the history, to terminate with a call to finish_session(). Second, the model’s
+outputs are parsed and normalized into a uniform schema. Tool calls are executed lo­
+cally, and their results are appended back into the log under a dedicated tool role entry,
+ensuring every invocation is explicitly recorded with arguments and return values. Third,
+if the model signals the end of the session, the pipeline triggers a routine that produces
+a natural language summary integrating reasoning traces with accumulated tool results.
+This response is appended to the log and returned as the final answer.
+The history log lies at the center of this process. Its structure is deliberately strict, forming
+a repeating block for each user query: a user message containing the raw query, followed
+by an assistant message issuing tool call specifications, then a tool message recording
+the execution results, and finally a second assistant message providing the natural lan­
+guage reply. This fixed sequence governs every conversational cycle because multiple
+queries are processed in sequence, the log grows turn by turn. This keeps the order of
+events clear, so the agent can look back at earlier tool calls, avoid repeating them, and
+know when the session should end. Crucially, the invocation of finish_session() serves
+as an explicit control flag for termination, signaling that the dialogue has converged on a
+conclusive answer.
+Importantly, this design mirrors the message flow enforced by the OpenAI toolcalling API,
+where user input, assistant tool specifications, tool responses, and final replies follow a
+specific order.
+Finally, the pipeline integrates mechanisms to sanitize and normalize tool calls before
+they are logged or replayed. Arguments are consistently stringified into JSON to ensure
+schema validity, and missing or malformed inputs are corrected through fallback rules.
+This guarantees that the conversation history remains both machine­readable and se­
+mantically coherent, even in the presence of imperfect model outputs. Since the memory
+persists across turns, the system supports cumulative reasoning: the agent can refer­
+ence earlier results, build on prior decisions, and dynamically determine when enough
+information has been collected to end the session.
+30
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:39==
+In summary, the multi­turn pipeline generalizes the single­turn mechanism to full con­
+versational sessions by maintaining structured memory, executing tool calls locally, and
+producing final responses conditioned on the complete interaction history.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+31
+==PAGE:40==
+32
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:41==
+6
+Evaluation
+In this chapter, we present the evaluation results from both the XLAM and Gorilla bench­
+marks, considering them from quantitative and qualitative perspectives. These results
+address RQ2: What is the effect of embedding chain­of­thought reasoning on tool selec­
+tion and argument invocation and RQ4: Can structured output with embedded reason­
+ing enable non­reasoning models (e.g., GPT­4o) to approach the tool call accuracy of
+reasoning­augmented models (e.g., GPT­o4)
+6.1
+Evaluation objective
+The evaluation presented in this chapter pursues two objectives. The first objective is to
+assess whether the proposed Structured Output (SO) agent, which is designed to enforce
+explicit reasoning traces and schema constrained tool calling, achieves higher tool call
+accuracy compared to a default tool calling agent.
+The second objective is to examine the robustness of this framework across a diverse
+set of model generations, scales and types. This analysis mainly relies on the XLAM
+benchmark for comparison. The experimental setup includes four general­purpose mod­
+els (GPT­4o, GPT­4o­mini, GPT­4.1, and GPT­4.1­mini), representing both generational
+differences (4o vs. 4.1) and scale differences within a generation (full vs. mini). We also
+include reasoning­optimized models (o3­mini and o4­mini), which focus on reasoning and
+offer different trade­offs in cost and latency.
+Together, these six models allow the evaluation to span three analytical axes. Along
+the generation axis, the comparison between GPT­4o and GPT­4.1 captures potential
+improvements introduced in newer releases. Along the scale axis, comparisons between
+full and mini variants examine whether the benefits of structured output hold consistently
+across model sizes. Finally, along the type axis, we compare general­purpose models with
+reasoning models to see whether applying our reasoning strategy and structured output
+can achieve performance close to that of models explicitly optimized for reasoning.
+Table 6.1: Evaluation axes and corresponding comparisons
+Axis
+Comparison
+Example pairs
+Generation
+Across model releases
+GPT­4o ↔GPT­4.1
+Scale
+Across model sizes
+GPT­4o ↔GPT­4o­mini
+Model type
+General­purpose vs. reasoning­optimized
+GPT­4o­mini ↔o4­mini
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+33
+==PAGE:42==
+6.2
+XLam Benchmark Evaluation
+6.2.1
+Evaluation setup
+As discussed in Chapter 5, the tool call evaluator measures accuracy at two levels: tool in­
+vocation and argument completeness. The evaluation workflow is illustrated in Figure 6.1.
+First, we verify whether the tool name generated by the LLM matches the ground truth.
+If it matches, we then check whether the required arguments also align with the ground
+truth.
+Figure 6.1: Evaluation flow of tool invocation and argument matching
+A correct match increases the count of true positives(TP) by one. If the LLM generates a
+tool name or argument not present in the ground truth, we count it as a false positive(FP).
+Conversely, if a tool call or argument appears in the ground truth but is missing from the
+LLM prediction, we count it as a false negative(FN). After obtaining the values of TP, FP,
+and FN, we calculate the Precision, Recall, and F1 score, as shown in the formulas below.
+Precision =
+TP
+TP + FP
+Recall =
+TP
+TP + FN
+F1 = 2 · Precision · Recall
+Precision + Recall
+6.2.2
+Error Case Overview
+Before presenting accuracy results, it is important to clarify how error cases were handled
+in the evaluation. These errors fall into two main categories:
+• Policy­filtered outputs: Responses blocked by the Azure OpenAI content man­
+agement policy. These cases were excluded from evaluation, since no output was
+returned for comparison.
+• Unparseable outputs: Responses that could not be parsed into a valid structured
+format (e.g., malformed JSON). In our evaluation, these were retained and counted
+as failures, since they reflect the agent’s inability to produce a valid tool call.
+34
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:43==
+To make these categories more concrete, we provide two examples from our experiment.
+Listing 6.1 shows an error, where the response was filtered by Azure OpenAI’s content
+management policy.
+1
+{
+2
+"id": 20492,
+3
+"error": {
+4
+"reason": "ToolCallingException",
+5
+"message": "Error code: 400 - {'error ': {'message ': \"The response was
+filtered due to the prompt triggering Azure OpenAI 's content
+management policy}"
+6
+}
+7
+}
+Listing 6.1: Policy filtered output
+Listing 6.2 shows a case from OpenAI where the model generated malformed JSON that
+could not be parsed, producing an unparseable output.
+1
+{
+2
+"id": 21093,
+3
+"error": {
+4
+"reason": "ToolCallingException",
+5
+"message": "Unterminated string starting at: line 1 column 2902 (char
+2901)"
+6
+}
+7
+}
+Listing 6.2: Unparseable output
+Table 6.2 summarizes the overall distribution of errors across all model agent pairs.
+Table 6.2: Error cases across models and agents
+Model
+Agent
+Policy issues (excluded)
+Unparseable (counted as failure)
+4o­global
+SO
+36
+34
+Baseline
+33
+0
+4o­mini
+SO
+33
+201
+Baseline
+33
+0
+4.1­nano
+SO
+33
+0
+Baseline
+33
+0
+4.1­mini
+SO
+35
+2
+Baseline
+33
+0
+o3­mini
+SO
+37
+487
+Baseline
+33
+1
+o4­mini
+SO
+63
+1285
+Baseline
+33
+0
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+35
+==PAGE:44==
+In addition to the errors described above, the SO­Agent sometimes produced a valid rea­
+soning trace but abstained from making a tool call, resulting in an empty tool call list. This
+behavior differs from the baseline, which always generates a call (even if incorrect). Such
+cases are treated as an additional failure category.
+Listing 6.3 illustrates a typical example. Here, the agent correctly identifies that the task
+is to validate a Sudoku board using the is_valid_sudoku tool, but it is not able to make
+the call because the required input (a 9x9 Sudoku board) is missing.
+1
+{
+2
+"id": 742,
+3
+"reasoning": "The task is to check if a 9x9 Sudoku board is valid using the
+'is_valid_sudoku ' tool. However , to proceed , I need the specific 9x9
+Sudoku board as input since it hasn't been provided. Thus, I am unable
+to invoke the tool without this information",
+4
+"predicted_tool_calls": []
+5
+}
+Listing 6.3: Example of missing required input for Sudoku validation
+Figure 6.2 shows the number of empty tool call cases (similar to Listing 6.3) across dif­
+ferent models tested in our experiments.
+Figure 6.2: Number of empty tool call failures (SO­Agent) across different models
+The presence of error and failure cases underlines the need for caution when interpret­
+ing the reported results. Because the number of excluded policy­triggered cases and
+retained failure cases differs across model–agent pairs, the effective evaluation sets are
+not identical. As a result, the subsequent comparisons should be viewed as indicative of
+overall performance trends rather than exact, one­to­one measurements. In the following
+subsections, we discuss results across generations, scales, and model types with this
+limitation in mind.
+36
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:45==
+6.2.3
+Results
+This section presents the empirical evaluation of the proposed SO­Agent in comparison
+with the baseline agent. The results are organized into two parts. The first part focuses
+on tool invocation, where we evaluate whether the correct tools were selected and report
+precision, recall, and F1 scores across models. The second part examines argument in­
+vocation, where we assess the completeness and correctness of the arguments provided
+to each tool. Within each part, analyze results along three axes: model generation, model
+scale, and model type.
+Tool Invocation Results
+We begin by evaluating tool invocation, where the task is to determine whether the correct
+tool is selected for each user query. The results are analyzed along three dimensions,
+model generation, model scale, and model type. An overall summary table is also pro­
+vided to concludes performance across all evaluated models.
+Model Generation
+We first examine the impact of model generation by comparing GPT­
+4o and GPT­4.1.Tables 6.3 and 6.4 present results for the full and mini versions, respec­
+tively.
+Table 6.3: Performance across generations at full scale
+Model
+Agent
+TP
+FP
+FN
+Precision (%)
+Recall (%)
+F1 (%)
+4o­global
+SO
+8207
+211
+338
+97.49
+96.04
+96.76
+Baseline
+8439
+139
+135
+98.38
+98.45
+98.41
+4.1­nano
+SO
+8215
+386
+384
+95.51
+95.53
+95.52
+Baseline
+8421
+358
+207
+95.92
+97.60
+96.75
+Table 6.4: Performance across generations at mini scale
+Model
+Agent
+TP
+FP
+FN
+Precision (%)
+Recall (%)
+F1 (%)
+4o­mini
+SO
+8182
+527
+218
+93.94
+97.40
+95.64
+Baseline
+8503
+138
+125
+98.40
+98.55
+98.47
+4.1­mini
+SO
+8414
+96
+252
+98.87
+97.09
+97.97
+Baseline
+8518
+116
+110
+98.65
+98.72
+98.69
+At full scale, both agents perform well on both generations, with only small differences
+in F1. The baseline maintains a slight edge on GPT­4o­global (98.41%) and GPT­4.1­
+nano (96.75%), while the SO­Agent stays close behind with 96.76% and 95.52%. This
+suggests that at larger scales, generational changes from 4o to 4.1 do not produce large
+shifts in tool invocation accuracy, and both agents remain strong.
+At the mini scale, however, generational differences are more visible. Moving from GPT­
+4o­mini to GPT­4.1­mini, both agents improve: the SO­Agent rises from 95.64% to 97.97%
+F1, while the baseline improves from 98.47% to 98.69%.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+37
+==PAGE:46==
+Model Scale
+We now examine the effect of model scale by comparing full and mini
+variants within the same generation. Tables 6.5 and 6.6 report results for GPT­4o and
+GPT­4.1, respectively.
+Table 6.5: Performance across scales in GPT­4o (global vs. mini).
+Model
+Agent
+TP
+FP
+FN
+Precision (%)
+Recall (%)
+F1 (%)
+4o­global
+SO
+8207
+211
+338
+97.49
+96.04
+96.76
+Baseline
+8439
+139
+135
+98.38
+98.45
+98.41
+4o­mini
+SO
+8182
+527
+218
+93.94
+97.40
+95.64
+Baseline
+8503
+138
+125
+98.40
+98.55
+98.47
+Table 6.6: Performance across scales in GPT­4.1 (nano vs. mini).
+Model
+Agent
+TP
+FP
+FN
+Precision (%)
+Recall (%)
+F1 (%)
+4.1­nano
+SO
+8215
+386
+384
+95.51
+95.53
+95.52
+Baseline
+8421
+358
+207
+95.92
+97.60
+96.75
+4.1­mini
+SO
+8414
+96
+252
+98.87
+97.09
+97.97
+Baseline
+8518
+116
+110
+98.65
+98.72
+98.69
+For GPT­4o, scaling down from the global to the mini version shows only modest differ­
+ences. The baseline agent remains strong and stable, with F1 scores of 98.41% (global)
+and 98.47% (mini). The SO­Agent, however, experiences a small decline from 96.76%
+to 95.64%, reflecting greater sensitivity to reduced model size. This suggests that for the
+GPT­4o family, structured reasoning benefits more from the representational capacity of
+the larger model.
+For GPT­4.1, the scale effect is more clear. The baseline’s precision rises from 95.92%
+to 98.65% and recall from 97.60% to 98.72%, lifting F1 from 96.75% to 98.69%. The
+SO­Agent improves even more: precision jumps from 95.51% to 98.87% and recall from
+95.53% to 97.09%, raising F1 from 95.52% to 97.97%. In terms of error count, SO’s false
+positives drop sharply from 386 to 96, and false negatives also decrease from 384 to 252.
+The baseline similarly reduces both FP from 358 to 116 and FN from 207 to 110. Overall,
+this shows that along the scale axis, GPT­4.1­mini delivers stronger performance than
+GPT­4o­mini.
+Model Type
+Lastly, we examine whether reasoning­optimized models behave differently
+from general­purpose GPT models when applied to tool invocation. Table 6.7 reports
+results for GPT­4o­global, o3­mini, and o4­mini.
+When comparing general­purpose GPT models to reasoning­optimized models, we ob­
+serve sharp differences in how the two agents perform. On the general­purpose GPT­4o­
+global, both agents achieve strong results with only a narrow F1 gap (98.41% baseline
+vs. 96.76% SO). However, the picture changes dramatically in reasoning models.
+On o3­mini and o4­mini, the baseline agent collapses: recall drops to 68.76% and 67.89%,
+respectively, yielding F1 scores near 80%. In these same settings, the SO­Agent achieves
+near­perfect reliability (F1 = 99.06% on o3­mini and 98.52% on o4­mini), driven by dra­
+matically fewer false negatives.
+38
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:47==
+Table 6.7:
+Performance across model types:
+general­purpose GPT vs. reasoning­
+optimized models (tool selection).
+Model Type
+Agent
+TP
+FP
+FN
+Precision (%)
+Recall (%)
+F1 (%)
+4o­global
+SO
+8207
+211
+338
+97.49
+96.04
+96.76
+Baseline
+8439
+139
+135
+98.38
+98.45
+98.41
+o3­mini
+SO
+7448
+37
+103
+99.50
+98.63
+99.06
+Baseline
+5932
+56
+2695
+99.06
+68.76
+81.17
+o4­mini
+SO
+5924
+41
+136
+99.31
+97.75
+98.52
+Baseline
+5858
+72
+2770
+98.79
+67.90
+80.48
+The baseline logs reveal an important behavioral pattern: in reasoning models, the base­
+line tends to output only a single tool call per query. This outcome is consistent with the
+default function­calling design, where reasoning models are conservative about generat­
+ing uncertain outputs. Without explicit reasoning guidance in the prompt, the model often
+terminates its chain of thought early to avoid hallucinations, leaving multi­step queries
+incomplete.
+(a) Baseline agent with GPT­4o
+(b) Baseline agent with o4­mini
+Figure 6.3: Impact of model type on baseline agent outputs.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+39
+==PAGE:48==
+By contrast, the SO­Agent explicitly enforces step­by­step reasoning in the system prompt.
+This guidance encourages the model to generate the full sequence of tool calls needed
+to resolve complex queries.
+Figure 6.4: SO­Agent with o4­mini
+However, this added reasoning depth comes with a cost. As shown in Table 6.2, the
+number of exception cases rises sharply compared to GPT­4o: while GPT­4o reported
+no unparseable responses, o3­mini and o4­mini produced 478 and 1,258 unparseable
+cases, respectively.
+Two main factors explain this. First, the stricter reasoning requirements increase the com­
+plexity of structured outputs, making them harder to format consistently. Second, when
+the agent cannot find a convincing rationale to terminate its reasoning, the structured out­
+put may continue to expand until exceeding the maximum token limit, resulting in invalid
+responses.
+In general, while the structured reasoning approach introduces more frequent failure
+cases during generation, the successfully parsed outputs are far more reliable.
+40
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:49==
+Summary
+Table 6.8 reports precision, recall, and F1 scores across all evaluated mod­
+els, comparing the SO­Agent with the baseline tool­calling agent. Both agents achieve
+strong overall performance, though their relative strengths vary depending on the model
+family.
+Table 6.8: Performance comparison between SO­Agent and baseline agent across mod­
+els (tool selection).
+Model
+Agent
+TP
+FP
+FN
+Precision (%)
+Recall (%)
+F1 (%)
+4o­global
+SO
+8207
+211
+338
+97.49
+96.04
+96.76
+Baseline
+8439
+139
+135
+98.38
+98.45
+98.41
+4o­mini
+SO
+8182
+527
+218
+93.94
+97.40
+95.64
+Baseline
+8503
+138
+125
+98.40
+98.55
+98.47
+4.1­nano
+SO
+8215
+386
+384
+95.51
+95.53
+95.52
+Baseline
+8421
+358
+207
+95.92
+97.60
+96.75
+4.1­mini
+SO
+8414
+96
+252
+98.87
+97.09
+97.97
+Baseline
+8518
+116
+110
+98.65
+98.72
+98.69
+o3­mini
+SO
+7448
+37
+103
+99.50
+98.63
+99.06
+Baseline
+5932
+56
+2695
+99.06
+68.76
+81.17
+o4­mini
+SO
+5924
+41
+136
+99.31
+97.75
+98.52
+Baseline
+5858
+72
+2770
+98.78
+67.89
+80.47
+In conclusion, although the SO­Agent performs slightly below the baseline agent at the
+tool invocation level, the difference is minor and well within an acceptable range. In ex­
+change, the SO­Agent provides transparent reasoning traces that make failure cases
+more diagnosable, while also reducing both latency and computational cost compared
+to specialized reasoning models. Furthermore, our results indicate that, when paired with
+the SO­Agent, a general­purpose model such as GPT­4o can achieve performance close
+to that of o4­mini, thereby offering comparable accuracy with significant savings in time
+and cost
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+41
+==PAGE:50==
+6.2.4
+Argument Invocation Results
+We now turn to the evaluation of argument invocation, where the task is not only to select
+the correct tools but also to supply them with the correct and complete arguments. As
+in the tool invocation analysis, results are also examined along three dimensions: model
+generation, model scale, and model type. Finally, we provide an overall summary table
+that consolidates performance across all evaluated models.
+Model Generation
+We first examine the effect of model generation by comparing GPT­
+4o and GPT­4.1 at comparable scales. Tables 6.9 and 6.10 present results for the full and
+mini versions, respectively.
+Table 6.9: Argument­level performance across generations at full scale.
+Model
+Agent
+TP
+FP
+FN
+Precision (%)
+Recall (%)
+F1 (%)
+4o­global
+SO
+13 446
+662
+752
+95.30
+94.70
+95.00
+Baseline
+13 749
+933
+626
+93.64
+95.64
+94.63
+4.1­nano
+SO
+13 186
+745
+944
+94.65
+93.31
+93.98
+Baseline
+13 709
+832
+652
+94.27
+95.45
+94.86
+Table 6.10: Argument­level performance across generations at mini scale.
+Model
+Agent
+TP
+FP
+FN
+Precision (%)
+Recall (%)
+F1 (%)
+4o­mini
+SO
+13 214
+802
+878
+94.27
+93.76
+94.02
+Baseline
+13 720
+924
+693
+93.69
+95.19
+94.41
+4.1­mini
+SO
+12 923
+684
+1616
+94.97
+88.88
+91.82
+Baseline
+13 798
+932
+640
+93.67
+95.56
+94.61
+At the argument level, both agents remain competitive across generations. At full scale,
+the baseline has slightly higher recall, while the SO­Agent maintains higher precision,
+resulting in comparable F1 scores. At the mini scale, however, the SO­Agent suffers a
+notable drop on GPT­4.1­mini (F1 = 91.82%) driven by a rise in false negatives, while the
+baseline remains more balanced. This indicates that generational effects at the argument
+level are more challenging for the SO­Agent, particularly on smaller models.
+Model Scale
+We next examine the effect of model scale by comparing full and mini
+variants within the same generation. Tables 6.11 and 6.12 present results for GPT­4o and
+GPT­4.1, respectively.
+Table 6.11: Argument­level performance across scales in GPT­4o (global vs. mini).
+Model
+Agent
+TP
+FP
+FN
+Precision (%)
+Recall (%)
+F1 (%)
+4o­global
+SO
+13 446
+662
+752
+95.30
+94.70
+95.00
+Baseline
+13 749
+933
+626
+93.64
+95.64
+94.63
+4o­mini
+SO
+13 214
+802
+878
+94.27
+93.76
+94.02
+Baseline
+13 720
+924
+693
+93.69
+95.19
+94.41
+42
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:51==
+Table 6.12: Argument­level performance across scales in GPT­4.1 (nano vs. mini).
+Model
+Agent
+TP
+FP
+FN
+Precision (%)
+Recall (%)
+F1 (%)
+4.1­nano
+SO
+13 186
+745
+944
+94.65
+93.31
+93.98
+Baseline
+13 709
+832
+652
+94.27
+95.45
+94.86
+4.1­mini
+SO
+12 923
+684
+1616
+94.97
+88.88
+91.82
+Baseline
+13 798
+932
+640
+93.67
+95.56
+94.61
+It is clear that for GPT­4o, both agents remain stable across scales, with F1 scores chang­
+ing by less than one percentage point. In contrast, GPT­4.1 shows greater sensitivity to
+scale. The baseline agent performs consistently between nano and mini, but the SO­
+Agent experiences a noticeable drop. This decline is mainly due to a rise in false nega­
+tives on the mini model (from 944 to 1616), indicating that producing correct structured
+outputs with reasoning becomes more difficult when model size is reduced in the GPT­4.1
+family.
+Model Type
+Finally, we examine whether reasoning­optimized models behave differ­
+ently from general­purpose GPT models when evaluated on argument invocation. Ta­
+ble 6.13 reports results for GPT­4o­global, o3­mini, and o4­mini.
+Table 6.13: Performance across model types: general­purpose GPT vs. reasoning­
+optimized models (argument­level).
+Model Type
+Agent
+TP
+FP
+FN
+Precision (%)
+Recall (%)
+F1 (%)
+4o­global
+SO
+13 446
+662
+752
+95.30
+94.70
+95.00
+Baseline
+13 749
+933
+626
+93.64
+95.64
+94.63
+o3­mini
+SO
+10 447
+470
+2583
+95.69
+80.17
+87.25
+Baseline
+10 198
+682
+297
+93.73
+95.41
+95.41
+o4­mini
+SO
+9895
+422
+403
+95.90
+96.08
+95.99
+Baseline
+10 072
+638
+351
+94.04
+96.63
+95.32
+A notable result is observed on o3­mini, where the SO­Agent performs poorly, with recall
+reduced to 80.17% and F1 dropping to 87.25%. A key driver is the 2,583 false nega­
+tives, far higher than for any other model. It is showing that o3­mini with the SO­Agent
+frequently fails to generate the required arguments, leaving many predictions incomplete.
+In contrast, the baseline remains much more balanced, achieving a strong F1 of 95.41%.
+On o4­mini, performance stabilizes again, with both agents performing similarly and the
+SO­Agent achieving a marginally higher F1.
+Overall, these results indicate that argument­level evaluation poses a particular chal­
+lenge of generating structured output with reasoning for reasoning­specialized models.
+For models such as o3, it is especially difficult for the LLM to generate both correct and
+sufficient arguments, leading to reduced robustness compared to general­purpose mod­
+els.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+43
+==PAGE:52==
+Summary
+Table 6.14 shows argument­level performance across all evaluated mod­
+els. As in tool invocation, both agents achieve broadly high precision, but their relative
+strengths vary. The baseline consistently maintains higher recall, while the SO­Agent
+emphasizes precision. However, the SO­Agent shows greater sensitivity to performance
+drops on smaller reasoning models, as demonstrated by o3­mini.
+Table 6.14: Overall argument­level performance comparison between SO­Agent and
+baseline agent across models.
+Model
+Agent
+TP
+FP
+FN
+Precision (%)
+Recall (%)
+F1 (%)
+4o­global
+SO
+13 446
+662
+752
+95.30
+94.70
+95.00
+Baseline
+13 749
+933
+626
+93.64
+95.64
+94.63
+4o­mini
+SO
+13 214
+802
+878
+94.27
+93.76
+94.02
+Baseline
+13 720
+924
+693
+93.69
+95.19
+94.41
+4.1­nano
+SO
+13 186
+745
+944
+94.65
+93.31
+93.98
+Baseline
+13 709
+832
+652
+94.27
+95.45
+94.86
+4.1­mini
+SO
+12 923
+684
+1616
+94.97
+88.88
+91.82
+Baseline
+13 798
+932
+640
+93.67
+95.56
+94.61
+o3­mini
+SO
+10 447
+470
+2583
+95.69
+80.17
+87.25
+Baseline
+10 198
+682
+297
+93.73
+95.41
+95.41
+o4­mini
+SO
+9895
+422
+403
+95.90
+96.08
+95.99
+Baseline
+10 072
+638
+351
+94.04
+96.63
+95.32
+6.3
+Gorilla Benchmark Evaluation
+6.3.1
+Evaluation Setup
+In the Gorilla leaderboard benchmark, our contribution was to extend the setup by de­
+ploying GPT­4o and GPT­4o­mini through Azure OpenAI, as these deployments were not
+part of the original benchmark. Furthermore, we modify the OpenAI Chat Completions
+API inference to support our structured output agent.
+Figure 6.5: Gorilla Leaderboard workflow
+44
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:53==
+The experiments were conducted across two main categories: single­turn and multi­turn.
+For the single­turn evaluation, four test sets were used:
+• Simple: single function calls
+• Multiple: multiple function calls executed in sequence
+• Parallel: multiple function calls executed in parallel
+• Parallel­Multiple: combined cases of parallel and sequential function calls
+For the multi­turn evaluation, four test sets were used:
+• Base: standard multi­turn function call entries
+• Multi_turn_miss_func: multi­turn cases with missing functions
+• Multi_turn_miss_param: multi­turn cases with missing parameters
+• Multi_turn_long_context: multi­turn function calls with long context
+We adopted the official evaluation pipeline provided by the Gorilla research group [24].
+The evaluation metrics are already implemented in the released framework, and our ex­
+periments therefore follow their established work.
+6.3.2
+Result
+Tables 6.15 and 6.16 present evaluation results on the Gorilla benchmark in the single­turn
+and multi­turn settings, respectively. In this case, the baseline agent results are taken from
+the Berkeley Function Calling Leaderboard[25], while the SO­Agent results are produced
+by our own implementation. This contrasts with the XLAM benchmark in the last section,
+where both baseline and SO­Agent results were generated within our experiments.
+Table 6.15: Evaluation results on Gorilla benchmark in the single­turn setting.
+Model
+Setup
+Overall
+Simple
+Multiple
+Parallel
+Multi Parallel
+4o
+Standard
+83.88
+76.50
+91.00
+90.00
+78.00
+SO
+89.43
+90.75
+90.50
+87.50
+89.00
+4o­mini
+Standard
+80.40
+70.58
+87.50
+86.00
+77.50
+SO
+85.75
+80.50
+88.50
+87.00
+87.00
+In the single turn setting (Table 6.15), the SO­Agent demonstrates strong improvements
+over the baseline. The most notable gain is in the most challenging category, Multi Par­
+allel, where accuracy rises by more than 10%. In the Parallel and Multiple categories,
+the SO­Agent performs slightly below the baseline, but the gaps are small, only about
+1% and 2.5%, respectively. The Simple case shows the largest improvement, with gains
+close to 15%. In addition, the SO­Agent raises the Overall accuracy to nearly 90%, which
+is among the highest levels of performance observed across all models on the Gorilla
+benchmark.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+45
+==PAGE:54==
+Table 6.16: Evaluation results on Gorilla benchmark in the multi­turn setting.
+Model
+Setup
+Overall
+Base
+Miss Func
+Miss Param
+Long Context
+4o
+Standard
+42.50
+55.50
+34.50
+29.00
+51.00
+SO
+38.40
+58.00
+35.50
+10.40
+50.00
+4o­mini
+Standard
+30.12
+43.50
+13.50
+26.00
+37.50
+SO
+15.10
+25.00
+8.70
+6.90
+19.80
+In the multi­turn setting (Table 6.16), we observe that the SO­Agent requires larger­scale
+models to perform effectively. On 4o­mini, performance drops sharply compared to the full
+4o model, which means that structured output with reasoning is a heavy and challenging
+task for smaller models. With the full 4o, the SO­Agent achieves better performance in
+the Base and Miss Function categories, and performs extremely close to the baseline in
+Long Context. However, it struggles severely when tool definitions are missing required
+parameters, where performance falls far behind the baseline. This shows that the SO­
+Agent has difficulty handling cases in which much of the necessary information is absent.
+46
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:55==
+7
+Conclusion and Future Work
+7.1
+Conclusion
+This thesis investigated whether structured output with embedded reasoning can improve
+the accuracy, reliability, and interpretability of tool calling with large language models. Our
+work was guided by four research questions (RQ1–RQ4) introduced in Chapter 1. In this
+section, we revisit each research question and summarize the main findings, followed by
+a general conclusion.
+RQ1: How can we design a tool calling approach that returns both the tool
+call and the supporting reasoning behind it?
+Our results show that the key to answering this question is to use a structured output
+format that includes both the reasoning steps and the tool call. This format makes sure that
+the model explains its thinking and gives the tool call together. To make this work, we use
+chain­of­thought (CoT) prompting, which helps the model first show its reasoning before
+producing the tool call. With this schema and CoT support, we reach a high level of format
+accuracy, which makes downstream parsing and evaluation more reliable. Compared
+with the baseline agent, which only outputs raw function calls without explanation, the
+SO­Agent provides greater transparency, better control, and more consistent accuracy
+across tasks.
+RQ2: What is the effect of embedding chain­of­thought reasoning on tool
+selection and argument invocation?
+Embedding reasoning traces substantially affected both tool selection and argument ac­
+curacy. At the tool level, the SO­Agent reduced false negatives in complex queries that
+required multiple tool calls, particularly on reasoning­optimized models such as o3­mini
+and o4­mini. This improvement was achieved because the reasoning trace guided the
+model to generate full tool chains instead of prematurely terminating after a single call,
+which was a frequent behavior of the baseline agent.
+At the argument level, the SO­Agent generally increased precision, producing more schema­
+consistent and interpretable arguments. However, this came at the cost of recall in some
+cases. Stricter reasoning occasionally led to more conservative predictions or absten­
+tions, resulting in higher numbers of unparseable or incomplete outputs. Thus, the chain­
+of­thought mechanism improved reliability but also introduced new forms of errors that
+need to be managed.
+RQ3: How can we design and enforce a structured output schema that
+conforms to a specific tool call format while embedding reasoning without
+breaking parsing?
+For RQ3, we find that strict schema enforcement is the critical factor that allows reasoning
+and tool calls to be reliably integrated into one format. By adopting OpenAI’s native tool
+call object and enforcing constraints such as strict: true and additionalProperties:
+false, the schema ensures that outputs are both machine executable and transparent.
+This design enabled deterministic parsing and reliable evaluation while keeping reason­
+ing tightly aligned with tool invocation. However, the stricter enforcement also reduces
+flexibility, requiring models to adapt to tighter format boundaries.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+47
+==PAGE:56==
+RQ4:Can structured output with embedded reasoning enable
+non­reasoning models (e.g., GPT­4o) to approach the tool call accuracy of
+reasoning­augmented models (e.g., GPT­o4)?
+Our experiments show that structured output with embedded reasoning enables non­
+reasoning models such as GPT­4o to achieve tool call accuracy that is close to, and in
+some cases even better than, reasoning­optimized models like o4­mini and o3­mini when
+used with the baseline agent. The SO­Agent delivers strong and stable performance on
+general­purpose models, narrowing the gap without requiring specialized reasoning ar­
+chitectures. This means that comparable accuracy can be achieved while saving both
+computation time and financial cost.
+General Conclusion
+Overall, this thesis shows that structured output with embedded reasoning is a promising
+framework for improving tool calling performance. The SO­Agent consistently delivered
+more reliable and interpretable outputs across diverse model families, especially in sce­
+narios where the baseline struggled with incomplete or hallucinated tool calls. While the
+approach introduced additional complexity and higher rates of unparseable responses on
+reasoning models, these trade­offs were outweighed by the gains in robustness, preci­
+sion, and interpretability.
+The central contribution of this work is the demonstration that structured reasoning not
+only enhances tool­call accuracy but also provides a clearer window into why failures
+occur. This transparency enables more effective debugging and downstream correction
+than baseline tool calling.
+7.2
+Future Work
+While this thesis provides evidence that structured output with embedded reasoning can
+improve the robustness and interpretability of tool calling, several limitations remain. These
+open avenues for future research:
+Real­world multi­turn evaluation
+The current evaluation relied on synthetic and pre­designed multi­turn scenarios derived
+from benchmark datasets. Although these cases capture many challenging aspects of tool
+invocation, they do not fully reflect the dynamics of real­world usage, where conversations
+unfold in unpredictable ways and context may shift across turns. A natural next step is
+to embed the SO­Agent into industrial workflows and log its performance in live multi­turn
+interactions.
+Intelligent memory management
+Our implementation of multi­turn reasoning employed a simple memory strategy: all prior
+turns were concatenated into the conversation history until a finish_session() call sig­
+naled termination. While effective for controlled experiments, this strategy is not directly
+transferable to real­world systems, where no explicit termination signal exists. A promis­
+ing direction is to design an adaptive memory module that can automatically distinguish
+between relevant and irrelevant prior turns.
+Expanding to new function­calling APIs
+This thesis focused primarily on the Chat Completion API for structured function call­
+ing. However, the landscape of model APIs is evolving rapidly. The recently released
+Response API, for instance, includes built­in reasoning mechanisms and different affor­
+dances for tool integration. A systematic comparison across APIs­examining not only raw
+accuracy but also reliability, latency, and interpretability, would deepen our understanding
+of how structured reasoning interacts with underlying model infrastructure.
+48
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:57==
+Bibliography
+[1]
+Ashish Vaswani et al. “Attention is all you need”. In: Advances in Neural Information
+Processing Systems. Vol. 30. 2017. URL: https://arxiv.org/abs/1706.03762.
+[2]
+Tom B. Brown et al. “Language Models are Few­Shot Learners”. In: Advances in
+Neural Information Processing Systems 33 (2020), pp. 1877–1901.
+[3]
+Jared Kaplan et al. Scaling Laws for Neural Language Models. 2020. arXiv: 2001.
+08361 [cs.LG]. URL: https://arxiv.org/abs/2001.08361.
+[4]
+Jordan Hoffmann et al. Training Compute­Optimal Large Language Models. 2022.
+arXiv: 2203.15556 [cs.CL]. URL: https://arxiv.org/abs/2203.15556.
+[5]
+Timo Schick et al. Toolformer: Language Models Can Teach Themselves to Use
+Tools. 2023. arXiv: 2302.04761 [cs.CL]. URL: https://arxiv.org/abs/2302.04761.
+[6]
+OpenAI. OpenAI Function Calling. OpenAI documentation. Accessed: 2025­07­09.
+2024. URL: https://platform.openai.com/docs/guides/function-calling?api-mode=
+responses.
+[7]
+Colin Jarvis and Joe Palermo. How to call functions with chat models. https://
+cookbook.openai.com/examples/how_to_call_functions_with_chat_models. Ac­
+cessed on 2025­09­03. June 2023.
+[8]
+Connor Shorten et al. Querying Databases with Function Calling. 2025. arXiv: 2502.
+00032 [cs.DB]. URL: https://arxiv.org/abs/2502.00032.
+[9]
+Jacky Liang et al. Code as Policies: Language Model Programs for Embodied Con­
+trol. 2023. arXiv: 2209.07753 [cs.RO]. URL: https://arxiv.org/abs/2209.07753.
+[10]
+César Bastos Da Silva et al. “Robotic Action Planning Using Large Language Mod­
+els”. In: 2024 Latin American Robotics Symposium (LARS). 2024, pp. 1–6. DOI:
+10.1109/LARS64411.2024.10786412.
+[11]
+Vasilios Mavroudis. “LangChain v0.3”. working paper or preprint. Dec. 2024. URL:
+https://hal.science/hal-04817573.
+[12]
+Diyi Xu et al. “Gorilla: Large Language Model Connected with Massive APIs”. In:
+arXiv preprint arXiv:2305.15334 (2024). URL: https://arxiv.org/abs/2305.15334.
+[13]
+Jason Wei et al. “Emergent abilities of large language models”. In: Transactions on
+Machine Learning Research (2022).
+[14]
+Jason Wei et al. “Chain of Thought Prompting Elicits Reasoning in Large Language
+Models”. In: arXiv preprint arXiv:2201.11903 (2022).
+[15]
+Xuezhi Wang et al. “Self­consistency improves chain of thought reasoning in lan­
+guage models”. In: arXiv preprint arXiv:2203.11171 (2022).
+[16]
+Takeshi Kojima et al. “Large language models are zero­shot reasoners”. In: Ad­
+vances in neural information processing systems 35 (2022), pp. 22199–22213.
+[17]
+Ofir Press, Noah A Smith, and Omer Levy. “Measuring and narrowing the compo­
+sitionality gap in language models”. In: arXiv preprint arXiv:2210.03350 (2022).
+[18]
+Jason Wei et al. Finetuned Language Models Are Zero­Shot Learners. 2022. arXiv:
+2109.01652 [cs.CL]. URL: https://arxiv.org/abs/2109.01652.
+[19]
+Mia Cate. “Understanding Zero­Shot and Few­Shot Learning in LLMs”. In: (June
+2023).
+[20]
+Shunyu Yao et al. “ReAct: Synergizing Reasoning and Acting in Language Models”.
+In: arXiv preprint arXiv:2210.03629 (2023). URL: https://arxiv.org/abs/2210.03629.
+[21]
+Katia Gil Guzman(OpenAI). Introduction to Structured Output. OpenAI CookBook.
+Accessed: 2025­07­09. 2024. URL: https://cookbook.openai.com/examples/structured_
+outputs_intro.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+49
+==PAGE:58==
+[22]
+Paul Johannesson and Erik Perjons. An Introduction to Design Science. Informa­
+tion Systems and Applications, incl. Internet/Web, and HCI. Cham: Springer, 2014.
+ISBN: 978­3­319­10631­1. DOI: 10.1007/978-3-319-10632-8.
+[23]
+Zuxin Liu et al. “APIGen: Automated Pipeline for Generating Verifiable and Diverse
+Function­Calling Datasets”. In: arXiv preprint arXiv:2406.18518 (2024).
+[24]
+Shishir G. Patil et al. “The Berkeley Function Calling Leaderboard (BFCL): From
+Tool Use to Agentic Evaluation of Large Language Models”. In: Advances in Neural
+Information Processing Systems. 2024.
+[25]
+Gorilla Team. Gorilla Function Calling Leaderboard. https://gorilla.cs.berkeley.edu/
+leaderboard.html. Accessed: 2025­09­16. 2025.
+50
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:59==
+A
+Response Schema Specification
+The following JSON schema was used to enforce structured output during function­calling
+inference. It is passed via the response_format parameter using chat completion API
+1
+response_format = {
+2
+"type": "json_schema",
+3
+"json_schema": {
+4
+"name": "response_format",
+5
+"strict": True,
+6
+"schema": {
+7
+"type": "object",
+8
+"properties": {
+9
+"reasoning": {
+10
+"type": "string",
+11
+"description": "A detailed explanation outlining the reasoning
+behind invoking the tool calls and any missing information. It
+should be between 50 and 500 words. It should be finished with
+an argument like 'tools should be called: 1- ... 2- ..., etc'",
+12
+},
+13
+"tool_calls": {
+14
+"type": "array",
+15
+"description": "A list of tool calls to be executed without any
+repetition. There is a penalty for having unnecessary
+repetitions.",
+16
+"items": {
+17
+"type": "object",
+18
+"properties": {
+19
+"id": {
+20
+"type": "string",
+21
+"description": "A unique identifier in UUID format for this
+tool call."
+22
+},
+23
+"type": {
+24
+"type": "string",
+25
+"enum": ["function"],
+26
+"description": "Must always be 'function' as per OpenAI's tool
+call format."
+27
+},
+28
+"function": {
+29
+"type": "object",
+30
+"description": "A tool that needs to be executed.",
+31
+"properties": {
+32
+"name": {
+33
+"type": "string",
+34
+"description": "The name of the tool being invoked."
+35
+},
+36
+"arguments": {
+37
+"type": "string",
+38
+"description": "A stringified JSON object containing the
+required parameters for the function."
+39
+}
+40
+},
+41
+"required": ["name", "arguments"],
+42
+"additionalProperties": False
+43
+}
+44
+},
+45
+"required": ["id", "type", "function"],
+46
+"additionalProperties": False
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+51
+==PAGE:60==
+47
+}
+48
+}
+49
+},
+50
+"required": ["reasoning", "tool_calls"],
+51
+"additionalProperties": False
+52
+}
+53
+}
+54
+}
+Listing A.1: Response Format JSON Schema
+52
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:61==
+B
+Agent Prompt
+1
+REASONING_PROMPT = """
+2
+You are an Agent to generate to provide the answer to user's request using the
+available tools with the right arguments and in the right format.You
+should either provide the next tool that should be used or use
+finish_session() to complete.
+3
+4
+Response Format:
+5
+Your response should be always based on response_format and it should have
+reasoning and tool_calls.
+6
+1. reasoning: Explain step-by-step tools should be considered for the user's
+request and the available or missing argument values. It will be ended
+with 'tools should be called: 1- ... 2- ..., etc'.
+7
+2. tool_calls: A list of tool call objects that follow strict OpenAI function
+calling format.
+8
+Each tool call must include:
+9
+- "id": A unique identifier for this tool call.
+10
+- "name": The exact name of the tool to be invoked.
+11
+- "arguments": A stringified JSON object with **no trailing brackets or
+quotation marks**.
+12
+- Do not add extra quotes or backslashes.
+13
+- Do not wrap the entire string in another pair of quotes.
+14
+- Output must be directly parsable by `json.loads(...)` in Python.
+15
+If you are unsure , ask yourself: would `json.loads(arguments)` work
+without error? If not, revise.
+16
+17
+18
+Reasoning Guidelines:
+19
+1. Use step-by-step REASONING in the "reasoning" field. Explaining which tool(
+s) are selected and why, and whether any information is missing.
+20
+2. For each sub-task in the user request:
+21
+- If all required arguments are present ,include a valid tool call.
+22
+- If the tool name is known but some required arguments are missing ,
+23
+include a partial tool call in tool_calls:
+24
+- Fill in all arguments the assistant is confident about.
+25
+- Set missing required arguments to empty strings (`""`),do NOT guess
+or hallucinate.
+26
+27
+Structured Response Format (Schema):
+28
+Your output must be a JSON object with two fields:
+29
+1) reasoning —
+step-by-step explanation of which tool(s) to use, why, and
+which arguments are present vs. missing. End with: 'tools should be called
+: 1- ..., 2- ..., etc'.
+30
+2) tool_calls — an array of OpenAI function -calling objects.
+31
+32
+33
+Prohibited Patterns (Must Not Do):
+34
+1. Do not create wrapper tools such as 'multi_tool_use.parallel' or '
+batch_tool_executor'.
+35
+2. Do not include internal fields like 'recipient_name', 'parameters', or '
+tool_uses'.
+36
+3. Each tool must be invoked individually in the `tool_calls ` list using the
+following format:
+37
+- "function": { "name": "tool_name", "arguments": "stringified JSON" }
+38
+- Do not add any prefixes like "functions." to tool names.For example , use
+"hotel_availability_checker", NOT "functions.hotel_availability_checker
+".
+39
+- Do not wrap tools inside another tool.
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+53
+==PAGE:62==
+40
+4. Do not repeat a tool call. If a tool has already been provided with the
+right arguments , do not repeat it again when it is not necessary. There is
+a penalty for having unnecessary tool calls.
+41
+""".strip()
+Listing B.1: SO­Agent Prompt
+54
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+==PAGE:63==
+Improving Tool Calling Accuracy via Structured Output with Embedded Reasoning
+55
+==PAGE:64==
+Technical
+University of
+Denmark
+Building 321
+2800 Kgs. Lyngby
+Tlf. 4525 1700
+www.dtu.dk

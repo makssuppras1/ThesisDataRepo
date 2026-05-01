@@ -1,0 +1,1945 @@
+==PAGE:1==
+M.Sc. Thesis
+Master of Science in Engineering
+Visual Place Recognition
+Leveraging GPS in Visual Place Recognition with
+Deep Learning
+Alexander Bøgely Holstrup (s164566)
+Kongens Lyngby 2021
+==PAGE:2==
+DTU Compute
+Department of Applied Mathematics and Computer Science
+Technical University of Denmark
+Matematiktorvet
+Building 303B
+2800 Kongens Lyngby, Denmark
+Phone +45 4525 3031
+compute@compute.dtu.dk
+www.compute.dtu.dk
+==PAGE:3==
+Abstract
+In this thesis we tackle the problem of visual place recognition; The task of matching
+an image of a place, with other images of the same place. Currently, the definition
+of the ”same place” is when two images are taken within 25 meters of each other,
+yet this definition has not been challenged until now. Furthermore, modern place
+recognition datasets contain vast amounts of geographical information, but it mostly
+goes unused.
+This thesis contributes with a new take on place recognition. Through our work
+we try to actively utilize the geographical information available, to learn a more
+fine-grained representation of images, such that latent distances better represent ge-
+ographical distances. To achieve this goal we contribute several novel loss functions
+that take geographical information into account. Two of which apply the geographical
+distance between images, while the other estimates a field-of-view overlap. We experi-
+ment with using our loss functions to train a place recognition model in an end-to-end
+manner, and as a post-processing whitening step. Additionally, we contribute with
+a technique for mining images during training, that relies on geographical distances
+rather than descriptor distances, as is the case with current state-of-the-art methods.
+Through extensive experimentation, we show that our loss functions lead to de-
+creased performance when used to train models in an end-to-end manner, however
+when used solely to train a whitening layer we reach existing state-of-the-art perfor-
+mance. In order to assess how well our methods correlate geographical distances with
+latent distances we implement several correlation metrics. Through those metrics we
+present results showing that our models do not lead to an increase in correlation. We
+find that the low correlation is due to the diﬀiculty in accurately estimating fields-of-
+view. Lastly, we analyze our results by giving concrete qualitative examples that offer
+hints as to why we do not break state-of-the-art or successfully create a correlation
+between latent distances and geographical distances. We show how semantic cues
+play an important role in establishing a correlation.
+==PAGE:4==
+ii
+==PAGE:5==
+Preface
+This master thesis was prepared at the department of Applied Mathematics and
+Computer Science at the Technical University of Denmark in fulfillment of the re-
+quirements for acquiring a M.Sc. degree in Engineering (Computer Science and En-
+gineering).
+This work would not have been possible without mentoring, guidance and insight-
+ful discussions with Frederik Warburg. I would also like to thank Søren Hauberg for
+supervising this project, and guiding me and Frederik through this research.
+Lastly, it wouldn’t have been possible without the love and support of my family.
+Alexander Bøgely Holstrup (s164566)
+Kongens Lyngby, July 16, 2021
+==PAGE:6==
+iv
+==PAGE:7==
+Contents
+Abstract
+i
+Preface
+iii
+Contents
+v
+1
+Introduction
+1
+1.1
+Motivation
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2
+Related Work
+5
+2.1
+Visual Place Recognition . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+2.2
+Loss Functions
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+3
+GPS in Place Recognition
+9
+3.1
+Field-of-View Similarity . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+3.2
+Proposed Loss Functions . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+3.3
+Whitening Layer . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+4
+Experiments
+15
+4.1
+Dataset
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+4.2
+Network . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+16
+4.3
+Training Procedures
+. . . . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+4.4
+Evaluation Metrics . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+5
+Results & Discussion
+21
+5.1
+GPS Loss Functions - End to end . . . . . . . . . . . . . . . . . . . . .
+21
+5.2
+GPS Loss Functions - Whitening . . . . . . . . . . . . . . . . . . . . .
+23
+5.3
+Intra-class Performance
+. . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+5.4
+Qualitative Analysis . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+31
+6
+Conclusion
+37
+Bibliography
+39
+Acronyms
+43
+==PAGE:8==
+vi
+Contents
+Appendix
+45
+==PAGE:9==
+CHAPTER 1
+Introduction
+Visual Place Recognition is a computer vision task with the goal of recognizing images
+from the same location. The convention is to let two images be from the same location,
+if they are taken within 25 meters of each other. Place recognition is particularly
+important when designing autonomous robots, because robot navigation often relies
+on Simultaneous Localization and Mapping (SLAM). A critical component of SLAM
+is loop closure detection i.e. knowing when an agent has returned to a previously
+visited location. For robots relying on camera sensors, visual place recognition can
+be a useful component in GPS-denied environments for identifying when the robot
+has returned to a previously visited location. Examples of such environments could
+be indoors or in urban canyons.
+However, despite receiving significant interest in the research community, visual
+place recognition remains a diﬀicult problem to solve. Specifically, making a model
+robust against appearance changes such as changes in viewpoint, season and time of
+day can be particularly challenging.
+Query
+Positive
+Figure 1.1: Three examples of query images, with a corresponding image taken
+within 25 meters of the query image. We denote such images as posi-
+tives.
+==PAGE:10==
+2
+1 Introduction
+Fortunately, the increased attention in the research community has fuelled the
+interest for creating new place recognition datasets. Just in the last few years, re-
+searchers have published numerous datasets with millions of images[42][25][40]. Some
+of which include detailed information on coordinates and viewpoint, yet there has been
+little research into how this information could be used during training. Most state-
+of-the-art research use methods that are general to image retrieval, which does not
+include place recognition-specific information like viewpoint and coordinates. Since
+the visual place recognition task is so closely tied to geographical locations, it seems a
+missed opportunity not to use geographical information actively when training mod-
+els.
+This thesis contributes to place recognition research by examining how geograph-
+ical information can be used more actively when training place recognition models.
+We present three new loss functions that each take advantage of the geographical
+information available. Two that compute the exact distance between where images
+were taken, whereas the last uses the visual overlap between images. Common for all
+losses is the goal of learning a linear relationship between intra-class samples, such
+that latent distances better represent geographical distances. In addition to contribut-
+ing three loss functions, we introduce a new approach to descriptor whitening, where
+we try to enforce intra-class differences when whitening.
+To sum up our strides within place recognition research, this thesis will attempt
+to answer the two following questions
+1. How can geographical information be used more actively in place recognition?
+2. How does using geographical information in place recognition impact perfor-
+mance?
+To the best of our knowledge this is one the first times these questions have been
+examined in place recognition research. An example of a previous work is IM2GPS[12],
+which examined how to learn GPS coordinates directly from images. Another recent
+work[18]1 examined how to use an image similarity measure based on geographical
+information in place recognition.
+This thesis is structured as follows; In Chapter 2 we present both past and contem-
+porary research into the place recognition task. In Chapter 3 we present our approach
+to using geographical information to better model the intra-class differences in place
+recognition. In Chapter 4 we explain our experimental setup used for producing the
+results. In Chapter 5 we document our findings through extensive experiments, and
+discuss the results. In Chapter 6 we conclude on our findings, and propose how the
+work presented in this thesis could be used for future research.
+1Pre-print article published 03/21
+==PAGE:11==
+1.1 Motivation
+3
+1.1
+Motivation
+The contributions of this thesis are motivated by improving state-of-the-art in the Vi-
+sual Place Localization task. The visual place localization task, attempts to estimate
+centimeter-accurate 6 degrees-of-freedom (6-DoF) camera pose from which the image
+was taken. Solving such a task could be useful in a variety of contexts. One example
+could be Google Maps’ Visual Positioning System, which uses localization to guide
+users to their desired location with augmented reality2.
+Visual place localization is related to place recognition because many modern
+approaches to place localization rely on place recognition. Methods such as the ones
+presented by Sarlin et al.[31][32] rely on place recognition to retrieve candidate images
+prior to matching candidate images against the query images.
+. . . 
+1: Place Recognition
+2: Spatial Veriﬁcation
+Visual Place Localization
+6-DoF Pose 
+Estimation
+2: Match Database Images
+2:  Database Matching
+Figure 1.2: Simplified overview of how the visual place localization task can be
+solved.
+First a place recognition model identifies a set of candidate
+images, it believes to be from the same place. Afterwards, a spatial
+verification step helps inform a 6-DoF pose estimation.
+The purpose of the matching step is to filter out wrong matches, before trying to
+estimate the pose. Often this matching is based on comparing the descriptors and
+keypoints for the query image with the database images. For the matching step to
+work well it is vital that candidate images retrieved by the place recognition step have
+a visual overlap with the query image. Since researchers working with place recogni-
+tion currently define the ”same place” as images within 25 meters of each other, there
+2https://ai.googleblog.com/2019/02/using-global-localization-to-improve.html
+==PAGE:12==
+4
+1 Introduction
+is no guarantee of visual overlap. Thus our research is motivated by using geographi-
+cal information during training, such that a place recognition model retrieves images
+with high visual overlap. We expect that higher visual overlap between query and
+database image will consequently lead to more accurate 6-DoF pose estimations, since
+visual place localization models are highly dependent on matching visual keypoints
+between images.
+==PAGE:13==
+CHAPTER 2
+Related Work
+In this section we will provide an overview of the research related to this thesis. We
+will start by introducing traditional methods for approaching place recognition, and
+explain the progress made since.
+Visual place recognition in modern research is typically cast as an image retrieval
+problem. In an image retrieval problem, models are trained to find database images
+visually similar to a query image. In visual place recognition, database images taken
+within a given distance from a query image, are considered positives. The rest are
+considered negatives. This concept of defining image similarity by their geographical
+distance makes visual place recognition slightly different from other image retrieval
+problems, as this definition is less closely tied to a similarity in appearance [44]. Two
+pictures from the same place can be visually dissimilar, while pictures from different
+locations can be visually similar.
+2.1
+Visual Place Recognition
+Handcrafted Methods
+Traditionally, place recognition used an aggregation of local hand-crafted represen-
+tations like GIST [24], Fisher vectors [17], bag of words and VLAD [16]. The under-
+lying local representations are typically computed using a locally invariant descriptor
+like SIFT [20] or SURF [5]. These methods were particularly prevalent before the
+breakthrough of deep learning in computer vision. Currently, CNN-based approaches
+are widespread, as they outperform approaches based on hand-crafted features [14].
+Off-the-shelf CNNs
+The earliest approach using Convolutional Neural Networks, CNNs, in place recog-
+nition was presented by Chen et al. in 2014 [7]. In this work, researchers used an
+off-the-shelf version of the OverFeat network[34], which consists of five convolutional
+stages and three fully connected stages. The network was originally trained on Ima-
+geNet to perform image classification, but researches were able to adapt the network
+to place recognition by using the feature vectors output at each layer of the network
+as descriptors. This novel approach to place recognition significantly outperformed
+all other state-of-the-art methods at the time. Like with many other computer vision
+tasks, several other works using off-the-shelf CNNs followed, all achieving superior
+performance to hand-crafted features [38][37][26]. A survey comparing CNN-based
+==PAGE:14==
+6
+2 Related Work
+descriptors to hand-crafted ones, concluded that particularly changes in illumination
+make CNNs superior to hand-crafted features [14]. Specifically, hand-crafted features
+are highly sensitive to changes in illumination, while CNNs are more robust.
+Current Techniques
+Upon discovery of the high-performance of CNNs in place recognition, researches
+started fine-tuning CNNs on place recognition datasets, as opposed to using them out-
+of-the-box from other tasks. Some of the first researchers to do this used the first four
+convolutional layers of AlexNet, and appended it with a fully connected layer[9][19].
+Their instance of AlexNet had been pre-trained on ImageNet, while the fully con-
+nected layer was trained on benchmark datasets like Kitti and Nordland[8][36]. Using
+this technique, researchers were able to outperform other state-of-the-art techniques,
+due to their model’s robustness to viewpoint and weather changes.
+Since the introduction of fine-tuning in place recognition, there has been a focus
+on designing layers specifically for place recognition. One modern, and widely used
+pooling layer for place recognition, is NetVLAD[3]. This layer attempts to imitate
+the original VLAD descriptor in a pooling layer with learnable parameters.
+One
+important difference between VLAD and NetVLAD is that VLAD stores the sum
+of residuals between a descriptor and its corresponding centroid, whereas NetVLAD
+computes a soft-assignment of residuals from each descriptor to all cluster centroids.
+Another widely used pooling layer for place recognition is the generalized-mean
+pooling layer (GeM)[29]. As the name suggests, GeM computes the generalized mean,
+which is parameterized by an exponent p. Since GeM is differentiable, p can be set
+manually, or learnt during training. Furthermore, GeM is a generalization of global
+max pooling (MAC[4][39]), and average pooling (SPoC)[30], such that it becomes max
+pooling when p →∞, and average pooling when p = 1. Using GeM, the authors were
+able to present new state-of-the-art on several benchmark datasets, in some cases
+outperforming NetVLAD by upwards of 20%.
+Finally, a common technique used in current place recognition models is to per-
+form dimensionality reduction and whitening on the image descriptors. Researchers
+Jégou and Chum[16][15] were able to show that performing PCA whitening can pos-
+itively impact place recognition performance. In the original papers, NetVLAD and
+GeM layers both achieve their highest performance by adding whitening as a post-
+processing step. In the case of GeM, the authors propose learning a whitening trans-
+formation through the labelled data as a post-processing step, while other works learn
+the whitening transformation during training of the place recognition network[10].
+Other Approaches
+Another related technique, named IM2GPS[12], takes a different approach to place
+recognition entirely. In this work researches try to estimate GPS coordinates from
+images, by leveraging hand-crafted features such as color histograms, lines in images
+and GIST descriptors. Using these features, they found the 120 closest geotagged
+images in feature-space, and constructed probability map over the earth. Their results
+show that their approach performs 30 times better than random chance. A more
+==PAGE:15==
+2.2 Loss Functions
+7
+recent work[41], uses deep learning to tackle IM2GPS but still with low accuracy. For
+instance, their results show they are within 25km of the correct GPS-coordinates in
+less than 20% of the examples.
+Contrastive 
+Generalised Contrastive 
+Triplet
+Figure 2.1: Intuitive comparison of loss functions used in place recognition. Con-
+trastive loss pulls positives and pushes negatives beyond a margin. Gen-
+eralized Contrastive loss generates both a push and a pull depending
+on the continuous similarity to the query point.
+Triplet loss pushes
+negatives beyond a margin, that is based on the distance to a positive
+point.
+2.2
+Loss Functions
+Loss functions for fine-tuning in visual place recognition typically focus on learning
+from both inter-class and intra-class samples, such that proximity in latent space
+reflects image similarity.
+Arguably, the two most common loss functions in place
+recognition are Contrastive loss and Triplet loss, with several recent papers exploring
+the use of both [29][42][3]. While there has been focus on designing better loss func-
+tions in the research community in recent years, there has been little performance
+gain. A recent survey found newer state-of-the-art loss functions only marginally bet-
+ter than Contrastive loss and Triplet loss[22].
+Contrastive loss[11] is a siamese loss, that takes pairs of points and computes the
+following loss
+LContrastive(xi, xj) = Y · D(xi, xj) + (1 −Y ) · max(0, m −D(xi, xj))2
+==PAGE:16==
+8
+2 Related Work
+where the label Y = 1 indicates the two points corresponding to the same class,
+D(xi, xj) is a distance measure between xi and xj, and m is a margin. The intuition
+behind contrastive loss is, to think of the first term as a stretched spring pulling
+inwards and the second term as a compressed spring pushing outwards. The hyper-
+parameter m indicates when the pushing should stop i.e. when the label Y = 0 and
+D(xi, xj) > m the loss would be LContrastive = 0.
+Whether the first or the second term is contributing to the loss depends on Y ,
+which is a binary variable indicating whether two points belong to the same class.
+Specifically, in place recognition the label indicates whether two points are from the
+same location. However, it does not have to be a binary variable. In a recent work
+by Leyva-Vallina et al.[18] researchers presented a Generalized Contrastive Loss, that
+redefines the the standard contrastive loss to
+LGeneralized(xi, xj) = ψi,jD(xi, xj) + (1 −ψi,j) · max(0, m −D(xi, xj))2
+where ψi,j is a continuous measure for the ground truth similarity between xi and
+xj ranging from 0 (dissimilar) to 1 (similar). In principle, this measure could be
+any similarity measure that ranges from 0 to 1. However, the authors present a 2D
+Field-of-view similarity measure, which estimates the overlap in field-of-view between
+pairs of images by taking their coordinates and angles into consideration.
+Another widely used loss function in place recognition is Triplet loss[33], which
+operates on triplets of points as opposed to pairs of points. Formally, given a triplet
+of points (xq, xp, xn) we compute the triplet loss as:
+LT riplet(xq, xp, xn) = max(0, D(xq, xp) −D(xq, xn) + m)
+where (xq, xp, xn) denote a query point, a positive point and a negative point respec-
+tively. Training with triplet loss therefore attempts to satisfy the constraint that
+D(xq, xp) + m < D(xq, xn).
+Choosing the right loss function is no simple task, as there are advantages and
+drawback to each. Researches usually choose hard-negative mining when using Con-
+trastive loss, as this leads to the fastest convergence, whereas with triplet loss it is less
+obvious which mining technique is preferred[43]. Hard-negative mining often leads to
+a collapsed model when used with triplet loss, so semi-hard negative mining is often
+preferred[33]. However, semi-hard negative mining leaves a narrow band to find neg-
+atives in, so it often stops making progress early. Generalized contrastive loss uses
+a naive mining technique, that does not require computing latent distances, which
+makes it far less computationally expensive. The authors present state-of-the-art re-
+sults with generalized contrastive loss and naïve mining, but these results have not
+been reproduced yet[18].
+In addition, triplet loss has the advantage of not requiring a predefined threshold
+to distinguish between similar and dissimilar images, like contrastive loss does. This
+makes it easier to handle intra-class variance with triplet loss, since it is able to adapt
+different amounts of intra-class variance.
+==PAGE:17==
+CHAPTER 3
+GPS in Place
+Recognition
+The idea of using geographical information in place recognition seems intuitive, given
+that place recognition is the task of identifying images from the same geographical
+location. Yet it remains a largely unexplored topic within place recognition research.
+The recently published dataset, Mapillary Street-Level Sequences (MSLS), contains
+1.68 million images, each labelled with coordinates and compass angles. Through
+experiments, we want to explore how all this information can be used in a meaningful
+way.
+In this section we will therefore introduce three areas where geographical infor-
+mation could be used in place recognition to push state-of-the-art place performance.
+Firstly, we present how GPS coordinates and angles could be used to compute a more
+fine-grained similarity measure between images, as opposed to the binary similarity
+measure widely adopted in place recognition.
+In addition, we present three rank-
+ing losses that take advantage of geographical information. Lastly, we present how
+geographical information can be used in a post-processing whitening layer.
+3.1
+Field-of-View Similarity
+Current place recognition techniques simply define image similarity as a binary mea-
+sure; Either two images are similar or they are not. Typically two images are consid-
+ered similar if they are within 25 meters from each other. However, two images can
+be visually very dissimilar if they are close to 25 meters away or facing in opposite
+directions. In this thesis, we therefore want to challenge that definition, by providing
+a more continuous similarity measure.
+One approach could be to compute field-of-view similarities.
+The field-of-view
+(FOV) refers to the area observable in an image.
+A similarity measure based on
+FOVs could therefore provide a method of quantifying the visual overlap between two
+images. Unfortunately, no place recognition datasets provide the FOV information
+for images. Inspired by Leyva-Vallina[18] we will instead estimate the FOV for each
+image.
+==PAGE:18==
+10
+3 GPS in Place Recognition
+To compute our FOVs we assume the FOV is a 2D circle sector parameterized by
+a set of UTM coordinates (UTME, UTMN), a compass angle CA, an angle θ and
+a radius. The UTM coordinates and compass angle are given in our dataset, while
+the angle and radius are hyperparameters. The radius signifies how far away into the
+image we can see, and the angle θ signifies how wide an angle the given camera offers.
+It should be noted that the dataset used in this thesis is crowdsourced, so the images
+were taken with many different cameras. Thus, there is not a single set of true values
+for r and θ.
+N
+E
+CA
+θ
+(UTME, UTMN)
+Figure 3.1: We denote the green circle sector area the FOV. The center of the circle
+sector is placed on the coordinate (UTME, UTMN), and it spans an
+angle of θ.
+In Figure 3.1 we provide an overview of the circle sector that estimates a FOV.
+The circle sector is centered in the coordinate (UTME, UTMN), and the sector spans
+the angle from [CA −θ
+2, CA + θ
+2]. To mimic the FOV estimates by Leyva-Vallina [18]
+we choose the same θ and r as in their paper, which is θ = 90° and r = 50m.
+In this thesis we will experiment with two different distance measures for FOVs,
+both ranging between 0 and 1. The first one is based on the Intersection-over-Union
+(IoU). For an intersection area AInt and a FOV area AF OV , we compute the DIoU as
+DIoU = 1 −
+AInt
+2AF OV −AInt
+The other similarity measure we will use is the Overlap coeﬀicient, also known as
+the Szymkiewicz–Simpson coeﬀicient. For an intersection area AInt and a FOV area
+AF OV , we compute the overlap coeﬀicient as
+==PAGE:19==
+3.2 Proposed Loss Functions
+11
+DOverlap = 1 −AInt
+AF OV
+Figure 3.2: Example of a query image with two corresponding positives. The posi-
+tives have overlap coeﬀicients of 0,64 (middle image) and 0,36 (bottom
+image).
+3.2
+Proposed Loss Functions
+In this section we will describe three new loss functions for the place recognition
+task, that unlike state-of-the-art methods, all take advantage of the geographical
+information available. Common for all of them, is the goal of learning intra-class
+similarities better, by taking advantage of geographical information.
+3.2.1
+Tobit Loss
+A Tobit model generally refers to a linear regression model that can estimate rela-
+tionships when the dependent variable is censored[2]. This entails that while we can
+observe the full range of a variable, the dependent variable can only be observed in
+==PAGE:20==
+12
+3 GPS in Place Recognition
+a restricted range. This type of model is often used when studying survival analysis.
+For example, researchers may run a study for five years, where they gather data on
+how long patients live for. However, certain patients will outlive the study, and thus
+their survival time will be capped to five years maximally. This is known as right-
+censoring (or censoring from above), because the maximum number of years we can
+observe is five. The Tobit model in this scenario allows researchers to still estimate a
+linear relationship despite the data being censored.
+Why does this matter for place recognition? The aim of this thesis is to train a
+place recognition model, that preferentially returns the closest images in geographical
+space. One way this could possibly be done, is to train the model to learn a local
+linear relationship between geographical distances and latent distances. However, this
+linear relationship should only be learnt locally, as learning global distances would be
+a task of similar diﬀiculty as IM2GPS. The goal of designing a loss function from the
+Tobit model is therefore to learn a local linear relationship, while censoring global
+ones. Through our work we try to learn a linear relationship of images up to 25
+meters away, while censoring images further away than 25 meters.
+Formally, we define the Tobit loss as
+Ltobit = −
+∑
+y<yL
+log
+( 1
+σ φ
+(y −ˆyα
+σ
+))
+−
+∑
+yj≥yL
+log
+(
+Φ
+(yL −ˆyα
+σ
+))
+where φ is the standard normal probability density function, Φ is the standard nor-
+mal cumulative distribution function. Given two images, we let y be the geographical
+distance between the images, ˆy be the euclidean distance between the latent repre-
+sentation of the images and yL be the local threshold. In our experiments, we model
+the local threshold yL = 25, so it fits with the standard positive / negative definition
+in place recognition.
+Inspecting the first term of the Tobit loss, it is immediately clear there is a problem
+with the scales. Since y represents geographical distances, we expect y’s range to be
+y ∈[0, 25], while ˆy represents latent distances in an L2 normalized space, so ˆy ∈[0, 2].
+Naïvely subtracting the two would therefore make little sense. Therefore we scale
+our latent distances to fit better with geographical distances, using a scaling factor
+α. To estimate an appropriate scaling factor, we use the fact that we use a 25 meter
+margin to distinguish between positives and negatives. Additionally, contrastive loss
+uses a margin, m = 0.7, as a constraint for when negatives contribute to the loss. We
+therefore introduce a scaling factor, α, defined as:
+α = mGP S
+mlat
+= 25
+0.7 ≃35
+In this way when the latent distance, y = 25, we have that 25 −ˆyα = 0 when
+ˆy = 0.7.
+We present a visual representation of Tobit loss in Figure 3.3. Since we define
+positives to be within 25 meters, we see a horizontal split in the visualization, when
+the geographical distance is 25. In the upper section of the visualization, we see how
+==PAGE:21==
+3.2 Proposed Loss Functions
+13
+Tobit loss produces a loss that depends on the geographical distance while in the
+lower section we see how the loss simply decreases as the latent distance increases.
+3.2.2
+MSE Loss
+While Tobit regression might not have been used in deep learning before, other linear
+estimators have. Measures like Mean Absolute Error (MAE) and Mean-Squared-Error
+(MSE) have been used for tasks like pose estimation and facial landmark detection
+[6][21]. The Tobit likelihood and MSE might seem like different approaches to re-
+gression, but it can be proven that maximizing the Tobit log likelihood is equivalent
+to minimizing the mean-squared error, if only the images from the same place are
+considered1.
+We use this insight to define another loss function, that uses MSE for regression.
+Formally, we define it as
+LMSE = Y (y −ˆyα))2 + (1 −Y )max(0, m −ˆyα))2
+where Y is a binary variable with Y = 1 indicating a positive sample, and m is
+the positive/negative margin (25 meters). Similarly to before, we let y be the true
+geographical distance and ˆy be the euclidean distance between the descriptors. As
+with Tobit loss, we use a parameter α to appropriately scale latent distances to fit
+better with geographical distance. We set α = 35 with the same reasoning as with
+Tobit loss. Intuitively, the objective of this loss is therefore to accurately estimate
+geographical distances with the latent descriptors from our model.
+We present a visual representation of MSE loss in Figure 3.3.
+The MSE loss
+visualization closely resembles the Tobit loss visualization, but with higher loss values.
+In the upper section, when the geographical distance is less than 25 meters, they look
+almost identical, while the lower section of MSE loss produces a relatively lower loss
+compared to Tobit loss.
+3.2.3
+FOV MSE Loss
+While the two prior loss functions only took advantage of the GPS-coordinates, this
+loss functions aims to take advantage of GPS-coordinates and angle information. All
+images in the MSLS dataset contains information on the compass angle of the images.
+The compass angle denotes the angle between north and the direction in which the
+image was taken. For example, a compass angle of 0 means the image was taken
+facing north, a compass angle of 90 means the image was taken facing east and so
+on. The researchers behind Generalized Contrastive Loss proposed using the compass
+angle to reconstruct a FOV of each image, as seen in Figure 3.2. They used this to
+compute a continuous similarity measure based on the overlaps in FOV, as opposed
+to the binary similarity measure used by standard contrastive loss.
+1We include the proof of this in the appendix
+==PAGE:22==
+14
+3 GPS in Place Recognition
+We take the use of FOV overlap one step further, by defining a loss that attempts
+to learn a linear relationship between FOV similarity and latent distances. Formally
+we define the FOV MSE Loss as
+LIoU = Y (y −ˆy))2 + (1 −Y )max(0, m −ˆy))2
+where Y is a binary variable with Y = 1 indicating a positive sample, and m is a
+margin. This loss of course resembles MSE loss quite a lot, with the only difference
+being the scaling parameter α.
+Figure 3.3: Visualization of how loss functions depend on latent distance and ge-
+ographical distance. All losses consider points closer than 25 meters,
+positives. Standard contrastive loss produces high loss for close nega-
+tives and far-away positives. Tobit loss and MSE Loss act similarly;
+enforce a linear relationship for positives, and produces a high loss for
+close negatives.
+3.3
+Whitening Layer
+To achieve the best possible results for our place recognition framework, we use a
+post-processing whitening step. Many previous works have documented the perfor-
+mance benefits of using whitened descriptors as opposed to non-whitened ones. Par-
+ticularly the use of PCA whitening has been studied extensively. However, we take
+the approach proposed by Radenovic[29], of learning the whitening step with a fully
+connected (FC) layer.
+We therefore append a FC layer to our place recognition model, which we train
+after the place recognition model has converged.
+The whitening layer is trained
+on the same training data and training procedure, as the place recognition model,
+but we vary the loss function used to train the whitening layer. The goal is to use
+the whitening layer to improve the descriptors from the base network. Specifically,
+making the descriptors better at reflecting geographical distances between intra-class
+samples.
+==PAGE:23==
+CHAPTER 4
+Experiments
+In this chapter we will explain our experimental setup, and the methods used to get
+the results presented in Chapter 5. We introduce the dataset, the network architecture
+and mining procedures.
+4.1
+Dataset
+Winter
+Spring
+Summer
+Fall
+Figure 4.1: Sample images taken from one of the cities (Tokyo) in the MSLS dataset,
+with colorings representing the different seasons.
+All experiments in this thesis work was conducted using the Mapillary Street-Level
+Sequences (MSLS) dataset[42]. The MSLS datasets aggregates over 1.6 million images
+from 30 different cities, making it the largest dataset for place recognition currently
+available. The dataset contains images from all seasons, times of day and various
+types of areas (urban, suburban etc.), making it a very challenging dataset for place
+recognition. Additionally, all images in the MSLS dataset are fully annotated with
+UTM coordinates and compass angles, which we will actively use during training.
+==PAGE:24==
+16
+4 Experiments
+The Mapillary dataset also provides information about clusters of images, as is
+the case with other modern place recognition datasets (e.g.
+Oxford105k[28] and
+Paris106k[27]). Two images are contained in the same cluster if they are within 30
+meters of each other, and difference in their compass angle is less than 40 degrees.
+Therefore, images from the same cluster can be visually similar, so clustering infor-
+mation can used to achieve more variability if it is used during mining.
+4.2
+Network
+ResNet50
+GeM
+L2
+ Norm
+Whitening
+L2
+ Norm
+Input Image
+Descriptors
+Figure 4.2: The network used for all our experiments consists on three components;
+A base architecture (ResNet50), a pooling layer (GeM) and a whiten-
+ing layer. After the GeM pooling layer and the whitening layer, the
+descriptors are normalized.
+For all our experiments we use a siamese network with a Resnet50 backbone [13] and
+a Generalized-Mean pooling layer. Specifically, given an image, x ∈R320×240×3, our
+network maps x to a descriptor ˆf(x) ∈R2048. In this section we will describe the
+pooling layer and the whitening layer in more detail.
+4.2.1
+Generalized Mean
+For all experiments we will use a the Generalized-Mean (GeM) pooling layer intro-
+duced by Radenovic et al.
+in 2018[29].
+They propose a pooling layer, that is a
+generalization of the standard average pooling and max pooling. Specifically, for a
+set Xk of activations from the k ∈{1, .., K} feature maps, the generalized mean is
+f =
+(
+1
+|Xk|
+∑
+x∈Xk
+xpk
+) 1
+pk
+where pk can learnt or assigned manually.
+pk = 1 makes GeM equal to average
+pooling and pk →∞makes it max pooling. The dimensionality of f is equal to K,
+the number of feature maps. In our experiments we use ResNet50 with GeM, giving
+==PAGE:25==
+4.3 Training Procedures
+17
+us an output dimension of 2048. We initialize pk = 3, and learn a new pk through
+training.
+4.2.2
+Whitening & Normalization
+We will experiment with the use of a whitening layer, as described in Section 3.3.
+Thus, for some experiments we will append a whitening layer, to experiment with
+different losses and output dimensionalities. After the descriptors have been passed
+through the GeM pooling layer, we normalize them with L2 normalization. Addition-
+ally, if a whitening layer is used, we also L2 normalize the final descriptors. Therefore,
+the descriptors output by the network are always L2 normalized. We use L2 normal-
+ization, because computing distances in latent space can be reduced to computing an
+inner product of the descriptors, if the descriptors are L2 normalized. This makes
+computing distances more eﬀicient.
+In addition, L2 Normalization has also been
+shown to yield better generalization performance[1].
+4.3
+Training Procedures
+4.3.1
+Query & Database
+Since the Mapillary dataset is too large to fit in memory, we cannot use all image
+at once during training. Instead we use a technique similar to Arandjelovic et al.
+[29], where we randomly draw a subset of query and database images every iteration.
+Specifically, in our experiments we draw 2000 query images and 20,000 database
+images at random, which we use to mine the tuples used for training.
+Once the
+model has seen all 2000 tuples, we draw a new subset of query and database images,
+and create new tuples from those.
+4.3.2
+Hard-Negative Mining
+For the majority of our experiments, we used the hard-negative mining technique
+adopted from [29]. We therefore construct tuples of 6 images, where there is one query
+image, one positive and five negatives. While the positives are chosen at random,
+the negatives are mined using hard-negative mining. Specifically, we choose the non-
+matching images, whose descriptors are the most similar to the query descriptor. This
+similarity is based on their L2 distances, which can be computed eﬀiciently using an
+inner product.
+The hard-negative mining is constrained to only using one negative per cluster,
+using the clustering information from the MSLS dataset. Compared to hard-negative
+mining without clustering information, this has been shown by Radenovic[29], to give
+better results on other place recognition datasets, as it gives more variabilitiy in the
+negatives chosen.
+==PAGE:26==
+18
+4 Experiments
+4.3.3
+GPS Mining
+While hard-negative mining is a widely used mining technique for the image retrieval
+task, it is also computationally expensive. Before new tuples can be constructed, we
+need to compute the descriptors for all query and database images.
+The aim of GPS Mining is construct tuples based on their relative geographical
+distances, by constructing tuples of 8 images, consisting of one query image, one pos-
+itive, three geographically close points and three negatives. The three geographically
+close points are chosen as the three closest images beyond 10 meters from the query
+image. The three negatives are chosen randomly from the database.
+This approach is largely adopted from Leyva-Vallina[18] who used a similar ap-
+proach based on field-of-view overlaps. In their paper, they reach state-of-the-art per-
+formance with a naïve mining technique, where three negatives are chosen randomly
+in addition to three points with a field-of-view similarity of 0 < FOVSIM < 0.5.
+4.4
+Evaluation Metrics
+To evaluate our results, we use the two evaluation metrics, top-n recall and mean
+average precision (mAP), as these are standard evaluation metrics used in most visual
+place recognition research. Top-n recall measures the proportion of query images,
+where the place recognition model can return at least one image from the same place.
+Thus, top-5 recall (denoted recall@5) measures the proportion of query images, with
+at least one image from the correct place, among the 5 images retrieved. Additionally,
+we evaluate using mAP, which is computed by calculating the average precision for
+each query image, and computing the mean of the average precisions.
+Unless otherwise specified, we define two images as taken from the same place, if
+they are within 25 meters of each other.
+4.4.1
+Kendall’s Tau
+For evaluating the intra-class correlation, we will use two correlation metrics.
+In
+this section we present one of those two metrics, Kendall’s Tau. Kendall’s Tau, τ,
+is a metric commonly used to measure the ranking correlation between two sets of
+data. The metric ranges from -1 to 1, where a score of 1 means both sets of data are
+monotonically increasing or decreasing.
+Kendall’s Tau is computed by finding the number of concordant and discordant
+pairs. Given two pairs of data, (xi, yi) and (xj, yj), the pairs are concordant if xi −xj
+and yi −yj both have the same sign e.g. if xi −xj > 0. then yi −yj > 0. A discordant
+pair is a pair where xi −xj and yi −yj have different signs e.g. if xi −xj > 0. then
+yi −yj < 0
+==PAGE:27==
+4.4 Evaluation Metrics
+19
+Once the number of concordant and discordant pairs are found, Kendall’s Tau can
+be computed as:
+τ = #Concordant −#Discordant
+(n
+2
+)
+Where
+(n
+2
+)
+is the number of ways to choose 2 elements from a set of n elements.
+τ = 1, ρ = 1
+τ = 0.87, ρ = 0.91
+τ = 0.52, ρ = 0.80
+τ = 0.2, ρ = 0.31
+τ = 0.0, ρ = 0.27
+τ = −0.43, ρ = −0.62
+Figure 4.3: Examples of sets of intra-class samples and their correlation scores. We
+plot the rank of positive images, against the DOverlap between the posi-
+tive and the query image. In the bottom right corner we present an ex-
+ample giving a perfect correlation score of 1. As seen in the top-middle
+plot, a positive gradient will yield a positive ρ, but not necessarily a
+positive τ.
+4.4.2
+Pearson Coeﬀicient
+The second metric we will use for intra-class correlation is the Pearson coeﬀicient.
+The Pearson coeﬀicient, ρ, measures the linear correlation between two sets of data.
+Similarly to Kendall’s tau, the metric ranges from -1 to 1 where 1 represents a perfect
+correlation, and -1 represents opposite correlation.
+The Pearson coeﬀicient is calculated by finding the ratio between the covariance
+of two sets of data, and the product of their standard deviations. Formally, given a
+set of data {x1, x2, ..., xn} and {y1, y2, ..., yn}, we compute the Pearson coeﬀicient as:
+ρ =
+∑n
+i=1(xi −¯x)(yi −¯y)
+√∑n
+i=1(xi −¯x)2√∑n
+i=1(yi −¯y)2
+==PAGE:28==
+20
+4 Experiments
+In this thesis, we will let one set of data X be the rank of the intra-class samples,
+and let the other set Y be the field-of-view distance metric, Doverlap. The Pearson
+coeﬀicient should therefore be understood as the correlation between the rank of the
+intra-class sample, and its FOV distance. We let the rank of an intra-class sample
+be its ordering amongst the other retrieved positives, such that the closest positive
+retrieved has rank 1, the second-closest has rank 2 etc.
+In Figure 4.3 we provide the reader with some visual examples of Kendall’s Tau
+and Pearson correlation scores, to give a more intuitive understanding of the correla-
+tion metrics used in this thesis.
+==PAGE:29==
+CHAPTER 5
+Results & Discussion
+In this chapter we will present the results for our experiments using geographical
+information in place recognition. We will first and foremost show how the various
+approaches perform within the standard place recognition metrics. Later we will try
+to understand those results better with some examples.
+5.1
+GPS Loss Functions - End to end
+Loss
+Mining Technique
+mAP @ 1
+mAP @ 5
+Recall @ 1
+Recall @ 5
+Recall @ 10
+Contrastive
+Hard-Negative
+0.448
+0.312
+0.448
+0.578
+0.632
+Generalised Contrastive
+Hard-Negative
+0.402
+0.261
+0.402
+0.513
+0.561
+Tobit Loss
+Hard-Negative
+0.321
+0.220
+0.321
+0.459
+0.511
+MSE Loss
+Hard-Negative
+0.427
+0.286
+0.427
+0.548
+0.606
+Contrastive
+GPS-Mining
+0.257
+0.166
+0.257
+0.389
+0.446
+Generalised Contrastive
+GPS-Mining
+0.285
+0.180
+0.285
+0.414
+0.476
+Tobit Loss
+GPS-Mining
+0.259
+0.171
+0.259
+0.397
+0.460
+MSE Loss
+GPS-Mining
+0.335
+0.213
+0.335
+0.459
+0.512
+Table 5.1: Results of training place recognition models in an end-to-end manner
+varying loss functions, and mining techniques. The results clearly show
+contrastive loss with hard-negative mining to be the superior model.
+In Table 5.1 we present the results of end-to-end training with varying loss func-
+tions and mining techniques. We keep all other parameters like base network, input
+size and dataset constant.
+5.1.1
+Mining Technique Matters
+From the results in Table 5.1 it is quite evident that hard-negative mining is superior
+to our naïve GPS-Mining technique. All our results, regardless of the choice of loss
+function, simply perform better with hard-negative mining. This is not surprising,
+as hard-negative mining is a standard mining procedure used in most state-of-the-art
+place recognition research, along with semi-hard negative mining [29][3]. Both of those
+mining techniques rely on the descriptors to compute a set of appropriate negative
+samples for training, while our GPS-mining selects some negatives by geographical
+distance and others randomly. As pointed out by Wu et al. [43], sampling randomly
+==PAGE:30==
+22
+5 Results & Discussion
+likely obtains negatives a distance of
+√
+2 in latent space, which would not yield any
+loss by any of the four loss functions we tested1.
+An argument for why this result is surprising, is when we consider the recent
+result by Leyva-Vallina [18].
+In their paper, the authors achieve state-of-the-art
+performance with generalized contrastive loss using a similar sampling technique to
+our GPS-Mining, which uses FOV Similarity rather than geographical distance for
+sampling.
+Both our results and their results are achieved with the same dataset,
+base model and pooling method, yet the results we report for generalized contrastive
+loss does not surpass state-of-the-art methods. This discrepancy between our results,
+and their results, could be due our use of geographical distance rather than field-
+of-view similarity.
+Another contributing factor could be, that in our experiments
+we use the intersection-over-union to compute FOV similarities, as this is what the
+authors claim to do in their paper. However, we subsequently discovered that their
+FOV similarities are consistent with the overlap-coeﬀicient, and not intersection-over-
+union2. This might seem like a subtle difference, but it means the estimated FOV
+overlaps we used are significantly lower. In most cases the estimated FOV overlaps
+are 10 −15% lower with IoU than with the overlap coeﬀicient. Since generalized
+contrastive loss uses FOV similarities to estimate whether an image is a positive or
+negative, underestimating FOV similarities means fewer positives examples.
+5.1.2
+Evaluation of new losses
+The results for our new proposed loss functions, Tobit loss and MSE loss are both good
+and bad. Tobit loss performed significantly worse than the other losses. Meanwhile,
+MSE Loss achieved better results than generalized contrastive loss, but not quite as
+good results as contrastive loss.
+Interestingly, MSE loss performs better than contrastive loss with GPS-Mining,
+despite performing worse with hard-negative mining. From our experiments, it is not
+clear why this is the case. When we compare our result for contrastive loss with GPS
+mining with a similar experiment by Leyva-Vallina[18] we see that our results are
+similar. For Recall @ 5 and Recall @ 10 our results are within 0.1% of their results.
+Our results from contrastive loss with GPS Mining therefore seem reasonable.
+The question is therefore, why MSE loss performs relatively well despite the sub-
+optimal mining technique. From our experiments it is clear that negatives produce
+very little loss despite the choice of loss function, since the negatives mined with a
+naïve mining strategy rarely are hard negatives. Our results would therefore seem
+to indicate, that MSE loss handles this scenario better i.e. when most of the loss
+comes from positives MSE loss is superior to contrastive loss. This could be due to
+the fact, that contrastive loss simply pulls all positives closer, while our loss could
+push positives away, if the latent distance does not accurately reflect the geographical
+1One might say, choosing samples
+√
+2-away would be irrational
+2See Appendix Section 6
+==PAGE:31==
+5.2 GPS Loss Functions - Whitening
+23
+distance. However, more experimentation would be needed to confirm or deny this
+hypothesis.
+Turning to Tobit loss the results indicate that its performance lacks compared to
+the other losses tested. One possible explanation for why Tobit loss performs worse
+than the other losses, could be due to a sub-optimal choice of parameters. Tobit loss
+is parameterized by a value σ, which translates to the standard deviation used in the
+normal distribution, and cumulative normal distribution in the Tobit likelihood.
+Figure 5.1: Examples of the negative tobit log likelihood for different values of σ.
+In the top plot we show the likelihood produced for a positive, while
+in the bottom figure we show the likelihood produced by the negative
+term. A lower σ yields a steeper curve. For reference we show the loss
+curve for contrastive loss.
+The choice of σ ultimately affects how much we penalize positives and negatives at
+different distances. As seen in Figure 5.1, a low σ will penalize close negatives more,
+while penalize negatives further away less than higher values of σ. Thus, choosing an
+appropriate σ is not trivial.
+5.2
+GPS Loss Functions - Whitening
+In Table 5.2 we present the results of training a whitening layer, while freezing the
+base-model. We let the base model be the best performing model from our end-to-end
+experiments, which is the base model trained with contrastive loss.
+5.2.1
+Dimensionality & Learnt Whitening
+Comparing the results in Table 5.2 of varying descriptor dimensionalities, it is evi-
+dent that dimensionality matters a lot. Our results indicate, that regardless of the
+choice of loss function, the performance is proportional to the descriptor dimension-
+==PAGE:32==
+24
+5 Results & Discussion
+Loss
+Whitening Technique
+Output Dimension
+mAP @ 1
+mAP @ 5
+Recall @ 1
+Recall @ 5
+Recall @ 10
+Contrastive
+No Whitening
+2048
+0.448
+0.312
+0.448
+0.578
+0.632
+PCA
+128
+0.264
+0.182
+0.264
+0.413
+0.480
+-
+PCA
+1024
+0.363
+0.264
+0.363
+0.517
+0.584
+-
+PCA
+2048
+0.376
+0.272
+0.376
+0.530
+0.591
+Contrastive
+Learnt Whitening
+1024
+0.416
+0.282
+0.416
+0.539
+0.590
+Contrastive
+Learnt Whitening
+2048
+0.461
+0.325
+0.461
+0.597
+0.642
+Generalised Contrastive
+Learnt Whitening
+1024
+0.414
+0.279
+0.414
+0.541
+0.596
+Generalised Contrastive
+Learnt Whitening
+2048
+0.414
+0.288
+0.414
+0.558
+0.621
+FOV MSE
+Learnt Whitening
+1024
+0.411
+0.277
+0.411
+0.542
+0.596
+FOV MSE
+Learnt Whitening
+2048
+0.432
+0.326
+0.432
+0.598
+0.644
+Table 5.2: Results of training a whitening layer as a post-processing step with differ-
+ent techniques and output dimensions. We let all whitening models use
+the same base model, whose results are shown in the top row. Our results
+show contrastive loss and FOV MSE loss produce the best performance.
+ality. This is consistent with the results presented in other state-of-the-art research
+works[29][3][18], which indicate that when dimensionality increases, performance in-
+creases monotonically as well.
+In Table 5.2 we present results for two different schemes of whitening; PCA whiten-
+ing and learnt whitening. Of the two, PCA whitening is most commonly used in other
+research, as learned whitening is a relatively recent concept3. Despite the popularity
+of PCA whitening, our results indicate that it leads to lower performance than learnt
+whitening. This is consistent with the work presented by Radenovic[29], who exper-
+imented with learnt whitening and PCA whitening on six different datasets. Of the
+six datasets, learnt whitening achieved higher performance on all of them. Unfortu-
+nately, neither of the datasets tested was MSLS, so we cannot compare our results
+directly.
+5.2.2
+FOV MSE Performance
+In Table 5.2 we also present the results for our FOV MSE whitening. When compared
+to contrastive whitening, we see results that are quite similar on mAP@5, Recall@5
+and Recall@10. Since learnt whitening with contrastive loss is state-of-the-art, our
+FOV MSE tangents the current state-of-the-art on aforementioned metrics. Interest-
+ingly, there is a 2.9% difference in the mAP@1 and Recall@1 results. This would
+seem to indicate that for a query image, q, FOV MSE whitening is good at learning
+the neighborhood of points around q, but not as good at learning a correct closest
+neighbor.
+This low performance on mAP@1 and Recall@1 could be a product of an under-
+estimation in FOV overlap. Since the ”pull” FOV MSE loss generates on a positive,
+depends on the estimated FOV overlap between query and positive. A low FOV over-
+lap yields a high DOverlap, since DOverlap = 1−FOV Similarity. If DOverlap is high,
+3Introduced in 2018 by Radenovic[29]
+==PAGE:33==
+5.3 Intra-class Performance
+25
+the positive will not be pulled as close, which could explain why FOV MSE performs
+worse on the closest points than contrastive loss.
+0.33
+0.36
+0.30
+23 m
+22 m
+21 m
+Figure 5.2: Examples of positive images within 25 meters of their corresponding
+query image, with low estimated FOV overlap. The left and middle
+examples demonstrate examples where we can see beyond the 50 meter
+viewing distance. The example to the right demonstrates how a small
+change in angle can lower the FOV overlap.
+If FOV overlaps are indeed underestimated, then this could be fixed by tuning
+the parameters of the FOV estimation presented in Section 3.1. Specifically, a higher
+view radius, r, and a higher view angle, θ, will in a lot of cases yield a higher FOV
+overlap. For the purpose of our experiments, we chose r = 50m and θ = 90°, since
+these were the values used by Leyva-Vallina[18]. In their paper, only examples with a
+FOV overlap > 0.5 are considered positives. However, given the qualitative examples
+from MSLS in Figure 5.2, one should consider experimenting with other values in
+future experiments, as it seems the FOV estimations are at the low end.
+5.3
+Intra-class Performance
+5.3.1
+Task Definition
+In this section, we use the same base model and whitening models from the previous
+section, to evaluate performance using different definitions of the place recognition
+task. We compare performance when a positive is an image within 25 meters, with a
+==PAGE:34==
+26
+5 Results & Discussion
+positive being defined by its FOV overlap with the query image. We set the threshold
+to DOverlap < 0.5.
+Figure 5.3: Recall graphs comparing the performance of whitening models with two
+different place recognition task definitions. Note, that the y-axes are
+slightly different between the two.
+In Table 5.3 we present the results of three whitening models, as well as the base
+model without whitening, on different task definitions.
+5.3.1.1
+General Performance
+Looking at Figure 5.3 we make the observation that all models achieve higher recall
+across all values of N, with the 25 meter definition. In fact, the average performance
+difference across all recalls on all models is 5.2%.
+The difference in performance can be explained by the fact that the FOV definition
+is a stricter definition than the 25 meter definition.
+Particularly points with too
+much camera angle variation are filtered away, which results in fewer positives per
+query image. Across the entire MSLS test dataset, query images have on average
+10.1 positives with the 25 meter definition, while there are 5.6 positives on average
+with the FOV definition. Given there are almost twice as many positives per query
+image with the traditional place recognition task definition, it is not surprising that
+performance is higher.
+However, the positives with a FOV similarity higher than 0.5, are also expected to
+be the easiest positives. Intuitively, it would therefore be surprising that we observe
+a 5% performance gap, when the easiest positives are kept, and the harder ones are
+filtered away. This may again be related to an underestimation of FOV Similarity
+pointed out in Figure 5.2.
+If our models pick up those relatively easy positives,
+==PAGE:35==
+5.3 Intra-class Performance
+27
+they will count positively towards the performance in the 25 meter definition, and
+negatively in the 0.5 FOV definition.
+5.3.1.2
+FOV MSE Performance
+In Figure 5.3 we can also compare our FOV MSE whitening to the other whitening
+models. Since the FOV MSE loss directly uses FOV to compute the loss, we expect
+this model to perform better, when the task definition directly relies on FOV. Unfor-
+tunately, this expectation does not match reality. When using the FOV definition,
+we observe that our FOV whitened model is best in recall 1, 5 and 10, but is worse
+than the base model for recall @ N, when N > 30. Overall the performance of FOV
+MSE whitening drops 4.8 % from the 25 meter definition, to the FOV definition. In
+comparison to the base model and contrastive whitening this is better, as we observe
+a performance drop of 5.1% and 5.5% on those models respectively.
+5.3.2
+Overlaps & Distances
+In this section we examine what impact our whitening model has on the intra-class
+samples, and whether our models learn to better distinguish between positives.
+mAO @ 10
+mAO @ 25
+mAO @ 50
+mAD @ 10
+mAD @ 25
+mAD @ 50
+Base Network
+0.51
+0.49
+0.48
+11.7
+12.0
+12.1
+Contrastive Whitening
+0.52
+0.50
+0.49
+11.6
+11.9
+12.0
+FOV MSE Whitening
+0.52
+0.50
+0.49
+11.6
+11.8
+11.9
+Table 5.3: More detailed information about the closest positives. We denote the
+mean average FOV overlap between the N closest neighbors, mAO @ N.
+Similarly, we denote the mean average geographical distance to positives
+within the N closest neighbors, mAD @ N.
+In Table 5.3 we present the mean average FOV overlaps (mAO) and mean average
+distances (mAD), between the intra-class samples contained in the N closest points.
+First and foremost, Table 5.3 reveals a clear picture about our FOV MSE whiten-
+ing model; It does not signficantly improve the ”quality” of the intra-class samples
+returned, if we define a high-quality intra-class image, as an image with higher FOV
+overlap or a lower geographical distance. The average FOV overlap is only 0.01 higher
+with whitening, and the average distance is 0.1 −0.2 meters closer with whitening.
+While this is not the intent of our whitening model, it is not completely unexpected.
+All models have the same base model, so they share the majority of their parameters.
+Additionally, in Table 5.2 we can see that the performance of the whitening models
+are quite similar. For example, in Recall @ 10, the performance differs 0.02 % between
+the contrastive whitening model, and the FOV MSE whitening model.
+==PAGE:36==
+28
+5 Results & Discussion
+5.3.3
+Ranking Performance
+Having learnt that our whitening models return positives with similar FOV overlap
+and geographical distance, we are now interested in learning how well our model ranks
+and correlates positives. The hope is that our FOV MSE model has learnt to correlate
+positives, such that the closest positives are also the images with the highest FOV
+overlap.
+τ @ 10
+τ @ 25
+τ @ 50
+ρ @ 10
+ρ @ 25
+ρ @ 50
+Base Network
+0.252
+0.255
+0.261
+0.319
+0.309
+0.307
+Contrastive Whitening
+0.244
+0.244
+0.248
+0.286
+0.276
+0.278
+FOV MSE Whitening
+0.212
+0.233
+0.236
+0.282
+0.288
+0.287
+Table 5.4: Cumulated ranking results of the base model, and two whitening models.
+We denote Kendall’s Tau of the intra-class samples within the nearest N
+points, as τ @ N. We denote the Pearson correlation of the intra-class
+samples within the nearest N points as ρ @ N.
+In Table 5.4 we present the results for the base model and the two whitening
+models, using Kendall’s Tau and the Pearson correlation coeﬀicient. For Kendall’s
+Tau we measure the rank correlation between the rank of the returned positives, and
+their corresponding FOV overlaps. Similarly, for the Pearson coeﬀicient, we measure
+the correlation coeﬀicient between the rank of the returned positives and their FOV
+overlaps.
+From the results in Table 5.4, it can be seen that, of the three models, our base
+model performs best on both metrics. Meanwhile, the FOV MSE whitening model
+performs worst on Kendall’s tau, but is slightly better than contrastive whitening on
+the Person coeﬀicient.
+Intuitively, the results from Table 5.4 seem rather surprising, as the base model
+has not explicitly been trained to learn correlations the same way our FOV MSE
+whitening model has, and yet it produces a higher correlation. This difference in
+correlation could potentially be explained by the results in Figure 5.3. In the first
+graph, for the standard place recognition definition, we see the base model performs
+better than the FOV MSE whitening model when N > 10. This result could help
+explain the lower correlation on the FOV MSE model, assuming that our correlation
+metrics are correlated with recall. Specifically, if a model performs well on standard
+place recognition metrics, like mean-average precision and recall, then it is also better
+at correlating/ranking the intra-class samples.
+5.3.4
+Whitening Models - Correlation Plots
+In this section we will take a closer look at how well each of the whitening models
+correlates latent distances with FOV similarities globally across all positives in the
+MSLS test dataset.
+==PAGE:37==
+5.3 Intra-class Performance
+29
+FOV Distance
+FOV Distance
+FOV Distance
+Latent Distance
+Latent Distance
+Latent Distance
+FOV MSE Whitening
+Base Model
+Contrastive Whitening
+Figure 5.4: Aggregated plot over FOV distances and latent distance of the test
+dataset.
+The plots aggregate the intra-class samples related to each
+query image in the test dataset.
+In Figure 5.4 we present three plots for the relationship between intra-class FOV
+similarities and the latent distances from the query image. Looking at the figure, it is
+clear that while there is a slight correlation in all three, none of them is significantly
+more correlated than another. Performing linear regression on the three reveals that
+both the base model and the contrastive whitening model have a gradient of 0.09
+whereas the FOV MSE whitening model has a gradient of 0.11.
+Comparing the base model plot to the contrastive whitening plot, might give us
+a clue as to why learnt whitening generally leads to a boost in performance. Even
+though the points are not more correlated, it seems they are more compressed and
+closer in latent space. Intuitively, this is also what we expect from contrastive loss,
+since the positive term in contrastive loss should pull all positives closer.
+If the
+positives are closer, and the negatives are kept at the same distance, this should
+result in higher performance.
+Another interesting finding of Figure 5.4 is, that while points are marginally more
+correlated in the FOV MSE whitened model, they are also further away and the space
+is not as compressed. Thus, FOV MSE whitening seems to have the opposite effect
+of contrastive whitening. The higher distances can be explained by FOV MSE not
+simply pulling all positives closer as is the case with contrastive loss.
+5.3.5
+FOV Overlaps
+In this section we will inspect how our choice in parameters for estimating FOVs affect
+the estimated FOV similarities. For all our experiments, we chose the parameters r =
+50 meters and θ = 90 degrees as the parameters for the circle sector that makes up the
+estimated FOVs. In Figure 5.5 we present a plot showing the FOV distance measure
+Doverlap, as a function of the geographical distance between query and positive.
+==PAGE:38==
+30
+5 Results & Discussion
+GPS Distance
+GPS Distance v. Overlap Distance (
+) 
+r = 50,θ = 90
+D Overlap
+Figure 5.5: Plot over the geographical distance and the FOV distances DOverlap for
+the entire test dataset. The green horizontal line indicate the median,
+and the green lines show the linear correlation in top cluster of points.
+In Figure 5.5 we see that there is a clear negative correlation around the line
+going from (0, 1) to (25, 0.3). By applying a Gaussian Mixture Model, and using
+linear regression on the topmost cluster, we find the gradient to be −0.028. This
+negative trend is as expected, and is explained by the viewing radius r used when
+estimating FOVs. The deviation away from this trend, can mostly be explained by
+slight changes in viewpoint (CA). The top row of images were also included in Figure
+3.2, where we saw there is a difference in viewpoint between query and positive. The
+points at the bottom in the plot can be explained by points pointing in the opposite
+direction to the query image, as seen in the bottom row of images.
+Interestingly, a gap in the data appears when the geographical distance gets
+smaller. The most likely explanation for this has to do with the nature of the dataset.
+The MSLS dataset contains pictures taken mostly on the street by cars. Since most
+streets are two-way streets, the images from a particular road will either be taken in
+one direction or the other.
+In Figure 5.5 we also plot the median of the visual overlaps, whose value is 0.54.
+We find these values to support the hypothesis mentioned in earlier sections: That
+the FOV overlap estimations were too low. Particularly for our experiments with
+generalized contrastive loss these values are problematic, since this loss uses the FOV
+overlap estimations to indicate whether an image is considered a positive.
+If the
+FOV overlap is < 0.5 the majority of the loss will come from the negative term of
+generalized contrastive loss.
+Through the median we are able to see that almost
+half the images we consider positives in the other loss functions, are not considered
+positives when using generalized contrastive loss.
+The low median is also problematic for our MSE FOV loss. Since we are trying
+to learn a distance between the query and positive, ˆy, such that ˆy = DOverlap, a low
+==PAGE:39==
+5.4 Qualitative Analysis
+31
+estimated FOV overlap will yield higher latent distances, which may impact perfor-
+mance. It might therefore be worthwhile to experiment more with the parameters for
+the FOV, θ and r in future experiments.
+5.4
+Qualitative Analysis
+In this section we will try to look at some specific examples from the dataset, to gain
+a better understanding of why our models perform the way they do.
+5.4.1
+End-to-end Models
+In this section we present the outputs of three models trained in an end-to-end manner,
+as presented in Table 5.1. In Figure 5.6 we show the output for models trained with
+contrastive loss, MSE loss and Tobit loss on five hand-picked query images.
+One thing we notice from the results in Figure 5.6 is the similarity between the
+models. Only in one out of the five examples, do the three models all return different
+images (top row). In the other four, two of the models are in consensus about two
+positives or two wrong negatives. Particularly, the consensus on negatives is inter-
+esting, as it hints towards the models learning similar representations, despite the
+difference in loss function used during training. This may not be surprising given
+that MSE loss and contrastive loss uses the same term for negatives, and we can
+prove the equivalence between the positive term in Tobit loss to MSE loss. However,
+since these examples represent a small subset of all images, it is hard to definitively
+conclude anything on the similarity of the learnt descriptors of the three models.
+In Figure 5.6 we also notice how MSE loss is the only model, that correctly predicts
+a positive in row 4. Looking at the predictions from the two other models, it is clear
+the negative returned by both these model, is an extremely diﬀicult negative. This
+image is considered a negative because it is further than 25 meters away, even though
+it has high visual similarity to the query image. We see this as a clear example of
+why there is a need for a better positive/negative definition in place recognition.
+==PAGE:40==
+32
+5 Results & Discussion
+Contrastive 
+MSE 
+Tobit 
+Figure 5.6: Figure showing five query images and our models top-1 retrieved image.
+We show the results from the models trained with hard-negative mining
+as presented in Table 5.1.
+Positives are marked with a green frame,
+while negatives are marked with a red frame.
+==PAGE:41==
+5.4 Qualitative Analysis
+33
+5.4.2
+Whitening Models
+Base Model
+Contrastive
+Whitening
+FOV MSE
+Whitening
+Figure 5.7: Figure showing five query images and our models top-1 retrieved image.
+We show the results from the models trained with output dimensionality
+2048 as presented in section 5.2.
+Positives are marked with a green
+frame, while negatives are marked with a red frame.
+==PAGE:42==
+34
+5 Results & Discussion
+This section will relate to Section 5.2, where we presented and discussed the results
+for different methods of learnt whitening. In Figure 5.7 we present five query images,
+along with the top-1 prediction for the base model, the contrastive whitening model
+and the FOV MSE whitening model.
+Looking at the images, we notice that often when the models return a positive,
+they return either the same, or a positive that is visually very similar. Given that
+one of the goals of FOV MSE loss was to learn positives with higher visual similarity
+to the query image than the other models, this is not quite what we had hoped for.
+It does however fit with the results presented in earlier sections. Specifically, in Table
+5.4 we observed how MSE loss does not yield more correlation between intra-class
+samples, measured on the Pearson coeﬀicient and Kendall’s tau, despite our hopes it
+would.
+5.4.3
+FOV MSE Correlation
+In this section we present some qualitative example extracted using our FOV MSE
+whitening model, to assess specific scenes and how well our model correlates latent
+distances and the FOV distance DOverlap
+In Figure 5.8 we present four examples of query images, as well as two selected
+positives.
+From these examples we see how our FOV MSE whitening model has
+a hard time learning to correlate FOV similarity with latent distances in the top
+two examples, while the latter two look slightly better. While it is hard to justify
+exactly why this is the case, it is noteworthy that the two top images do not show
+any buildings, while the bottom two images do. It may very well be the case that
+correlating FOV similarities with latent distances is highly dependent on semantic
+cues, such as buildings.
+Utilizing semantic cues in place recognition has been an
+active area of research for many years for a good reason[35][23], as semantic cues
+often provide features that are invariant to weather, illumination and season[44].
+It is of course not possible to conclude on how dependent, correlating FOV sim-
+ilarities and latent distances, is on semantic cues, but it poses questions for future
+work within this area. For example, would we have more success correlating FOV
+similarities and latent distances, if we only considered urban environments?
+==PAGE:43==
+5.4 Qualitative Analysis
+35
+Figure 5.8: Figure showing four examples of query images and two selected positives
+marked with red and green.
+The first column shows a scatter plot
+DOverlap and latent distance ˆy for the positives.
+==PAGE:44==
+36
+==PAGE:45==
+CHAPTER 6
+Conclusion
+In this thesis we set out to thoroughly examine how state-of-the-art place recognition
+methods could be improved, by using all the geographical information available in
+many modern datasets. Through our literature review we discovered that no pub-
+lished research actively uses geographical information.We therefore posed the two
+questions: How can geographical information be used more actively in place recog-
+nition? And how does using geographical information in place recognition impact
+performance? Through extensive experiments, and dozens of iterations, we managed
+to produce results to help answer these questions.
+How can geographical information be used more actively in place recogni-
+tion?
+In this thesis we introduced several ways to use geographical information in place
+recognition. We designed three novel loss functions, that each use geographical in-
+formation to enforce a linear relationship between geographical similarity and latent
+distances.
+We introduced a novel approach to using the negative Tobit log likeli-
+hood as a loss function in place recognition. By analyzing the Tobit likelihood, we
+were able to prove the equivalence between maximizing the Tobit likelihood and min-
+imizing the mean-squared error.
+This led us to define a new loss function using
+mean-squared error, to enforce a linear relationship between geographical distances
+and latent distances. Lastly, we introduced a loss function that uses mean-squared
+error over field-of-view similarities, rather than geographical distances. The perceived
+advantage of the three aforementioned loss functions are their ability to perform re-
+gression on images considered positives, while still keeping negatives distant in latent
+space. To the best of our knowledge, this way of using regression to learn a more
+fine-grained representation of positives, is novel in place recognition.
+Additionally, we identified two techniques for using the loss functions introduced
+in this thesis. One technique is through training a place recognition model end-to-
+end using our proposed loss functions. The other technique uses our proposed loss
+functions to train a whitening layer after the underlying place recognition has been
+trained, and converged.
+How does using geographical information in place recognition impact per-
+formance?
+Through extensive experiments we were able to train our proposed loss functions
+in an end-to-end manner, and compare their performance to state-of-the-art. Our
+==PAGE:46==
+38
+6 Conclusion
+results clearly indicate that despite our best efforts our loss functions did not beat
+existing state-of-the-art losses, like contrastive loss. Particularly, Tobit loss was sig-
+nificantly worse than the contemporary methods in place recognition, while MSE loss
+was slightly worse. However, through our results we also show that MSE loss per-
+forms better than generalised contrastive loss; The only other loss in place recognition
+that uses geographical information. Additionally, we conducted experiments using a
+GPS-mining technique that if successful, could replace the computationally expensive
+hard-negative mining. Through our results, we were able to show that GPS-mining
+leads to significantly worse performance across all loss functions.
+Given the sub-optimal results from the end-to-end training, we experimented with
+training a whitening layer using our FOV MSE loss.
+From our experiments with
+whitening, we were able to show that the performance of FOV MSE matches the
+state-of-the-art performance, making it a good alternative to contrastive loss. By
+experimenting with the output dimensions of the whitening layers, we were able to
+conclude that lowering the dimensionality of descriptors leads to performance drop,
+across all whitening methods we tested.
+Additionally, we evaluated our models’ abilities to learn a more fine-grained repre-
+sentation of positives, such that our models preferentially return positives with higher
+FOV overlap. The results indicate that a whitening layer trained with our FOV MSE
+loss does not improve the correlation of positives. In fact, the results indicate that a
+base model without whitening is better at correlating positives, than our loss function.
+Through our work we were able to examine how geographical information could be
+used in place recognition. Although we conducted extensive experiments, we believe
+there are still questions left to be answered for future work. Through our work we
+concluded that our FOV similarities were underestimated, which might have had an
+impact on our results. For future research, it could be interesting to experiment more
+with the parameters for FOV estimations, to determine their impact on performance.
+Another interesting avenue to explore, is to determine whether learning fine-grained
+representations of positives is more feasible in scenes with more semantic cues.
+There is still a lot of room left for improvement within place recognition. Hopefully,
+this thesis can help inform future research on how geographical information can be
+used in place recognition, and how it cannot.
+==PAGE:47==
+Bibliography
+[1]
+Selim Aksoy and Robert M Haralick. “Feature normalization and likelihood-
+based similarity measures for image retrieval.” In: Pattern recognition letters
+22.5 (2001), pages 563–582.
+[2]
+Takeshi Amemiya. “Tobit models: A survey.” In: Journal of econometrics 24.1-2
+(1984), pages 3–61.
+[3]
+Relja Arandjelovic et al. “NetVLAD: CNN architecture for weakly supervised
+place recognition.” In: Proceedings of the IEEE conference on computer vision
+and pattern recognition. 2016, pages 5297–5307.
+[4]
+Artem Babenko and Victor Lempitsky. “Aggregating deep convolutional fea-
+tures for image retrieval.” In: arXiv preprint arXiv:1510.07493 (2015).
+[5]
+Herbert Bay, Tinne Tuytelaars, and Luc Van Gool. “Surf: Speeded up robust fea-
+tures.” In: European conference on computer vision. Springer. 2006, pages 404–
+417.
+[6]
+Vasileios Belagiannis et al. “Robust optimization for deep regression.” In: Pro-
+ceedings of the IEEE international conference on computer vision. 2015, pages 2830–
+2838.
+[7]
+Zetao Chen et al. “Convolutional neural network-based place recognition.” In:
+arXiv preprint arXiv:1411.1509 (2014).
+[8]
+Andreas Geiger, Philip Lenz, and Raquel Urtasun. “Are we ready for autonomous
+driving? the kitti vision benchmark suite.” In: 2012 IEEE Conference on Com-
+puter Vision and Pattern Recognition. IEEE. 2012, pages 3354–3361.
+[9]
+Ruben Gomez-Ojeda et al. “Training a convolutional neural network for appearance-
+invariant place recognition.” In: arXiv preprint arXiv:1505.07428 (2015).
+[10]
+Albert Gordo et al. “Deep image retrieval: Learning global representations for
+image search.” In: European conference on computer vision. Springer. 2016,
+pages 241–257.
+[11]
+Raia Hadsell, Sumit Chopra, and Yann LeCun. “Dimensionality reduction by
+learning an invariant mapping.” In: 2006 IEEE Computer Society Conference on
+Computer Vision and Pattern Recognition (CVPR’06). Volume 2. IEEE. 2006,
+pages 1735–1742.
+==PAGE:48==
+40
+Bibliography
+[12]
+James Hays and Alexei A Efros. “Im2gps: estimating geographic information
+from a single image.” In: 2008 ieee conference on computer vision and pattern
+recognition. IEEE. 2008, pages 1–8.
+[13]
+Kaiming He et al. “Deep residual learning for image recognition.” In: Proceed-
+ings of the IEEE conference on computer vision and pattern recognition. 2016,
+pages 770–778.
+[14]
+Yi Hou, Hong Zhang, and Shilin Zhou. “Convolutional neural network-based
+image representation for visual loop closure detection.” In: 2015 IEEE inter-
+national conference on information and automation. IEEE. 2015, pages 2238–
+2245.
+[15]
+Hervé Jégou and Ondřej Chum. “Negative evidences and co-occurences in im-
+age retrieval: The benefit of PCA and whitening.” In: European conference on
+computer vision. Springer. 2012, pages 774–787.
+[16]
+Hervé Jégou et al. “Aggregating local descriptors into a compact image repre-
+sentation.” In: 2010 IEEE computer society conference on computer vision and
+pattern recognition. IEEE. 2010, pages 3304–3311.
+[17]
+Hervé Jégou et al. “Aggregating local image descriptors into compact codes.”
+In: IEEE transactions on pattern analysis and machine intelligence 34.9 (2011),
+pages 1704–1716.
+[18]
+Marı́a Leyva-Vallina, Nicola Strisciuglio, and Nicolai Petkov. “Generalized Con-
+trastive Optimization of Siamese Networks for Place Recognition.” In: arXiv
+preprint arXiv:2103.06638 (2021).
+[19]
+Manuel Lopez-Antequera et al. “Appearance-invariant place recognition by dis-
+criminatively training a convolutional neural network.” In: Pattern Recognition
+Letters 92 (2017), pages 89–95.
+[20]
+David G Lowe. “Distinctive image features from scale-invariant keypoints.” In:
+International journal of computer vision 60.2 (2004), pages 91–110.
+[21]
+Jiangjing Lv et al. “A deep regression architecture with two-stage re-initialization
+for high performance facial landmark detection.” In: Proceedings of the IEEE
+conference on computer vision and pattern recognition. 2017, pages 3317–3326.
+[22]
+Kevin Musgrave, Serge Belongie, and Ser-Nam Lim. “A metric learning reality
+check.” In: European Conference on Computer Vision. Springer. 2020, pages 681–
+699.
+[23]
+Tayyab Naseer et al. “Semantics-aware visual localization under challenging
+perceptual conditions.” In: 2017 IEEE International Conference on Robotics
+and Automation (ICRA). IEEE. 2017, pages 2614–2620.
+[24]
+Aude Oliva and Antonio Torralba. “Modeling the shape of the scene: A holistic
+representation of the spatial envelope.” In: International journal of computer
+vision 42.3 (2001), pages 145–175.
+==PAGE:49==
+Bibliography
+41
+[25]
+Kohei Ozaki and Shuhei Yokoo. “Large-scale landmark retrieval/recognition
+under a noisy and diverse dataset.” In: arXiv preprint arXiv:1906.04087 (2019).
+[26]
+Pilailuck Panphattarasap and Andrew Calway. “Visual place recognition using
+landmark distribution descriptors.” In: Asian Conference on Computer Vision.
+Springer. 2016, pages 487–502.
+[27]
+James Philbin et al. “Lost in quantization: Improving particular object retrieval
+in large scale image databases.” In: 2008 IEEE conference on computer vision
+and pattern recognition. IEEE. 2008, pages 1–8.
+[28]
+James Philbin et al. “Object retrieval with large vocabularies and fast spatial
+matching.” In: 2007 IEEE conference on computer vision and pattern recognition.
+IEEE. 2007, pages 1–8.
+[29]
+Filip Radenović, Giorgos Tolias, and Ondřej Chum. “Fine-tuning CNN image
+retrieval with no human annotation.” In: IEEE transactions on pattern analysis
+and machine intelligence 41.7 (2018), pages 1655–1668.
+[30]
+Ali S Razavian et al. “Visual instance retrieval with deep convolutional net-
+works.” In: ITE Transactions on Media Technology and Applications 4.3 (2016),
+pages 251–258.
+[31]
+Paul-Edouard Sarlin et al. “From coarse to fine: Robust hierarchical localization
+at large scale.” In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition. 2019, pages 12716–12725.
+[32]
+Paul-Edouard Sarlin et al. “Leveraging deep visual descriptors for hierarchical
+eﬀicient localization.” In: Conference on Robot Learning. PMLR. 2018, pages 456–
+465.
+[33]
+Florian Schroff, Dmitry Kalenichenko, and James Philbin. “Facenet: A unified
+embedding for face recognition and clustering.” In: Proceedings of the IEEE
+conference on computer vision and pattern recognition. 2015, pages 815–823.
+[34]
+Pierre Sermanet et al. “Overfeat: Integrated recognition, localization and detec-
+tion using convolutional networks.” In: arXiv preprint arXiv:1312.6229 (2013).
+[35]
+Erik Stenborg, Carl Toft, and Lars Hammarstrand. “Long-term visual localiza-
+tion using semantically segmented images.” In: 2018 IEEE international confer-
+ence on robotics and automation (ICRA). IEEE. 2018, pages 6484–6490.
+[36]
+Niko Sünderhauf, Peer Neubert, and Peter Protzel. “Are we there yet? Challeng-
+ing SeqSLAM on a 3000 km journey across all four seasons.” In: Proc. of Work-
+shop on Long-Term Autonomy, IEEE International Conference on Robotics and
+Automation (ICRA). Citeseer. 2013, page 2013.
+[37]
+Niko Sünderhauf et al. “On the performance of convnet features for place recog-
+nition.” In: 2015 IEEE/RSJ international conference on intelligent robots and
+systems (IROS). IEEE. 2015, pages 4297–4304.
+==PAGE:50==
+42
+Bibliography
+[38]
+Niko Sünderhauf et al. “Place recognition with convnet landmarks: Viewpoint-
+robust, condition-robust, training-free.” In: Robotics: Science and Systems XI:
+(2015), pages 1–10.
+[39]
+Giorgos Tolias, Ronan Sicre, and Hervé Jégou. “Particular object retrieval with
+integral max-pooling of CNN activations.” In: arXiv preprint arXiv:1511.05879
+(2015).
+[40]
+A. Torii et al. “24/7 place recognition by view synthesis.” In: CVPR. 2015.
+[41]
+Nam Vo, Nathan Jacobs, and James Hays. “Revisiting im2gps in the deep learn-
+ing era.” In: Proceedings of the IEEE International Conference on Computer
+Vision. 2017, pages 2621–2630.
+[42]
+Frederik Warburg et al. “Mapillary street-level sequences: A dataset for lifelong
+place recognition.” In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition. 2020, pages 2626–2635.
+[43]
+Chao-Yuan Wu et al. “Sampling matters in deep embedding learning.” In: Pro-
+ceedings of the IEEE International Conference on Computer Vision. 2017,
+pages 2840–2848.
+[44]
+Xiwu Zhang, Lei Wang, and Yan Su. “Visual place recognition: A survey from
+deep learning perspective.” In: Pattern Recognition 113 (2021), page 107760.
+==PAGE:51==
+Acronyms
+FOV
+Field-of-view
+GEM
+Generalized-Mean
+GPS
+Global Positioning System
+MSLS
+Mapillary Street-Level Sequences
+RANSAC Random sample consensus
+SLAM
+Simultaneous Localization and Mapping
+UTM
+Universal Transverse Mercator
+VLAD
+Vector of Locally Aggregated Descriptors
+VPR
+Visual Place Recognition
+==PAGE:52==
+44
+==PAGE:53==
+Appendix
+Link between MLE of Tobit and MSE
+In this proof, we will show that the maximizing the Tobit log likelihood for positive
+points, is equivalent to minimizing the Mean Squared Error.
+The log likelihood for Tobit is given by
+log Ltobit(σ) =
+∑
+yj>yL
+log
+( 1
+σ φ
+(yj −ˆyj
+σ
+))
++
+∑
+yj=yL
+log
+(
+Φ
+(yL −ˆyj
+σ
+))
+Assuming we are given N points where, for all points yi it holds that yi < yL, the
+likelihood will be given by:
+log Ltobit(σ) =
+N
+∑
+yj
+log
+( 1
+σ φ
+(y −ˆy
+σ
+))
+Setting the standard deviation σ = 1
+log Ltobit =
+N
+∑
+yj
+log (φ (y −ˆy))
+Since φ is a standard normal distribution, we can rewrite the likelihood
+log Ltobit =
+N
+∑
+yj
+log
+(
+1
+√
+2π · e−1
+2 (y−ˆy)
+)
+log Ltobit = −N
+2 log
+(√
+2π
+)
+−
+N
+∑
+yj
+(y −ˆy)2
+Now we can show that maximum likelihood estimation of the Tobit log likelihood is
+equivalent to minimizing the mean squared error:
+MLE = Arg Max
+W
+−
+∑
+(y −x · W)2
+MLE = Arg Min
+W
+1
+N
+∑
+(y −x · W)2
+==PAGE:54==
+46
+Appendix
+MLE = Arg Min
+W
+MSE
+==PAGE:55==
+Appendix
+47
+Note on how FOV similarities are calculated
+a
+b
+Figure 1: (a) Two fields-of-view that originate in the same place, but their compass-
+angles are shifted 40 degrees from each other. (b) Two fields-of-view with
+the same compass-angle, but 25 meters away from each other.
+In the paper by Leyva-Vallina[18], researchers define field-of-view similarity for
+two points as the intersection-over-union of their fields-of-view.
+A field-of-view is
+defined as a slice of a circle, and can therefore be parameterized by a radius and an
+angle of the circle slice (360 is a full circle, 180 is half a circle etc.). The radius and
+angle can be interpreted as how far away we can see in the picture, and the angle the
+camera is able to capture.
+In their paper they use the two examples in Figure 1 to rationalize choosing an
+angle θ = 90 and a radius r = 50m, by calculating their field-of-view similarities.
+The example in Figure 1(a) is two points with identical coordinates but ∆θ = 40.
+The example in Figure 1(a) is two points 25 meters away from each other, but with
+identical angle. The wish was, that these examples should have close to 50% field-
+of-view overlap, and indeed they calculate Figure 1(a) to 55.63% and Figure
+1(b) to 45.01%. However, we calculate the same examples to 38.47% and
+28.91% respectively.
+To verify our results, we calculated Figure 1(a) theoretically. In this example, the
+union is θU = 90 + 40 = 130 and the area of the intersection is θI = 90 −40 = 50.
+Additionally, the area of a circle slice, can be calculated as:
+ACircleSlice = θSlice
+360 · (r2π)
+Putting in the parameters we compute that
+IoU = AIntersection
+AUnion
+=
+50
+360 · (r2π)
+130
+360 · (r2π) = 5
+13 = 38.46%
+==PAGE:56==
+48
+Appendix
+Which is exactly the result we get. Upon further analysis of the results by Leyva-
+Vallina, their results turn out to be exactly equal to
+IoU = AIntersection
+ACircleSlice
+where ACircleSlice is the area of one circle slice with r = 50 m and θ = 90. In our
+work, we calculate the the intersection-over-union as
+IoU = AIntersection
+AUnion
+where AUnion = 2 · ACircleSlice −AIntersection.
+Extra Figures
+This section provides a few more figures, that were left out of the main portion of the
+thesis.
+Figure 2: Two examples of fields-of-view. The green field-of-view are query images
+and the red are database images. While the overlaps in field-of-view are
+similar in the left figure, they are not in the right figure. Thus one of the
+the database images would have very little visual overlap with the query
+image.
+==PAGE:57==
+Appendix
+49
+0
+5
+10
+15
+20
+25
+Geographical Distance
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Latent Distance
+Clustering - Gaussian Mixture Model
+Figure 3: Clustering produced by Gaussian mixture model used in Figure 5.5.
+==PAGE:58==
+50
+Appendix
+10 m
+12 m
+11 m
+Figure 4: More examples of images with 0 FOV overlap, but within 25 meters.
+==PAGE:59==
+==PAGE:60==

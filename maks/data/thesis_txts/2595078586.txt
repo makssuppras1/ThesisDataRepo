@@ -1,0 +1,2303 @@
+==PAGE:1==
+Algorithms for Modern Processor Architectures∗
+Mads O. Bjørn and Tord J. Stordalen
+{s153413, s153083}@student.dtu.dk
+15.06.2020
+Supervisors:
+Philip Bille
+Inge Li Gørtz
+Abstract
+While the amount of data keeps increasing, CPU clock speeds have stagnated over the last decade. Yet,
+a number of features on modern CPUs are under-utilised. Single instruction, multiple data (SIMD) is
+one such feature, in which the CPU operates on vectors of values instead of individual elements. One
+area that has not yet seen much research on the possibilities of SIMD is the indexing problem, which
+consists of maintaining a dynamic set of keys while supporting updates, predecessor- and range queries.
+In this report we introduce several new SIMD enhanced data structures, as well as a simpliﬁed interface
+to express SIMD computations and a model to analyse programs utilising them. We introduce what we
+believe to be the ﬁrst data structure that uses SIMD to directly improve insertions. The data structures
+are optimised for response times, and several of the new data structures are more than a factor two
+better than their un-enhanced counterparts for both queries and updates. The best data structure is a
+Log-Structured Merge-Tree (LSM) which uses SIMD to merge levels together. It is more than 10 times
+faster for insertions than a SIMD enhanced standard B+-Tree, while being slightly faster for searches.
+As a performance baseline for searches the most eﬃcient, static, cache optimised, SIMD implementation
+of a search tree that we could devise is used. The LSM stays within a factor four of this data structure.
+Acknowledgements
+We would like to express our great appreciation and thanks to our supervisors Philip Bille and Inge
+Li Gørtz, for their excellent help and guidance throughout ﬁve years of studies and in completing this
+Master’s Thesis.
+∗This report is a Master’s Thesis for the authors’ MSc. degree in Computer Science and Engineering at the Technical
+University of Denmark (DTU). It represents 60 ECTS worth of work.
+1
+==PAGE:2==
+Contents
+1
+Introduction
+3
+2
+Preliminaries
+3
+2.1
+SIMD
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+3
+Problem Statement
+4
+4
+Previous Work
+4
+5
+Data Structure Overview
+6
+6
+Implementation
+8
+6.1
+Simpliﬁed SIMD Interface . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+6.2
+Implementation Overview . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+6.3
+The B+-Trees . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+10
+6.3.1
+SIMD B+-Tree . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+10
+6.3.2
+Two-Level SIMD B+-Tree . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+6.3.3
+Buﬀered SIMD B+-Tree . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+6.3.4
+Implicit SIMD B+-Tree
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+13
+6.3.5
+Static SIMD B+-Tree
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+6.4
+The LSMs . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+19
+6.4.1
+Scalar LSM . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+19
+6.4.2
+SIMD LSM: Eﬃcient Merging Using SIMD . . . . . . . . . . . . . . . . . . . . . .
+19
+6.4.3
+SIMD LSM with Search Trees . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+23
+6.4.4
+SIMD LSM with Parallel Binary Searches . . . . . . . . . . . . . . . . . . . . . . .
+23
+6.4.5
+SIMD LSM with Fractional Cascading . . . . . . . . . . . . . . . . . . . . . . . . .
+24
+7
+Experiments
+26
+7.1
+Test Setup and Overview
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+7.2
+Results at a Glance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+27
+7.3
+SIMD B+-Trees . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+28
+7.4
+Performance of the Scalar LSM . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+30
+7.5
+Tuning Parameters for the SIMD LSM . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+31
+7.6
+Comparing the Best Solutions . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+33
+8
+Discussion and Future Work
+35
+8.1
+Suitability of the Simpliﬁed SIMD Model
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+35
+8.2
+Scalability of the SIMD LSM with Search Trees . . . . . . . . . . . . . . . . . . . . . . . .
+36
+9
+Conclusion
+36
+Appendix A: Predecessor Search in Unsorted SIMD Vectors
+39
+2
+==PAGE:3==
+1
+Introduction
+In recent years, hardware designers have been adding new powerful features to processors. One of these
+features is single instruction, multiple data (SIMD). SIMD is a form of vector processing paradigm in
+which a single instruction can be applied simultaneously to multiple data elements. While introduced
+in the 60s [9], it has recently become commonplace in modern processors. For instance, Intel’s newest
+CPUs ship with AVX512 which provides SIMD operations on words that are 512 bits wide [17].
+While the beneﬁt of doing more work per unit of time is obvious, SIMD poses certain challenges. To
+fully beneﬁt from SIMD, algorithms must be restructured such that it is useful apply the same operation
+to multiple data at the same time. More importantly, data for SIMD registers must be aligned properly
+and located consecutively in memory to avoid penalties when loading data into a SIMD register.
+Due to these constraints, it is not always obvious how to improve the many algorithms and data structures
+that were developed for the standard computational paradigm. Despite this, SIMD has been used to
+great eﬀect in areas such as compression [19], set intersection [11], sorting [10, 12] and searching [18].
+These papers indicate that there is research potential in exporting well-known ideas into the domain of
+SIMD to achieve signiﬁcant speedups.
+In this report we will tackle the indexing problem which consists of maintaining a dynamic set of keys
+while supporting predecessor and range queries.
+We introduce a Simpliﬁed SIMD Interface along with a model of computation to more easily communicate
+and analyse SIMD based data structures and algorithms.
+Using these tools we introduce new SIMD-enhanced variants of well-known data structures that perform
+signiﬁcantly better than their un-enhanced counterparts.
+To our knowledge we introduce the ﬁrst data structure which uses SIMD to directly improve insertions
+and show that our best structure is a factor of 3 and 20 better at searching and insertion respectively, than
+a balanced binary search tree, while remaining within a factor four of the best static search procedure
+we could devise.
+The layout of the report is as follows. Section 2.1 introduces basic notions about SIMD and how to
+analyse SIMD programs theoretically. Section 4 introduces related work on data structures that use
+SIMD to solve the indexing problem. A high level introduction of our own data structures can be found
+in Section 5, while Section 6 covers all of our data structures in more depth. A simpliﬁed SIMD interface
+is introduced in Section 6.1. The big picture of the data structures in this report can be found in Section
+6.2. It contains a helpful summary over all the data structures in Section 6, including their running
+times and main characteristics. The experiments and results are introduced and analysed in Section 7.
+Section 8 contains further discussions as well as future work.
+2
+Preliminaries
+Throughout this report, N denotes the number of elements in a data structure. It is not to be confused
+with the lowercase n, which will be used on an ad-hoc basis to analyse operations that do not directly
+relate to a data structure. Given two sequences (arrays, SIMD vectors, etc) x and y, x ◦y is the their
+concatenation. It is assumed that the largest signed 32 bit integer never will be used as a key. Instead,
+it is used as a sentinel in several data structures and is commonly referred to as ∞.
+2.1
+SIMD
+SIMD (single instruction, multiple data) is a computation paradigm where operations are performed
+on vectors that contain a given number of elements each. Algorithms utilising SIMD are said to be
+vectorised, as opposed to unvectorised algorithms which are scalar.
+For this project, Intel’s Advanced Vector Extensions 2 (AVX2) which supports 256 bit vectors were
+used. Many operations are supported, including variants of most of the normal arithmetic and boolean
+operations, an example of which can be seen in Figure 1. More powerful operations include reordering
+3
+==PAGE:4==
+a1
+a2
+a3
+a4
+a5
+a6
+a7
+a8
+b1
+b2
+b3
+b4
+b5
+b6
+b7
+b8
+a1+b1 a2+b2 a3+b3 a4+b4 a5+b5 a6+b6 a7+b7 a8+b8
++
+=
+a
+b
+a+b
++
+=
+Figure 1: Left: Shows how arithmetic operations work element-wise for SIMD vectors. Right: Shows the
+corresponding scalar operation.
+the contents of a vector, ﬁnding the smallest element in a vector, etc. The API is nuanced, sometimes
+with multiple almost identical implementations of the same operation.
+While convenient for implementations, this makes describing and reasoning about vectorised algorithms
+diﬃcult. To remedy this, programs using SIMD will be analysed using an idealised1 extension of the
+Word RAM model where SIMD words contain B elements and all SIMD operations run in O (1) time.
+An important implication of this is that data can be moved in chunks of Θ(B) elements in constant time.
+Initially, the focus in this report will be on the core ideas of the data structures. The speciﬁcation of
+SIMD operations is deferred for Section 6.1.
+The most important design principle for SIMD algorithms is that data that is moved from memory to
+a SIMD register or vice versa, should be located consecutively in memory. Otherwise it is necessary to
+read or write information from or to diﬀerent locations in memory. These operations are called gather
+and scatter, respectively, and are prohibitively expensive. In some cases they can entirely negate the
+increased computation power from using SIMD. Accessing data that is not properly aligned in memory
+also incurs a penalty. In most cases this is easy to avoid, however, and alignment issues are disregarded
+as implementation details in this report.
+3
+Problem Statement
+In this report, we will study how to apply SIMD to the fundamental and well-studied data structuring
+problem of indexing. In particular, we will focus on data structures that maintain a set while supporting
+incremental updates and predecessor queries. Note that the predecessor queries are all implemented such
+that extending them to range queries is trivial and does not induce signiﬁcant overhead. The goal is to
+explore diﬀerent trade-oﬀs which minimise the worst case running time for the diﬀerent operations.
+Due to restrictions on the available SIMD hardware, we will restrict ourselves to working with 32 bit
+integer keys. Furthermore, we will restrict ourselves to a single thread, to using only internal mem-
+ory (RAM), and to the setting where insertions and queries can occur in any order. In other words,
+optimisations that rely on concurrency or on bulking updates or queries are excluded.
+The data structures will be compared using empirical results as well as theoretical analyses using the
+model of computation presented in Section 2.1. The idea is to capture how the performance of these
+data structures will change as hardware continues to improve.
+4
+Previous Work
+Indexing is a well researched problem.
+Classic in-memory data structures for the indexing problem
+include balanced binary search trees and van Embde Boas trees [8]. Solutions for the external memory
+version of the problem include B-Trees [3],B+-Trees [3], Bϵ-Trees [5], Log-Structured Merge-Trees (LSM)
+[15], and the Cache-Oblivious Lookahead-Array (COLA) [4]. In particular B-Trees and its derivatives
+have seen much use both in practise and in research.
+1The model truly is idealised. A discussion on why this model might not stand the test of time can be found in Section
+8.1.
+4
+==PAGE:5==
+The literature on using SIMD for indexing is sparser. Table 1 shows an overview over following paragraphs
+on the previous work.
+Schlegel et al. showed how to use SIMD to implement B-ary search 2 in a static collection of keys. B-ary
+search is a generalisation of binary search, where instead of recursively eliminating half of the remaining
+elements you divide the remaining elements into B + 1 equally sized groups and recurse only on one.
+This leads to a lookup time of O (logB N). Note that the technique requires a static data structure and
+that updates run in linear time [18].
+Huber et al. implemented an in-memory B-Tree where the keys in the B-Tree nodes are searched using
+B-ary search introduced by Schlegel et al. [23]. They apply the same idea to a trie (technically a preﬁx
+B-tree) where the keys stored in a trie node are searched using B-ary search. Note that trie nodes contain
+only segments of keys rather than the entire keys themselves, and that more segments than keys can be
+ﬁt into a single SIMD register. This speeds up the searching process. For instance, if the segments are
+a quarter of the length of the actual keys, each SIMD segment can ﬁt 4B segments, leading to the more
+eﬃcient 4B-ary search in each trie node [23]. Since the B-ary search relies on a static data structure,
+both of the data structures suggested by Huber et al. are static in the sense that at least one entire
+B-Tree or trie node needs to be rebuilt on any update.
+VAST (A Vector-Advanced and Compressed Structure for Massive Data Tree Traversal) by Yamamuro
+et al. is another eﬃcient vectorised indexing data structure. The authors apply cache-conscious design
+on the level of a page block, cache line and SIMD registers, as well as a lossy compression technique
+with error correction in order to decrease the size of the data structure and decrease bandwidth use.
+As far as SIMD-speciﬁc optimisations go, they apply the same technique as mentioned in the previous
+works of using a SIMD register in order to compare multiple keys simultaneously, eﬀectively increasing
+the ”branching factor” of the search [22].
+The Adaptive Radix Tree (ART) introduced by Leis et al. in [14] is a trie in which the implementation
+of a node is adapted to the number of keys stored in the node. While they use SIMD to search in the
+same way as explained above in one particular type of node, in certain other nodes they use a direct
+addressing table which is not suitable for supporting predecessor and range queries.
+Graphical Processing Units (GPUs) are eﬃcient and highly concurrent processors. At a low level, multiple
+processes form a group that is controlled in a fashion similar to SIMD, where the same instruction is
+executed on each processor in the group simultaneously. Consequently, we will brieﬂy summarise some
+recent work on index structures for the GPU. Common for all of the data structures mentioned here
+is that they use the concurrency of the GPU in order to run multiple operations simultaneously, thus
+greatly increasing throughput. While immensely useful, this is not relevant in our context.
+Zhang et al. [24] introduce the Harmonia, which is a B+-Tree where the keys and child pointers are
+stored separately and where the keys are stored in a breath-ﬁrst order. They use SIMD to perform
+multiple simultaneous queries, by batching them up, and sorting them before they are run. This ensures
+that queries that are headed down the same path of the tree are performed in the same search, which
+gives a good cache performance. This gives them a high throughput on both the CPU and the GPU.
+Shahvarani and Jacobsen implement a B+-Tree that is resident both in CPU and GPU [20]. By storing all
+nodes but the leaves of the B+-Tree in both the CPU and GPU RAM, the bandwdith of both processors
+can be used and the throughput is increased. They demonstrate that bandwidth, not processing power,
+is the performance bottleneck. Notably, they use SIMD in order to traverse trees similarly to Schlegel
+et al.
+Ashkiani et al.
+implement a Log-Structured Merge-Tree (LSM) for the GPU for the context where
+updates and queries arrive in batches of a given size [1]. Each of the levels in the LSM is a sorted array.
+When one level is full, it is merged with the next, until an empty level is found. While they do not use
+the SIMD-like capabilities of the GPU for anything other than running concurrent queries, it is worth
+noting that one of our data structures is inspired by this LSM.
+2Schlegel et al. calls the technique k-ary search, not B-ary search. The latter is more suitable in our context because
+the name ’k-ary search’ assumes that k −1 keys ﬁt in one SIMD register. Technically, the most accurate name would be
+(B + 1)-ary search, but we omit the +1 for simplicity.
+5
+==PAGE:6==
+Work
+SIMD Usage
+Queryi
+Updatei
+Notes
+SGL [18]
+Perform
+B-ary
+search
+on
+sorted numbers.
+O(logB (N))
+O(N)
+Using a static data structure.
+A gener-
+alisation of binary search which runs in
+O (logB (N)) rather than O (log2(N)).
+ZYLZ+ [24]
+Run multiple concurrent B+-
+Tree queries.
+O (logB (N)) O (logB (N))
+Uses multi-threading and bulks queries to-
+gether before applying them.
+HZF [23]
+Uses B-ary search for internal
+searching in (Preﬁx) B-Tree
+nodes
+O(logB (N))
+O(γ+logB (N)) ii
+Updates are not implemented, but rebuild-
+ing B-ary search trees on update is sug-
+gested. Preﬁx B-Tree is not linear space.
+SJ [20]
+B-ary-like search on keys in a
+hybrid CPU/GPU B+-Tree
+O (logB (N)) O (N)
+Processes queries and updates in bulk and
+uses concurrency.
+ART [14]
+To search some internal nodes
+faster.
+O (α) iii
+O (α) iii
+A space optimised trie which has a number
+of optimisations that are applicable only
+for point quires.
+FAST [13]
+Used to search the internal
+FAST nodes.
+O (logB (n))
+O (logB (n))
+Optimised
+for
+fewer
+cache-
+and
+TLB
+misses, but uses the memory wait time to
+do multiple concurrent searches to achieve
+high throughput.
+VAST [22]
+Used to search the internal
+VAST nodes.
+O (logB(n))
+O (logB(n))
+VAST is an extension of FAST which
+uses lossy compression to store more nodes
+closer together for better SIMD and cache
+utilisation. They also use statistical error
+correction to compensate for the lossy com-
+pression, and guarantee no false results.
+Table 1: Overview over previous work using SIMD to address the indexing problem.
+i: Note that these complexities far from give an entirely fair comparison of the diﬀerent methods. Some of the data structures are
+highly optimised with regards to for instance cache performance, while others are concurrent, etc.
+ii: γ is the number of keys in a node
+iii: α is the length of the key
+Finally, SIMD has been used to speed up common database operations [21, 16]. However, this work
+explains how to implement joins, scans, partitions, hash tables and the like in a more eﬃcient manner.
+With the exception of hash tables, which do not eﬃciently support range queries, these operations are
+not related to indexing structures.
+5
+Data Structure Overview
+This section will present a high-level, intuitive overview over our data structures. Broadly speaking, the
+data structures are organised into two classes: the B-Tree and the Log-Structured Merge-Tree (LSM).
+Each will be covered in turn.
+The SIMD B+-Tree
+The SIMD B-Tree draws inspiration both from B-ary search, as presented by Schlegel, et al. in [18], and
+the B-Tree, as presented by Bayer and McCreight in [3].
+B-ary search is a generalisation of binary search for speeding up searches in a static collection of N
+unique keys that are stored in a sorted array A.
+While binary search would eliminate half of the
+remaining candidates by choosing a central pivot and recursing either left or right, B-ary search chooses
+B pivots which divides A into B+1 evenly sized partitions. The B pivots are loaded into a SIMD register,
+and the correct partition to recurse into is identiﬁed in O (1) time. Hence, the running time of B-ary
+6
+==PAGE:7==
+search is O (logB N), which is a factor Θ(log2 B) faster than binary search for B > 2.
+However, naively implementing this procedure using SIMD would be slow because a gather load is
+necessary to get the B pivots into a SIMD register. Therefore, Schlegel et al. suggest B-ary search tree
+which, in essence3, is constructed in the following way. Initially, extract B pivots from A as described
+above. Let those pivots be the keys in the root node of the tree. Recursively construct B-ary search trees
+from the B + 1 partitions and let the resulting trees be the children of the root in the order they appear
+in A from left to right. The recursion terminates for partitions of size Θ(B). Each node in the B-ary
+search tree can now be eﬃciently loaded since its keys are located consecutively in memory, removing
+the need for gather operations.
+The B-ary search tree is similar to a B-Tree: the branching factor of every node is Θ(B), and under
+certain constraints on N, every root-to-leaf path is of equal length. A natural idea following from this
+observation is that the B-ary search tree can be made dynamic by implementing a B-Tree where all nodes
+except the root has a branching factor of Θ(B).
+The SIMD B+-Tree is such a tree, where the number of keys in all internal nodes is kept in the range
+[ B
+2 , . . . , B] by splitting nodes when they get too full. B+-Trees diﬀer from B-Trees by the fact that all the
+keys are stored in the leaves of the tree, while keys in internal nodes are merely routing elements used
+to ﬁnd the correct leaf. Consequently, range queries can be supported by maintaining left-to-right links
+between adjacent leaves, performing a single predecessor search and traversing rightwards through the
+leaves until all elements in the range have been reported. As will be justiﬁed later, searching, insertion
+and splitting spends O (1) time in each node, leading to both update and query time of O (logB N).
+The SIMD LSM
+Log-structured merge-tree was ﬁrst introduced by O’Neill, Cheng, Gawlick and O’Neill in [15]. The
+core idea is to organise data in data structures in multiple levels, where the size of each level increases
+exponentially. When one level is full, it is merged into the next level. If the merge results in the next
+level also being full, the merge cascades further down the hierarchy. If necessary, a new level is added. To
+perform a predecessor query, each level must be searched individually. The LSM is eﬃcient for updates,
+intuitively because it gathers the updates together into groups of increasing sizes and processes them in
+bulk. However, the search performance suﬀers as a result of maintaining multiple data structures.
+The SIMD LSM is inspired by the GPU LSM [1]. The ﬁrst level is a sorted array of length B, and every
+subsequent level is a sorted array of twice the size. Insertions are buﬀered until there are B of them
+before the cascading merge is initiated. The buﬀer exactly ﬁts into level 0. If level 0 is full, the result of
+merging the buﬀer and level 0 exactly ﬁts into level 1, and so on. Hence, at all times each level is either
+entirely full or completely empty.
+An eﬃcient SIMD merging procedure introduced by Chhugani et al. in [7] is used for the cascading
+merge. The algorithm uses a SIMD implementation of a sorting network which can merge two vectors of
+size B in O (log2 B) time. Longer arrays are merged by repeatedly extracting the B smallest values using
+the sorting network until both arrays are depleted. Hence the amortised time spent for one particular
+element in the merge is O
+
+log2 B
+B
+
+. Each element in the SIMD LSM has been involved in at most as
+many merges as there are levels in the structure, of which there are O (log2 N), leading to an amortised
+insertion time per element of O
+
+log2 B log2 N
+B
+
+.
+Two diﬀerent ways of eﬃciently searching the SIMD LSM are explored.
+One is by building a SIMD B+-Tree over each full level. To do a predecessor query for x in this data
+structure, perform a predecessor query in each of the SIMD B+-Trees in the structure, yielding a query
+time of O (log2 N · logB N) = O
+
+(log2 N)2
+log2(B)
+
+To extend the predecessor query to a range query, additionally
+traverse each level from x’s predecessor in that level until the end of the range is discovered.
+The other is by using fractional cascading as introduced by Chazelle and Guibas in [6]. In essence,
+fractional cascading works by having level i of the LSM store a compact representation of level i + 1 in
+3The exact construction from [18] has diﬀerences that are inconsequential in this instance.
+7
+==PAGE:8==
+such a way that if x’s predecessor in level i is known, then x’s predecessor in level i + 1 can be found
+in constant time. Performing a predecessor query consists of binary searching level 0 and using the
+fractional cascading structure to ﬁnd predecessors in the remaining levels.
+6
+Implementation
+6.1
+Simpliﬁed SIMD Interface
+As mentioned previously, APIs for SIMD operations tend to be complicated. This is a challenge for
+describing computations using SIMD; the complexity takes the focus away from the algorithmic ideas,
+but not including code leads to irreproducible results.
+In this report we have opted for the middle route, presenting a set of simpliﬁed SIMD operations whose
+functionality is ﬁne-grained enough to represent the algorithmic ideas, while certain implementation
+details are left out. Table 2 shows an overview of the relevant operations and notation.
+−→v
+The arrow indicates that v is a vector.
+−→v ←[x1, x2, . . . , xk]
+Populates a vector
+−→v [i] and −→v [i] ←x
+Returns or updates the i’th element in −→v , respectively
+−→x = −→y
+Returns a bitstring s such that s[i] = 1 iﬀ−→x [i] = −→y [i]
+−→x ≥−→y
+Returns a bitstring s such that s[i] = 1 iﬀ−→x [i] ≥−→y [i]
+−→x > −→y
+Returns a bitstring s such that s[i] = 1 iﬀ−→x [i] > −→y [i]
+minV(−→a ,−→b )
+Returns a new vector −→v where −→v [i] = min(−→a [i], −→b [i])
+maxV(−→a ,−→b )
+Returns a new vector −→v where −→v [i] = max(−→a [i], −→b [i])
+blend(−→a ,−→b , −−−−−→
+selector) e.g.:
+blend(−→a ,−→b , [a,a,a,a,b,b,b,b])
+Returns a new vector −→v where the ith element is taken from the vector
+speciﬁed by −−−−−→
+selector[i]: if −−−−−→
+selector[i] = a, then −→v [i] ←−→a [i], otherwise
+−→v [i] = −→b [i]. The example takes the four ﬁrst and last elements from −→a
+and −→b respectively.
+reorder(−→x , −−−−−−→
+ordering) e.g.:
+reorder(−→x , [7,6,5,4,3,2,1,0])
+reorder(−→x , [0,0,0,0,1,1,1,1])
+Returns a new vector −→v where the ith element is taken from the index
+of −→x speciﬁed by −−−−−−→
+ordering[i]. If −−−−−−→
+ordering[i] = k then −→v [i] = −→x [k]. The
+ﬁrst example reverses −→x , while the second creates a vector where −→x [0]
+is repeated four times followed by four repetitions of −→x [1].
+popcount(s)
+Returns the number of ones in the bitstring s
+Table 2: The operations used in the simpliﬁed SIMD interface. Note that the operators =, ≥and > are
+overloaded and maintain their normal semantics for integers.
+6.2
+Implementation Overview
+The following sections introduces quite a number of data structures, most of which diﬀer from each
+other in minor ways. This section will give a brief overview of all the data structures along with their
+complexities. Its purpose is both to serve as an introduction to the work presented here, as well as a
+reference the reader can return to in order to gain (or regain) the big picture.
+8
+==PAGE:9==
+The B-Trees
+Description
+Section
+Query
+Update
+SIMD B+-Tree: A regular B+-Tree where each node contains at
+most B keys/routing elements and each node is individually allocated
+on the heap. During a search, SIMD comparisons are used to identify
+the next node to visit in O (1) time.
+6.3.1
+O (logB(N))
+O (logB(N))
+Two-Level SIMD B+-Tree: Like SIMD B+-Tree where nodes have
+Θ(B2) keys/routing elements. More work is required per node for
+both queries and updates, but the tree is shallower.
+6.3.2
+O (logB(N))
+O (logB(N) + B)†
+Buﬀered SIMD B+-Tree: Like Two-Level SIMD B+-Tree where
+each internal node additionally has a buﬀer of size B for each child.
+Elements are added to buﬀers on insertion and moved in bulk to the
+next node when the buﬀer is full.
+Searching additionally requires
+checking a buﬀer in each node on the search path.
+6.3.3
+O (logB(N))
+O (logB(N) + B)†
+Implicit SIMD B+-Tree: A SIMD B+-Tree where the entire tree is
+laid out in one array. The layout encodes a complete tree of branching
+factor B + 1, but parts of the layout might be unused, leading to
+wasted memory. Good cache performance and no pointers required.
+Slow insertions due to rigid layout.
+6.3.4
+O (logB(N))
+O (N)
+Static SIMD B+-Tree: Another implicitly laid out SIMD B+-Tree.
+Laid out without any wasted space, but does not support insertions.
+Good cache performance, no pointers required. Very eﬃcient bulk
+building procedure to build it from sorted keys.
+6.3.5
+O (logB(N))
+Unsupported
+The Log-Structured Merge-Trees (LSMs)
+Description
+Section
+Query
+Update
+Scalar LSM: Consists of a number of sorted arrays (levels) of ex-
+ponentially increasing size. New elements are inserted into the ﬁrst
+level. Once a level is full, it is merged with the next one. This can
+cause a cascade of merges until a level with enough space is reached.
+Queries are performed by binary searching each level.
+6.4.1
+O
+ (log2 N)2
+O (log2(N))†
+SIMD LSM: A Scalar LSM where the merge procedure is replaced
+by an eﬃcient SIMD merging procedure.
+6.4.2
+O
+ (log2 N)2
+O
+log2(B) log2(N)
+B
+
+†
+SIMD LSM w/ Search Trees: A SIMD LSM where a static SIMD
+B+-Tree is built over each level and used in place of binary search.
+6.4.3
+O
+(log2 N)2
+log2(B)
+
+O
+log2(B) log2(N)
+B
+
+†
+SIMD LSM w/ Parallel Binary Searches: A SIMD LSM where
+searches are performed by doing B binary searches in parallel using
+SIMD. While more eﬃcient than the SIMD LSM w/ Search Trees in
+theory, it turns out to be slow in practise.
+6.4.4
+O
+(log2 N)2
+B
+
+O
+log2(B) log2(N)
+B
+
+†
+SIMD LSM w/ Fractional Cascading: A SIMD LSM with an ad-
+ditional searching structure based on fractional cascading. In essence,
+the levels are preprocessed such that once the predecessor of some el-
+ement x is found on level i, x’s predecessor on level i+1 can be found
+in constant time. Searching is performed by doing one binary search
+at level 0, and using the fractional cascading structure to visit the
+rest of the levels.
+6.4.5
+O (log2(N))
+O
+log2(B) log2(N)
+B
+
+†
+O(·)†: Amortised
+9
+==PAGE:10==
+6.3
+The B+-Trees
+6.3.1
+SIMD B+-Tree
+The SIMD B+-Tree is an implementation of the standard B+-Tree [3], which we assume the reader is
+familiar with.
+Each node contains at most B routing elements.
+The routing elements are stored in
+a SIMD vector which, if necessary, is padded on the right with the sentinel value ∞to ﬁll the vector
+entirely. Furthermore, internal nodes contain B+1 pointers to their children. How many of these pointers
+are in use is obviously determined by the number of routing elements in use in the node. The ith routing
+element is strictly smaller than every key occurring in the (i + 1)th child.
+Suppose you want to determine which child of some internal node v you should go to in order to ﬁnd the
+predecessor of some key x. The number of routing elements of v that x is strictly greater than exactly
+corresponds to the index of the desired child. This can be determined in constant time using SIMD. First,
+create the key vector which has B occurrences of x. Comparing the key vector to the routing elements
+of v using the greater-than comparison yields a bitvector where the number of ones corresponds to the
+number of routing elements x is greater than. The number of ones can be extracted using the popcount
+function. The same procedure can be used to ﬁnd x’s predecessor in a leaf, with the only diﬀerence
+being that the greater-than-or-equal-to operator is used instead, in case x itself is present. Since only a
+constant number of SIMD operations are used, this runs in constant time.
+The search procedure for the SIMD B+-Tree can be seen in Algorithm 1 and works as follows. First, the
+key vector is created (line 2), which happens only once during the search. Until a leaf is reached, use
+the procedure speciﬁed in the previous paragraph to identify the next node to visit and move there (line
+7). Finally, ﬁnd the key’s predecessor (line 12-13) and return it.
+Algorithm 1 Search SIMD B+-Tree
+1: procedure Search(root, key)
+2:
+−→
+key ←[key, key, ..., key]
+3:
+height ←height of tree
+4:
+current ←root
+5:
+while height > 0 do
+6:
+// The .vector member of internal nodes contain their routing elements
+7:
+index of child ←popcount(−→
+key > −−−−−−−−−−→
+current.vector);
+8:
+current ←current.children[index of child]
+9:
+height ←height - 1
+10:
+end while
+11:
+// The .vector member of leaves contain the keys of that leaf
+12:
+index ←popcount(−→
+key ≥−−−−−−−−−−→
+current.vector)
+13:
+return −−−−−−−−−−→
+current.vector[index]
+14: end procedure
+As usual, nodes in the B-Tree must be split if they become full during insertions. The insertion procedure
+for the SIMD B+-Tree uses preemptive splitting; whenever a full node is encountered during an insertion
+procedure, it is split. Splitting the node consists of copying the B/2 −1 largest routing elements and the
+corresponding children pointers into a new node, padding both nodes with ∞as required, and passing a
+pointer to the new node along with a routing element which diﬀerentiates the contents of the two nodes
+to the parent node. This can easily be done in constant time in the SIMD Model of Computation since
+it assumes that Θ(B) data can be moved in O (1) time. An illustration of the splitting procedure can be
+seen in Figure 2.
+The insertion procedure searches to the correct leaf in the same way as Algorithm 1 while splitting any
+full node that it encounters. The key is then inserted into the corresponding leaf at the correct position.
+This too can be done in O (1) time, as at most Θ(B) elements must be shifted rightwards to make room
+for the new key.
+10
+==PAGE:11==
+100, 200, 300, 400, 500, 600, 700, 800
+t1
+t2
+t3
+t4
+t5
+t6
+t7
+t8
+t9
+500
+100, 200, 300, 400
+600, 700, 800
+t1
+t2
+t3
+t4
+t5
+t6
+t7
+t8
+t9
+Figure 2: The root node of a SIMD B+-Tree being split. The topmost tree displays a full root node,
+with B = 8, while the bottom tree displays the result of splitting the root node.
+Since it is maintained that all internal nodes (except the root) have a branching factor of at least B/2+1
+at all times, the height of the tree is O (logB(N)). Since both the search and insertion procedure spends
+at most O (1) time at each node on a root-to-leaf path, this is also the running time of these operations.
+Note that while we could use SIMD to support the insertion and splitting operations in O (1) time and
+achieve these bounds, we found that in practise it is more eﬃcient to do scalar, linear insertions since
+the arrays of routing elements are so small.
+Improving Insertion Performance
+As will be seen in Section 7, the SIMD B+-Tree performs quite well on searches, while not so well on
+insertions. This section introduces an optimisation which trades some of the search performance for
+better insertion performance. It is based on the following observation: if it is possible to eﬃciently
+determine a key’s predecessor in an unsorted vector of keys, the sorting of the keys can be deferred until
+the leaf node needs to be split.
+Instead of inserting keys into the leaves so that they always remain sorted, new keys are simply added
+at the end of the already present keys. When a node is to be split, the keys can be sorted in O (B log B)
+time before the node is split in O (1) time. While this is theoretically worse than simply keeping the
+leaves sorted, empirical tests proved it to be slightly faster.
+What remains is to ﬁnd the predecessor of a key in an unsorted vector during a search. Intel’s AVX2
+has a function which returns the index of the minimum element in a vector which can be used for this
+purpose. In essence, it works by ﬁrst extracting all the numbers smaller than the key, which are all
+candidates for being the key’s predecessor. Then they can be negated so that the key’s predecessor
+becomes the smallest number, which can be found by extracting its index. Unfortunately, the function
+for extracting the index of the minimum element works only for 16 bit unsigned integers and the actual
+implementation is quite complex. However, it still runs in O (1) time. Refer to Appendix A for a detailed
+description of the implementation.
+6.3.2
+Two-Level SIMD B+-Tree
+The Two-Level SIMD B+-Tree is simply a SIMD B+-Tree where each node contains an internal two-
+level B+-Tree over the routing elements/keys as illustrated in Figure 3. In this internal tree there are
+B + 1 leaves containing the actual keys/routing elements along with the root which contains keys that
+11
+==PAGE:12==
+5,10,15,20,∞
+1,2,3,4,5
+6,7,8,9,10
+11,12,13,14,15
+16,17,18,19,20
+20,21,22,∞, ∞
+∞, ∞, ∞, ∞, ∞
+Figure 3: Illustration of the internal search tree in a node of the Two-Level SIMD B+-Tree with B = 5.
+The search tree is not entirely full and has room for another seven elements. To ensure the SIMD search
+procedure works correctly, the tree is padded with ∞where needed. The elements in the leaves that are
+bold indicate the keys used as routing elements in the root.
+distinguish the leaves from each other. Hence a node contains at most B(B + 1) keys elements and has
+a branching factor of at most B(B + 1) + 1.
+The search process in the Two-Level SIMD B+-Tree is analogous to that of a SIMD B+-Tree. In each
+node, ﬁrst compare the key vector (containing the key being searched for) with the root of that node’s
+internal search tree to identify the relevant leaf, and then compare against the keys in that leaf to identify
+the key’s predecessor in that node’s routing elements. Move to the child indicated by the routing element
+found, and repeat the process. Since a O (1) procedure is repeated twice per node, the running time for
+a search is determined by the height of the Two-Level SIMD B+-Tree. The branching factor is Θ(B2) so
+the height is O(logB2(N)) = O
+
+logB(N)
+2
+
+= O(logB(N)).
+An insertion of a single key into a node requires Θ(B2) elements to move in the worst case. Since elements
+can be moved in chunks of Θ(B) in constant time, this takes Θ(B) time. The same argument holds for
+splitting a node x, where Θ(B2) elements must be copied and a new routing element must be inserted
+into the parent of x.
+At ﬁrst glance, this seems to indicate an insertion time of O (B logB(N)). However, splits do not occur
+often, and the insertion procedure can be shown to run in O (logB(N) + B) amortised.
+To do this
+using the accounting method, leave Θ(1) credits on any internal node encountered during an insertion
+procedure, and Θ(B) credits on the leaf the insertion procedure ends on. The Θ(B) credits are always
+enough to pay for work done in the leaf since both inserting an element and splitting the node takes Θ(B)
+time. Let x be an internal node. When x is entirely new, or when it has newly been split, it is no more
+than half full and has room for at least B2/2 keys. x gains at most one new key whenever an element is
+inserted in a descendant of x (this happens only when one of x’s children split, and the cost of inserting
+this new key in x is charged to that child), which means that it receives Θ(B2) insertions before it needs
+to be split. Each of these insertions leave Θ(1) credits at x, which means that by the time x should split
+it has Θ(B2) available credits. Splitting x and inserting a new routing element in x’s parent both cost
+Θ(B), for which there is more than enough credits. Since there are O (logB(N)) internal nodes and only
+one leaf on every insertion path, the amortised running time of an insertion is O (logB (N) + B).
+Note that even though there are Θ(B2) credits available whenever an internal node should split, we only
+actually use Θ(B) of them. In fact, the analysis would still work if Θ(1/B) rather than Θ(1) credits were
+left on each internal node. There are two reasons for including this slack. Firstly, constant time still
+needs to be spent at each node to identify the next node to visit, so the tighter analysis would not make
+a diﬀerence. Secondly, the slack will be used to pay for some extra work that will be introduced in the
+next section.
+6.3.3
+Buﬀered SIMD B+-Tree
+The Buﬀered SIMD B+-Tree is inspired by the Bϵ-Tree [5]. The Bϵ-Tree is an external memory indexing
+data structure which consists of a B+-Tree where a certain amount of space per node is used as buﬀers.
+When inserting an element, it is added to the buﬀer of the root node. When the buﬀer becomes full,
+it is ﬂushed by removing a bulk of elements headed to the same child and adding them to the buﬀer
+of that child instead. If the buﬀer of the child is now full, the ﬂush cascades further down in the tree.
+Intuitively, this is beneﬁcial in the external memory model because moving the elements in bulk rather
+than one by one reduces the total number of I/Os required.
+The Buﬀered SIMD B+-Tree is a Two-Level SIMD B+-Tree where internal nodes have a buﬀer of size B
+for each of their children. Leaves have no buﬀers and are identical to the leaves of the Two-Level SIMD
+12
+==PAGE:13==
+6,12,18,24,30,36
+1,2,3,4,5,6
+7,8,9,10,11,12
+13,14,15,16,17,18 19,20,21,22,23,24 25,26,27,28,29,30 31,32,33,34,35,36 37,38,39,40,41,42
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+b
+u
+f
+Figure 4: Illustration of a full internal node in a Buﬀered SIMD B+-Tree when B = 6. The number of
+keys is B(B + 1) = 6 · 7 = 42, and there is one more children than there are keys. There is one buﬀer per
+child.
+B+-Tree. An example of an internal node when B = 6 which hence contains 6(6 + 1) + 1 = 43 buﬀers
+can be seen in Figure 4.
+Suppose that some key x is to be inserted, and that while navigating to the leaf where x would normally
+be inserted the procedure visits the i’th child of the root. Instead of searching all the way to a leaf to
+insert x, it is added to the buﬀer corresponding to child i of the root. If that buﬀer is full, all the B
+elements in it are moved to the i’th child in bulk, and then redistributed into their new buﬀers in that
+node. Once an element reaches a leaf, it is inserted as usual. If the leaves become full, they are split and
+a new routing element is passed to the parent node as usual.
+In case an internal node splits, half of the buﬀers must also be moved. Since each node contains a buﬀer
+of size Θ(B) for each of its Θ(B2) children, a total of Θ(B3) elements must be moved. Since elements
+can be moved in bulks of B in constant time, that requires Θ(B2) time. However, remember that in the
+amortised analysis in the previous section Θ(B2) credits were available whenever a node splits (although
+that analysis only utilised Θ(B) of them). All the arguments made there still hold true for the Buﬀered
+SIMD B+-Tree. Hence, charging each insertion a constant number of credits is suﬃcient to pay for all
+splits that might occur. Whenever a bulk of size B reaches a leaf, they can all be inserted one by one.
+Each insertion requires Θ(B) time. Hence, the amortised insertion time is still Θ(logB(N) + B).
+The search routine now additionally needs to check a buﬀer in addition to the work it does in the Two-
+Level SIMD B+-Tree. However, that can be done in constant time by using the procedure for ﬁnding
+a predecessor in an unsorted SIMD vector that was mentioned in Section 6.3.1. Hence there is only a
+constant amount of extra work and the search time remains O (logB(N)).
+If the running time remains the same even with the buﬀers, what is the purpose of this data structure?
+While the Bϵ-Tree is theoretically better than a B-Tree in the external memory model, the Buﬀered
+SIMD B+-Tree does not demonstrate a theoretical beneﬁt in terms of the model introduced in Section
+2.1. However, the intention and intuition is that using the buﬀers leads to better cache performance.
+One can assume that the root node of the Buﬀered SIMD B+-Tree is always in cache because it is used
+by all operations. Further, during insertions a node is only loaded into cache if B elements will be moved
+into it, in eﬀect reducing the total amount of time spent loading nodes into cache.
+6.3.4
+Implicit SIMD B+-Tree
+In all the previously mentioned implementations of B+-Trees, nodes are individually allocated on the
+heap and pointers are used to organise the nodes in relation to each other. This can exhibit poor cache
+performance due to nodes being scattered around memory, and the Implicit SIMD B+-Tree is an attempt
+at mitigating the downsides of this method.
+The Implicit SIMD B+-Tree is just like a SIMD B+-Tree where the entire tree is stored in a single array.
+The memory layout is that of a pre-order traversal of a complete tree of branching factor B +1. Suppose
+the Implicit SIMD B+-Tree represented by the array has height h. First lay out the B elements of the
+root node. The root has B + 1 children T1, T2, . . . , TB+1. Recursively lay out the entirety of T1, then lay
+out the entirety of T2, and so on. An example of a complete tree laid out in this manner can be seen in
+Figure 5. However, this layout is used regardless of whether all nodes are in use. In other words, if the
+13
+==PAGE:14==
+4,12
+2,4
+8,10
+14,16
+1,2
+3,4
+5,6
+7,8
+9,10
+11,12
+13,14
+15,16
+17,18
+4,12
+2,4
+1,2
+3,4
+5,6
+8,10
+7,8
+9,10
+11,12 14,16 13,14 15,16 17,18
+Figure 5: Top: A complete SIMD B+-Tree of height three with B = 2. Bottom: Illustrates the implicit
+memory layout of the tree above. Each block in the array indicates the SIMD vector from a tree node.
+The vertical oﬀset of a block in the array is a visual aid used to indicate which level in the SIMD B+-Tree
+the vector comes from.
+root node only has one element in it, and hence only has two children, the part of the array corresponding
+to the B−1 subtrees T3, T4, . . . , TB+1 is unused. An example of non-complete tree laid out in this manner
+can be seen in Figure 6.
+While this obviously leads to space overhead, it has the beneﬁt that the location of a child node can
+be computed in constant time, and without any TLB misses. Consider some node v which is located at
+index i in the layout and whose height in the tree is h. Suppose that x elements are required to lay out
+a complete tree of height h −1. Then the k’th child of v is located at index i + 1 + kx. Why? By the
+deﬁnition of the layout, i + 1 is the 0’th child of v. Skipping x elements from i + 1 would exactly skip
+the layout of the 0th subtree, which has height h −1. Since the 1st child of v is laid out immediately
+after the 0th, index i + 1 + x is the 1st child of x, and so on. An illustration can be found in Figure 7.
+The number of elements required to layout a tree of a given branching factor and height can easily be
+precomputed, and therefore determining the position of a particular child of a node runs in O (1) time.
+As a consequence, each node in the tree consists of a single SIMD vector, and only that. The vectors
+are padded with ∞as required if they have less than B keys. The only additional information required
+to search this structure is the height of the tree, which is stored globally for the entire data structure
+rather than in the individual nodes.
+The search procedure for the Implicit SIMD B+-Tree can be seen in Algorithm 2. It takes the array
+containing the laid out search tree as a parameter. It works exactly the same as the search procedure
+of the SIMD B+-Tree with the exception that the location of a child is determined by the computation
+described above as opposed to following a pointer.
+The insertion procedure is as usual: search to the relevant leaf and insert the new key. However, splitting
+nodes requires a diﬀerent algorithm. When a node is being split, half its children are copied to another
+node. This is fast when children are represented using pointers, but requires moving the entire subtrees
+rooted at those children in the implicit layout. This is because a node’s location directly determines
+which node is its parent. Consider Figure 8 which illustrates the process and let the root node of T2 be
+r. When r splits, T3 and T4 must be oﬀset to the right to make room for a new node. In the memory
+layout, means copying the entirety of T3 and T4 and relocating them rightwards. This is implemented
+using the C function memmove which eﬃciently copies memory from one location to another. It runs in
+14
+==PAGE:15==
+4,∞
+2,∞
+8,∞
+1,2
+3,4
+7,8
+9,10
+4,∞
+2,∞
+1,2
+3,4
+8,∞
+7,8
+9,10
+Figure 6: Top: A non-complete SIMD B+-Tree of height three with B = 2. The SIMD vectors in the
+nodes are padded with ∞as required. Dashed nodes indicate the unused parts of the memory layout.
+Bottom: Illustrates the implicit memory layout of the tree above. Each block in the array indicates the
+SIMD vector from a tree node. The empty blocks illustrate allocated memory that is not actually used
+to represent this particular tree. The vertical oﬀset of a block in the array is a visual aid used to indicate
+which level in the SIMD B+-Tree the vector comes from.
+p
+T1
+T2
+T3
+T4
+. . . . . . . . .
+p
+T1
+T2
+T3
+T4
+−
+−
+. . . . . .
+i
+i + 1
+i + 1 + x
+i + 1 + 2x
+i + 1 + 3x
+i + 1 + 4x
+i + 1 + 5x
+i + 1 + 6x
+x
+x
+x
+x
+x
+x
+Figure 7: Shows how to calculate the index of a child of an arbitrary node p in the imlicit layout. Top:
+p is the root of a subtree of some larger tree which is not shown in the ﬁgure. T1, T2, T3 and T4 indiciate
+subtrees that are actually in use. The two dashed subtrees indicate subtrees that are not in use. Bottom:
+The memory layout for the above tree. The sections marked with ’. . .’ indicate the layout for the rest of
+the tree. p can be found at index i. It’s ﬁrst child can be found at index i + 1. Each of the subtrees of
+p’s occupy x consecutive elements in the layout, so p’s kth child can be found at index i + 1 + kx.
+15
+==PAGE:16==
+Algorithm 2 Search Implicit SIMD B+-Tree
+1: procedure Search(arr, key)
+2:
+// The root is always at index 0
+3:
+index ←0
+4:
+height ←height of tree
+5:
+−→
+key ←[key, key, ..., key]
+6:
+while height > 0 do
+7:
+// Note that −−−−−−−→
+arr[index] is a vector, as opposed to accessing
+8:
+// the element of a vector (arr is an array of vectors)
+9:
+index of child ←popcount(−→
+key > −−−−−−−→
+arr[index])
+10:
+11:
+// The tree size array has been precomputed
+12:
+index ←index + 1 + index of child * tree size[height -1]
+13:
+height ←height - 1
+14:
+end while
+15:
+predecessor index ←popcount(−→
+key ≥−−−−−−−→
+arr[index])
+16:
+return −−−−−−−→
+arr[index][predecessor index]
+17: end procedure
+p
+T1
+T2
+T3
+T4
+r
+p
+T1
+T2
+T3
+T4
+−
+−
+p
+T1
+L
+R
+T3
+T4
+p
+T1
+L
+R
+T3
+T4
+−
+Figure 8: Illustrates the process of splitting a node in the Implicit SIMD B+-Tree. Left: A tree given in
+the implicit memory layout, along with a graphical visualisation of the tree. Dashed nodes and a ’−’ in
+the implicit layout indicates unused memory. Right: The same tree after the root node r of T2 has been
+split. Splitting r yields two new nodes, each of which are the roots of the subtrees L and R, respectively.
+Note how T3 and T4 are shifted rightwards in the memory layout to make room laying out a new tree
+between T2 and T3.
+linear time in the memory copied. Hence, the running time of a split, and therefore also an insertion, is
+O (N).
+Issues with Memory Utilisation
+Even though the implicit layout eliminates the need for storing anything other than the actual keys of a
+node, it is ineﬃcient in terms of memory usage. Table 3 displays an estimate of the amount of allocated
+space which is wasted as a function of the height of the tree when B = 8. The estimate is based on the
+assumption that each node is ﬁlled with keys to the average of its minimum and maximum capacity. For
+instance, the root must have between 1 and B routing elements, and so is assumed to have B/2 routing
+elements. Internal nodes have at least B/2 and at most B routing elements, so they are assumed to have
+3B
+4 routing elements.
+While this sort of capacity usage might not sound that bad, the implicit memory layout magniﬁes the
+problem. Consider the representation of a tree of height h. If half of the keys and therefore half of the
+children of the root are unused, that means that there are approximately B/2 subtrees of height h −1
+that are laid out in memory and not at all in use. After only taking the root into account, the conclusion
+is that almost half the allocated memory is wasted.
+Furthermore, these estimates are optimistic. For instance, inserting elements in sorted order would lead
+16
+==PAGE:17==
+to a signiﬁcantly worse result where most nodes are at their minimum capacity. Regardless, the ﬁgures
+in Table 3 correspond well with empirical observations after inserting uniformly random input.
+Tree height in #nodes
+Nodes allocated
+Average #nodes used
+Percentage of nodes wasted
+1
+1
+1
+0.00 %
+2
+10
+7
+30.00 %
+3
+91
+49
+46.15 %
+4
+820
+343
+58.17 %
+5
+7 381
+2 401
+67.47 %
+6
+66 430
+16 807
+74.70 %
+7
+597 871
+117 649
+80.32 %
+8
+5 380 840
+823 543
+84.69 %
+9
+48 427 561
+5 764 801
+88.10 %
+10
+435 848 050
+40 353 607
+90.74 %
+Table 3: Estimations of how much memory is wasted in the layout for the Implicit B+-Tree when B = 8.
+Based on the assumption that all nodes on average are ﬁlled up to halfway between their minimum and
+maximum capacity.
+6.3.5
+Static SIMD B+-Tree
+The Static SIMD B+-Tree is yet another implicitly represented SIMD B+-Tree which, unlike the Implicit
+SIMD B+-Tree, does not support updates.
+However, it has no memory consumption issues like the
+Implicit SIMD B+-Tree does, and it can be built extremely fast from a sorted array. It will be used both
+as a benchmark for search performance, as well as a component of the LSM described in Section 6.4.3.
+While stored in a single array, the Static SIMD B+-Tree has a diﬀerent layout than the Implicit SIMD
+B+-Tree. It is stored level by level, starting with the leaves and ending with the root. An example of
+this layout with B = 2 can be seen in Figure 9. All the vectors in the leaves occur ﬁrst in a left to right
+order. They are followed by all the vectors from the nodes on the level above, also in a left to right order,
+and so on. The starting point of each level is stored. Levels are padded with ∞as required to ensure
+their lengths are divisible by B. Also, there is a minor deviation from the SIMD B+-Tree: In the Static
+SIMD B+-Tree each node has a maximum branching factor of B as opposed to B + 1. The Bth routing
+elements is greater than or equal to anything in the Bth subtree, and there is no (B + 1)th subtree.
+Searching the Static SIMD B+-Tree relies on the observation that all the nodes on a level are tightly
+packed: all but the rightmost node on a level must contain B actual keys (as opposed to the padding
+element ∞). Suppose a node v has i nodes to the left of it on its own level, and that you want to ﬁnd the
+kth child of v. All the i nodes have B actual keys and therefore B children each, for a total of iB children.
+Therefore, on level below v, there will be exactly iB nodes before the ﬁrst child of v is encountered. If
+level the below v starts at index x, the kth child of v is at index x + iB + k, which can be computed in
+constant time since the start of each level is stored.
+This gives rise to the search procedure which can be seen in Algorithm 3. With the exception of the new
+way to calculate the location of a child, the search procedure is identical to that of the Implicit SIMD
+B+-Tree. The running time remains O (logB(N)).
+Bulk Building
+Bulk building this data structure from a sorted array A of N distinct numbers is both simple and eﬃcient.
+In the following, we assume that A has enough space to lay out the entire tree.
+First pad the sorted sequence with at most B −1 occurrences of ∞such that its length is divisible by B.
+The padded sequence now constitutes a discrete number of vectors and represents the leaves of the tree,
+which we call Level 0. Let i be the ﬁrst index after Level 0 ends. Create Level 1 by sampling the last
+element of every vector on Level 0 from left to right and writing this sequence to A starting at index
+i. Pad with ∞as required. Repeat the process until there is only a single node remaining, at which
+point the root is reached and the process terminates. This process can be eﬃciently implemented by
+17
+==PAGE:18==
+9,18,∞
+3,6,9
+12,15,18
+21,∞,∞
+1,2,3
+4,5,6
+7,8,9
+10,11,12
+13,14,15
+16,17,18
+19,20,21
+22,∞,∞
+∞,∞,∞
+1,2,3
+4,5,6
+7,8,9
+10,11,12
+13,14,15
+16,17,18
+19,20,21
+22,∞,∞
+3, 6, 9
+12,15,18
+21,∞,∞
+9,18,∞
+Figure 9: Top: A Static SIMD B+-Tree with B=3. Each level in the tree is padded with ∞as needed.
+Bottom: The memory layout illustrated. Each block in the memory layout corresponds to a SIMD vector
+of keys from the tree. The vertical oﬀset of the blocks indicates which layer of the tree the node belongs
+to.
+Algorithm 3 Search Static SIMD B+-Tree
+1: procedure Search(arr, key)
+2:
+−→
+key ←[key, key, ..., key]
+3:
+// The root is the only node at the top level
+4:
+current index ←start of level[height]
+5:
+// The root has zero nodes to its left
+6:
+nodes to the left ←0
+7:
+height ←height of tree
+8:
+while height > 0 do
+9:
+// Note that −−−−−−−−−−−−−−→
+arr[current index] is a vector, as opposed to accessing
+10:
+// the element of a vector (arr is an array of vectors)
+11:
+child index ←popcount(−→
+key > −−−−−−−−−−−−−−→
+arr[current index])
+12:
+nodes to the left ←nodes to the left * B + child index
+13:
+current index ←start of level[height - 1] + nodes to the left
+14:
+height ←height - 1
+15:
+end while
+16:
+index ←popcount(−→
+key ≥−−−−−−−−−−−−−−→
+arr[current index] )
+17:
+return −−−−−−−−−−−−−−→
+arr[current index][index]
+18: end procedure
+18
+==PAGE:19==
+linearly traversing A in leaps of B while simultaneously appending every Bth element to the end of A,
+only occasionally pausing to insert a few padding elements.
+Given a level of size n, the next level can be constructed by sampling 1/B of the elements in O (n/B)
+time and adding required padding elements in O (B) time. There are at most O (logB(N)) levels since
+their sizes decrease geometrically by a factor of B. Hence, adding padding elements contributes at most
+O (B logB(N)) to the running time, while sampling elements contributes at most N/B + N/B2 + . . . =
+Θ(N/B). Under the reasonable assumption that N ≫B, the running time of O (N/B + B logB(N)) can
+be simpliﬁed to O (N/B).
+The tree resulting from this procedure must maintain the invariant that each routing element is greater
+than or equal to the contents of the subtree to its left. Using induction, this obviously holds in the
+base case where Level 0 has length no greater than B. Assume the bulk building procedure works for
+all arrays that are at most n elements long. Given an array A of length n + 1, partially apply the
+bulk building procedure to construct Level 0 and Level 1.
+Taking the possible padding elements of
+Level 0 into account, Level 1 is no longer than (n + 1 + (B −1))/B = n/B + 1, and by the induction
+hypothesis the bulk building procedure properly builds a Static SIMD B+-Tree over Level 1. However,
+node i on Level 1 was constructed by sampling the last element from the vectors positioned at indices
+iB, iB + 1, iB + 2, . . . , iB + B −1 on Level 0. Since Level 0 is sorted, the last element of a vector is also
+the largest. Since the initial numbers were all distinct, everything following a sampled element must be
+larger than it. Hence the routing elements on Level 1 also satisﬁes the invariant with regards to their
+left subtrees, which concludes the proof.
+6.4
+The LSMs
+6.4.1
+Scalar LSM
+Our LSM is inspired by the GPU LSM [1] and the COLA[4]. This section describes a Scalar LSM which
+is the basis for the work in both of these papers. In subsequent sections, the LSM will be extended with
+SIMD to improve both insertion and search performance.
+The Scalar LSM consists of the levels 0, 1, . . . k. Even though an earlier section stated that each level is
+twice as large as the one preceding it, this is not entirely true. All the LSMs are parameterised with a
+growth factor, commonly referred to as GF. For all intents and purposes each level is a factor of GF
+larger than the preceding level. There is additionally an insertion buﬀer (or simply buﬀer) of size B.
+To insert a new element, it is added to the insertion buﬀer. If the buﬀer happens to be full, we ﬁrst ﬂush
+the LSM in the following way: First, the buﬀer is sorted. If there is room in level 0, the buﬀer is merged
+into that level. Otherwise the level is emptied by merging it with the buﬀer and attempting to merge
+the new sequence into level 1. This process continues until a level where there is enough space is found.
+If there is no level with enough space, another level is allocated.
+To be a little more precise about the growth factor, we follow the work in [4]: Level 0 has the size B and
+every other level i has size 2B(GF −1)GF i−1. Under these constraints, every level i will receive GF −1
+merges before it is completely full. The next attempt at merging into the level will cause the merge to
+cascade further down the tree and leave level i entirely empty.
+Amortised constant time is spent per element involved in a merge. Each element is involved in at most
+GF merges on each level in the LSM. Since there are O (logGF (N)) levels in the LSM, the amortised
+insertion time for an element is O (GF logGF (N)).
+For any constant value of GF the running time
+becomes logarithmic. Note that unless speciﬁed otherwise, it is assumed that GF = 2.
+To search for an element, perform binary search in each level which is full. In a worst case situation,
+every single level is searched which leads to a running time of O
+ (log2 N)2
+.
+6.4.2
+SIMD LSM: Eﬃcient Merging Using SIMD
+The ﬁrst extension to the scalar LSM is to replace the scalar merge procedure with an eﬃcient SIMD
+merge procedure. This procedure is introduced as a sub-routine in a vectorised, multi-core merge sort
+implementation introduced by Chhugani et al. in [7]. As mentioned previously, the merging procedure
+19
+==PAGE:20==
+uses O
+
+log2 B
+B
+
+time per element involved in the merge. Each element is involved in a constant number
+of merges per level, leading to an amortised insertion time of O
+
+log2(B) log2(N)
+B
+
+.
+While the SIMD merge procedure speeds up the LSM quite a bit, it does have one downside: during the
+procedure there is no element-by-element control since they are are processed as vectors, in bulks of B
+elements. Therefore it can be tricky to extend it to support deletions.
+However, if deletions are implemented by inserting tombstones (a message that encodes that an element
+is deleted) into the LSM, the deletions can be carried out on a regular basis by sometimes doing a scalar
+merge instead of a SIMD merge. That would allow for identifying the tombstones and removing all
+occurrences of tombstoned elements.
+We will now describe the SIMD merging procedure.
+Comparator Networks
+A comparator network is a method of specifying a computation. Figure 10a shows an example of a
+comparator network consisting of a single comparator: the values a and b are simultaneously travelling
+rightwards along the horizontal wires. When they encounter a comparator (the vertical line) the values
+are if necessary swapped such that the smallest value continue along the top wire and the largest value
+continues along the bottom wire. More complex networks contain more wires and comparators. For
+instance, Figure 10b shows a comparator that sorts three arbitrary input values into sorted order.
+a
+b
+min(a, b)
+max(a, b)
+(a)
+c
+b
+a
+x3
+x2
+x1
+≤
+≤
+(b)
+Figure 10: (a) An example of a single comparator in a comparator network. The wires (horizontal lines)
+carry the values a and b from left to right. The comparator (vertical line) swaps the values if a > b. (b)
+A comparator network for sorting three arbitrary values. That is, x1 ≤x2 ≤x3.
+The Bitonic Sorter: Merging Small Arrays
+A sorting network is a comparator network which sorts the input sequence into monotonically increasing
+order. In [2], Ken Batcher presents the bitonic sorter, a sorting network for bitonic sequences. A sequence
+is bitonic if it is a rotation of the concatenation of two (possibly empty) sequences: one monotonically
+increasing and one monotonically decreasing. For instance, each of the following graphs represent bitonic
+sequences:
+Batcher’s sorting network is of interest because it can be used to merge two sorted sequences; given two
+arbitrary sorted sequences, reversing any one of them and concatenating them yields a bitonic sequence
+which can then be sorted using the sortning network. The comparator network for the bitonic sorter for
+sequences of length 16 can be seen in Figure 11.
+The bitonic sorting network can be divided into several rounds of comparisons, as indicated by the shaded
+boxes in Figure 11. In particular, log2(n) rounds are required for an input sequence of length n. Another
+important property of the sorting network is that it is recursively composed of smaller versions of itself:
+a sorting network for a sequence of length n is composed of two sorting networks for sequences of size
+20
+==PAGE:21==
+A
+B
+C
+D
+Figure 11: The bitonic sorter network of Batcher [2]. The network sorts a bitonic input sequence of
+length 16 into a monotonically increasing sequence.
+For an input of size 2k there are k ’rounds’ of
+comparisons, indicated by the gray boxes. The construction is recursive, and the dashed box indicates
+the bitonic sorter for sequences of length 8, which occurs twice.
+n
+2 . This is indicated in Figure 11 by the dashed box; the lower half of stages B, C and D is identical to
+the upper half.
+Merging Large Arrays
+Using the bitonic sorting network, we can construct an eﬃcient merging algorithm. In the following,
+assume that each round of comparisons in Bathcer’s sorting network can be completed in O (1) time
+using SIMD. Then the running time is bounded by the number of rounds of comparisons and becomes
+O (log2 B) for merging two sequences of B elements. In the next section, we will explain how achieve this
+bound.
+The merging procedure repeats the following three steps until the input is consumed. A single iteration
+is illustrated in Figure 12. Suppose you want to merge two sorted arrays A and B of collective length
+N. Extract the ﬁrst B elements of each array into B-wdith vectors a and b, and let A = a ◦A′ and
+B = b ◦B′. Merge a and b together using Batcher’s bitonic sorting network to produce two new vectors
+a′ and b′. a′ must contain the B smallest values from A and B and is consequently added to the output
+array. Let x and y be the ﬁrst values in A′ and B′, and let w.l.o.g. x < y. All the values in b′ must be
+smaller than y, otherwise either A or B was not sorted initially. Since both b′ and B′ are sorted, b′ ◦B′
+is a sorted array, and b′ is added to the front of B′. This procedure is repeated until both A and B are
+depleted.
+Each iteration determines the next B elements for the output by using Batcher’s bitonic sort, which runs
+in O (log2 B) time. This can be done O
+  N
+B
+
+times before the input is depleted. Therefore, the running
+time is O
+
+N log2 B
+B
+
+, or O
+
+log2 B
+B
+
+amortised per element.
+21
+==PAGE:22==
+A′
+a
+B
+B′
+b
+B
+BitonicSort2B(a,b)
+x
+A′
+b′
+y
+B′
+b′
+x > y?
+Output:
+. . . . . . . . .
+a′
+a
+b
+a′
+b′
+yes
+no
+1
+2
+3
+Figure 12: A SIMD merging routine presented by Chhugani et al. in [7]. Step 1: Extract the ﬁrst B
+values from each of the arrays A and B. Step 2: Merge them using a bitonic sorting network. Step 3:
+Add the smallest B values (a′) to the output, and add the B largest vaues (b′) back to either of the input
+arrays such that they both remain sorted. Repeat the process until the input is depleted.
+Implementing the Bitonic Sorter with SIMD
+The idea in using SIMD to implement the bitonic sorter is to choose the size of the sorting network in
+relation to the SIMD word width so that each round of comparisons can be completed in O (1) time. If
+this can be achieved, then merging two arrays of length B can be done in O (log2(B)) time.
+Algorithms 4 and 5 shows the pseudocode for the bitonic sorting network for two vectors with B = 8.
+The following paragraphs will, for each stage in Figure 11, explain how the stage is implemented.
+Referring back to Figure 11, stage A is covered in Algorithm 4. After reversing −→y , −→x ◦−→y is a bitonic
+sequence where −→x represents the top eight wires and −→y represents the bottom eight wires in Figure 11.
+After the ﬁrst round of comparisons, −→x [i] should be the smallest of −→x [i] and −→y [i], and −→y [i] should be
+the largest(temporary variables are used in the code). This is directly achieved by using the minV and
+maxV functions. At this point −→x and −→y are themselves bitonic sequences where −→x contains the eight
+smallest values and −→y contains the eight largest values. Both vectors are sorted using the bitonic sorter
+for sequences of length eighth, which can be seen in Algorithm 5.
+Algorithm 4 Bitonic Sort 16
+procedure BitonicSort16(−→x ,−→y )
+// Reverse −→y such that −→x ◦−→y is bitonic
+−→y ←reorder(−→y , [7,6,5,4,3,2,1,0])
+// Stage A
+−−→
+xtmp ←minV(−→x ,−→y )
+−−→
+ytmp ←maxV(−→x ,−→y )
+//Sort each of −−→
+xtmp and −−→
+ytmp using bitonic sort for length 8 sequences
+−→x ←BitonicSort8(−−→
+xtmp)
+−→y ←BitonicSort8(−−→
+ytmp)
+return (−→x , −→y )
+end procedure
+22
+==PAGE:23==
+Stages B, C and D are all covered in Algorithm 5, and their implementations all follow the same
+pattern.
+First, a reordering −→y of the input vector −→x is determined as follows: Suppose there is a
+comparator between wires i and j and that i < j, meaning that wire j should carry the largest value
+after the comparator. Let −→y [i] = −→x [j] and −→y [j] = −→x [i]. After using the minV and maxV functions,
+−→a [i] = min(x[i], x[j]) and −→b [j] = max(x[i], x[j]). To complete the current stage, −→a and −→b are blended
+in the following way: if the wire i is the uppermost wire in its comparator, take the ith value from −→a ,
+otherwise take the ith value from −→b .
+Algorithm 5 Bitonic Sort 8
+1: procedure BitonicSort8(−→x )
+2:
+// Stage B
+3:
+−→y ←reorder(−→x , [4,5,6,7,0,1,2,3])
+4:
+−→a ←minV(−→x ,−→y )
+5:
+−→b ←maxV(−→x ,−→y )
+6:
+−→x ←blend(−→a ,−→b , [a,a,a,a,b,b,b,b])
+7:
+// Stage C
+8:
+−→y ←reorder(−→x , [2,3,0,1,6,7,4,5])
+9:
+−→a ←minV(−→x ,−→y )
+10:
+−→b ←minV(−→x ,−→y )
+11:
+−→x ←blend(−→a ,−→b , [a,a,b,b,a,a,b,b])
+12:
+// Stage D
+13:
+−→y ←reorder(−→x , [1,0,3,2,5,4,7,6])
+14:
+−→a ←minV(−→x ,−→y )
+15:
+−→b ←maxV(−→x ,−→y )
+16:
+−→x ←blend(−→a ,−→b , [a,b,a,b,a,b,a,b])
+17:
+return −→x
+18: end procedure
+6.4.3
+SIMD LSM with Search Trees
+To speed up the search procedure we will store a Static SIMD B+ Tree as described in Section 6.3.5 over
+each level which is in use. During a search, at most O(log2(N)) levels are searched, each in O (logB(N))
+time. Hence searching takes O(logB (N) log2(N)) = O
+
+(log2 N)2
+log2 B
+
+time.
+When a ﬂush into a level of the LSM is completed, a Static SIMD B+-Tree is built over the level using
+the bulk building technique described in Section 6.3.5. As seen in Section 6.4.2, the merge into the level
+costs O (log2(B)/B) amortised per element, while the bulk building procedure from Section 6.3.5 spends
+amortised O (1/B) time per element. Hence the complexity of the insertion procedure is not aﬀected by
+the bulk building procedure.
+6.4.4
+SIMD LSM with Parallel Binary Searches
+Another way of speeding up searches in the LSM is by using the binary search method from the Scalar
+LSM, but using SIMD to run B binary searches in parallel. The O (log2 N) required binary searches can
+then be completed in O
+
+log2(N)
+B
+
+rounds. This leads to a search complexity of O
+
+(log2 N)2
+B
+
+, which in
+theory is far superior to searching in a Static SIMD B+-Tree per level as seen in Section 6.4.3. However,
+empirical tests show that the theoretical speedup does not translate into reality. In order to run parallel
+binary searches, a number of gather operations that collect data from diﬀerent parts of memory into a
+SIMD vector need to be used. Since these proved to be prohibitively expensive, this idea was discontinued.
+23
+==PAGE:24==
+6.4.5
+SIMD LSM with Fractional Cascading
+Fractional Cascading
+Fractional cascading was introduced by Chazelle and Guibas in [6] and is a data structuring technique
+for speeding up searches in multiple collections. Suppose you want to search for the predecessor of x
+in k diﬀerent sorted arrays, A1, A2, . . . , Ak, of collective length N.
+The straight forward solution is
+to binary search each array in O (k log(N)) time. Fractional cascading will allow for a lookup time of
+O (log(N) + k) by performing a single binary search in the ﬁrst array, and using the information about
+x’s predecessor in A1 to ﬁnd x’s predecessors in the other arrays as well.
+Figure 13 displays an example of the fractional cascading data structure, which consists k arrays
+S1, S2, . . . , Sk where Sk = Ak. The remaining arrays are inductively deﬁned (in reverse order) such
+that Si is the sorted array over all the elements from Ai and every other element from Si+1. For every
+element in Si we store its value, a pointer to its predecessor in Ai and a pointer to its predecessor among
+the sampled elements from Si+1. Furthermore, every sampled element knows where it came from in
+Si+1.
+This data structure has the property that once x’s predecessor in Si is found, its predecessor in Si+1
+can be found in O(1) time. Assume that p is x’s predecessor in Si. Using the information stored for p
+we can in constant time ﬁnd both x’s predecessor in Ai and the element q1 where p was sampled from
+in Si+1. Let q2 and q3 be the two elements immediately following q1. x’s predecessor in Si+1 must be
+either q1 or q2. Otherwise x is no smaller than q3, which is also sampled from Si+1 into Si, and hence
+p would not be x’s predecessor in Si. Therefore, once x’s predecessor in Si is known, its predecessor in
+the next level can be found in O (1) time.
+This leads to the search procedure of performing a single binary search in S1 and using the pointers as
+described above to ﬁnd x’s predecessor in each of the subsequent levels in constant time per level. As we
+will argue in the next paragraph, the size of S1 is O (N), which yields the running time O (log(N) + k).
+For any level Ai of length ni, ni/2 elements are sampled into Si−1. At most half of those, or ni/4,
+are sampled into level Si−2, and so on. Hence the number of extra elements propagated from Ai into
+diﬀerent levels is ni/2 + ni/4 + ni/8 + . . . ≤ni. Since this holds for every level, the number of elements
+in the data structure at most doubles and therefore stays linear. Consequently, S1 has size O (N).
+Note that propagating every second element to the next array is not necessarily the most eﬃcient solution.
+In general, if you copy every c’th element to the level below, at most c elements must be checked on a
+particular level to ﬁnd x’s predecessor on that level. So long as c is some constant, the running time
+remains unchanged, and since c ≥2 the space is still linear.
+Augmenting the LSM with Fractional Cascading
+This data structure is inspired by the COLA [4], which is a Scalar LSM which uses fractional cascading.
+Fractional cascading is here used as an alternative to a SIMD Search Tree over each level in the LSM.
+Since each level in the LSM is a sorted list, ideally we would like to directly apply fractional cascading as
+described in the previous section. However, the SIMD merge procedure does not allow for the element-by-
+element control needed in order to update predecessor pointers for each individual element. An additional
+scalar iteration over the entire level would be required, which defeats the purpose of the SIMD merge.
+Instead, for LSM level i we sample a subset of the elements into an external array to act as array Ai,
+and fractional cascading is performed on these external arrays. In Si each element stores a pointer to its
+predecessor in the LSM level rather than to its predecessor in Ai. An example can be seen in Figure 14
+The procedure for maintaining the fractional cascading data structure is as follows. Let LSM(i) and
+FC(i) be the i’th level of the LSM and the fractional cascading structure, respectively. When a ﬂush ter-
+minating in LSM(i) is performed, FC(i) is constructed by performing a modiﬁed merge of subsequences
+of LSM(i) and of FC(i + 1).
+It does this by ﬁrst comparing the two ﬁrst elements of each sequence. If the merge takes the ﬁrst element
+from LSM(i), it skips the next B −1 elements and considers the next. The number of elements skipped
+24
+==PAGE:25==
+A1
+A2
+A3
+A4
+(a) A set of four sorted arrays, A1 . . . A4 repre-
+sented by four number lines where the elements are
+placed as ticks on the lines.
+S1
+S2
+S3
+S4
+(b) The sets S1 . . . S4 constructed from the sets
+A1 . . . A4 in ﬁg.
+13a.
+Dashed lines indicates an
+element that has been copied from the level below.
+S1
+S2
+S3
+S4
+(c) A diﬀerent view of ﬁg. 13b where each element has a pointer to its predecessor among
+the elements sampled from the level below. Note that in addition to this pointer, each
+element also has a pointer to its predecessor on the same level which is not sampled from
+a lower level. Also note that if there is no such predecessor, there is a pointer to the ﬁrst
+element on the level instead.
+Figure 13: The fractional cascading data structure on an example. Figure 13c shows the end result of
+applying fractional cascading on the arrays from Figure 13a (note that pointers to predecessors on the
+same level are not included).
+B
+PR
+k0 k1 k2 k3 k4 k5 k6
+Figure 14: Showing how the SIMD LSM is extended with an additional fractional cascading data struc-
+ture. To the left are the LSM levels, and to the right are the corresponding levels in the fractional
+cascading data structure. Each element to the right has three components: a key, a pointer back to
+that keys predecessor in the LSM level, and a pointer to that keys predecessor in the next level in the
+fractional cascading data structure.
+25
+==PAGE:26==
+from FC(i) is determined by the propagation rate, which is a tuning parameter of the data structure
+that is commonly referred to as PR. If the propagation rate is 1/k, every k’th element from FC(i) will
+be taken. This in eﬀect means that the merge is comparing the subsequences consisting of every B’th
+element from LSM(i) and every k’th element from FC(i).
+Furthermore, the procedure maintains one pointer to the origin of the previously added element from
+LSM(i), and an equivalent pointer for the previously added element from FC(i+1). If the next element
+from LSM(i) is taken in an iteration, the pointer to the previous element from LSM(i) is updated.
+Otherwise, the FC(i+1) pointer is updated. Both pointers are initialised to the start of their respective
+sequences. Hence the correct information about which pointers to use is always available when another
+element is added to FC(i).
+Like a normal merge, the procedure takes the remainder of the other sequence once one of the sequences
+have been depleted.
+After the merge has been completed, pointers are propagated to lower levels in the LSM by copying
+every k’th element in FC(i) to FC(i −1) and cascading this process further down in the LSM. Note
+that at least one pointer is always copied to make sure the search process works properly.
+Since every array Ai is constructed by sampling every B’th element from a LSM level, we can use the
+analysis from the previous section to bound the space usage for the fractional cascading data structure
+to O
+  N
+B
+
+.
+Hence, the size of the two sequences involved in the initial merge is O
+  N
+B
+
+, which also bounds the running
+time. Using the same analysis as in the previous section, the amount of pointers propagated down from
+LSM(i) is linear in the length of the level, so the time it takes to maintain the fractional cascading data
+structure is an additional O
+  N
+B
+
+, or O
+  1
+B
+
+amortised per element, for any ﬂush. This is dominated by
+the time to perform a ﬂush, and the running time for insertions remain the same.
+To ﬁnd the predecessor of some key x in the LSM with Fractional Cascading, perform a binary search in
+FC(0) in O (log2(N)) time. Then use the fractional cascading structure to ﬁnd x’s predecessor in FC(i)
+for each level i in O (log2(N)) time. From each of these predecessors, follow the pointers back into the
+corresponding LSM level and perform a predecessor query with SIMD operations in O (1) time.
+7
+Experiments
+7.1
+Test Setup and Overview
+All tests were run on mac os x with 32 GB of RAM on a 8 core i9-9880H CPU(16 hyperthreads)
+with a base clock speed of 2.3 GHz and a boost speed of 4.0 GHz. Since none of the data structures are
+multi threaded, only a single core was used. The CPU supports Intel’s AVX2 with 256 bit words, which
+can contain eight 32 bit integers. Hence, all tests were run with B = 8.
+The results of the performance tests are for the most part shown as the response time of operations given
+as a function of the number of elements N in the data structure.
+The response time of a predecessor search for a given N and data structure is computed by inserting N
+elements chosen uniformly at random into the data structure, and searching for all of the elements. The
+total time is divided by N to get the response time.
+The response time of insertions is computed in the following way. Insert a large number of elements
+selected uniformly at random into the data structure while at regular intervals recording the number of
+elements ni inserted so far and the total time ti it took to insert these elements. It took ti+1 −ti time to
+insert ni+1 −ni elements between the records i and i + 1. The average response time for each of these
+insertions is (ti+1 −ti)/(ni+1 −ni), which is used as the response time for the point midway between ni
+and ni+1, when N = (ni + ni+1)/2.
+Note that the response time for the insertion procedure is not entirely accurate, because the number
+of elements changes over time as more insertions are made. However, the average insertion time for
+26
+==PAGE:27==
+Figure 15: Shows how a selection of the data structures compare to each other.
+Each data point
+corresponds to a particular data structure. The position on the x-axis represents how many seconds it
+took to perform 200 million predecessor queries in a data structure containing 200 million elements. The
+position on the y-axis represents how many seconds it took to insert 214 million elements. The closer a
+data structure is to (0,0), the better it performs. The Static SIMD B+-Tree does not support insertions
+and is therefore represented as a line.
+N ∈[ni, ni+1] is a reasonable approximation for the response time at N = (ni + ni+1)/2 as long as this
+range is not too large.
+7.2
+Results at a Glance
+Figure 15 illustrates how a selection of our data structures perform on a large input size.
+While it
+does not display the response time of the data structures, it does compactly convey the performance
+characteristics of all data structures.
+The vertical line is the Static SIMD B+-Tree. It does not support insertions but is by far the fastest
+data structure for searching. It was used as a benchmark for search performance because the branching
+factor of essentially all internal nodes is optimal and it exhibits good cache performance because all data
+is allocated in one consecutive array rather than spread out in memory.
+As can be seen from the plot, all tested variants of the SIMD LSM are competitive with all the SIMD
+B+-Trees on search performance, while signiﬁcantly better at insertions. the SIMD LSM with Search
+Trees performs better than the SIMD LSM with Fractional Cascading on both queries and updates,
+which is surprising given it has worse asymptotic bounds.
+The best data structure, SIMD LSM with Search Trees with GF = 16 and PR = 1/12 actually performed
+better than all the SIMD B+-Trees on queries while being at least a factor 6 faster at insertions.
+To put this performance into perspective, consider Figure 16 which displays how a reference implemen-
+tation of a Red-Black4 tree performs in comparison to the SIMD B+-Tree; it is beaten by a factor three
+at searching and a factor two at insertions. By comparing the best LSM with the SIMD B+-Tree, we
+get that it is more than a factor three faster on searching while being more than a factor 20 faster at
+insertions than a Red-Black Tree.
+4A Red-Black tree is a balanced binary search tree with query and update times of O (log2(N).)
+27
+==PAGE:28==
+Figure 16: Compares the performance of a Red-Black tree with that of the SIMD B+-Tree on 40 million
+insertions and searches.
+7.3
+SIMD B+-Trees
+Figure 17 shows the search performance of the SIMD B+-Trees introduced in Section 6. As can be
+seen the Static SIMD B+-Tree is by far the fastest, closely followed by the Implicit B+-Tree. This is
+to be expected: since both trees are allocated in a single array, only one pointer needs to be accessed.
+Since this pointer is used constantly, it will always be in the TLB and TLB misses are avoided entirely.
+Furthermore, the fact that the tree is located in the same consecutive stretch of memory likely reduces
+the number of cache misses compared to the trees where nodes are individually allocated on the heap.
+The diﬀerence in the Implicit and Static SIMD B+-Trees stems from the fact that all nodes in the Static
+tree are packed, i.e. ﬁlled entirely with keys. This leads to a higher branching factor and therefore a
+shallower tree than in the case of the Implicit tree, where nodes are mostly not fully packed.
+Note how the data for the Implicit SIMD B+-Tree suddenly stops at about N = 224 or about 16 million.
+At this point, the data structure no longer ﬁt in main memory (32GB!) due to the amount of unused
+allocated space in the memory layout. Even though the Implicit SIMD B+-Tree is faster than the rest
+of the dynamic trees at searching, it is rendered useless by the excessive memory usage and it will be
+disregarded from this point on.
+The three remaining trees all exhibit more or less the same performance characteristics. Note that the
+x-axis is log-scaled. Since all three data structures have O (logB(N)) bounds for searching, their lines in
+Figure 17 should be linear. However, they do for some reason appear to be superlinear. This is probably
+because when the number of elements in the data structure increases, more nodes will fall out of cache
+and more cache misses will occur. Eventually the root might start to fall out of cache and the root
+pointers starts to fall out of the TLB.
+Predictably, the Buﬀered SIMD B+-Tree is slightly slower than the Two-Level SIMD B+-Tree. The over-
+head is due to having to check a buﬀer in each internal node on the search path. Somewhat surprisingly,
+the SIMD B+-Tree is faster than the Two-Level SIMD B+-Tree. While the Two-Level tree requires twice
+the amount of work per node on the search path, it has a branching factor of Θ(B2). By doing some
+maths on the approximate heights of the Two-Level and normal SIMD B+-Trees, the Two-Level tree is
+about half as tall: logB2(N) = logB(N)
+2
+. Therefore it should more or less oﬀset the cost of the extra work
+per node in the Two-Level tree. It might be due to nodes being larger in the Two-Level tree, which
+somehow causes more unnecessary data to be loaded into cache than for the SIMD B+-Tree. Regardless,
+their performance is more or less equivalent.
+28
+==PAGE:29==
+Figure 17: Shows the response time for queries for the SIMD B+-Trees. The data for the Implicit SIMD
+B+-Tree stops before the others because it could no longer ﬁt in main memory.
+Figure 18: Shows the response time for updates in three of the dynamic B+-Trees. The Implicit SIMD
+B+-Tree is so not included because its memory performance is too bad to be useful.
+Figure 18 shows the insertion performance of the three remaining dynamic SIMD B+-Trees. At a glance,
+the data for the Normal SIMD B+-Tree is concerning, with large spikes in the running time for low values
+of N. This is not due to a measurement error or due to lag spikes on the computer; the performance
+proﬁle looks the same for every single test being run. The peaks do ﬂuctuate a bit in height and position,
+but for multiple runs with the same seed for the random number generator the peaks are more or less
+identical.
+The likely culprit is the way the response time is calculated. For small values of N, nodes in the SIMD
+29
+==PAGE:30==
+B+-Tree are split relatively frequently, because the number of nodes a key can be inserted into is limited.
+When N is small, samples of (ni, ti) (as described in Section 7.1) are taken more often. Hence the cost
+of performing many splits is averaged out over a fewer number of insertions. What this indicates is that
+the response time is abysmal when many nodes have to be split. Since the response time in the plots are
+an average of a small number of insertions, the worst case response time is probably signiﬁcantly worse.
+This also explains why the Two-Level- and Buﬀered SIMD B+-Tree perform better than the normal
+SIMD B+-Tree even though their theoretical performance is worse. Since nodes contain a factor B more
+keys, splits are much less frequent, which can be seen from the smoothness of the curves for these data
+structures at low values of N. However, when splitting larger nodes, more work needs to be done than
+when splitting small nodes. Why does this not oﬀset the beneﬁt from splitting less often? One reason
+might be that even though nodes take time linear in their size to be spilt, bigger nodes have better cache
+performance while splitting, resulting in a faster splitting time per element.
+The Two-Level SIMD B+-Tree is 40% faster than SIMD B+-Tree, and with the buﬀers the performance
+is boosted with another 13% in insertion speed. While the Buﬀered SIMD B+-Tree is 16% worse at
+searching than the Normal SIMD B+-Tree, it is 53% faster on insertions.
+7.4
+Performance of the Scalar LSM
+Before covering the analysis for the SIMD LSM, it is worth documenting the eﬀect the SIMD enhance-
+ments have on the Scalar LSM. The Scalar LSM supports insertions eﬃciently, inserting 196 million
+elements in 14 seconds, or about 14 million elements a second. Yet the SIMD merge procedure increases
+the speed by a factor of two, being able to insert the same number of elements in 6.9 seconds, or about
+half the time.
+The Scalar LSM search procedure, consisting of running a binary search for each level in use is tremen-
+dously slow. By the time N is 16 million, a single search could take 2µs which is a factor of 20 worse
+than the Static SIMD B+-Tree. As can be seen in the barchart below, it is not remotely competitive with
+some of the other data structures. This is to be expected due to the search complexity of O(log2(N)).
+For these reasons, the Scalar LSM will mostly be ignored in the remainder of this section.
+30
+==PAGE:31==
+Figure 19: Shows the performance of the SIMD LSM with Search Trees for diﬀerent choices of the growth
+factor. Left: Search performance. Right: Insertion performance.
+7.5
+Tuning Parameters for the SIMD LSM
+Recall that the SIMD LSM has the growth factor (GF) as a tuning parameter. Furthermore, the SIMD
+LSM w/ Fractional Cascading also has the propagation rate (PR) as a tuning parameter. This section
+will explore how the choice of these parameters aﬀects the performance of the SIMD LSM.
+SIMD LSM w/ Search Trees
+Figure 19 displays the performance of the SIMD LSM with Search Trees with four diﬀerent options for
+the growth factor. When GF = 2 the search performance is poor. This is because when the GF = 2, a
+large number of levels are required to maintain the data set, which means that a large number of searches
+in Static SIMD B+-Trees are required. There is no apparent pattern which distinguishes the cases where
+GF ∈{8, 16, 22} from each other. However, for growth factors 8, 16 and 22 the number of levels needed
+for 250 million elements are 10, 7 and 6 respectively, and so the number of searches performed does not
+diﬀer greatly.
+For insertions, the LSM performs slightly better when GF = 2 than with the other growth factors.
+With a growth factor of k, a level receives k −1 merges before it is full.
+That means that many
+elements are involved in multiple merges per level. Furthermore, the number of elements in a level keeps
+increasing until it becomes full, so merges into that level become progressively more costly until the
+LSM is eventually ﬂushed. When the growth factor is 2, every element is involved in at most one merge
+per level. Furthermore, sequences being merged are equally long. Hence, GF = 2 performs well for
+insertions, and insertions become more expensive the higher the growth factor.
+From the above it is obvious that as long as the growth factor is large enough, searching is twice as fast
+as when the growth factor is 2. However, a higher growth factor leads to slower insertions. A reasonable
+tradeoﬀthat performs well for both insertions and searches is with GF = 16.
+SIMD LSM w/ Fractional Cascading
+The SIMD LSM w/ Fractional Cascading is parameterised by both a growth factor and a propagation
+rate. Searches depend on both parameters because the number of pointers the procedure needs to follow
+is determined by the growth factor and the number of pointers that need to be checked on each level is
+determined by the pointer density. The insertions are aﬀected by the growth factor in the same way as
+mentioned above for the SIMD LSM w/ Search Trees, and it is aﬀected by the propagation rate because
+that determines how many pointers must be copied down to lower levels of the LSM. In other words,
+there is a complicated interplay between these two parameters and how they aﬀect the performance of
+the LSM.
+The heatmaps in Figure 20 indicate how well the SIMD LSM w/ Fractional Cascading performs for
+31
+==PAGE:32==
+Figure 20: Showing the performance of the SIMD LSM w/ Fractional Cascading as a function of growth
+factor and propagation rate. Note that the inverse of the propagation rate is given (i.e. k instead of
+1/k. Each test was made on 10 million uniformly random elements. A brighter colour indicates a lower
+running times. Left: Performance of search. Right: Performance of insertions. Note: The results were
+capped at 20 seconds to show better granularity. Some of the measurements for propagation rate = 1/2
+ran to more than 160 seconds.
+diﬀerent parameters. It is immediately clear that insertions run faster the lower the growth factor is and
+the lower the propagation rate is. This is expected from the discussion above. The search performance
+has more complicated trends, however. There are various bright spots, the brightest one being in the
+vicinity of GF = 15, PR = 1/10.
+Based on Figure 20 we identiﬁed some interesting combinations of parameters which are explored in depth
+in Figure 21. The top bar chart displays the response time for predecessor queries when there are 200
+million elements in the LSM for various combinations of the parameters. As expected it performs worse
+when the growth factor is lower. Surprisingly, the propagation rate’s eﬀect on the performance seems
+to be negligible in most cases as long as the growth factor remains constant. Even more surprisingly, a
+propagation rate of 1/2 is signiﬁcantly worse than a propagation rate of 1/22 when GF = 2. Intuitively
+it should be faster, since at most two pointers must be checked on each level, compared to at most 22.
+It is likely due to better cache behaviour; with lower propagation rates, there are fewer pointers on each
+level. Hence, the probability that a particular pointer is in cache at any point is larger, and the number
+of cache misses is reduced.
+As expected, insertions do mostly get faster with lower growth factors. However, GF = 2 breaks with
+this trend. The reason is that when building the fractional cascading data structure, pointers need to be
+copied downwards to all the levels below, of which there can be many when GF = 2. Furthermore, there
+is likely one cache miss per level, since the arrays containing the pointers for fractional cascading are
+allocated individually. Beyond this, higher propagation rates lead to slower insertion times, as expected.
+32
+==PAGE:33==
+Figure 21: Shows how the SIMD LSM with Fractional Cascading performs for diﬀerent choices of tuning
+parameters. The number following the GF indicates the growth factor, and the number following the
+PR indicates the propagation rate. Top: Query performance. Bottom: Update performance.
+According to these results, the LSM w/ Fractional Cascading seems to be performing well at GF =
+16, PR = 1/12. This tradeoﬀensures that both insertion and search performance is close to as good as
+they get, while the space overhead is not signiﬁcant.
+7.6
+Comparing the Best Solutions
+Figure 22 compares the performance of the best of each type of data structure in terms of response time,
+while Figure 23 compares the total running time.
+Of the dynamic data structures, the SIMD LSM w/ Search Trees performs the best on searches. It
+remains competitive with the other data structures at worst, and is signiﬁcantly better at best.
+It
+remains within a factor 5 of the very eﬃcient Static SIMD B+-Tree for N up to 200 million elements.
+It is somewhat surprising that the SIMD LSM with Search Trees is faster at searching than the SIMD
+LSM with Fractional Cascading, given that it is theoretically slower.
+Checking a constant number
+of elements on each level should intuitively be faster than searching an entire search tree per level.
+However, fractional cascading suﬀers from more cache- and TLB misses, since it needs to search on all
+levels, regardless of whether it is in use or not. Simultaneously, the Static B+-Trees have good cache
+performance to begin with as, the top level of each search tree is always loaded and no TLB misses occur
+since we only have a single pointer to the root of each tree.
+33
+==PAGE:34==
+Figure 22: Shows how the best of each type of data structure compares to each other. Left: Shows
+response time for searches. Right: Shows response time for insertions.
+Figure 23: Top: Shows the total time of the 3 data structures, after inserting 223, 225 and 227 elements
+respectively. Bottom: Shows the total search time for doing N ∈{223, 225, 227} predecessor queries on a
+data structure of size N.
+34
+==PAGE:35==
+The SIMD LSM w/ Search Trees is also the most eﬃcient at insertions, by far outperforming both of the
+other data structures, as can be seen in the bottom chart in Figure 23. This means that bulk building
+the Static SIMD B+-Trees is more eﬃcient than maintaining the fractional cascading data structure
+on top of the LSM. This is because the bulk building procedure is extremely simple, consisting only of
+copying elements and performing a single linear traversal over an array. Building the fractional cascading
+structure, on the other hand, requires a scalar merge which can lead to branch mispredictions and copying
+elements between arrays that have been separately allocated on the heap which leads to cache misses.
+In fact, adding search trees to the SIMD LSM only just about negates the eﬀect of using the SIMD merge
+procedure when inserting, meaning that the search trees can be viewed as a free addition on top of a
+Scalar LSM which improves the search performance from 2µs to about 250ns at N = 16000000. In other
+words, the SIMD LSM w/ Search Trees achieves a factor eight speedup for searches with no penalty in
+insertions compared to a Scalar LSM.
+8
+Discussion and Future Work
+8.1
+Suitability of the Simpliﬁed SIMD Model
+The model of computation for analysing programs using SIMD that was introduced in Section 2.1 assumes
+that all SIMD operations run in O (1) time. For any particular SIMD hardware implementation, this
+assumption is reasonable; the running time of the diﬀerent operations diﬀer, but it is typically bounded
+by some low, constant number of cycles.
+However, as the width of the SIMD vectors continue to increase in the future, it is not obvious that
+the running time of these operations will stay constant, because it depends on how the operations are
+implemented in hardware.
+Most of the operations mentioned in the Simpliﬁed SIMD Interface in Section 6.1 can scale in constant
+time and linear physical space (i.e. the number of transistors used to create the circuit). For instance,
+the addition circuit or the minV circuit for 256 bit words can easily be adapted to 512 bit words in this
+manner by simply using two of the 256 bit version in parallel.
+However, it is not obvious how the reorder function would scale, which we will discuss in this section.
+On the Scaling of the ’reorder’ Operation
+The reorder operation deﬁned in this report is in reality implemented in two diﬀerent ways in Intel’s
+AVX2: Permute, which is slow, but can do everything reorder can do and shuﬄe, which is fast, but
+is limited to reordering within 128 bit lanes. In other words, no elements from among the ﬁrst four
+elements can move to the spot of the four last and vice versa. Also the shuﬄe within the 128 bit lanes
+is limited to shuﬄing all lanes in the same way.
+Permute, can not scale in O (1) time and O (B) physical space, since it would need to be able to move B
+elements to B other spots in a constant amount of cycles. One of the following solutions would need to
+be implemented, non of which scale in O (1) time and O (n) physical space:
+• More space: permute can scale and keep time O (1), but that means it would need O
+ B2
+transistor scaling, as it would need B2 paths to make every permutation possible in constant time.
+• More time: permute can scale and keep physical space O (B), but that mean it would need O (B)
+time complexity, as it would need to shift the output vector over the hardware, and save one word
+at a time.
+• A trade-oﬀ: Suppose you made a circuit which could move any of the B elements to any location
+in a vector of size
+√
+B. Then the permutation function could be implemented in O
+√
+B
+
+time and
+O
+
+B
+√
+B
+
+physical space by using this circuit
+√
+B times to populate an entire vector.
+A shuﬄe which only works within 128 bit lanes, on the other hand, can easily scale in O (1) time and
+O (B) physical space, as we would just need the 128 bit shuﬄe circuit repeated O (B) times.
+35
+==PAGE:36==
+8.2
+Scalability of the SIMD LSM with Search Trees
+Assuming that a normal comparison and SIMD comparison run in the same time, the maximum speedup
+for the SIMD merge procedure is
+B
+log2(B) = 3 when B= 8. This is because log2 B comparisons rather than
+B comparisons are used to merge B elements. This is actually close to the the speedup seen when merging
+large sorted arrays. It would be interesting to see how this scales as the supported word width for SIMD
+continues to increase.
+Since we have only focused on response time and not throughput of our data structures, only single
+threaded behaviour was considered. However, some of our data structures would beneﬁt greatly from
+concurrency. In particular the LSM with Search Trees, because each core could search a search tree on
+a level in the LSM. With GF = 16, eight levels is enough to cover the entire 32 bit key space. In other
+words, an eight core CPU could search all eight levels at once, in essence making the SIMD LSM with
+Search Trees as eﬃcient as the Static B+-Tree for searching. Also, the insertion procedure can easily
+beneﬁt from concurrency since multiple merges can run in parallel during a ﬂush. Furthermore, once a
+ﬂush has cleared the ﬁrst few levels of the LSM, new elements can be inserted while the ﬂush is running,
+eﬀectively removing any response time ﬂuctuations for for inserting into the SIMD LSM.
+As mentioned previously, the SIMD LSM needs some work before it can support deletions. This is an
+obvious candidate for future work since the LSMs perform well.
+The LSM with Search Trees does have a theoretical running time of O
+
+(log2 N)2
+log2(B)
+
+, so in theory its
+performance should quickly deteriorate for larger values of N. However, the number of levels in the LSM
+is eﬀectively constant for a large enough growth factor. For 200 million elements 7 levels are required
+for GF = 16, and the entire 32 bit key space can ﬁt in 8 levels. However, it is likely that for larger
+key spaces the performance would be worse. Furthermore, larger key spaces requires larger keys, which
+means that fewer keys ﬁt into a single SIMD vector, which further cripples the data structure. Extending
+this solution to 64 bit keys would be an interesting experiment.
+9
+Conclusion
+In this report we have developed a number of vectorised data structures that solves the indexing problem.
+They are all analysed using a simple model of SIMD computations, and we introduced an interface that
+simpliﬁes the communication of SIMD algorithms. To our knowledge, we present the ﬁrst data structure
+that uses SIMD to directly improve insertion performance.
+The most eﬃcient data structure is a SIMD enhanced Log-Structured Merge-Tree.
+It uses a SIMD
+merging procedure for insertions and eﬃciently traverse static search trees using SIMD to speed up
+searches. It is a factor three faster than a standard balanced binary search tree for searching and a
+factor 20 faster at insertions. It achieves these bounds while still being within a factor four of the best
+possible static search strategy we could devise. Furthermore, the data structure is easily extensible to
+improve both the insertion and search performance using concurrency.
+36
+==PAGE:37==
+References
+[1] S. Ashkiani, S. Li, M. Farach-Colton, N. Amenta, and J. D. Owens. Gpu lsm: A dynamic dictio-
+nary data structure for the gpu. In 2018 IEEE International Parallel and Distributed Processing
+Symposium (IPDPS), pages 430–440, 2018.
+[2] K. E. Batcher. Sorting networks and their applications. In Proceedings of the April 30–May 2, 1968,
+Spring Joint Computer Conference, AFIPS ’68 (Spring), page 307–314, New York, NY, USA, 1968.
+Association for Computing Machinery.
+[3] R. Bayer and E. McCreight. Organization and maintenance of large ordered indices. In Proceedings
+of the 1970 ACM SIGFIDET (Now SIGMOD) Workshop on Data Description, Access and Control,
+SIGFIDET ’70, page 107–141, New York, NY, USA, 1970. Association for Computing Machinery.
+[4] Michael A. Bender, Martin Farach-Colton, Jeremy T. Fineman, Yonatan R. Fogel, Bradley C.
+Kuszmaul, and Jelani Nelson. Cache-oblivious streaming b-trees. In Proceedings of the Nineteenth
+Annual ACM Symposium on Parallel Algorithms and Architectures, SPAA ’07, page 81–92, New
+York, NY, USA, 2007. Association for Computing Machinery.
+[5] Gerth Stolting Brodal and Rolf Fagerberg. Lower bounds for external memory dictionaries. In
+Proceedings of the Fourteenth Annual ACM-SIAM Symposium on Discrete Algorithms, SODA ’03,
+page 546–554, USA, 2003. Society for Industrial and Applied Mathematics.
+[6] Bernard Chazelle and Leonidas J Guibas. Fractional cascading: I. a data structuring technique.
+Algorithmica, 1(1-4):133–162, 1986.
+[7] Jatin Chhugani, Anthony D. Nguyen, Victor W. Lee, William Macy, Mostafa Hagog, Yen-Kuang
+Chen, Akram Baransi, Sanjeev Kumar, and Pradeep Dubey. Eﬃcient implementation of sorting on
+multi-core simd cpu architecture. Proc. VLDB Endow., 1(2):1313–1324, August 2008.
+[8] Thomas H. Cormen, Charles E. Leiserson, Ronald L. Rivest, and Cliﬀord Stein. Introduction to
+Algorithms, Third Edition. The MIT Press, 3rd edition, 2009.
+[9] M. J. Flynn. Very High-Speed Computing Systems. Proceedings of the IEEE, 54(12):1901–1909,
+December 1966.
+[10] H. Inoue, T. Moriyama, H. Komatsu, and T. Nakatani. AA-Sort: A New Parallel Sorting Algorithm
+for Multi-Core SIMD Processors. In 16th International Conference on Parallel Architecture and
+Compilation Techniques (PACT 2007), pages 189–198, Sep. 2007.
+[11] Hiroshi Inoue, Moriyoshi Ohara, and Kenjiro Taura. Faster Set Intersection with SIMD Instructions
+by Reducing Branch Mispredictions. Proc. VLDB Endow., 8(3):293–304, November 2014.
+[12] Hiroshi Inoue and Kenjiro Taura. SIMD - and Cache-Friendly Algorithm for Sorting an Array of
+Structures. Proc. VLDB Endow., 8(11):1274–1285, July 2015.
+[13] Changkyu Kim, Jatin Chhugani, Nadathur Satish, Eric Sedlar, Anthony D. Nguyen, Tim Kaldewey,
+Victor W. Lee, Scott A. Brandt, and Pradeep Dubey. Fast: Fast architecture sensitive tree search
+on modern cpus and gpus. In Proceedings of the 2010 ACM SIGMOD International Conference
+on Management of Data, SIGMOD ’10, page 339–350, New York, NY, USA, 2010. Association for
+Computing Machinery.
+[14] V. Leis, Alfons Kemper, and Thomas Neumann.
+The adaptive radix tree: Artful indexing for
+main-memory databases. pages 38–49, 04 2013.
+[15] Patrick O’Neil, Edward Cheng, Dieter Gawlick, and Elizabeth O’Neil. The log-structured merge-tree
+(lsm-tree). Acta Inf., 33(4):351–385, June 1996.
+[16] Orestis Polychroniou, Arun Raghavan, and Kenneth A. Ross. Rethinking simd vectorization for
+in-memory databases.
+In Proceedings of the 2015 ACM SIGMOD International Conference on
+Management of Data, SIGMOD ’15, page 1493–1508, New York, NY, USA, 2015. Association for
+Computing Machinery.
+[17] James Reinders. Intel AVX-512 Instructions. Intel Corporation, 2013. Last updated in 2017.
+37
+==PAGE:38==
+[18] Benjamin Schlegel, Rainer Gemulla, and Wolfgang Lehner. K-ary search on modern processors. In
+Proceedings of the Fifth International Workshop on Data Management on New Hardware, DaMoN
+’09, page 52–60, New York, NY, USA, 2009. Association for Computing Machinery.
+[19] Benjamin Schlegel, Rainer Gemulla, and Wolfgang Lehner. Fast Integer Compression using SIMD
+Instructions. pages 34–40, 01 2010.
+[20] Amirhesam Shahvarani and Hans-Arno Jacobsen.
+A hybrid b+-tree as solution for in-memory
+indexing on cpu-gpu heterogeneous computing platforms. In Proceedings of the 2016 International
+Conference on Management of Data, SIGMOD ’16, page 1523–1538, New York, NY, USA, 2016.
+Association for Computing Machinery.
+[21] Thomas Willhalm, Nicolae Popovici, Yazan Boshmaf, Hasso Plattner, Alexander Zeier, and Jan
+Schaﬀner. Simd-scan: Ultra fast in-memory table scan using on-chip vector processing units. Proc.
+VLDB Endow., 2(1):385–394, August 2009.
+[22] Takeshi Yamamuro, Makoto Onizuka, Toshio Hitaka, and Masashi Yamamuro. Vast-tree: A vector-
+advanced and compressed structure for massive data tree traversal.
+In Proceedings of the 15th
+International Conference on Extending Database Technology, EDBT ’12, page 396–407, New York,
+NY, USA, 2012. Association for Computing Machinery.
+[23] Steﬀen Zeuch, Frank Huber, and Johann-christoph Freytag. Adapting tree structures for processing
+with simd instructions. 2014.
+[24] Weihua Zhang, Zhaofeng Yan, Yuzhe Lin, Chuanlei Zhao, and Lu Peng. A high throughput b+tree
+for simd architectures. IEEE Transactions on Parallel and Distributed Systems, PP:1–1, 09 2019.
+38
+==PAGE:39==
+Appendix A: Predecessor Search in Unsorted SIMD Vectors
+This can be done, but is not easy, since we only have one instruction to work with, which is mm minpos epu16,
+which returns both the value and index of the smallest number among 8 16 bit unsigned numbers.
+To use this 16 bit operation, we ﬁrst need to ﬁrst compare the high bytes of the keys and then the low
+bytes of the keys. The algorithm can be seen in algorithm 6, and is described below.
+• Line 2-3: Here we extract the high and low bytes of the search key, and makes vectors just contain
+these keys repeatedly.
+• Line 5-6: Here we load a high byte mask and a low byte mask into two vectors.
+• Line 8-9: Using bit logic and we extract the high bytes and low bytes from the unsorted vector.
+• Line 11-12: Here we rearrange the vector elements, so we have a vector that contains the the high
+bytes in the original order ﬁrst, and then the low bytes in the original order of the unsorted vector.
+• Line 14-15: Here we subtract the high and low parts of the numbers we search, from the key,
+and in that way we make all numbers larger than the key negative numbers, which is seen as the
+highest numbers in unsigned numbers.
+• Line 17: Find the min number among the high bytes
+• Line 18: Create a mask for the low bytes, where all numbers that does not match the lowest high
+bytes are masked out.
+• Line 20: Mask out all low bytes that did not have the lowest corresponding high bytes, by using
+logical or to max them out.
+• Line 22: Calculate the minimum low bytes, of those available, after mask out.
+Algorithm 6
+1: procedure Index of predecessor in unsorted SIMD vector(vector, key)
+2:
+key high = mm set1 epi16(key >> 16);
+3:
+key low = mm set1 epi16(key & 0x0000ffff);
+4:
+5:
+high bytes = mm256 set1 epi32(0xffff0000);
+6:
+low bytes = mm256 set1 epi32(0x0000ffff);
+7:
+8:
+vector high bytes = mm256 and si256(high bytes, vector);
+9:
+vector low bytes = mm256 and si256(low bytes, vector);
+10:
+11:
+vector high low = mm256 hadd epi16(vector high bytes, vector low bytes);
+12:
+vector high low = mm256 permute4x64 epi64(vector high low, 0b11011000);
+13:
+14:
+vector high low[0:B/2] = mm subs epi16(key high, vector high low[0:B/2]);
+15:
+vector high low[B/2:B] = mm subs epi16(key low, vector high low[B/2:B]);
+16:
+17:
+result high = mm minpos epu16(vector high low[0:B/2]);
+18:
+high mask
+=
+mm not ps( mm cmpeq epi16(vector high low[0:B/2],
+mm set1 epi16(result high)));
+19:
+20:
+vector low = mm or si128(high mask, vector high low[B/2:B])
+21:
+22:
+result low = mm minpos epu16(vector low);
+23:
+return result low;
+24: end procedure
+Algorithm 7 shows the algorithm used for searching for a predecessor in a sorted SIMD vector.
+39
+==PAGE:40==
+Algorithm 7
+1: procedure Index of predecessor in sorted SIMD vector(vector, key)
+2:
+key vector = mm256 set1 epi32(key);
+3:
+return mm256 movemask epi8( mm256 cmpgt epi32(key vector, vector)) >> 2
+4: end procedure
+Timing
+Unsorted leaves: It takes 2.69 ns per predecessor search in an unsorted SIMD vector.
+Sorted leaves: It takes 0.68 ns per predecessor search in an sorted SIMD vector.
+So even tough it takes 5 times longer to search in unsorted leaves, the time used for the predecessor
+search in the SIMD vector is nothing compared with the around 200-1000 ns it takes to ﬁnd the SIMD
+vector we need to search in.
+So it is worth it not to sort the leaves in the SIMD B+-Tree, since we get a good speedup in insertions
+for almost no cost in searching.
+40
