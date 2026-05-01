@@ -8,17 +8,54 @@ No Java? Use Python (same flags, stdlib only):
 
   uv run python maks/findit_bulk_download/bulk_download.py maks/findit_urls/dtu_theses_all_urls_deduped.txt -o ./downloads -c maks/cookies.txt
 
+Shorter runs: copy maks/findit_bulk_download/bulk_download.config.example.json to e.g. bulk_download.config.json (keep it gitignored if it holds local paths), edit values, then:
+
+  uv run python maks/findit_bulk_download/bulk_download.py --config bulk_download.config.json
+
+Any flag you pass on the command line overrides the JSON for that run. Keys are snake_case (urls_file, out_dir, skip_ok_from_manifest, skip_prohibited_from_manifest, …).
+
 Progress / resume: each run writes ./downloads/bulk_download_checkpoint.json (line number, thesis id, outcome, in-progress on interrupt). Re-run the same command to continue — existing PDFs are skipped. --no-checkpoint turns this off; --checkpoint-file PATH sets the JSON path.
 
 Append-only join metadata: ./downloads/bulk_download_manifest.jsonl (one JSON per line: rft_dat_id, gateway_oid, gateway_targetid, resolver_url, outcome, …). --no-manifest disables; --manifest-file PATH overrides.
 
+access_prohibited: by default bulk_download.py does not write .access_prohibited files; the next run will call GetIt again for those ids (manifest still records outcome). Use --prohibited-tombstones to restore the old behaviour (write tombstone + skip ids that have one).
+
+Two-phase workflow: (1) Run the normal command until the full urls list is processed (Ctrl+C safe; re-run the same command to continue). (2) Re-attempt only thesis ids whose latest manifest line still has outcome prohibited: add --retry-prohibited-from-manifest to the same urls file and paths; keep --manifest-file (and --skip-ok-manifest-file if used) so new lines append to the same JSONL. Optional --retry-prohibited-manifest-file PATH reads outcomes from a different JSONL.
+
+Important: step (2) is a narrow pass — most URL lines are skipped on purpose (counter skip_retry_manifest_filter). Log line outcome_prohibited means GetIt responded with access_prohibited after a real request, not “skipped without trying”. If almost every line is outcome_prohibited, refresh cookies from GetIt (short ~60-char cookies are usually catalog-only).
+
 After moving PDFs off disk, resume without re-downloading completed ids: add --skip-ok-from-manifest (reads the same manifest path unless you pass --skip-ok-manifest-file PATH). Still skips local PDFs when present. --force ignores manifest skips.
+
+To avoid calling GetIt again for ids whose latest manifest outcome is already prohibited, add --skip-prohibited-from-manifest (optional --skip-prohibited-manifest-file PATH). Omit that flag (or run with --retry-prohibited-from-manifest only) when you refresh cookies and want another attempt at those ids.
+
+Strongest option — never re-fetch an id that already has any latest manifest outcome (ok, prohibited, or fail): add --skip-manifest-recorded (optional --skip-manifest-recorded-file PATH). Use --force or omit the flag when you intentionally retry after fixing cookies or failed rows.
+
+PDFs on an external volume: -o is where PDFs, .part, and .bin live (and .access_prohibited only if --prohibited-tombstones); --checkpoint-file and --manifest-file can stay in the repo. Example (adjust paths):
+
+  uv run python maks/findit_bulk_download/bulk_download.py maks/findit_urls/dtu_theses_all_urls_deduped.txt \
+    -o /Volumes/NoaNoa/Theses_PDF_raw -c maks/cookies.txt \
+    --checkpoint-file ./downloads/bulk_download_checkpoint.json \
+    --manifest-file ./downloads/bulk_download_manifest.jsonl
+
+With --skip-ok-from-manifest, also pass --skip-ok-manifest-file ./downloads/bulk_download_manifest.jsonl so it reads the same file as --manifest-file. Large restarts avoid per-id skip lines with --quiet-skips (optional --progress-every N; default 2000 with quiet-skips).
+
+Canonical resume command — one line, repo root (PDFs + .part under ./downloads; checkpoint/manifest use the same defaults under -o):
+
+  uv run python maks/findit_bulk_download/bulk_download.py maks/findit_urls/dtu_theses_all_urls_deduped.txt -o ./downloads -c maks/cookies.txt --skip-ok-from-manifest --quiet-skips
+
+Alternate — PDFs on an external volume but checkpoint/manifest still in ./downloads (explicit paths):
+
+  uv run python maks/findit_bulk_download/bulk_download.py maks/findit_urls/dtu_theses_all_urls_deduped.txt -o /Volumes/NoaNoa/Theses_PDF_raw -c maks/cookies.txt --checkpoint-file ./downloads/bulk_download_checkpoint.json --manifest-file ./downloads/bulk_download_manifest.jsonl --skip-ok-from-manifest --skip-ok-manifest-file ./downloads/bulk_download_manifest.jsonl --quiet-skips
 
 Shell note: do not paste documentation placeholders. In zsh, square brackets are globs — use a real command like the Example below, not literal "less-than urls.txt greater-than".
 
+Multiline commands: the backslash must be the last character on the line — no space after it. If a line ends with "\ " (backslash space), the shell stops the command there and the next line (e.g. -o /Volumes/...) is not passed to bulk_download.py; PDFs may then land under a different -o than you intended (e.g. only ./downloads from an older habit). The script prints "PDF directory (-o): ..." at startup so you can confirm.
+
 The resolver URLs need the same session your browser uses after DTU login.
 
-The GetIt resolver often returns Server-Sent Events (SSE): a first line like data: {"url":"https://fulltext-gateway.cvt.dk/...","resource_option":"..."}. bulk_download.py follows that URL to fetch the PDF. If resource_option is access_prohibited (or url is missing), the thesis is skipped and counted as prohibited.
+Do not rely on a pasted Safari/Network **request dump** (many lines: Summary, GET, Cookie:, …) as your only cookie source: bulk_download.py can now pick out a `Cookie:` line from such a file, but a dump from the **catalog filter** page often has only short FindIt cookies (`_findit_session_id`, `cks=…`). GetIt fulltext usually needs cookies from a **getit.findit.dtu.dk** request after you trigger full text — use Option A or A2 below.
+
+The GetIt resolver often returns Server-Sent Events (SSE): one or more data: {JSON} lines. bulk_download.py picks among lines that contain an http(s) url: it prefers the last JSON whose resource_option is not access_prohibited (some streams end with a URL line that is still a denial stub). If every url line is access_prohibited (or there is no url), behaviour matches the resolver.
 
 Option A2 — From a HAR export (Safari may save as .json or a misnamed extension like .css)
 1. DevTools → Network → Export HAR (file is JSON with a top-level "log" key).
@@ -36,6 +73,7 @@ Option A — Single-line Cookie header (simplest)
 3. Pick that request → Headers → Request Headers → copy the full "cookie:" value (everything after "cookie: ").
 4. Save it as one line in a file, e.g. maks/cookies.txt:
    sessionid=...; other=...
+   Optional: several lines of plain name=value pairs (no tabs) are merged into one Cookie header with "; " — useful if you paste a short FindIt line and a longer GetIt line from two exports.
 5. Run from repo root:
    uv run python maks/findit_bulk_download/bulk_download.py maks/findit_urls/dtu_theses_all_urls_deduped.txt -c maks/cookies.txt -o ./downloads
    (with JDK: java -cp maks/findit_bulk_download/out BulkDownload ... same args)
