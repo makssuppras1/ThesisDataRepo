@@ -1,0 +1,1870 @@
+==PAGE:1==
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Author 
+Thor Bech Johannesen (s083350) 
+ 
+ 
+ 
+Supervisor 
+Thomas Nordahl Petersen, Associate Professor 
+ 
+Master Thesis 
+Technical University of Denmark 
+June 22nd, 2015 
+ 
+ 
+Master Thesis 
+Optimization of Metagenomic 
+Sequence Analysis with MGmapper 
+==PAGE:2==
+1 
+ 
+ 
+Table of contents 
+Introduction ..............................................................................................................................................................2 
+Theory and background ............................................................................................................................................3 
+Metagenomics ......................................................................................................................................................3 
+Next-generation Sequencing ................................................................................................................................3 
+The procedure for Illumina sequencing ...............................................................................................................3 
+Library preparation ...........................................................................................................................................3 
+Cluster generation and Clonal Bridge Amplification ........................................................................................4 
+Sequencing by synthesis. ..................................................................................................................................4 
+MGmapper ...........................................................................................................................................................4 
+Bwa-mem..............................................................................................................................................................5 
+Burrows-Wheeler Transform ............................................................................................................................5 
+LF-mapping and the FM-index ..........................................................................................................................6 
+The Smith-Waterman algorithm .......................................................................................................................9 
+Bwa-mem scoing and match+mismatch fraction .......................................................................................... 11 
+GemSIM ............................................................................................................................................................. 12 
+Methods ................................................................................................................................................................ 14 
+Results ................................................................................................................................................................... 16 
+Impact of MMF threshold on the mapping of real metagenomics data ........................................................... 16 
+Mapping of GemSIM-simulated reads............................................................................................................... 19 
+Frequency of correct predictions .................................................................................................................. 19 
+Frequency of incorrect predictions ............................................................................................................... 20 
+Impact of MMF threshold .............................................................................................................................. 21 
+MGmapper as a basis for taxonomy analysis .................................................................................................... 21 
+Discussion .............................................................................................................................................................. 25 
+References ............................................................................................................................................................. 26 
+Appendix A ............................................................................................................................................................ 27 
+ 
+==PAGE:3==
+2 
+ 
+Introduction 
+ 
+The field of metagenomics is in constant progression as continued improvements in next-generation 
+sequencing techniques lead to higher capacity and lower cost of DNA sequencing. Metagenomics benefits not 
+only because the sequencing of metagenomics data becomes cheaper, but even more so because the amount 
+of genomic data available from central databases such as NCBI and EBI is constantly increasing as new species 
+are identified and their genetic makeup charted, providing new references for the identification and study of 
+future metagenomics samples. 
+When studying metagenomics data the first problem encountered is most often determining what is in the 
+sample; which species are present. MGmapper is a web based alignment tool capable of mapping large 
+amounts of short DNA sequences to several large databases. It takes as input raw NGS reads and uses the bwa-
+mem algorithm to align query sequences to a set of databases specified by the user and outputs alignment files 
+as well statistics on references that have been aligned with queries. MGmapper has shown the most promising 
+results when mapping against databases in so called chain-mode, that is, once a read has been successfully 
+mapped to a database MGmapper will not attempt to map it against subsequent databases. Chain-mode 
+mapping has been shown to outperform full-mode mapping (where every read is mapped against every 
+database) (Petersen TN et.al.), but it also presents a problem as a read mapped to an incorrect species will not 
+only result in a false positive, it will also prevent the read from being mapped to subsequent databases where 
+it could potentially be correctly mapped. This study will examine the potential of MGmapper to properly 
+classify the species of sequencing reads as well as the implementation of an additional output filter to reduce 
+the rate of false positives. 
+ 
+ 
+ 
+==PAGE:4==
+3 
+ 
+Theory and background 
+ 
+Metagenomics 
+Metagenomics is the study of microorganisms by direct extraction of genetic material from environmental 
+samples without the process of first isolating and cultivating individual organisms to have their DNA 
+sequenced. Samples can contain genetic material from thousands of organisms or more, and when studying 
+microbial diversity and complex ecosystems of microorganisms, metagenomics has several advantages over 
+regular genomic approaches (Handelman J, 2004). The enormous species diversity found in these samples 
+makes cultivating and sequencing individual species a considerable task, and many organisms are completely 
+missed by regular cultivation-based approaches simply because they resist cultivation (Hugenholtz P, Goebel 
+BM, Pace NR, 1998). Metagenomics has found use in agriculture, ecology and several other fields, but its most 
+prominent use is possibly in medicine where microbial communities, the human microbiome, have been found 
+to play a significant role in human health. 
+ 
+Next-generation Sequencing 
+Next-generation sequencing (NGS), also known as high-throughput sequencing, is a broad term that comprises 
+several modern methods of DNA sequencing. These methods are characterized by being significantly cheaper 
+and having much greater capacity than Sanger sequencing, which was the most widely used sequencing 
+method for 25 years, but has now been almost entirely replaced. These improved methods have had a massive 
+impact on bioinformatics as the amount of sequence data shared through central databases and made 
+available to researchers has increased massively and continues to increase. It has enabled the use of whole-
+genome sequencing on a much larger scale and revolutionized entire fields of study including metagenomics. 
+The most popular NGS technologies include Roche/454, Ion Torrent, SOLiD and Illumina sequencing, the latter 
+of which is the focus of this report as it is the technology used to sequence the metagenomics samples 
+analyzed. 
+ 
+The procedure for Illumina sequencing 
+Library preparation 
+As with most NGS technologies extensive preparation is required before the actual sequencing takes place. 
+With a method dubbed "tagmentation" purified DNA samples are fragmented by transposomes, which 
+simultaneously ligate adapter sequences onto both ends of the DNA fragments (Illumina, Inc., 2014). The 
+motifs added to the end of the strands include binding sites for the sequencing primer, an index sequence and 
+lastly a specific adapter sequence on each end, on one end one that is complementary to the first kind of oligo 
+found in the cluster generation flow cells, and on the other end one that is identical to the second type of oligo 
+found in the flow cells. 
+==PAGE:5==
+4 
+ 
+Cluster generation and Clonal Bridge Amplification 
+Amplification of fragments takes place when the ligated DNA fragments are washed through flow cells coated 
+with 2 types of oligos (Illumina, Inc., 2010). The first type of oligos is complementary to the adapter region on 
+the fragment strand, enabling hybridization between the two. After hybridization a polymerase creates a 
+compliment of the rest of the strand. The resulting double strand is denatured and the original template 
+washed away, leaving room for the remaining complementary strand to fold over as the adapter region on the 
+other end of the strand hybridizes to the second type of oligo in the flow cell, creating the bridge structure that 
+lends its name to the method. Once again polymerases generate the complementary strand, creating a double 
+stranded bridge which is then denatured to create separate forward and reverse strands. These strands are 
+now free to fold over and hybridize to other oligos and the process is repeated. After a number of amplification 
+cycles the reverse strand is cleaved off and washed away, leaving several copies of the forward strand to be 
+used for sequencing. The 3'-end of the strand as well as the cell-surface oligos are blocked to prevent any 
+interference with the sequencing process. 
+ 
+Sequencing by synthesis. 
+Sequencing is initiated by adding fluorescently tagged nucleotides as well as primer complementary to the 
+primer binding site on the 3'-end of the strand (Illumina, Inc., 2010). The primer will hybridize to the binding 
+site after which single nucleotides are added to the strand in cycles. With all four nucleotides present the 
+nucleotide that is incorporated will generally be complementary to the one on the template. After the addition 
+of each fluorescently tagged nucleotide the cluster is excited by a light source, causing a fluorescent signal to 
+be emitted. The type of nucleotide that has been added is interpreted based on the wave length and intensity 
+of the signal. This cycle of adding a nucleotide and interpreting base type is repeated a number of times equal 
+to the desired read length and is performed simultaneously for many copies of the same template. Once the 
+read itself has been sequenced the read product is washed off and the first index primer is added, which allows 
+the index sequence at the 5'-end of the strand to be sequenced in the same fashion. This concludes the 
+sequencing of the first read, however for paired-end reads a similar process has to take place for the reverse 
+strand. After the first index is sequenced the sequence product is once again washed off, and the 3'-end of the 
+strand as well as the oligos on the cell-surface are deprotected, allowing the strand to fold over and bind to the 
+second type of oligo. The index 2 sequence is read similar to index one, after which the oligo is once again 
+extended by a polymerase, creating a double stranded bridge. The double strand is denatured and the forward 
+strand is cleaved and washed off, leaving the reverse strand. A second type of sequencing primer 
+complementary to the binding site on the 5'-end of the strand is added and sequencing takes place exactly like 
+it did for the forward strand. 
+ 
+MGmapper 
+MGmapper is a web-based method for strain identification that can map large amounts of short low-divergent 
+DNA sequences against several large reference databases. It takes as input sequence reads from next-
+==PAGE:6==
+5 
+ 
+generation sequencing platforms and aligns those sequences to a number of available pre-indexed databases 
+as specified by the user. Mapping against each database can be done in full-mode or chain-mode. In full mode 
+MGmapper will attempt to map all input reads against the database while in chain-mode only reads that have 
+not already been successfully mapped to a database will be tested. The alignment itself is based on bwa-mem, 
+which is described more in-depth later in this chapter. 
+The output produced by MGmapper includes overall statistics on the number of reads in input file(s); how 
+many remain after trimming and how many where mapped to each of the selected databases, as well as a file 
+for each selected database containing statistics on references in that database that had reads mapped to them. 
+This file contains a line for each reference in the database that had one or more reads mapped to it and 
+includes, among other things, a unique identifier, a description i.e.the fasta-file header of the reference which 
+often contains a classification at genus or species level, the number of reads mapped to that reference, the size 
+of the reference, and the total number of nucleotides mapped to that reference. MGmapper also outputs 
+alignments in BAM-format and compressed fastq files containing the unmapped reads. 
+ 
+Bwa-mem 
+Bwa-mem is one of several alignment algorithms found in the bwa software package and is designed to 
+efficiently map low-divergent sequences shorter than 1Mbp to a large reference genome (Li H, Durbin R, 2013). 
+BWA stands for Burrows-wheeler Alignment Tool, so called because Burrows-Wheeler Transform is used to 
+create an FM-index from the reference genome. Bwa-mem initially locates alignments in the index with 
+Maximal Exact Matches (MEMs) above a certain threshold (default 19), as the name suggests these are exact 
+matches between two strings, i.e. an exact alignment that cannot be extended in either direction without 
+allowing for a mismatch. All alignments located this way are then extended with the Smith-Waterman 
+algorithm allowing for mismatches and insertions/deletions, and the final alignments are evaluated with a 
+specific scoring scheme to determine the single best alignment which is given as output. 
+ 
+Burrows-Wheeler Transform 
+The Burrows-Wheeler Transform (BWT) is a block sorting algorithm proposed by M. Burrows and D.J. Wheeler 
+in 1994 (Burrows M, 1994). It rearranges the order of characters in a string with a tendency to group runs of 
+similar characters, allowing for a greater degree of data compression, while still being fully reversible. For 
+instance the Burrows-Wheeler Transform of the string 
+“It_was_the_best_of_times_it_was_the_worst_of_times$” becomes 
+“s$esttssfftteww_hhmmbootttt_ii__woeeaaressIi_______” which can be compressed much more efficiently 
+due to the many character repeats.The BWT also has a second application besides compression; indexing. The 
+Burrows-Wheeler Alignment Tool makes use of the so-called FM-index proposed by Paolo Ferragina and 
+Giovanni Manzini in 2000 (Ferragina P, 2000), which based on BWT and some additional small data structures 
+functions as a space-efficient index of a string. 
+==PAGE:7==
+6 
+ 
+In order to perform BWT on a string, an end-of-string character, $ is added to the sequence. The end of string 
+marker should be lexicographically smaller value than any other character in the string so that a regular sort 
+will put it first in the string. 
+A matrix is created based on the cyclic shifts of T, also known as the rotations of T. I.e. the strings obtained by 
+repeatedly removing a character from one end of the string and adding that character to the other end of the 
+string, producing a number of strings equal to the length of T. For instance the rotations of the string 
+T=atgactt$ would be, $atgactt, t$atgact, tt$atgc, etc. Listing these strings below each other in alphabetical 
+order results in the Burrows-Wheeler Matrix, BWM(T) . BWM(atgactt$) would look like this: 
+F  
+ 
+ 
+ 
+ 
+ 
+L 
+$ a t g a c t t 
+a c t t $ a t g 
+a t g a c t t $ 
+c t t $ a t g a 
+g a c t t $ a t 
+t $ a t g a c t 
+t g a c t t $ a 
+t t $ a t g a c 
+ 
+The Burrows-Wheeler Transform, BWT(T) is the string found in the last column (L column) of the matrix, 
+BWT(atgactt$) = tg$attac. 
+ 
+LF-mapping and the FM-index 
+One way to reverse the BWT to find the original string is using last-to-first mapping or LF-mapping for short. LF-
+mapping uses the F and L columns of the BW matrix as well as an array containing the rank of each element in 
+the L column. The rank of a character in BWT(T) indicates the number of previous occurrences of that character 
+in the string, the first a in the string will be a0, the second a will be a1 etc. The F and L columns with ranks of the 
+character in the L columns are listed below. The rank order of a character is identical between the two 
+columns, that is, the first t in the L column and the first t in the F column both refer to the same character at 
+the same location in the original string. 
+ 
+F 
+L 
+Rank 
+1 
+$ 
+t 
+0 
+2 
+a 
+g 
+0 
+3 
+a 
+$ 
+0 
+4 
+c 
+a 
+0 
+5 
+g 
+t 
+1 
+6 
+t 
+t 
+2 
+7 
+t 
+a 
+1 
+8 
+t 
+c 
+0 
+==PAGE:8==
+7 
+ 
+The original string, T, can be recreated backwards from right to left. Starting with the F-column in the first row, 
+which will always contain the end-of-string character, the L column in the same row will contain the character 
+immediately left of $ in T. In this case the t with rank 0, t0, meaning the last character in T is t. t0 can be located 
+as the first t in the F-column which is found on row 6. Once again the L column indicates the preceding 
+character in T, in this case t2, meaning the second-to-last character in T is also a t. Since t2 refers to the third 
+occurrence of t in BW(T) we now locate the third occurrence of t in column F, found on row 8. From the L 
+column we see that t2 is preceded by c0, thus the third-to-last character in T is a c. Continue this process until 
+reaching $ in the L column and the original string will have been recreated in full from right to left.  
+LF-mapping with a rank-array can also be used to search for substrings in T. For instance to search for a string, 
+P = act, we first locate the rows in the matrix beginning with the shortest possible suffix of P, t. This of course 
+corresponds to all rows with t in the F-column as highlighted below. 
+F  
+ 
+ 
+ 
+ 
+ 
+L Rank 
+$ a t g a c t t 
+0 
+a c t t $ a t g 
+0 
+a t g a c t t $ 
+0 
+c t t $ a t g a 
+0 
+g a c t t $ a t 
+1 
+t $ a t g a c t 
+2 
+t g a c t t $ a 
+1 
+t t $ a t g a c 
+0 
+ 
+Next we extend the suffix with a character and locate all rows in the matrix beginning with ct. These are found 
+by searching for occurrences of ‘c’ in the L column of the highlighted rows. Only one of these rows contains c in 
+the L column, meaning the substring ‘ct’ occurs in T exactly once.  The c in this row has a rank of 0, thus by 
+locating c0 in F, i.e. the first occurrence of ‘c’ in F, we find the row in the matrix starting with ‘ct’, as highlighted 
+below. 
+F  
+ 
+ 
+ 
+ 
+ 
+L Rank 
+$ a t g a c t t 
+0 
+a c t t $ a t g 
+0 
+a t g a c t t $ 
+0 
+c t t $ a t g a 
+0 
+g a c t t $ a t 
+1 
+t $ a t g a c t 
+2 
+t g a c t t $ a 
+1 
+t t $ a t g a c 
+0 
+ 
+Again the suffix is extended to ‘act’. The previously found row in the matrix starting with ‘ct’ happens to have 
+‘a’ in the L column, meaning there is exactly one occurrence of ‘act’ in T. Once again the rank of a can be used 
+==PAGE:9==
+8 
+ 
+to find the row starting with ‘act’. Since this a has rank 0 the first occurrence of ‘a’ in F is the row beginning 
+with ‘act’.  
+F  
+ 
+ 
+ 
+ 
+ 
+L Rank 
+$ a t g a c t t 
+0 
+a c t t $ a t g 
+0 
+a t g a c t t $ 
+0 
+c t t $ a t g a 
+0 
+g a c t t $ a t 
+1 
+t $ a t g a c t 
+2 
+t g a c t t $ a 
+1 
+t t $ a t g a c 
+0 
+ 
+Note that we do not actually need the information contained in the entire matrix, as the only characters used 
+are those contained in F and L as well as the rank-array. 
+Finding the location of a substring in T can be done by adding a suffix-array, an array containing the starting 
+positions of suffixes of T in each row in the matrix. For instance we see from the second row that the substring 
+act occurs in T with an offset of 3. 
+F  
+ 
+ 
+ 
+ 
+ 
+L SA(T) 
+$ a t g a c t t 
+7 
+a c t t $ a t g 
+3 
+a t g a c t t $ 
+0 
+c t t $ a t g a 
+4 
+g a c t t $ a t 
+2 
+t $ a t g a c t 
+6 
+t g a c t t $ a 
+1 
+t t $ a t g a c 
+5 
+ 
+In total the FM-index contains 4 data structures. The F and L columns from the Burrows-Wheeler Matrix, the 
+latter of which is also the Burrows-Wheeler Transform of T, the rank-array containing the ranks of the 
+characters in L, and the suffix-array. It is obvious that in their full state these structures combined take up more 
+space than the original string; however the FM-index typically only include a fraction of the elements in the 
+rank and suffix-arrays, referred to as checkpoints. For instance the FM-index might only contain the suffix-array 
+for 1/32 rows in the matrix. To find the offset of a substring where the suffix-array has been discarded we must 
+cycle through the string, repeatedly stepping one position left in the string using LF-mapping until landing on a 
+row in the Matrix that has maintained its suffix array. The offset can then be calculated from the value given in 
+the suffix-array for that row and the number of LF-mapping steps taken before reaching the row. 
+The FM-index thus consist of checkpoints for the rank and suffix-arrays, which take up only a fraction of the 
+disc space of the arrays, the L column which is sorted alphabetically and thus easily compressible, and the F 
+==PAGE:10==
+9 
+ 
+column, the Burrows-Wheeler Transform, which can be compressed significantly more efficiently than the 
+original string. All together this makes for an index that takes up significantly less disk space than the original 
+string. 
+ 
+The Smith-Waterman algorithm 
+Smith-Waterman (SW) is a dynamic programming algorithm that performs local alignment on two strings and is 
+guaranteed to find the optimal alignment according to the specified scoring scheme (Smith TF, Waterman MS, 
+1981). The scoring scheme will typically consist of a positive value for matches, a penalty for mismatches 
+(either a fixed value for any mismatch or specified in a substitution matrix) and a gap-scoring scheme consisting 
+of a penalty for gap-openings (insertions/deletions) and gap-extensions. In bwa-mem SW is used to extend the 
+alignments identified by searching for MEMs in the FM-index. 
+A simple way of using SW to align two sequences, a and b is to create an mxn-sized scoring matrix, H, where m 
+= length(a)+1 and n = length(b)+1. The first row and first line in the matrix are filled out with zeros. 
+Hi,0 = 0 , 0 ≤ i ≤ m 
+H0,j = 0 , 0 ≤ j ≤ n 
+The rest of the matrix is filled out according to 
+𝐻𝑖𝑗= max
+{  
+  
+0                                    
+          𝐻𝑖−1,𝑗−1 + 𝑠(𝑎𝑖, 𝑏𝑗)             𝑚𝑎𝑡𝑐ℎ/𝑚𝑖𝑠𝑚𝑎𝑡𝑐ℎ
+𝑚𝑎𝑥𝑘≥1{𝐻𝑖−𝑘,𝑗+ 𝑊𝑘}                  𝑑𝑒𝑙𝑒𝑡𝑖𝑜𝑛
+ 𝑚𝑎𝑥𝑙≥1{𝐻𝑖,𝑗−𝑙+ 𝑊𝑙}                  𝑖𝑛𝑠𝑒𝑟𝑡𝑖𝑜𝑛
+   
+}  
+  
+ , 1 ≤ i ≤ m , 1 ≤ j ≤ n 
+ 
+Where W is the gap-scoring scheme accounting for insertions and deletions and s(ai, bj) is a similarity function 
+between ai and bj. In DNA alignments this similarity function is most often a binary function consisting of a 
+match score for when the two nucleotides are identical and a mismatch penalty for when they are not, but it 
+can also be given as a substitution matrix containing different penalties for substitutions between different 
+types of nucleotides. 
+ 
+ 
+==PAGE:11==
+10 
+ 
+In essence each element in the scoring matrix is obtained from one of four paths depending on the alignment 
+1. The alignment is extended by one nucleotide from each sequence, meaning a match or a mismatch. 
+The score of the element in H is given by the score of the element above and to the right plus a match 
+score or mismatch penalty. 
+2. The alignment is extended by k nucleotides in string b but not in string a, deletion(s). The score of the 
+element is given by the score of the element k spaces left of it plus a gap-penalty. 
+3. The alignment is extended by l nucleotides in string a but not in string b, insertion(s). The score of the 
+element is given by the score of the element l spaces above it plus a gap-penalty. 
+4. All of the above result in a score less than or equal to 0 in which case the element will be given a score 
+of 0. 
+For example let us create a matrix for aligning the two sequences, ATGACTT and ATGCACCT, using the following 
+scoring scheme: 
+s(a,b) = +2 if a=b and s(a,b) = -1 if a≠b 
+Wk = 1+1*k where k is the gap length 
+ 
+ 
+- 
+A T G A C 
+T 
+T 
+ 
+ 
+ 
+- 
+A 
+T 
+G 
+A 
+C 
+T 
+T 
+ 
+- 
+0 
+0 
+0 
+0 
+0 
+0 
+0 
+0 
+ 
+ 
+- 
+0 
+0 
+0 
+0 
+0 
+0 
+0 
+0 
+ 
+A 
+0 
+2 
+1 
+0 
+2 
+1 
+0 
+0 
+ 
+ 
+A 
+0 ↖ ← 
+0 
+↖ ← 
+0 
+0 
+ 
+T 
+0 
+1 
+4 
+3 
+2 
+1 
+2 
+2 
+ 
+ 
+T 
+0 ↑ ↖ ← ← ← ↖ ↖ 
+H =  G 0 
+0 
+3 
+6 
+5 
+4 
+3 
+2 
+ 
+T = 
+G 0 
+0 
+↑ ↖ ← ↖ ← ← 
+C 
+0 
+0 
+2 
+5 
+4 
+7 
+6 
+5 
+ 
+C 
+0 
+0 
+↑ ↑ ↖ ↖ ← ← 
+ 
+A 
+0 
+2 
+1 
+4 
+7 
+6 
+5 
+4 
+ 
+ 
+A 
+0 ↖ ↑ ↑ ↖ ← ← ← 
+ 
+C 
+0 
+1 
+0 
+3 
+6 
+9 
+8 
+7 
+ 
+ 
+C 
+0 ↑ 
+0 
+↑ ↑ ↖ ← ← 
+ 
+C 
+0 
+0 
+0 
+2 
+5 
+8 11 10 
+ 
+ 
+C 
+0 
+0 
+0 
+↑ ↑ ↖ ↖ ← 
+ 
+T 
+0 
+0 
+2 
+1 
+4 
+7 10 13 
+ 
+ 
+T 
+0 
+0 
+↖ ↑ ↑ ↑ ↖ ↖ 
+Figure 1. Scoring matrix (H) and path matrix for the SW alignment of the strings ATGACTT and ATGCACCT 
+ 
+Meanwhile a second matrix, T, of the same dimensions stores the information of which path led to the score in 
+the corresponding element in the scoring matrix. An element in T is given a value of 1 if the corresponding 
+element in H came from a match/mismatch, 2 if it came via deletion, 3 if it came via insertion and 0 if no value 
+above 0 could be obtained. Figure 1 shows a T matrix with the values 1, 2 and 3 replaced with arrows for better 
+visualization.  
+To find the optimal alignment simply locate the highest value in H and retrace its path in the T matrix. Here we 
+find that the optimal alignment between the two sequences contain a single insertion and a single mismatch. 
+A T G - 
+A C T 
+T 
+A T G C A C C T 
+==PAGE:12==
+11 
+ 
+Bwa-mem scoing and match+mismatch fraction 
+Once the SW algorithm has found the optimal alignments bwa-mem performs a final evaluation of each 
+alignment through its own scoring scheme consisting of a matching score (default 1), mismatch penalty 
+(default 4), and gap penalty (default 6+1*k where k is the length of the gap). For each query the single 
+alignment with the highest alignment score is given as output, unless no alignment achieves an alignment score 
+above a specified threshold (default 30) in which case no output is given (Li H, Durbin R, 2013).  
+Bwa outputs the alignment in SAM-format, an example of which can be seen in figure 2. 
+ 
+ 
+ 
+Figure 2. Example alignments and the corresponding SAM-format (The SAM/BAM Format Specification Working Group, 2015). 
+ 
+Central in the SAM-file is the CIGAR-string which contains the alignment in its most condensed form. The CIGAR 
+string is found in the sixth column of the SAM-file and indicates when certain operations including 
+matches/mismatches (M), insertions (I) and deletions are found in the alignment. The CIGAR-string in the file in 
+figure 2 indicates that the alignment of r001 to the reference genome starts out with 8 matches/mismatches, 
+followed by 2 insertions, followed by 4 matches/mismatches, followed by 1 deletion and finally 3 
+matches/mismatches. The CIGAR-string can also contain several other operations such as hard clippings (H) and 
+soft clippings (S). Clippings are areas at the end of reads that are cut from the alignment as they could not be 
+aligned with the reference sequence, while other parts of the read aligns very well with it. These clippings 
+present an issue for MGmapper since bwa-mem will occasionally output alignments where only a small fraction 
+of the read actually aligns and the rest is ignored, leading to a large number of false positives. MGmapper 
+attempts to resolve this by implementing an additional filter called the match+mismatch fraction, MMF, which 
+simply refers to the fraction of a read that is listed as either matches or mismatches (M) in the CIGAR string. 
+==PAGE:13==
+12 
+ 
+GemSIM 
+General Error-Model based Simulator, or GemSIM for short, is a software package that can generate models for 
+errors in DNA sequencing, and apply those error models to genomic data in order to emulate sequencing reads 
+obtained from NGS technologies. The program uses generic formats commonly used by sequencing 
+technologies and tools for NGS analysis. Error models can be created based on a SAM-file containing 
+alignments of real reads to a reference genome and reads can be simulated and obtained in fastq format based 
+on a specified error model and input fasta file(s). Both single-end and paired-end reads of specified read 
+lengths and insert sizes can be simulated. 
+When applying the error model each nucleotide in a read is assigned an error rate based on 3 to 4 factors. 
+1) The nucleotides position in the read. 
+2) Overall insertion and deletion error rates. 
+3) The nucleotides context, i.e. the makeup of the 5mer consisting of the three nucleotides preceding it, the 
+nucleotide itself and the immediate succeeding nucleotide. 
+4) For paired-end reads, whether it is the first or second read in a pair. 
+As there are 4^5 = 1024 unique 5mers and 3 possible substitutions for each 5mer (the 4th nucleotide can be 
+substituted for the 3 other bases) the error model includes substitution rates for 1024x3 = 3072 substitutions in 
+their context. It also contains overall error rates for insertions and deletions and error rates for each position in 
+the read. Error models for paired-end reads contain two sets of all this information, one for the first read and 
+one for the second read in a pair. 
+In addition to the option to generate error models the GemSIM package also includes three premade error 
+models, 2 models for paired-end Illumina reads and a model for Roche/454 reads, see table 1 and figure 3. 
+Several tendencies are well established when it comes to error rates of NGS-techniques. The 454 method has a 
+greater tendency towards insertion and deletion errors and suffers from increased error rates in homopolymer 
+regions, but has a lower substitution error rate than the Illumina methods overall and is less dependent on 
+read length. The substitution error rates for Illumina reads are also found to be highly context-dependent 
+(Abnizova I, et.al., 2012). 
+ 
+ 
+==PAGE:14==
+13 
+ 
+Table 1. Summary of the 3 error models that are supplied in the GemSIM package including the 5 specific k-mers with the highest 
+overall substitution rate (McElroy KE, et.al., 2012). 
+  
+Ill. v4 1st read 
+Ill. v4 2nd read 
+Ill. v5 1st read 
+Ill. v5 2nd read 
+Roche/454 
+Overall (%) 
+0.99 
+2.40 
+0.28 
+0.34 
+0.12 
+A (%) 
+1.23 
+2.86 
+0.25 
+0.33 
+0.14 
+T (%) 
+0.91 
+2.19 
+0.34 
+0.39 
+0.10 
+G (%) 
+0.78 
+2.00 
+0.23 
+0.23 
+0.12 
+C (%) 
+1.12 
+2.78 
+0.29 
+0.41 
+0.12 
+1st most freq. 
+(%) 
+GGGTA - > GGGGA 
+(4.47) 
+ACAAG - > ACACG 
+(3.94) 
+GGGTC - > GGGGC 
+(5.85) 
+AGGTG- > AGGGG 
+(3.69) 
+AAACA - > AAAAA 
+(1.07) 
+2nd most freq. 
+(%) 
+AGGTG - > AGGGG 
+(3.71) 
+AGGTG - > 
+AGGGG (3.29) 
+CTCGG - > CTCCG 
+(5.83) 
+CGGTG - > 
+CGGGG (2.7) 
+CCCAC - > CCCCC 
+(1.02) 
+3rd most freq. 
+(%) 
+CCCAA - > CCCCA 
+(3.15) 
+CCCAA - > CCCCA 
+(3.24) 
+GGGCG - > GGGGG 
+(4.06) 
+GGGTG - > 
+GGGGG (2.45) 
+CCCCG - > CCCAG 
+(0.75) 
+4th most freq. 
+(%) 
+CGGTG - > CGGGG 
+(3.06) 
+GGGTA - > 
+GGGGA (3.14) 
+CGGTG - > CGGGG 
+(3.65) 
+GGGTC - > 
+GGGGG (2.03) 
+AAAGG - > AAAAG 
+(0.70) 
+5th most freq. 
+(%) 
+GGGTG - > GGGGG 
+(2.71) 
+ACAAA - > ACACA 
+(2.97) 
+GGGTA - > GGGGA 
+(3.20) 
+CGGTC - > CGGGC 
+(1.98) 
+AGGAA - > 
+AGGGA (0.52) 
+Insertions (%) 
+0.000723 
+0.000935 
+0.000622 
+0.001300 
+0.290000 
+Deletions (%) 
+0.000434 
+0.000482 
+0.000353 
+0.000484 
+0.270000 
+ 
+ 
+ 
+Figure 3. Position specific error rates for the 3 error-models contained in the GemSIM package (McElroy KE, et.al., 2012). 
+==PAGE:15==
+14 
+ 
+Methods 
+ 
+The current version of MGmapper is able to map reads to 20 pre indexed databases of which nine were used in 
+some capacity in this study.  Below is a short description of the used databases.  
+ 
+Bacteria. A database of complete bacterial genomes from NCBI. 3017 entries classified at species level. 
+ 
+MetaHitAssembly. Long (average around 21 kbp) DNA sequences from bacteria found in the human gut 
+obtained from a European study.  41,126 entries, most classified at genus or species level. 
+ 
+HumanMicrobiome.  Long (average around 63 kbp) DNA sequences from bacteria found in the human 
+gut obtained from an American study.  42,928 entries, most classified at genus or species level. 
+ 
+Bacteria_draft. Draft genomes from NCBI. 3,152,971 entries classified at species level. 
+ 
+Human. Human chromosomes and mitochondrion from human genome assembly GRCh38. 25 entries. 
+ 
+Virus. Viruses from NCBI. 5764 entries. 
+ 
+Fungi. Fungi from Ensembl. 29,053 entries. 
+ 
+Plasmid. Extracted from NCBI complete bacteria database. 2091 entries. 
+ 
+Plant. Plant genomes from NCBI. 5,447,342 entries. 
+ 
+The impact of the MMF filter on the mapping of real metagenomics data was studied using sequence data 
+obtained from fecal samples from air toilets. The data set consisted of around 169 million reads total, removing 
+adapter sequences with cutadapt and discarding reads mapped to the phiX genome left around 146 million 
+reads that could be mapped with MGmapper. The remaining reads where mapped in chain mode against 6 
+databases, Bacteria, MetaHitAssembly, Human, Virus, Fungi and Plasmid. Mapping was repeated five times 
+using five different MMF thresholds, 0.0, 0.2, 0.4, 0.6 and 0.8. 
+The effect of the MMF filter was analyzed by looking at the number of reads mapped to each database in each 
+of the five scenarios and examining taxonomy and classification of the entries that reads had been aligned 
+with, and how this changed with increasing MMF-thresholds. 
+ 
+While mapping reads from unknown organisms can give us an idea of how the MMF-filter impacts the output it 
+cannot definitively tell us if the MMF-filter is successful at mainly targeting false positives. To more accurately 
+measure the impact of the MMF threshold as well as read length on the rate of true and false positive 
+predictions, 10 whole-genome sequences were picked out at random from the bacteria database and used to 
+generate simulated reads with the program GemSIM. For each of the 10 entries two sets of paired-end reads 
+were simulated using the Illumina v5 error-model supplied in the program package, one containing 2x 
+1,000,000 reads with a read length of 50 bp and an insert size of 200 bp and one containing 2x 500,000 reads 
+with a read length of 100 bp and an insert size of 300 bp. All reads were then mapped with MGmapper against 
+the Bacteria database at five different MMF thresholds, 0.0, 0.2, 0.4, 0.6 and 0.8. The taxonomy of the entries 
+==PAGE:16==
+15 
+ 
+that each read was aligned to was examined in order to find the exact number of correct and incorrect 
+predictions at species and genus levels. 
+ 
+Taxonomy analysis was carried out on two sets of metagenomics data obtained from fecal samples from two 
+koalas, Hawkins and Kiewa. Around 22 million reads from the Hawkins sample and 116 million reads from the 
+Kiewa sample were mapped separately against 7 databases, Bacteria, MetaHitAssembly, HumanMicrobiome, 
+Bacteria_draft, Virus, Fungi and Plant with the application of an MMF threshold of 0.8. Species classification of 
+references with 1 or more reads mapped to it was extracted to sum up the number of reads mapped to each 
+species in each database. The most commonly found species where examined and compared between the two 
+samples to find differences and similarities between the two microbial communities. 
+ 
+ 
+==PAGE:17==
+16 
+ 
+Results 
+ 
+Impact of MMF threshold on the mapping of real metagenomics data 
+Mapping reads from air toilet-samples in chain mode using different MMF thresholds demonstrated a 
+significant impact of MMF filtering. When no MMF filter was applied 75% of reads where mapped to the 
+Bacteria database. Increasing the MMF threshold drastically reduced this number to around 36% when MFF = 
+0.4 and 28.2% when MMF = 0.8. A significant portion of the filtered reads were instead mapped to the 
+MetaHitAssembly database, which accounted for around 12.5% of mapped reads when MMF = 0.0 and 31.5% 
+when MMF = 0.4. Most of the filtered reads however remained unmapped, as the share of unmapped reads 
+increased from around 11% when no MMF filter was applied to 40% using and MMF threshold of 0.8. Figure 4 
+illustrates how the MMF filter impacted the number of reads mapped to each database. 
+ 
+ 
+Figure 4. Graph showing the impact of the MMF threshold on the number of reads mapped to each database. 
+ 
+ 
+Before applying an MMF threshold a total of 109,289,184 reads were mapped to 1512 different species in the 
+Bacteria database. This number was reduced to 41,074,780 reads mapped to 1485 different species when 
+0
+10
+20
+30
+40
+50
+60
+70
+80
+0
+0.2
+0.4
+0.6
+0.8
+1
+Percent of reads 
+MMF threshold 
+Percentage of reads mapped to each database at 5 different 
+MMF thresholds  
+Bacteria
+MetaHitAssembly
+Human
+Virus
+Fungi
+Plasmid
+Unmapped
+==PAGE:18==
+17 
+ 
+applying a threshold of 0.8. Overall a 0.8 MMF threshold filtered out 62.4% of the reads, but the remaining 
+reads were spread out over almost the same number of species. In spite of that, filtering was found to mainly 
+target reads that were mapped to species which had a relatively low number of reads mapped to it, as 
+illustrated in figure 5. In the graph each point represents a species, the horizontal axis indicate the number of 
+reads mapped to that species when no MMF filter was applied and the vertical axis indicate the percentage of 
+those reads that were filtered out when an MMF threshold of 0.8 was applied. The graph shows an inverse 
+relationship between the two; when a species had very few reads mapped to it those reads would more often 
+be targeted by the filter. Of the 1512 species that had reads mapped to them before applying a filter 1229 had 
+more than 99% of those reads filtered when applying an MMF-filter of 0.8, and only 95 species had less than 
+90% of their hits filtered. It can be speculated that a species with very few hits overall is more likely to not 
+actually be present in the sample, and that the reads mapped to that species are more likely to be false 
+positives, which would indicate that the MMF filter is at least moderately successful at targeting false positives. 
+ 
+ 
+Figure 5. Graph illustrating the MMF filters tendency to filter reads mapped to species with a small number of reads mapped to 
+them. Each data point represent a species in the Bacteria database which had some number of reads mapped to it before applying 
+the MMF filter. The vertical axis indicate the percentage of those reads that were filtered out when applying an MMF threshold of 
+0.8. 
+0.00
+20.00
+40.00
+60.00
+80.00
+100.00
+120.00
+0
+2000000
+4000000
+6000000
+8000000
+10000000
+Percent of reads filtered when MMF = 0.8 
+Number of reads aligned to each species at MMF=0.0 
+Reads filtered from Bacteria database 
+==PAGE:19==
+18 
+ 
+As the filter mainly targeted low represented species, highly represented species came to be even more 
+dominant among mapped reads. The three most represented bacterial species in the sample, Bacteroides 
+vulgatus, Faecalibacterium prausnitzii and Eubacterium rectale accounted for around 22% of the reads mapped 
+to the Bacteria database before applying MMF filter. After applying a 0.8 threshold 52% of reads mapped to 
+Bacteria were assigned to one of those three species. 
+While the majority of the filtered reads previously mapped to Bacteria remained unmapped, a significant 
+amount was instead mapped to the MetaHitAssembly database.  Table 2 shows the species in the Bacteria 
+database most affected by the application of an MMF filter and table 3 the species from the MetaHitAssembly 
+database that had the most additional hits when applying the MMF filter. Note that many of the entries in the 
+MetaHitAssembly database have only been classified at genus level and some even less specifically. We see 
+that when applying the MMF filter several Bacteroides species have a large number of hits filtered in the 
+bacteria database, while entries in the MetaHitAssembly database classified as Bacteroides sp. or Bacteroides 
+uniformis (a species not represented in the bacteria database) have a significant increase in the number of 
+reads mapped to them. Similarly reads mapped to Faecalibacterium prausnitzii, Eubacterium rectale, Roseburia 
+intestinales and Clostridium botulinum were among the most commonly filtered reads in the bacteria database, 
+matching the rise in reads mapped to Faecalibacterium sp., Eubacterium sp., Roseburia sp. and Clostridium sp. 
+seen in the MetaHitAssembly database. 
+ 
+Table 2. Overview of the species in the Bacteria database that saw the greatest reduction in mapped reads when applying the MMF 
+filter with the number of reads mapped to that species before and after applying a 0.8 MMF threshold. 
+Species 
+Reads at 0.0 
+Reads at 0.8 
+Reads filtered 
+Percent of 
+reads filtered 
+Faecalibacterium prausnitzii 
+8469558 
+6668204 
+1801354 
+21.27 
+Bacteroides vulgatus 
+8510632 
+7926992 
+583640 
+6.86 
+Bacteroides helcogenes 
+927870 
+346916 
+580954 
+62.61 
+Bacteroides xylanisolvens 
+2319998 
+1761572 
+558426 
+24.07 
+Bacteroides thetaiotaomicron 
+1763860 
+1217452 
+546408 
+30.98 
+Eubacterium rectale 
+6926958 
+6409176 
+517782 
+7.47 
+Roseburia intestinalis 
+2006512 
+1524434 
+482078 
+24.03 
+Bacteroides fragilis 
+1591782 
+1127438 
+464344 
+29.17 
+Clostridium botulinum 
+438316 
+4026 
+434290 
+99.08 
+ 
+ 
+ 
+ 
+==PAGE:20==
+19 
+ 
+Table 3. Overview of the species in the MetaHitAssembly database that saw the greatest increase in mapped reads when applying 
+the MMF filter with the number of reads mapped to that species before and after applying a 0.8 MMF threshold. 
+Species 
+Reads at 0.0 
+Reads at 0.8 
+Read 
+difference 
+Percent reads 
+difference 
+Firmicutes bacterium 
+2236158 
+5187046 
+2950888 
+56.89 
+Bacteroides uniformis 
+1463854 
+4208648 
+2744794 
+65.22 
+Clostridium sp. 
+1864360 
+4454702 
+2590342 
+58.15 
+Roseburia sp. 
+1202328 
+3451780 
+2249452 
+65.17 
+Eubacterium sp. 
+859000 
+2134290 
+1275290 
+59.75 
+Ruminococcus sp. 
+866636 
+2139250 
+1272614 
+59.49 
+Bacteroides sp. 
+937188 
+2150694 
+1213506 
+56.42 
+Prevotella copri 
+601202 
+1651306 
+1050104 
+63.59 
+Alistipes putredinis 
+418200 
+1357546 
+939346 
+69.19 
+Prevotella sp. 
+748354 
+1675192 
+926838 
+55.33 
+Alistipes sp. 
+458476 
+1240730 
+782254 
+63.05 
+Faecalibacterium sp. 
+459856 
+1231886 
+772030 
+62.67 
+Roseburia inulinivorans 
+306754 
+861798 
+555044 
+64.41 
+ 
+It is evident that many of the matches filtered from the bacteria database instead find better matches within 
+the same genus in the MetaHitAssembly database, and it can be reasonably hypothesized that many of these 
+reads where originally mapped to an incorrect species and mapped to a correct species after applying the filter, 
+however since the actual species classifications of the reads are unknown, the conclusion remains vague. As 
+such the central question of whether the application of an MMF threshold improves the accuracy of the 
+predictions on species level is still not definitively answered. Obtaining a clearer picture of whether the 
+matches filtered by the MMF filter are predominantly true or false positives requires the mapping of reads 
+from known species.  
+ 
+Mapping of GemSIM-simulated reads 
+ 
+Frequency of correct predictions 
+The rate of true positives at species level, i.e the percentage of reads that were mapped to the correct species, 
+varied greatly between the 10 strains, ranging from around 7% of reads from L. monocytogenes to around 97% 
+of reads from A. saccharovans. Reads with a length of 100 bp outperformed the 50 bp reads for all 10 strains, 
+however there was a significant difference as to how much better they performed. 50 bp L. pneumophila reads 
+had a true positive rate of around 35% while 100 bp reads from the same strain had a true positive rate of 
+around 57%. A similar large difference is seen among L. lactis reads while the TPR difference for several other 
+strains was less than a percentage point. 
+==PAGE:21==
+20 
+ 
+Frequency of incorrect predictions 
+Looking at the rate of false positives - the percentage of reads mapped to an incorrect species - the 100 bp 
+reads again appear to outperform the 50 bp reads in general. For most of the tested strains however the rate 
+of false positives is low enough to be considered largely insignificant. Reads from the B. cereus and L. 
+pneumophila strains stand out as having a considerably higher rate of false positives due to a larger number of 
+reads being mapped to highly similar strains within the same genus, however even for these strains the rate of 
+false positives remain below 0.5%. 
+Table 4. Number of reads mapped to the same strain, same species and different species from the one the reads where simulated 
+from as well as true and false positive rates when mapping the GemSIM simulated 50 bp reads. 
+Species 
+Same strain 
+Same species 
+TPR (%) 
+Different 
+species 
+FPR (%) 
+Listeria monocytogenes 
+76254 
+140812 
+7.04 
+48 
+0.0024 
+Acinetobacter baumanii 
+27558 
+147652 
+7.38 
+472 
+0.0236 
+Candidatus Phytoplasma mali 
+1789992 
+1789992 
+89.50 
+16 
+0.0008 
+Lactococcus lactis 
+652252 
+730086 
+36.50 
+48 
+0.0024 
+Legionella pneumophila 
+663482 
+706712 
+35.34 
+3082 
+0.1541 
+Acidilobus saccharovorans 
+1936470 
+1936470 
+96.82 
+4 
+0.0002 
+Glaciecola nitratireducens 
+1930808 
+1930808 
+96.54 
+30 
+0.0015 
+Bacillus cereus 
+461334 
+569846 
+28.49 
+9236 
+0.4618 
+Thiobacillus denitrificans 
+1929772 
+1929772 
+96.49 
+106 
+0.0053 
+Nocardiopsis dassonvillei 
+1891382 
+1892212 
+94.61 
+462 
+0.0231 
+ 
+Table 5 Number of reads mapped to the same strain, same species and different species from the one the reads where simulated 
+from as well as true and false positive rates when mapping the GemSIM simulated 100 bp reads. 
+Species 
+Same strain 
+Same species 
+TPR 
+Different 
+species 
+FPR 
+Listeria monocytogenes 
+66334 
+99116 
+9.91 
+8 
+0.0008 
+Acinetobacter baumanii 
+18576 
+88180 
+8.82 
+198 
+0.0198 
+Candidatus Phytoplasma mali 
+905172 
+905172 
+90.52 
+0 
+0 
+Lactococcus lactis 
+495520 
+519134 
+51.91 
+16 
+0.0016 
+Legionella pneumophila 
+558558 
+570208 
+57.02 
+1396 
+0.1396 
+Acidilobus saccharovorans 
+970916 
+970916 
+97.09 
+0 
+0 
+Glaciecola nitratireducens 
+967008 
+967008 
+96.70 
+2 
+0.0002 
+Bacillus cereus 
+392594 
+453582 
+45.36 
+3118 
+0.3118 
+Thiobacillus denitrificans 
+967950 
+967950 
+96.80 
+36 
+0.0036 
+Nocardiopsis dassonvillei 
+957748 
+958302 
+95.83 
+38 
+0.0038 
+ 
+ 
+ 
+==PAGE:22==
+21 
+ 
+Impact of MMF threshold 
+The MMF threshold was seen to have no impact on mapping of the simulated reads (exact number of correctly 
+mapped reads at different MMF thresholds along with identifier of the strains can be found in appendix A), 
+even using an MMF threshold of 0.8, an insignificant amount of reads where filtered. As such the MMF 
+threshold did not prove effective at filtering out false positives from the set of simulated reads, however the 
+number of false positives was already extremely low when using no MMF filtering, and from the mapping of air 
+toilet data it has already been established that the MMF threshold does have a significant impact on real data. 
+As such the most noteworthy conclusion is that the implementation of an MFF threshold did not filter out any 
+significant amount of true positives from the simulated data. Since the strains used as the basis for the 
+simulated reads were also found in the Bacteria database there is also the question of whether similar results 
+could be expected when mapping reads from a strain that is not present in the database or if the genetic 
+diversity within a species would lead to a lower rate of true positives. Several of the mapped strains however 
+had a significant portion of reads mapped to other references from the same species, while some of the tested 
+strains were the only representation of their species in the database, thus all correctly mapped reads were 
+mapped to that reference. 
+ 
+MGmapper as a basis for taxonomy analysis 
+Almost all mapped reads from the two samples were mapped to one of the four bacterial databases; Bacteria, 
+MetaHitAssembly, HumanMicrobiome and Bacteria_draft, with less than 0.001% of mapped reads being 
+mapped to the remaining three databases; Virus, Fungi and Plant. The distribution of reads mapped to the first 
+four databases can be seen in figure 6. 88% of reads from the Hawkins sample and 86% of reads from the 
+Kiewa sample remained unmapped.  
+ 
+==PAGE:23==
+22 
+ 
+ 
+Figure 6. Percent of reads from the two koala samples that where mapped to each of the 4 bacterial databases. 
+ 
+Table 6 through 9 shows the species in each of the four bacterial databases that had a large share of reads 
+from one of the samples mapped to it. Species from the Bacteroides genus were found in large numbers in all 
+four databases and were generally found at similar levels in the two samples. The exceptions to this was B. 
+unformis which was found considerably more frequently in the Hawkins sample and B. Helcogenes which had a 
+larger share of mapped reads in the Kiewa sample. The Clostridium genus was also frequently mapped to, 
+particularly C. clostrodioforme which accounted for a majority of reads mapped to MetaHitAssembly from the 
+Kiewa sample, but was found less frequently in the Hawkins sample. Various species from the Parabacteroides 
+genus was found in moderate amounts in both samples while Alistipes finegoldii and and Alistipes senegalensis 
+were found in large amounts in the Kiewa sample but very rarely in the Hawkins sample. 
+Although very few reads were mapped to the Plant database these can still be interesting to examine as they 
+might give indications to the diet of the koalas. Reads from the Kiewa sample was mostly mapped to bananas 
+(Musa acuminata) and spinach (Spinacia oleracea), while reads from Hawkins were mainly mapped to 
+eucalyptus (Eucalyptus grandis). See table 10. 
+0
+1
+2
+3
+4
+5
+6
+Bacteria
+MetaHitAssembly
+HumanMicrobiome
+Bacteria_draft
+Percent of reads mapped to database 
+Database 
+Distribution of reads mapped to the 
+bacterialdatabases 
+Kiewa
+Hawkins
+==PAGE:24==
+23 
+ 
+Table 6. Species in the Bacteria database that had the most reads mapped to them. Kiewa % and Hawkins % indicate the number of 
+reads mapped to that species in the database as a percent of all reads in the sample including unmapped reads. 
+Species 
+Kiewa reads 
+Hawkins reads 
+Kiewa % 
+Hawkins % 
+Difference 
+Bacteroides xylanisolvens 
+2424794 
+345562 
+2.087 
+1.581 
+-0.507 
+Alistipes finegoldii 
+2128610 
+11282 
+1.833 
+0.052 
+-1.781 
+Bacteroides helcogenes 
+896050 
+22692 
+0.771 
+0.104 
+-0.668 
+Parabacteroides distasonis 
+173496 
+26480 
+0.149 
+0.121 
+-0.028 
+Bacteroides fragilis 
+139620 
+30570 
+0.120 
+0.140 
+0.020 
+Bacteroides thetaiotaomicron 
+106718 
+48028 
+0.092 
+0.220 
+0.128 
+Bacteroides vulgatus 
+43410 
+78596 
+0.037 
+0.359 
+0.322 
+ 
+Table 7. Species in the MetaHitAssembly database that had the most reads mapped to them. Kiewa % and Hawkins % indicate the 
+number of reads mapped to that species in the database as a percent of all reads in the sample including unmapped reads. 
+Species 
+Kiewa reads 
+Hawkins reads 
+Kiewa % 
+Hawkins % 
+Diff 
+Clostridium clostridioforme 
+3855752 
+231148 
+3.319 
+1.057 
+-2.262 
+Clostridium hathewayi 
+227932 
+23024 
+0.196 
+0.105 
+-0.091 
+Bacteroides ovatus 
+159672 
+31832 
+0.137 
+0.146 
+0.008 
+Clostridium bolteae 
+133576 
+31060 
+0.115 
+0.142 
+0.027 
+Bacteroides uniformis 
+2432 
+626836 
+0.002 
+2.867 
+2.865 
+Bacteroides dorei 
+3138 
+21080 
+0.003 
+0.096 
+0.094 
+Phascolarctobacterium sp. 
+98348 
+20234 
+0.085 
+0.093 
+0.008 
+Alistipes finegoldii 
+81552 
+106 
+0.070 
+0.000 
+-0.070 
+ 
+ 
+Table 8. Species in the HumanMicrobiome database that had the most reads mapped to them. Kiewa % and Hawkins % indicate the 
+number of reads mapped to that species in the database as a percent of all reads in the sample including unmapped reads. 
+Species 
+Kiewa reads 
+Hawkins reads 
+Kiewa % 
+Hawkins % 
+Diff 
+Clostridium citroniae 
+526798 
+134037 
+0.454 
+0.613 
+0.160 
+Bacteroides sp. 
+395687 
+139245 
+0.341 
+0.637 
+0.296 
+Bacteroides ovatus 
+283399 
+27792 
+0.244 
+0.127 
+-0.117 
+Parabacteroides goldsteinii 
+213742 
+66128 
+0.184 
+0.302 
+0.118 
+Desulfovibrio sp. 
+135226 
+9525 
+0.116 
+0.044 
+-0.073 
+Clostridium clostridioforme 
+130008 
+9242 
+0.112 
+0.042 
+-0.070 
+Bacteroides xylanisolvens 
+110133 
+14781 
+0.095 
+0.068 
+-0.027 
+Clostridiales bacterium 
+58090 
+37217 
+0.050 
+0.170 
+0.120 
+Bacteroides uniformis 
+2150 
+80670 
+0.002 
+0.369 
+0.367 
+ 
+ 
+ 
+==PAGE:25==
+24 
+ 
+Table 9. Species in the Bacteria_draft database that had the most reads mapped to them. Kiewa % and Hawkins % indicate the 
+number of reads mapped to that species in the database as a percent of all reads in the sample including unmapped reads. 
+Species 
+Kiewa reads 
+Hawkins reads 
+Kiewa % 
+Hawkins % 
+Diff 
+Hungatella hathewayi 
+628064 
+74470 
+0.541 
+0.341 
+-0.200 
+Clostridium clostridioforme 
+186458 
+10728 
+0.161 
+0.049 
+-0.111 
+Parabacteroides gordonii 
+163738 
+47614 
+0.141 
+0.218 
+0.077 
+Alistipes senegalensis 
+134404 
+1948 
+0.116 
+0.009 
+-0.107 
+Desulfovibrio sp. Dsv1 
+100824 
+7638 
+0.087 
+0.035 
+-0.052 
+Bacteroides uniformis 
+650 
+16918 
+0.001 
+0.077 
+0.077 
+Parabacteroides goldsteinii 
+27952 
+14192 
+0.024 
+0.065 
+0.041 
+ 
+ 
+Table 10. Species in Plant database that had the most reads mapped to them. Kiewa % and Hawkins % indicate the number of reads 
+mapped to that species in the database as a percent of all reads in the sample including unmapped reads. 
+Species 
+Kiewa reads 
+Hawkins reads 
+Kiewa % 
+Hawkins % 
+Diff 
+Musa acuminata 
+720 
+0 
+6.198E-04 
+0 
+-6.198E-04 
+Spinacia oleracea 
+600 
+18 
+5.165E-04 
+8.233E-05 
+-4.342E-04 
+Eucalyptus grandis 
+76 
+168 
+6.543E-05 
+7.684E-04 
+7.030E-04 
+Triticum urartu 
+60 
+8 
+5.165E-05 
+3.659E-05 
+-1.506E-05 
+Beta vulgaris 
+48 
+2 
+4.132E-05 
+9.147E-06 
+-3.218E-05 
+Brassica oleracea 
+42 
+0 
+3.616E-05 
+0 
+-3.616E-05 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+==PAGE:26==
+25 
+ 
+Discussion 
+ 
+The nature of chain-mode mapping with MGmapper makes minimizing false positives a high priority since false 
+positives prevent the incorrectly mapped reads from being tested against subsequent databases, where they 
+might be mapped to a correct species. When mapping air toilet reads while applying different MMF thresholds 
+it was evident that the MMF filter had a significant impact on the output, filtering a large amount of reads 
+mapped to the first database (Bacteria) of which a considerable share found better matches in the second 
+database(MetaHitAssembly). While nothing definitive cold be concluded, there were several indications that 
+the MMF-filter was at least moderately successful at targeting false positives over true positives, and some 
+form of filtering is likely a necessity to prevent a large share of reads from incorrectly mapping to the first 
+databases they are mapped against. 
+The mapping of GemSIM simulated reads from known species supported the hypothesis that the MMF filter 
+does not target true positives to any significant extent. The GemSIM experiment however had several issues, 
+most prominently the large differences in the rate of true positives between reads from different strains, which 
+is likely anchored in the error-model used to simulate the reads rather than in the properties of MGmapper 
+itself. As such it would be beneficial to perform the experiment using actual NGS reads from known bacterial 
+strains rather than simulated reads. Another issue was that the species used to create the simulated reads 
+were all present in the database, while the main source of false positives when mapping real metagenomics 
+reads is likely to be species that are not present in the database. Testing how the mapping of negative results is 
+impacted by the MMF-filter thus seems equally important when evaluating its ability to filter false positives. 
+Lastly MGmapper showed potential as a basis for taxonomy analysis and for comparing microbial communities 
+from different metagenomics samples. Although MGmapper only mapped 12-14% of the reads extracted from 
+the samples this number is likely to increase as databases expand and improve. The number is also likely to be 
+higher when testing samples from more prominent areas of study such as human health, since environments 
+such as the human gut has been studied much more thoroughly than koalas, and the databases reflect this. 
+ 
+ 
+ 
+==PAGE:27==
+26 
+ 
+References 
+Abnizova I, et.al. (2012, April 3). Analysis of context-dependent errors for Illumina sequencing. J. Bioinform. 
+Comput. Biol. 
+Burrows M, W. D. (1994). A Block-sorting Lossless Data Compression Algorithm. 
+Ferragina P, M. G. (2000). Opportunistic Data Structures with Applications. 
+Handelman J. (2004, Dec). Metagenomics: Application of Genomics to Uncultured Microorganisms. Microbiol 
+Mol Biol Rev, pp. 669-685. 
+Hugenholtz P, Goebel BM, Pace NR. (1998, Sep). Impact of Culture-Independent Studies on the Emerging 
+Phylogenetic View of Bacterial Diversity. J Bacteriol, pp. 4765–4774. 
+Illumina, Inc. (2010). Illumina Sequencing Technology. Retrieved May 2015, from illumina.com: 
+http://www.illumina.com/documents/products/techspotlights/techspotlight_sequencing.pdf 
+Illumina, Inc. (2014). Nextera DNA Sample Preparation Kits. Retrieved May 2015, from illumina.com: 
+http://res.illumina.com/documents/products/datasheets/datasheet_nextera_dna_sample_prep.pdf 
+Li H, Durbin R. (2013, March). Manual Reference Pages - bwa (1). Retrieved May 2015, from http://bio-
+bwa.sourceforge.net/bwa.shtml 
+McElroy KE, et.al. (2012). GemSIM: general, error-model based simulator of next-generation sequencing data. 
+BMC Genomics. 
+Petersen TN et.al. (n.d.). MGmapper manuscript. submitted, unpublished. 
+Smith TF, Waterman MS. (1981, March 25). Identification of common molecular subsequences. J Mol Biol, pp. 
+195-197. 
+The SAM/BAM Format Specification Working Group. (2015, may 11). Sequence Alignment/Map Format 
+Specification. Retrieved june 2015, from http://samtools.github.io/hts-specs/SAMv1.pdf 
+ 
+ 
+ 
+ 
+==PAGE:28==
+27 
+ 
+Appendix A 
+Results of mapping of GemSIM simulated reads 
+Number of 50 bp simulated reads mapped to the correct species at each MMF-threshold 
+Identifier 
+Species 
+0 
+0.2 
+0.4 
+0.6 
+0.8 
+gi|346644924|gb|CP002004.1| 
+Listeria 
+monocytogenes 
+140860 
+140860 
+140860 
+140860 
+140860 
+gi|385876581|gb|CP003500.1| 
+Acinetobacter 
+baumannii 
+148124 
+148124 
+148124 
+148124 
+148124 
+gi|193806760|emb|CU469464.1| 
+Candidatus 
+Phytoplasma 
+1790008 
+1790008 
+1790008 
+1790008 
+1790008 
+gi|374672113|dbj|AP012281.1| 
+Lactococcus lactis 
+709794 
+709794 
+709794 
+709794 
+709794 
+gi|53752796|emb|CR628337.1| 
+Legionella 
+pneumophila 
+1936474 
+1936474 
+1936474 
+1936474 
+1936474 
+gi|302328214|gb|CP001742.1| 
+Acidilobus 
+saccharovorans 
+1930838 
+1930838 
+1930838 
+1930838 
+1930838 
+gi|347944810|gb|CP003060.1| 
+Glaciecola 
+nitratireducens 
+579082 
+579082 
+579082 
+579082 
+579082 
+gi|401794054|gb|CP003747.1| 
+Bacillus cereus 
+1929878 
+1929878 
+1929878 
+1929878 
+1929878 
+gi|74055513|gb|CP000116.1| 
+Thiobacillus 
+denitrificans 
+1892676 
+1892676 
+1892676 
+1892676 
+1892674 
+gi|296848233|gb|CP002041.1| 
+Nocardiopsis 
+dassonville 
+1228637 
+1228637 
+1228637 
+1228637 
+1228637 
+ 
+Number of 50 bp simulated reads mapped to the correct species at each MMF-threshold 
+Identifier 
+Species 
+0 
+0.2 
+0.4 
+0.6 
+0.8 
+gi|346644924|gb|CP002004.1| 
+Listeria 
+monocytogenes 
+99124 
+99124 
+99124 
+99124 
+99124 
+gi|385876581|gb|CP003500.1| 
+Acinetobacter 
+baumannii 
+958342 
+958342 
+958342 
+958340 
+958340 
+gi|193806760|emb|CU469464.1| 
+Candidatus 
+Phytoplasma 
+905174 
+905174 
+905174 
+905174 
+905172 
+gi|374672113|dbj|AP012281.1| 
+Lactococcus lactis 
+571606 
+571606 
+571606 
+571604 
+571604 
+gi|53752796|emb|CR628337.1| 
+Legionella 
+pneumophila 
+970916 
+970916 
+970916 
+970916 
+970916 
+gi|302328214|gb|CP001742.1| 
+Acidilobus 
+saccharovorans 
+967014 
+967014 
+967014 
+967010 
+967010 
+gi|347944810|gb|CP003060.1| 
+Glaciecola 
+nitratireducens 
+456700 
+456700 
+456700 
+456700 
+456700 
+gi|401794054|gb|CP003747.1| 
+Bacillus cereus 
+967986 
+967986 
+967986 
+967986 
+967986 
+gi|74055513|gb|CP000116.1| 
+Thiobacillus 
+denitrificans 
+958342 
+958342 
+958342 
+958340 
+958340 
+gi|296848233|gb|CP002041.1| 
+Nocardiopsis 
+dassonville 
+761689 
+761689 
+761689 
+761688 
+761688 
+ 

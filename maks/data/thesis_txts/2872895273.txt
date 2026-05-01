@@ -1,0 +1,2321 @@
+==PAGE:1==
+Real­Time Image Enhancement in ROV Sys­
+tems
+Master Thesis
+DTU Electro
+Department of Electrical and Photonics Engineering
+==PAGE:2==
+==PAGE:3==
+Real­Time Image Enhancement in ROV Systems
+Master Thesis
+July, 2025
+By
+Eszter Sára Hetzmann
+Copyright:
+Reproduction of this publication in whole or in part must include the cus­
+tomary bibliographic citation, including author attribution, report title, etc.
+Cover photo:
+Vibeke Hempler, 2012
+Published by:
+DTU, Department of Electrical and Photonics Engineering, Brovej, Build­
+ing 118, 2800 Kgs. Lyngby Denmark
+www.byg.dtu.dk
+ISSN:
+[0000­0000] (electronic version)
+ISBN:
+[000­00­0000­000­0] (electronic version)
+ISSN:
+[0000­0000] (printed version)
+ISBN:
+[000­00­0000­000­0] (printed version)
+==PAGE:4==
+Approval
+Eszter Sára Hetzmann ­ s232532
+Signature
+Date
+ii
+Real­Time Image Enhancement in ROV Systems
+11.07.2025
+==PAGE:5==
+Abstract
+This thesis investigates the development and deployment of a real­time underwater im­
+age enhancement model tailored for integration into UVision’s operational workflow. The
+main research goal was to create a dehazing model capable of enhancing underwater
+visuals in murky port environments while maintaining a processing delay below 500 mil­
+liseconds per frame. This performance benchmark enables real­time operation (≥2 FPS)
+on CPU­based hardware, reflecting the needs of UVision’s clients, who often lack access
+to GPU acceleration.
+A lightweight learning­based model, FUnIE­GAN, was selected as the foundation due to
+its suitability for low­latency inference. The training pipeline began with a domain adapta­
+tion attempt using the EUVP dataset, but results showed that training directly on UVision’s
+proprietary underwater data yielded better performance. To further improve visual quality,
+a custom color­balance loss function was introduced. The final model was converted to
+ONNX format for compatibility with the company’s Rust­based interface and evaluated
+across multiple deployment methods.
+Extensive runtime testing on an Apple M2­powered device revealed that input image re­
+sizing was the most effective optimization technique, allowing the model to meet the real­
+time constraint consistently. Other methods, such as quantization (FP16, UINT8), GPU
+offloading via CoreML and FastAPI, and ONNX graph optimizations, were evaluated but
+showed limited improvements in the current setup. The final model demonstrated robust
+visual enhancement and stable runtime performance when deployed in Rust, with further
+gains possible in Python or GPU­based environments.
+The results show that the proposed solution is well­suited for operator­side deployment
+and can serve as a foundation for future upgrades, including GPU acceleration and adap­
+tation to different underwater environments.
+Real­Time Image Enhancement in ROV Systems
+iii
+==PAGE:6==
+Acknowledgements
+Eszter Sára Hetzmann, MSc Autonomous Systems, DTU
+Creator of this thesis.
+Siavash Arjomand Bigdeli, Associate Professor, Department of Applied Mathematics
+and Computer Science, Visual Computing
+MSc thesis supervisor.
+Morten Beier, UVision, CEO & Co­Founder
+Robert Coffey, UVision, CTO & Co­Founder
+Andreas Wendelboe, UVision, Developer
+I would like to sincerely thank my supervisor, Siavash Arjomand Bigdeli, for his continuous
+support, insightful guidance, and for always taking the time to answer my many questions.
+I also wish to express my deep gratitude to the UVision team, Morten Beier, Robert Cof­
+fey, and Andreas Wendelboe, for their incredible support and the excellent collaboration
+throughout this thesis.
+iv
+Real­Time Image Enhancement in ROV Systems
+==PAGE:7==
+Acronyms
+ACCE­D Adaptive Color and Contrast Enhancement and Denoising. 13, 14
+ACDC Attenuated Color Channel Correction and Detail Preserved Contrast Enhance­
+ment. 14
+ADP Adaptive Dark Pixels. 12
+ADPCC Adaptive Dark Pixel Prior and Color Correction. 12
+AR Augmented Reality. 2
+AUVs Autonomous Underwater Vehicles. 2, 9
+CIP Channel Intensity Prior. 12
+CNNs Convolutional neural networks. 8, 63
+CPU Central Processing Unit. 30, 31, 33, 37, 39, 40, 51, 57–59, 61, 63
+FPS Frames Per Second. 33, 37, 45, 46, 49
+FUnIE­GAN Fast Underwater Image Enhancement GAN. 9–11, 21, 27, 32, 34–36
+GAN Generative Adversarial Network. 7–9
+GANs Generative Adversarial Networks. 7, 8
+GPU Graphics Processing Unit. 30, 31, 33, 39, 40, 44, 57, 58, 61, 63
+HFM Hybrid Fusion Method. 13, 25–27
+HLRP Hyper­Laplacian Reflectance Priors. 14
+MPS Multi­Process Service. 30, 31, 37, 40, 43
+MSE Mean Square Error. 15–17
+NAE Normalized Absolute Error. 15, 17
+NCC Normalized Cross­Correlation. 16, 18
+PCDE Piecewise Color Correction and Dual Prior Opt. Contrast Enhancement. 12, 13
+PSNR Peak Signal­to­Noise Ratio. 16, 18
+RAM Random Access Memory. 30
+ROP Rank­One Prior. 15
+ROV Remotely Operated Vehicle. 1, 3, 9, 21
+SNR Signal­to­Noise Ratio. 16, 18
+Real­Time Image Enhancement in ROV Systems
+v
+==PAGE:8==
+SSIM Structural Similarity Index. 16, 19
+UCIQE Underwater Color Image Quality Evaluation. 51, 52
+UCM Unsupervised Colour Correction Method. 1
+UIQM Underwater Image Quality Measure. 51, 52
+vi
+Real­Time Image Enhancement in ROV Systems
+==PAGE:9==
+Contents
+Preface . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ii
+Abstract . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iii
+Acknowledgements
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iv
+1
+Introduction
+1
+1.1
+UVision and Their Current Dehazing Pipeline . . . . . . . . . . . . . . . . .
+1
+1.2
+Motivation and Background . . . . . . . . . . . . . . . . . . . . . . . . . . .
+1
+1.3
+The Challenge of Underwater Imaging . . . . . . . . . . . . . . . . . . . . .
+2
+1.4
+Objective and Scope . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+1.5
+Thesis Structure
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4
+2
+Literature Review and Approach
+7
+2.1
+Underwater Image Enhancement Techniques . . . . . . . . . . . . . . . . .
+7
+2.2
+State­of­the­Art GAN­Based Approaches
+. . . . . . . . . . . . . . . . . . .
+8
+2.3
+Generating Target Images for Supervised Training . . . . . . . . . . . . . .
+11
+2.4
+Quality Assessment Parameters
+. . . . . . . . . . . . . . . . . . . . . . . . 15
+3
+Methodology
+21
+3.1
+Dataset Collection and Preprocessing . . . . . . . . . . . . . . . . . . . . . 21
+3.2
+Training Pipeline . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27
+4
+Model Deployment and Optimization for Real­Time CPU Inference
+39
+4.1
+ONNX Conversion and Deployment on Operator Laptop . . . . . . . . . . . 39
+4.2
+Local Testing and Optimization on DeviceX . . . . . . . . . . . . . . . . . . 39
+4.3
+Summary of Optimization Results . . . . . . . . . . . . . . . . . . . . . . . . 49
+5
+Evaluation
+51
+5.1
+Inference Speed on CPU
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . 51
+5.2
+Visual Output Quality . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 51
+5.3
+Example Outputs . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 53
+6
+Discussion
+57
+6.1
+Impact of Deployment Decision Shift . . . . . . . . . . . . . . . . . . . . . . 57
+6.2
+Why a Trainable Model Was Chosen Over Direct Preprocessing
+. . . . . . 57
+6.3
+Why GPU Deployment was not Prioritized . . . . . . . . . . . . . . . . . . . 58
+6.4
+Reflections on CPU Constraints and the Speed–Quality Trade­off . . . . . . 58
+6.5
+Limitations of deployment across different devices . . . . . . . . . . . . . . 59
+6.6
+Potential Bias . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 59
+7
+Conclusion and Future Work
+61
+7.1
+Summary of Work
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 61
+7.2
+Challenges and Solutions Summary . . . . . . . . . . . . . . . . . . . . . . 61
+7.3
+Suggestions for Further Improvements . . . . . . . . . . . . . . . . . . . . . 62
+Bibliography
+65
+Real­Time Image Enhancement in ROV Systems
+vii
+==PAGE:10==
+viii
+Real­Time Image Enhancement in ROV Systems
+==PAGE:11==
+1
+Introduction
+1.1
+UVision and Their Current Dehazing Pipeline
+UVision is a young Danish company that specializes in underwater 3D scanning. It was
+founded in February 2022 and has since developed both hardware and software solutions
+for capturing and processing underwater environments.
+Their main product is the UScanner, shown in Figure 1.1, a compact underwater 3D scan­
+ner equipped with an NVIDIA Jetson Xavier NX for onboard processing. To operate the
+scanner, UVision also offers the UController, a cross­platform control application avail­
+able for Windows, Linux, and Mac. With the UController, users can view live video feeds,
+monitor point clouds in real­time, start recordings, and upload data directly to the cloud
+for further processing.
+In addition to their products, UVision provides 3D scanning services on request. Scans
+can be performed using various mounting setups, such as ROVs, telescopic poles, or
+handheld by divers. They also offer training sessions, typically completed in a single day,
+due to the intuitive nature of their system.
+Figure 1.1: UScanner from UVision, equipped with an NVIDIA Jetson Xavier NX
+UVision’s underwater 3D scanning system includes both hardware and software compo­
+nents. The scanning device, the UScanner, is typically mounted on an ROV and con­
+nected to the operator’s laptop via an Ethernet cable (RJ45 connector). This direct con­
+nection enables real­time data transmission, including video and point cloud data.
+For image enhancement, UVision currently uses the Unsupervised Colour Correction
+Method (UCM) [1]. This method performs basic dehazing and color correction directly
+on the ROV using onboard processing. While UCM improves visibility to some extent,
+its effectiveness is limited in more challenging underwater environments, especially in
+murky ports or highly turbid waters. As a result, there is room for improvement through
+more advanced or data­driven dehazing techniques.
+1.2
+Motivation and Background
+In recent years, advances in digital imaging and computer vision have enabled the devel­
+opment of systems capable of operating in increasingly challenging environments, such
+as underwater scenarios. For the autonomous navigation of an Remotely Operated Vehi­
+cle (ROV), the robot must provide reliable visual data, both for the human operator and its
+Real­Time Image Enhancement in ROV Systems
+1
+==PAGE:12==
+own onboard decision­making. Underwater imaging presents one of the most challenging
+cases, as light behaves fundamentally differently due to the physical properties of water.
+The approach to underwater imaging often depends on the specific environment in which
+it is used, for example, coastal and shallow waters, coral reefs, the open ocean, deep
+sea, or freshwater environments.
+Applications such as marine biology, Autonomous Underwater Vehicles (AUVs), maritime
+archaeology, and even underwater Augmented Reality (AR) rely heavily on clear visual
+input. However, due to the harsh nature of the underwater domain, raw image data often
+becomes severely degraded. This degradation not only limits human interpretation but
+also compromises the performance of computer vision tasks like detection, segmentation,
+tracking, and 3D reconstruction.
+To correct these effects, various dehazing and image enhancement techniques have been
+proposed, ranging from traditional image processing methods to more modern, data­
+driven approaches. Enhancing underwater images is not just a visual improvement; it
+is essential for enabling scientific exploration, improving human­robot interaction, and
+supporting real­time decision­making in autonomous systems operating underwater [2].
+An example of dehazing results can be seen in Figure 1.2, clearly illustrating how much
+additional detail can be revealed once the haze is removed, details that would otherwise
+remain obscured.
+Figure 1.2: Example of dehazing results. The enhanced images reveal significantly more
+structural detail compared to the original, haze­obscured inputs [3].
+1.3
+The Challenge of Underwater Imaging
+Unlike images taken in air, underwater images suffer from unique and complex degra­
+dation effects due to the interaction of light with water and suspended particles. Several
+physical phenomena impact the visual quality of underwater images [4, 5]:
+• Absorption and color shift: water absorbs light at different wavelengths unequally.
+Red light is absorbed first, often within just a few meters, followed by green and then
+blue. As a result, underwater images usually have a strong bluish or greenish tint
+2
+Real­Time Image Enhancement in ROV Systems
+==PAGE:13==
+and lack warm color information. The deeper the scene, the stronger this effect
+becomes.
+• Backscatter: Light is scattered by suspended particles such as sand, silt, and bub­
+bles, reducing image contrast, blurring fine details, and introducing uneven illumi­
+nation across the scene.
+• Lighting conditions: Achieving consistent and even lighting underwater is chal­
+lenging. As sunlight enters the water, it becomes scattered and attenuated. The
+angle of sunlight, time of day, and water depth all affect the amount and type of light
+that reaches the scene.
+• Water clarity: The clarity of water depends on its particulate content, which can
+vary significantly based on geography, weather, tides, and seasons. This variability
+causes unpredictable haze and cloudiness that severely affect image quality.
+These combined distortions result in images that are often dark, blurry, color­distorted, and
+low in contrast, making both human interpretation and computer vision­based processing
+significantly more difficult.
+Understanding the environmental characteristics of the specific underwater context, such
+as geographic location, typical visibility, water turbidity, and lighting conditions, allows for
+more effective fine­tuning of enhancement models. By tailoring dehazing and enhance­
+ment techniques to the known features of target environments (e.g., port areas or specific
+coastal sites), it becomes possible to improve both the quality of visual output and the
+robustness of downstream tasks such as detection or tracking [6, 7].
+1.4
+Objective and Scope
+The entire project is centered around one clear goal:
+• Develop an underwater dehazing model that can run in under 500ms per frame
+(≥2 FPS) on the operator’s laptop.
+This performance requirement, defined by UVision, shaped every design choice in the
+thesis, from data preprocessing and model architecture to deployment format and infer­
+ence pipeline. The ultimate aim is to provide the operator of the ROV with the clearest
+possible underwater view in real time, without introducing noticeable latency.
+However, to make this core objective feasible and practically valuable, the following sub­
+goals will also be addressed throughout the project:
+• Develop a reusable training pipeline that enables future model improvements or
+adaptations as new data becomes available. This includes support for supervised
+learning using synthetically generated targets from preprocessing techniques.
+• Benchmark inference performance and output quality across different platforms
+(CPU and GPU) to evaluate the feasibility of deploying a trained dehazing model in
+real­time underwater applications.
+• Explore and evaluate optimization strategies for achieving real­time performance
+under deployment constraints, including techniques such as quantization, input res­
+olution scaling, GPU acceleration, ONNX graph optimization, and multi­threaded
+execution.
+UVision’s current system operates at 8 FPS using the NVIDIA Jetson Xavier NX 16GB
+compute module. While the original plan was to deploy the model directly on this em­
+Real­Time Image Enhancement in ROV Systems
+3
+==PAGE:14==
+bedded system, a strategic shift was made midway through the project: the deployment
+target was changed to the operator’s laptop, via the UController interface.
+The UController is a Rust­based software interface that runs on the operator’s laptop,
+which may vary between missions. While GPU acceleration is technically possible, many
+of UVision’s clients use laptops without dedicated GPUs. As a result, the model has to be
+optimized for reliable CPU­only inference. This shift introduces new constraints but also
+makes the solution more portable and broadly applicable across real­world deployment
+scenarios.
+As a result, this thesis not only delivers a ready­to­integrate dehazing model that meets
+runtime constraints but also provides a framework for model training, evaluation, and
+optimization that can support future deployments and iterations.
+While the company will handle final integration into the operational system, this project
+ensures that the model is compatible with UVision’s Rust­based architecture and provides
+all necessary documentation and tooling for further development.
+Challenges Addressed in This Thesis
+Underwater imaging presents several unique challenges that degrade visual quality and
+complicate downstream tasks such as object detection, navigation, or operator feedback.
+Based on existing literature and practical observations from UVision’s system, this thesis
+focuses on addressing the following key challenges:
+• Murky visual conditions in port environments and lack of ground truth: Shal­
+low water sites like ports often contain suspended particles, organic matter, and
+poor lighting, leading to reduced visibility and intense red­brown color casts [8, 9].
+• Strict runtime constraints for real­time deployment: In operator­in­the­loop sys­
+tems, delays above 500ms hinder usability. Many enhancement models exceed this
+threshold when deployed on CPU [10].
+• Limited hardware support and platform compatibility: The system must work
+without GPU acceleration and run within a Rust­based pipeline, which limits the
+availability of optimized backends and tools [11].
+• Bias in training data and overfitting to specific conditions: Models trained on
+limited datasets may not generalize well to unseen environments, often producing
+color distortions in blue water or high­visibility scenes [12].
+• Difficulties in measuring image quality objectively: No ground truth images are
+available in real­world underwater settings. This makes traditional full­reference
+metrics unusable [13, 14].
+These challenges form the core focus of this thesis and are addressed through data prepa­
+ration, model fine­tuning, and a deployment­focused optimization pipeline.
+1.5
+Thesis Structure
+The thesis begins with exploring existing underwater image enhancement techniques,
+comparing traditional and learning­based approaches, and explaining why a GAN­based
+solution was chosen. The review also highlights relevant architectures, including FUnIE­
+GAN and domain adaptation methods. The methodology section details the selection of
+FUnIE­GAN as the base model, the datasets used, including company­provided under­
+water imagery, and the preprocessing experiments conducted to improve training perfor­
+mance. An explanation of the training process follows this. The next chapter focuses
+4
+Real­Time Image Enhancement in ROV Systems
+==PAGE:15==
+on deploying and optimizing the trained model for real­time inference on CPU. It covers
+ONNX conversion, local testing on macOS, and various optimization strategies, including
+input resolution reduction, quantization to FP16 and UINT8, use of CoreML, model graph
+optimization, and multi­threaded inference. The evaluation chapter presents quantitative
+and qualitative results of the final model, using image quality metrics and visual outputs.
+The discussion chapter reflects on key decisions and constraints that influenced the model
+design and deployment strategy, particularly the shift from GPU­based to CPU­based de­
+ployment. It also discusses potential biases in the model and challenges in deploying
+across different devices and platforms. Finally, the thesis concludes with a summary of
+contributions and suggestions for future improvements.
+Real­Time Image Enhancement in ROV Systems
+5
+==PAGE:16==
+6
+Real­Time Image Enhancement in ROV Systems
+==PAGE:17==
+2
+Literature Review and Approach
+This chapter provides an overview of the literature and techniques relevant to underwater
+image enhancement, with a particular focus on methods that could be applied to images
+captured in shallow waters, such as harbors. Although many existing approaches in the
+field are developed for deep­sea environments, where visibility is limited and images tend
+to have strong blue or green color casts, this use case required evaluating whether these
+methods were suitable for more complex and variable shallow­water conditions.
+To address this, general underwater image enhancement techniques were explored, in­
+cluding dehazing methods commonly applied in deep­ocean scenarios. From there, more
+recent approaches based on Generative Adversarial Networks (GANs) were examined,
+which have shown promise in learning to restore or enhance underwater images in a
+data­driven manner.
+Following the discussion on GAN­based approaches, this chapter outlines the prepro­
+cessing techniques used to generate synthetic target images for training. These steps
+were necessary to improve the quality and consistency of the data before training the
+enhancement model. The final section explains how the effectiveness of these prepro­
+cessing techniques was evaluated, both through quantitative image quality metrics and
+visual inspection. Although several standard parameters were used to assess quality, the
+final choice of the preprocessing method was made in collaboration with UVision, based
+on the visual output that was considered the most suitable for their application.
+2.1
+Underwater Image Enhancement Techniques
+Underwater image processing presents unique challenges due to the complex optical
+properties of water. To address these, a wide range of techniques have been developed,
+typically categorized as image restoration or image enhancement. Additionally, these
+methods can be divided into classical (rule­based) and learning­based (data­driven) ap­
+proaches. This section discusses these distinctions and explains the motivation behind
+choosing a learning­based model for this project.
+2.1.1
+Image Restoration vs. Image Enhancement
+Although often used reciprocally, image restoration and image enhancement have distinct
+goals and methodologies [15]. Image restoration focuses on recovering an image that
+has been degraded due to known or unknown distortions, aiming to recover the original
+scene as closely as possible by reversing effects such as blur, noise, or underwater haze.
+Typical restoration techniques include dehazing, denoising, and inpainting.
+In contrast, image enhancement aims to improve the visual quality of an image. The
+goal is not to recover the original scene, but rather to make the image more appealing or
+easier to interpret. This can be done by enhancing contrast, correcting colors, or adjusting
+brightness. Enhancement techniques are often used in photography, advertising, and
+other fields where aesthetics or clarity are prioritized over strict accuracy.
+In the context of underwater imaging, the distinction between these two categories often
+blurs. Many practical techniques combine elements of both, such as reducing haze and
+enhancing contrast simultaneously.
+Real­Time Image Enhancement in ROV Systems
+7
+==PAGE:18==
+2.1.2
+Classical vs. Learning­Based Approaches
+Classical image processing methods rely on well­defined rules and transformations.
+Techniques such as histogram equalization, white balancing, and Retinex­based mod­
+els are computationally efficient, easy to interpret, and require no training data. These
+methods are ideal for tasks with predictable distortions and where transparency and low
+resource consumption are essential. However, they often fall short when confronted with
+the complexity of real underwater environments, which may include varying lighting con­
+ditions, different levels of turbidity, and inconsistent object appearances.
+Learning­based approaches, particularly those using deep learning, offer a powerful al­
+ternative. Convolutional neural networks (CNNs) and GANs can learn from large datasets
+to model complex visual transformations. These models have shown superior perfor­
+mance in tasks like image dehazing. Unlike classical methods, they do not require ex­
+plicit rule definitions. Instead, they learn patterns directly from data, making them highly
+capable of adjusting to diverse scenarios.
+According to a white paper comparing traditional image processing and deep learning
+[16], learning­based methods provide higher accuracy and flexibility, especially in visu­
+ally complex tasks. They can be fine­tuned with new data and repurposed for different
+objectives, making them ideal for customization.
+2.1.3
+Why a Learning­Based Approach Was Chosen
+For this thesis, a learning­based approach was chosen, specifically a GAN model, to
+develop an underwater video dehazing tool tailored to the needs of UVision. While this
+path involves a steeper learning curve, greater implementation effort, and the need for
+GPU­accelerated training, it offers several advantages:
+• Personalization: The model can be fine­tuned to the company’s specific underwa­
+ter environment and camera settings.
+• Adaptability: As new underwater data becomes available or if there is a camera
+system change, the model can be retrained or updated with minimal effort.
+• Expandability: The resulting model can be integrated into different platforms and
+expanded with additional functionality.
+In the context of this thesis, a learning­based approach was selected to build a custom,
+high­quality underwater image enhancement tool that combines the advantages of both
+image enhancement and image restoration. The flexibility, performance, and future­proof
+nature of deep learning models, particularly GANs, make them well­suited for the com­
+pany’s specific goals, whilst leaving the door open for future enhancements.
+2.2
+State­of­the­Art GAN­Based Approaches
+In recent years, Generative Adversarial Networks (GANs) [17] have become powerful
+tools in image generation and enhancement. Introduced in 2014 by Ian Goodfellow, GANs
+rely on a concept called adversarial training, where two neural networks, a generator and
+a discriminator, compete with each other. The generator’s goal is to produce realistic im­
+ages, while the discriminator tries to distinguish between real and fake ones. Through this
+back­and­forth process, the generator gradually learns to create increasingly convincing
+photos.
+One of the key advantages of GANs is that they can learn complex mappings from data
+without requiring hard­coded rules. This makes them especially valuable for enhancing
+8
+Real­Time Image Enhancement in ROV Systems
+==PAGE:19==
+underwater images, where the visual distortions are non­linear and complicated to model
+using traditional techniques.
+2.2.1
+Image­to­Image Translation Models
+A specific group of GAN models called image­to­image translation models has been
+widely used for tasks like deblurring, style transfer, and even underwater image enhance­
+ment. These models aim to learn a mapping from one image domain to another, such as
+from distorted to clear images [18, 19].
+Pix2Pix is a well­known conditional GAN model designed for supervised image­to­image
+translation using paired datasets. It has shown strong results in various tasks by learning
+a direct mapping from input to target images, often producing sharp and realistic out­
+puts. However, Pix2Pix was not explicitly designed for underwater imagery or resource­
+constrained environments.
+While it can be effective, its relatively heavy architecture
+and reliance on large paired datasets can limit its practicality for real­time deployment
+in robotics [20, 21].
+To overcome this limitation, CycleGAN was introduced as an unsupervised alternative. It
+does not require paired data and instead learns to map between two domains by ensuring
+that an image translated from one domain to the other can be mapped back to its original
+form. While this flexibility is great, the training process is often unstable and requires
+careful tuning. In practice, CycleGAN­based models can struggle with color consistency
+and may introduce artifacts, which is not ideal for robotics or deployment in the field. For
+the objective of this thesis, it was also decided that a supervised learning approach would
+be more efficient due to its capability of better fine­tuning [22, 23].
+2.2.2
+FUnIE­GAN: Fast Underwater Image Enhancement GAN
+In contrast to Pix2Pix, FUnIE­GAN, developed by Islam et al. [9], builds on a similar
+supervised learning framework but introduces several key modifications that make it better
+suited for underwater image enhancement and real­time robotic applications. In addition
+to supporting both paired and unpaired training modes, it leverages a lightweight and fully
+convolutional architecture optimized for speed and deployability. These design choices
+make it especially suitable for embedded systems on visually guided underwater robots
+such as AUVs or, in this case, an ROV.
+FUnIE­GAN uses a conditional GAN framework, architecture seen in Figure 2.1, with a
+generator based on a shallow U­Net­style encoder­decoder [24]. The encoder consists of
+five convolutional blocks that progressively reduce spatial resolution and extract high­level
+features, while the decoder mirrors this structure to reconstruct the enhanced image. Cru­
+cially, the generator employs skip connections between mirrored encoder and decoder
+layers: specifically between (e1, d5), (e2, d4), (e3, d3), and (e4, d2). These connec­
+tions preserve fine spatial details, which are essential in underwater environments where
+textures and edges may already be degraded.
+The architecture is designed for efficiency:
+• The generator is fully convolutional with no dense layers, reducing the number of
+parameters.
+• It uses 4×4 convolutional kernels and limits the number of feature maps to a max­
+imum of 256.
+• The input and output image sizes are fixed at 256×256×3, striking a balance be­
+tween computational load and image quality.
+Real­Time Image Enhancement in ROV Systems
+9
+==PAGE:20==
+• The model has fewer encoder­decoder layers compared to typical GANs, enabling
+fast inference (e.g., 25 FPS on Jetson TX2).
+Figure 2.1: Conditional GAN architecture [25]
+Its discriminator is based on a PatchGAN architecture, a discriminator that classifies small
+image patches instead of the entire image, making it effective at enforcing local texture
+and style consistency without adding significant computational overhead.
+The training objective of FUnIE­GAN combines several loss components:
+• The adversarial loss ensures realism.
+LcGAN(G, D) = EX,Y [log D(Y )] + EX,Y [log(1 −D(X, G(X, Z)))]
+• A global similarity loss (L1) encourages output images to be structurally close to
+the ground truth.
+L1(G) = EX,Y,Z[||Y −G(X, Z)||1]
+• A content loss based on VGG­19 features helps preserve high­level semantics and
+scene structure.
+Lcon(G) = EX,Y,Z[||Φ(Y ) −Φ(G(X, Z))||2]
+• The PatchGAN discriminator contributes to local texture and style consistency.
+The following line of code is used to calculate the generator loss function. Here, λ1 = 0.7
+and λc = 0.3, which were tuned as hyperparameters and taken from [9].
+loss_G = loss_GAN + lambda_1 * loss_1
++ lambda_con * loss_con
+FUnIE­GAN supports both paired and unpaired training on the EUVP dataset, which con­
+tains over 20,000 underwater images across a wide range of visibility conditions and cam­
+era types.
+10
+Real­Time Image Enhancement in ROV Systems
+==PAGE:21==
+2.2.3
+Comparison With Other Approaches
+Several other GAN­based methods have been proposed for underwater image enhance­
+ment. Below, in Table 2.1, is a comparison of different models GAN, cGAN [26, 27],
+UGAN, and FUnIE­GAN, highlighting their characteristics and practical limitations:
+Feature
+GAN
+cGAN
+UGAN
+(UGAN­P)
+FUnIE­GAN
+Input
+Random noise
+Input image +
+noise
+Underwater
+image
+Underwater
+image
+Output
+Synthetic
+image
+Mapped image
+Enhanced
+image
+Enhanced
+image
+Conditioning
+None
+Yes
+Yes
+Yes
+Loss
+functions
+Adversarial
++ pixel­based
+losses (e.g. L1)
++ gradient
+penalty, L1
+L1 +
+VGG­based
+content loss
+Architecture
+Basic GAN
+U­Net/ResNet
+variants
+Deep encoder­
+decoder
+U­Net inspired,
+lightweight
+Real­time
+capable
+No
+Often not
+No
+Yes
+Training
+modes
+Paired data
+required
+Paired only
+Paired only
+Paired +
+unpaired
+Table 2.1: Comparison between GAN image enhancement techniques. cGAN is com­
+monly based upon heavier architectures and is therefore marked as ”Often not” real­time
+capable.
+Overall, FUnIE­GAN strikes a good balance between simplicity, performance, and us­
+ability. It enhances images with perceptual quality in terms of color, contrast, and clarity
+while remaining efficient enough for real­world deployment. This makes it an excellent
+choice for this thesis, which aims to improve underwater visual perception in a practical
+and deployable manner.
+2.3
+Generating Target Images for Supervised Training
+Before training the GAN­based enhancement model, a selection of enhancement tech­
+niques was applied to generate high­quality target images for supervised learning. The
+original dataset provided by UVision primarily consisted of murky, low­contrast images
+taken in shallow harbor environments. Since no paired training data (i.e., low­quality +
+clean ground truth) was available, this step was necessary to create an approximate ref­
+erence dataset. This process is referred to here as generating target images.
+A natural question might be: Why not simply use the best enhancement method directly
+in the final system? While this was considered, there were several reasons to build a
+trainable model instead:
+• Establishing a reusable pipeline: A trained model allows future updates using
+new or better data, enabling continual improvement.
+Real­Time Image Enhancement in ROV Systems
+11
+==PAGE:22==
+• Customization: Training enables incorporation of custom loss functions, such as a
+color­balance loss, tailored to the target environment.
+• Flexible deployment: A trained model can be converted, optimized, and deployed
+using various techniques (quantization, parallelization, etc.), which may offer better
+performance than fixed preprocessing pipelines.
+For these reasons, the enhancement methods discussed below were used not as final
+dehazing tools, but as intermediate tools to synthesize high­quality outputs used to su­
+pervise model training.
+The following methods were examined:
+Adaptive Dark Pixel Prior and Color Correction (ADPCC) [28] combines a compre­
+hensive imaging formation model with prior­based and unsupervised techniques. Using a
+Channel Intensity Prior (CIP) for depth estimation and Adaptive Dark Pixels (ADP) to re­
+duce backscatter. The final image is refined through color compensation and a blue­green
+channel balance. However, the results were generally unsatisfactory on the shallow­water
+UVision dataset. In several cases, the dark channel prior failed to remove haze from
+smooth regions effectively, and the method’s assumptions about strong blue tones, typ­
+ical in deep­sea waters, led to an overcorrection that introduced unnatural red tones, as
+seen in Figure 2.2. As a result, many of the enhanced images appeared visually distorted
+and were not usable for further processing.
+Figure 2.2: Example result using ADPCC: original (left) vs. enhanced (right)
+Piecewise Color Correction and Dual Prior Opt. Contrast Enhancement (PCDE) [29]
+enhances underwater images via piecewise color correction and a contrast enhancement
+scheme guided by dual priors. It is particularly suited for scenes with varying lighting
+conditions and was effective in improving overall contrast and color distribution. However,
+the method produced overly desaturated, gray­toned results in some cases, and struggled
+with very dark images where key details remained lost. As shown in Figure 2.3, the
+enhancement lacked vibrancy. It was also unable to recover enough structure in areas of
+low light.
+12
+Real­Time Image Enhancement in ROV Systems
+==PAGE:23==
+Figure 2.3: Example result using PCDE: original (left) vs. enhanced (right)
+Hybrid Fusion Method (HFM) [30], the Hybrid Fusion Method gave the best results on
+the UVision dataset. It uses color and white balance correction based on the gray world
+assumption, improves visibility with type­II fuzzy sets [31, 32], and boosts contrast using
+curve adjustments. In the final step, it combines the visibility­enhanced and contrast­
+enhanced images into one. This approach effectively tackles the main challenges of un­
+derwater pictures and consistently produces the most natural and well­balanced results,
+as seen in Figure 2.4.
+Figure 2.4: Example result using HFM: original (left) vs. enhanced (right)
+Adaptive Color and Contrast Enhancement and Denoising (ACCE­D) [33] employs
+adaptive color and contrast enhancement combined with denoising. It separates high­
+and low­frequency image components using Difference of Gaussian and bilateral filters
+and applies enhancement selectively. The results were visually clean, making this method
+the second­best choice after HFM. It was also considered as an alternative, though in
+some cases, where the original image was darker, it appeared slightly less vibrant and
+had a greenish undertone, as shown in Figure 2.5.
+Real­Time Image Enhancement in ROV Systems
+13
+==PAGE:24==
+Figure 2.5: Example result using ACCE­D: original (left) vs. enhanced (right)
+Attenuated Color Channel Correction and Detail Preserved Contrast Enhancement
+(ACDC) [34] uses attenuated color channel correction followed by global and local con­
+trast enhancement. A multiscale fusion and unsharp masking strategy produces sharp,
+detailed outputs. However, the results often had a grayish tone, as seen in Figure 2.6,
+that was less suitable for the intended application.
+Figure 2.6: Example result using ACDC: original (left) vs. enhanced (right)
+Hyper­Laplacian Reflectance Priors (HLRP) [35] builds on a Retinex­based approach
+that separates the scene’s reflectance and lighting to enhance underwater images. While
+it generally preserved fine details well, the overall results were not entirely satisfactory.
+The improved images often showed dark, exaggerated spots, especially over textured
+regions. These artifacts varied in intensity but were consistently distracting, as seen in
+Figure 2.7.
+Figure 2.7: Example result using HLRP: original (left) vs. enhanced (right)
+14
+Real­Time Image Enhancement in ROV Systems
+==PAGE:25==
+Rank­One Prior (ROP) [36] introduces a rank­one prior before enhancing degraded im­
+ages, delivering real­time performance with fairly strong results. It often improves clarity
+and preserves structural details well, but in some cases, the output appears overly bright
+and even more hazy than the original. These issues are especially noticeable in areas
+with fine textures, as seen in Figure 2.8.
+Figure 2.8: Example result using ROP: original (left) vs. enhanced (right)
+Each method was evaluated using a combination of quantitative metrics and qualitative
+visual assessment. Although objective parameters such as contrast, sharpness, and color
+distribution were considered, the final selection of the preprocessing technique was made
+in collaboration with UVision. Based on visual preference and practical usability, HFM
+[30] was chosen as the final preprocessing pipeline, due to its consistent and high­quality
+enhancement results across all tested scenarios.
+2.4
+Quality Assessment Parameters
+To evaluate the performance of the different enhancement methods, several image quality
+metrics were used. These help to give a numerical sense of how well the output images
+preserve or improve various visual properties, such as sharpness, contrast, and structural
+similarity. The metrics used include:
+• Mean Square Error (MSE) [37] – Measures the average squared difference be­
+tween the enhanced image and a reference. Lower values indicate better quality.
+The formula for MSE is:
+MSE =
+1
+mn
+m
+!
+i=1
+n
+!
+j=1
+"
+I(i, j) −ˆI(i, j)
+#2
+where I(i, j) is the pixel value of the original image at position (i, j), ˆI(i, j) is the
+pixel value of the enhanced image and m × n is the total number of pixels.
+• Normalized Absolute Error (NAE) [38] – Evaluates how far the enhanced image
+is from the reference, normalized to the total image intensity. Lower is better. The
+formula for NAE is:
+NAE =
+$m
+i=1
+$n
+j=1
+%%%I(i, j) −ˆI(i, j)
+%%%
+$m
+i=1
+$n
+j=1 |I(i, j)|
+where I(i, j) is the pixel value of the original image at position (i, j), ˆI(i, j) is the
+pixel value of the enhanced image, and m × n is the total number of pixels in the
+image.
+Real­Time Image Enhancement in ROV Systems
+15
+==PAGE:26==
+• Normalized Cross­Correlation (NCC) [39] – Shows how well the overall structure
+and content of the image match the reference. Higher values suggest stronger
+similarity. The formula for NCC is:
+NCC =
+$m
+i=1
+$n
+j=1
+&
+I(i, j) −¯I
+' "
+ˆI(i, j) −¯ˆI
+#
+($m
+i=1
+$n
+j=1
+&
+I(i, j) −¯I
+'2 · $m
+i=1
+$n
+j=1
+"
+ˆI(i, j) −¯ˆI
+#2
+where I(i, j) and ˆI(i, j) are the pixel values of the original and enhanced images at
+position (i, j), and ¯I and ¯ˆI are the mean pixel values of the original and enhanced
+images, respectively.
+• Peak Signal­to­Noise Ratio (PSNR) [37] – A common way to measure image qual­
+ity by comparing the original and the enhanced image. It works best with regular
+8­bit RGB images, where pixel values go from 0 to 255. Higher PSNR means the
+result is cleaner and closer to the original, with less distortion or noise. The formula
+for PSNR is:
+PSNR = 10 · log10
+)
+MAX2
+pix
+MSE
+*
+where MAX is the maximum possible pixel value of the image (e.g., 255 for 8­bit
+images), and MSE is the mean squared error between the original and enhanced
+images.
+• Signal­to­Noise Ratio (SNR) [40] – Similar to PSNR, but more focused on compar­
+ing signal power to background noise. Higher values mean less noise. The formula
+for SNR is:
+SNR = 10 · log10
++Signal Power
+Noise Power
+,
+where the signal power is calculated as the mean of the squared pixel values in the
+original image, and the noise power is given by the MSE between the original and
+enhanced images.
+• Structural Similarity Index (SSIM) [37] – Measures perceived structural similarity.
+Higher scores mean the image looks more like the reference from a human per­
+spective. The SSIM value ranges from 0 to 1, with 1 indicating perfect structural
+similarity. The formula for SSIM is:
+SSIM(I, ˆI) =
+(2µIµˆI + C1)(2σI ˆI + C2)
+(µ2
+I + µ2
+ˆI + C1)(σ2
+I + σ2
+ˆI + C2)
+where µI and µˆI are the mean pixel values of the original and enhanced images, σ2
+I
+and σ2
+ˆI are their variances, σI ˆI is the covariance between them, and C1 and C2 are
+constants to stabilize the division.
+For the evaluation of these preprocessing methods, the EUVP dataset [41] was used. A
+set of 50 poor­quality images was selected and enhanced using the individual preprocess­
+ing techniques. Each enhanced image was then compared to its corresponding ”clear”
+version from the dataset. The evaluation metrics were calculated based on this compari­
+son, and the results are shown in Figures 2.9 to 2.14. While these values were considered
+during the evaluation process, they were not the only basis for choosing the preferred en­
+hancement methods. In collaboration with the company, it was agreed that visual quality
+and interpretability were more critical than purely numerical results. Therefore, although
+16
+Real­Time Image Enhancement in ROV Systems
+==PAGE:27==
+some methods performed better in metrics, they were not necessarily the most visually
+convincing or practically useful in real­world underwater scenarios.
+Figure 2.9: MSE Comparison across evaluated methods ­ Lower values mean better
+quality
+Figure 2.10: NAE Comparison across evaluated methods ­ Lower values mean better
+quality
+Real­Time Image Enhancement in ROV Systems
+17
+==PAGE:28==
+Figure 2.11: NCC Comparison across evaluated methods ­ Higher values mean better
+quality
+Figure 2.12: PSNR Comparison across evaluated methods ­ Higher values mean better
+quality
+Figure 2.13: SNR Comparison across evaluated methods ­ Higher values mean better
+quality
+18
+Real­Time Image Enhancement in ROV Systems
+==PAGE:29==
+Figure 2.14: SSIM Comparison across evaluated methods ­ Higher values mean better
+quality
+Real­Time Image Enhancement in ROV Systems
+19
+==PAGE:30==
+20
+Real­Time Image Enhancement in ROV Systems
+==PAGE:31==
+3
+Methodology
+This chapter outlines the process of developing an underwater image enhancement model.
+It begins with a description of the dataset collection and the various preprocessing exper­
+iments conducted.
+Following that, the training pipeline is presented, including an attempt at domain adapta­
+tion. The following sections detail the final training setup using the company’s data and
+describe the specific modifications made to the base model, such as adjustments to the
+loss function and finetuning of model parameters.
+At the end, a comparison between different models will be presented. These include the
+original FUnIE­GAN (pretrained, open­source model), the domain­adapted FUnIE­GAN,
+a FUnIE­GAN model that was trained exclusively on company data but does not obtain a
+color­loss function, and finally the FUnIE­GAN model, trained on company data and with
+the color­loss function.
+3.1
+Dataset Collection and Preprocessing
+The company, UVision, provided raw image data captured during their underwater screen­
+ings. Since this data lacked high­quality reference images needed for supervised training,
+a preprocessing step was introduced to generate synthetic targets for the model to learn
+from. For the training process to be effective and generalizable, it was essential to collect
+data across a range of environmental conditions. These include:
+• varying levels of lighting (bright sunlight, dim conditions),
+• differences in water clarity (clear vs. murky),
+• differences in color distributions (affected by depth, turbidity, and light absorption),
+• and a variety of underwater scenes and structures (such as walls, vegetation, and
+open water).
+The company provided a total of 5 different datasets for training and testing purposes.
+After preprocessing, 3 of these datasets were used for training, and two datasets were
+reserved for testing.
+3.1.1
+Company Dataset Description
+The first dataset provided is named ”opera_dock_u_2024_08_06_15_39_25”, which, as
+the name suggests, was recorded at the Copenhagen Opera dock on August 6, 2024. The
+ROV used during data collection is equipped with two cameras, both capturing images
+simultaneously.
+Each dataset follows the same structure: within the ”images” directory, there are two
+sub­folders, ”left” and ”right”, containing images from the respective cameras. Since the
+captured images from both cameras were nearly identical (see Figure 3.1), using images
+from only one camera for training was considered the most logical and efficient approach.
+Real­Time Image Enhancement in ROV Systems
+21
+==PAGE:32==
+Figure 3.1: Images captured by the left camera are shown on the left, while the corre­
+sponding images from the right camera are shown on the right.
+The opera_dock dataset, seen in Figure 3.2, consists of 1,489 images at a resolution of
+1280×800. It features relatively clear underwater scenes with muted colors, dominated
+by brick walls and occasional metal railings. The K17_scan dataset, seen in Figure 3.3,
+contains 1,682 images, also at 1280×800 resolution, and includes dark images captured
+while circling a large submerged pipe. It offers a limited variety in content and lighting. The
+block5_US­1009, seen in Figure 3.4, dataset includes 1,640 images at a higher resolution
+of 1920×1200 and contains mostly clear, well­lit pictures with a mixture of intense blue and
+orange tones.
+22
+Real­Time Image Enhancement in ROV Systems
+==PAGE:33==
+Figure 3.2: Image samples from the opera_dock dataset
+Figure 3.3: Image samples from the K17_scan dataset
+Real­Time Image Enhancement in ROV Systems
+23
+==PAGE:34==
+Figure 3.4: Image samples from the block5_US­1009 dataset
+For testing purposes, the 2025_04_10 dataset, seen in Figure 3.5, having 2,295 high­
+resolution images (1920×1200), provided a rich variety of scenes, including underwater
+rocks, algae, and both more clear and heavily degraded images. The NorthWestCorner1
+dataset, seen in Figure 3.6, with 1,375 images at 1280×800 resolution, presented mostly
+orange­tinted images with some visible algae. While it lacks diversity in scenery, it in­
+cludes both hazy and clearer pictures.
+Figure 3.5: Image samples from the 2025_04_10 dataset
+24
+Real­Time Image Enhancement in ROV Systems
+==PAGE:35==
+Figure 3.6: Image samples from the NorthWestCorner1 dataset
+These datasets collectively represent a broad spectrum of underwater conditions, sup­
+porting the development and evaluation of a model capable of enhancing a wide range of
+image qualities and environments.
+3.1.2
+Preprocessing for Target Image Generation
+As presented in Section 2.3, seven preprocessing techniques were considered for this
+project. The Hybrid Fusion Method (HFM) was chosen due to its ability to enhance the
+natural colors of the image, while preserving the essential details.
+The core idea behind HFM is to combine the strengths of multiple image enhancement
+strategies through a multi­branch fusion approach. The method uses three parallel en­
+hancement operations on the input image:
+• Color and White Balance Correction: The white balance correction in HFM con­
+sists of two steps. First, the method applies the Gray World Assumption [42] to
+perform initial color correction. This technique is based on the idea that the average
+color of a natural scene should be neutral gray. By calculating the average intensity
+values of each RGB channel and adjusting them to match a target gray level, the
+method compensates for dominant color casts, particularly the loss of red in under­
+water environments. After this correction, a nonlinear white balance [43] operation
+is applied to reduce further color bias caused by underwater lighting. The white bal­
+ance correction module is based on a simple observation. Different light sources,
+like the sun or artificial lights, have different color temperatures, ranging from warm
+to cool. A white object in a cool color temperature may appear blue, while in a warm
+color temperature it appears yellow. The human eye is great at recognizing the true
+color of objects, while cameras often struggle to capture accurate colors under vary­
+ing lighting conditions. The nonlinear color mapping helps finetune the balance by
+projecting the corrected image onto a color­neutral space, producing more natural
+and visually pleasing results.
+• Visibility Recovery: This module improves the visibility of underwater images,
+Real­Time Image Enhancement in ROV Systems
+25
+==PAGE:36==
+which often suffer from haziness due to particles and light scattering in water. The
+method uses a concept called type­II fuzzy sets [31, 32], which helps estimate the
+uncertain visibility levels in different parts of the image. To do this, the algorithm cal­
+culates how bright and how varied the pixel values are (using the mean and standard
+deviation), and then defines a lower and upper limit for how much each pixel could
+be enhanced. These limits are combined using a modified Hamacher t­conorm to
+create an intermediate result. Finally, a transformation­based gamma correction
+[44, 45] is applied to brighten and sharpen the image.
+• Contrast Enhancement: This module increases the contrast of the image to make
+details more visible, especially in low­visibility scenes. It works by applying two
+different curve­based transformations to the input image, one using the probability
+density function of a normal distribution, and another using a soft addition function.
+These two outputs are then combined using a logarithmic image processing tech­
+nique. Finally, the image intensity is stretched using a gamma correction function,
+which helps adjust brightness and contrast in a balanced way.
+The weights for calculating the pixel intensities and the weights of the global gradient are
+then combined and normalized using a specific equation.
+The final enhanced image R(x) is computed as a weighted sum of the individual enhance­
+ment outputs:
+Wn(x) =
+w1,n(x) × w2,n(x)
+$N
+n=1 w1,n(x) × w2,n(x) + ϵ
+where w1,n(x) are the pixel intensity­based weights and w1,n(x) are the weights based on
+the global gradient.
+HFM is particularly effective due to its ability to adapt locally to pixel­level features, com­
+bining the best aspects of its components. Its simplicity, efficiency, and consistent per­
+formance across varied conditions make it a strong candidate for preprocessing in under­
+water image enhancement pipelines. In this project, it was chosen as the default prepro­
+cessing method due to its robust performance across datasets and its compatibility with
+neural network­based training workflows. Some of the results using HFM, also used later
+for training, can be seen in Figure 3.7.
+These enhanced images served as approximate ground truth for supervised training, en­
+abling the learning­based model to generalize from noisy, real­world underwater inputs to
+visually improved outputs.
+26
+Real­Time Image Enhancement in ROV Systems
+==PAGE:37==
+Figure 3.7: Visual comparison between original and enhanced images using the HFM
+method. Each pair shows the original image on the left and the corresponding enhanced
+output on the right.
+3.2
+Training Pipeline
+The following section provides an overview of the training process of the previously in
+Subsection 2.2.2 mentioned FUnIE­GAN. After a few failed Domain Adaptation attempts, it
+was concluded that the most suitable approach would be to train on the company datasets
+exclusively. With a broad variety of different lighting and water conditions, various under­
+water scenes, and different color schemes provided by the company datasets, a solid
+foundation was established for practical model training.
+3.2.1
+Domain Adaptation Attempt
+Leon C. Megginson summed up Charles Darwin’s work by saying, ”It is not the strongest
+of the species that survives, not the most intelligent that survives. It is the one that is most
+adaptable to change. The same thing can also be said about technology. The workhorse
+of Machine Learning (ML) and Artificial Intelligence (AI) – supervised learning has a se­
+vere disadvantage in that it works well when samples for training and testing both belong
+to the same distribution and are independent and identically distributed (i.i.d.). Domain
+Adaptation (DA) is a special case of Transfer Learning (TL), which supports and solves
+real­world (including in the wild) challenges by effectively applying the model trained on
+one dataset (source) for testing on another domain (target) with different distribution.”[46]
+As mentioned above, domain adaptation is a subfield of transfer learning. The idea is to
+use an existing and trained (on a source dataset) model and finetune it on a target dataset.
+In the scope of this project, the idea was to train the FUnIE­GAN model on a large public
+underwater dataset, such as the EUVP (Enhancing Underwater Visual Perception) [41] or
+the UFO­120 [47] dataset, and then finetune it on the company datasets. This approach
+is commonly used to use diverse examples from large source domains, while adapting to
+specific characteristics of a smaller target domain.
+Real­Time Image Enhancement in ROV Systems
+27
+==PAGE:38==
+The model was trained on approximately 11,500 paired images from the EUVP dataset
+using a reduced image resolution of 128×128 pixels to speed up the training. The training
+was conducted over 35 epochs with a batch size of 8 and a learning rate of 0.0003, using
+the Adam optimizer. The target domain finetuning was performed using one of the com­
+pany datasets, in total approximately 1,400 paired images from (opera_dock_u_2024_08_06).
+Finetuning was conducted over 12 epochs with a lower learning rate of 0.0001 and the
+same batch size.
+This training process was conducted using CPU­based training, resulting in longer training
+times. On average, training on the source dataset took approximately 4 hours per epoch,
+while finetuning on the smaller target dataset took around 45 minutes per epoch. To keep
+experimentation feasible, a reduced number of epochs and a lower image resolution were
+used, with some tuning of learning rates (0.0001–0.0003) and batch sizes (4–9) during
+initial testing phases. These changes did not help in output quality. The results were
+not visually acceptable. The enhanced images contained unnatural red and blue color
+distortions, especially in darker or textured areas.
+To rule out dataset­specific issues, the model was finetuned again using a different com­
+pany dataset (block5_US­1009), but the results remained poor, exhibiting similar unnatu­
+ral color artifacts. The model was tested on both pictures from the source and the target
+dataset (previously not used for training). The results can be seen in Figures 3.8 and 3.9.
+Figure 3.8: Example result on target dataset after finetuning the model trained on EUVP
+using the opera_dock dataset. Strong red and blue artifacts are visible. Each pair shows
+the original image on the left and the corresponding enhanced output on the right.
+One likely reason for this behavior is the large domain gap between the EUVP dataset
+and the company’s images. While EUVP includes a wide variety of underwater scenes, it
+is a deep­sea dataset with strong blue color distortions. However, the company datasets
+tend to have a stronger red coloration because they were conducted in ports and more
+shallow waters. As a result, the model may have overfitted to color or texture features
+common in EUVP but absent or differently represented in the company’s domain.
+Another potential issue is the distribution shift in terms of exposure and color balance.
+The company datasets tend to have more muted tones and different lighting conditions
+28
+Real­Time Image Enhancement in ROV Systems
+==PAGE:39==
+Figure 3.9: Example result on source dataset after finetuning the model trained on EUVP
+using the opera_dock dataset. Strong red and blue artifacts are visible. Each pair shows
+the original image on the left and the corresponding enhanced output on the right.
+(artificial light), especially in hazy or shadowed areas.
+Given the poor results of the domain adaptation attempts and the availability of a reason­
+ably large and diverse set of company­provided images, the final decision was to train the
+model exclusively on the company data.
+3.2.2
+Training with Company Data
+After the domain adaptation attempt, it seemed the most beneficial to train with the com­
+pany data. The model was first trained on two company datasets, opera_dock_u_2024_08_06
+and K17_scan again, with a reduced image resolution for quicker training (128x128 pix­
+els). The training was first conducted in 25 epochs with the same parameters as explained
+in the Subsection 3.2.1. After a few tests, it was determined that the best results, consid­
+ering both computational efficiency and enhancement performance, were provided by a
+learning rate of 0.0003 and a batch size of 8.
+After these tests, the final training was structured into two phases. For the initial pre­
+training, two internal datasets were used: opera_dock_u_2024_08_06 and K17_scan,
+consisting of 3,036 images and 303 validation images, respectively. Subsequently, two
+finetuning sessions were performed: one using the block5_US­1009 dataset ( 1,400 im­
+ages), and the other using the 2025_04_10 dataset ( 2,200 images).
+Training Parameters
+All trainings used the same settings for easier comparison and efficiency:
+• Image resolution: 256×256
+• Channels: 3 (RGB)
+• Batch size: 8
+• Optimizer: Adam
+• Learning rate: 0.0003
+Real­Time Image Enhancement in ROV Systems
+29
+==PAGE:40==
+• Epochs: 35 (pretraining), 15 (per finetuning)
+Hardware and Runtime
+The training was conducted using an Apple MacBook Pro (later referred to as DeviceX)
+equipped with an Apple M2 Pro chip, a 10­core Central Processing Unit (CPU) (6 perfor­
+mance cores + 4 efficiency cores), a 16­core integrated Graphics Processing Unit (GPU),
+and 16 GB of unified memory. The pretraining phase was GPU­based, while the two
+finetuning sessions were split to compare CPU and GPU performance:
+• The block5_US­1009 dataset: finetuned using CPU only. See required time per
+epoch, CPU and RAM usage in Figure 3.10
+• The 2025_04_10 dataset: finetuned using Apple’s Multi­Process Service (MPS)
+(GPU). See required time per epoch, CPU and RAM usage in Figure 3.11. Figure
+3.12 shows GPU usage during training, confirming MPS was utilized effectively.
+Figure 3.10: Finetuning using the block5_US-1009 dataset with CPU only. Top: Time
+required per epoch and average training time. Bottom: CPU and RAM usage during
+training on DeviceX.
+Figure 3.11: Finetuning using the 2025_04_10 dataset with GPU acceleration via Apple’s
+MPS. Top: Time required per epoch and average training time. Bottom: CPU and RAM
+usage during GPU­supported training on DeviceX.
+30
+Real­Time Image Enhancement in ROV Systems
+==PAGE:41==
+While training on the GPU is generally expected to result in quicker training, the dataset
+used for GPU­based finetuning contained 2.295 images, the dataset used in the CPU­
+based training only had 1.641 images. As a result, the average epoch time was higher for
+the GPU finetuning. However, by calculating the average time needed for one image, as
+shown in Table 3.1, it becomes clear that the GPU process is approximately 9.57% faster
+than the CPU process.
+Setup
+Number of images
+Epochs
+Total time (s)
+Average time
+per image (s)
+GPU
+2.295
+15
+3318,754
+0.0964
+CPU
+1.641
+15
+2624,158
+0.1066
+Table 3.1: Average time per image taken by the GPU and the CPU process during fine­
+tuning.
+Figure 3.12: GPU usage during training using Apple MPS backend (PyTorch). The value
+was between 40% and 87% as shown in Apple’s Activity Monitor.
+Loss Curves
+The training performance was monitored using generator and discriminator loss curves.
+These curves represent the values of the loss functions logged during each training iter­
+ation. The discriminator loss was computed based on a PatchGAN adversarial loss [48],
+while the generator loss was a weighted sum of several components: adversarial loss, L1
+similarity loss, perceptual content loss (based on VGG19 features), and a custom color
+balance loss.
+The color balance loss was added to minimize the strong red color distortions from the
+results. It was calculated by taking the average brightness of each color channel (RGB)
+and then measuring how different these averages are from each other. The final color
+loss term is expressed as:
+Losscolor = E[(µR −µG)2 + (µR −µB)2 + (µG −µB)2]
+This term was added to the total generator loss with a weighting factor of 3.
+lambda_color = 3
+loss_G = loss_GAN + lambda_1 * loss_1 + lambda_con * loss_con
++ lambda_color * loss_color
+Among the three training phases, the initial pretraining (on the opera_dock and K17
+datasets) showed more variation in both generator and discriminator losses. It can be
+seen in Figure 3.13. This can be explained by the diversity of these two datasets. The
+two finetuning sessions showed more stable values. The loss curves can be seen in
+Figure 3.14.
+Real­Time Image Enhancement in ROV Systems
+31
+==PAGE:42==
+Figure 3.13: Training loss curves for pretraining on the opera_dock and K17 datasets
+Figure 3.14: Training loss curves for finetuning on block5 (left) and the 2025 dataset
+(right).
+3.2.3
+Model Comparison and Runtime Evaluation on DeviceX
+In this section, the performance of the following models will be compared:
+• Original FUnIE­GAN model
+• Trained on company data (K17 and opera_dock) and fine­tuned (block5 and 2025),
+but without color correction.
+• Trained on company data (K17 and opera_dock) and fine­tuned (block5 and 2025),
+with color correction.
+The original model was acquired from the open­source Git repository from the FUnIE­
+GAN paper [9]. It was trained on the EUVP dataset [41]. The other two models were
+trained for this project on the company’s datasets.
+All three models were tested on the same eight images for the best possible comparison.
+The first two pictures are from the EUVP [41] dataset, the others are from the company’s
+datasets. The results can be seen in Figures 3.15­3.17. The original model (Figure 3.15)
+performed surprisingly well on the target dataset. Still, it has strong red discolorations,
+32
+Real­Time Image Enhancement in ROV Systems
+==PAGE:43==
+which can be due to the EUVP dataset’s strong blue undertones. It seems to have just
+shifted the colors instead of dehazing the images. The results from the second model
+(Figure 3.16), which was trained and finetuned on the company’s datasets, without the
+integration of the custom color­loss function, resulted in the poorest visual performance.
+The colors are distorted and unnatural. Lastly, the final model (Figure 3.17) delivered
+the best overall visual results. It consistently produced clearer and better­balanced im­
+ages across different underwater scenes. It also showed that it can perform well on new,
+previously unseen images.
+The three models were also compared regarding their Frames Per Second (FPS) perfor­
+mance. The goal for this project is to develop a dehazing algorithm that is real­time fea­
+sible, meaning the processing time stays under 500ms. The image resolution for these
+tests was 1280x800. As seen in Figures 3.18 and 3.19, all three models reached this
+target when running on the Apple M2 GPU with processing times around 122 −124ms
+per image. This means the system can run at over 8 FPS. When running on CPU, the
+models were much slower, taking around 1.7 to 1.8 seconds per image, about 0.5 FPS.
+This clearly shows how much faster the GPU is, even on a laptop. The three models
+had almost the same runtime, which makes sense, since their structure and size are very
+similar.
+At the time of conducting these tests, the project was still targeting deployment on the
+Jetson Xavier NX module onboard the UScanner. The goal was to develop a model that
+could deliver real­time performance using the Jetson’s built­in GPU. For this reason, the
+evaluation focused on GPU performance and visual quality, assuming that the final de­
+ployment would benefit from GPU acceleration. The decision to shift deployment to the
+operator’s laptop was made later in the project, as discussed in Chapter 6. Therefore,
+these results reflect the earlier phase of the project when the UScanner was still the in­
+tended target device.
+These results show that the final model can run in real time on modern laptops, espe­
+cially when using Python and GPU acceleration. This highlights that future deployment in
+Python, particularly on systems with GPU support, could lead to significant improvements
+in processing speed. Of course, performance may vary depending on the hardware and
+software environment, so further testing will be necessary for other setups.
+Real­Time Image Enhancement in ROV Systems
+33
+==PAGE:44==
+Figure 3.15: Image enhancement results, using the original FUnIE­GAN model
+34
+Real­Time Image Enhancement in ROV Systems
+==PAGE:45==
+Figure 3.16: Image enhancement results, using the custom trained FUnIE­GAN model,
+without the color­loss function
+Real­Time Image Enhancement in ROV Systems
+35
+==PAGE:46==
+Figure 3.17: Image enhancement results, using the custom trained FUnIE­GAN model,
+with the color­loss function
+36
+Real­Time Image Enhancement in ROV Systems
+==PAGE:47==
+Figure 3.18: FPS performance comparison between the 3 different models, using the
+CPU and MPS
+Figure 3.19: Average time per image comparison between the three different models,
+using the CPU and MPS
+Real­Time Image Enhancement in ROV Systems
+37
+==PAGE:48==
+38
+Real­Time Image Enhancement in ROV Systems
+==PAGE:49==
+4
+Model Deployment and Optimization for
+Real­Time CPU Inference
+As already mentioned in the introduction in Chapter 1, one of the decisions that had to be
+made was whether the model should run on the UScanner or the operator’s laptop via the
+UController interface. The original plan was to run it on the UScanner; many decisions
+during the initial model and training technique selection were based on this goal. This
+changed in May, when the decision, together with the company, was made to run the
+model on the operator’s laptop instead.
+The UController interface is implemented in Rust [49]. This required converting the Py­
+Torch model to a format compatible with the Rust environment. After making it compatible,
+further testing was needed to ensure it is real­time feasible.
+4.1
+ONNX Conversion and Deployment on Operator Laptop
+The final fine­tuned model, with the color­loss function, was converted to ONNX (Open
+Neural Network Exchange) format, which makes it compatible with RUST. The model was
+transformed using the torch.onnx Python library.
+The UController interface, which runs on the operator’s laptop, is written in Rust. A base­
+line Rust project was provided by Andreas Wendelboe from UVision, who also developed
+the UController software. This project was used as a starting point for connecting the
+ONNX model to the interface.
+Several additions were made to the code:
+• A padding function was added to ensure that the input images are compatible with
+the ONNX model.
+• The preprocessing step was adjusted to match the one used during model training
+and testing.
+This script is used to evaluate the ONNX model within the Rust­based interface on De­
+viceX, the same device employed during training and validation. At this stage, the device
+is not yet integrated with the UScanner.
+4.2
+Local Testing and Optimization on DeviceX
+Deploying the ONNX model in RUST, and testing it on 20 input images resulted in an av­
+erage processing time of 1,075 seconds per image. This result is quite over the desired
+500ms benchmark for processing time per image. Since DeviceX is a MacBook, the Rust
+script can only run on the CPU, as GPU access is not fully optimized in the current Rust
+setup. This, added to the high image resolution (1920x1216), results in longer processing
+times. For reference, the average time taken when running the same model on the same
+20 input images in the exact resolution on the GPU in Python was 0,229 seconds per
+image.
+Some of the results can be seen in Figure 4.1. The model performs well on the test
+images, but is not real­time feasible running on the CPU with such a high image resolution.
+Real­Time Image Enhancement in ROV Systems
+39
+==PAGE:50==
+Figure 4.1:
+Results after running the ONNX model in RUST (image resolution is
+1920x1216)
+A few optimization methods were explored to improve the model’s speed and make it
+suitable for real­time use. These include:
+• Deploying a Python FastAPI server, that runs the ONNX model using MPS. Calling
+Python from RUST.
+• Reducing image resolution (from 1920x1200 to 1280x800 and 960x600).
+• Enabling the GPU through CoreML
+• Quantization to convert the model to FP16
+• Quantization to convert the model to UINT8
+• Optimizing the model using ONNX optimizers
+• Parallelizing the Inference using multiple threads
+4.2.1
+Calling Python Inference through FastAPI from Rust
+One of the options for enabling a quicker dehazing process is to run the RUST script on the
+GPU instead of running it on the CPU. The MPS backend, however, is not yet supported
+by the RUST ort crate.
+To address this limitation, a workaround was implemented by separating the model in­
+ference from the Rust pipeline. A Python FastAPI server was created, which loads the
+ONNX model using the onnxruntime library with the MPS execution provider enabled.
+This allows the model to run on the Apple GPU on macOS devices.
+The Rust script, instead of performing inference locally, sends each image via an HTTP
+POST request to the FastAPI server. The Python backend handles all preprocessing
+steps (including padding), runs the inference on the GPU, and returns the enhanced im­
+age as a response. The Rust script then receives this image and saves it to the output
+directory. This structure maintains Rust as the controlling interface, interacting with the
+image files and managing timing, while offloading the computationally intensive model
+40
+Real­Time Image Enhancement in ROV Systems
+==PAGE:51==
+inference to Python. The integration was implemented using the reqwest crate on the
+Rust side, and FastAPI with onnxruntime and PIL on the Python side.
+Despite the goal of accelerating inference by offloading model execution to the GPU via
+FastAPI, the performance was the same, or even worse in some cases than the original
+direct Rust–ONNX implementation. The comparison can be seen in Figure 4.2. This is
+likely due to several factors. Sending images as HTTP requests introduces communi­
+cation overhead for each processed frame, which is the primary time factor here. While
+MPS allows inference on the MacBook’s GPU, its performance is still relatively limited
+compared to other mature GPU backends. Preprocessing and encoding/decoding steps
+in Python also contribute to the total processing time. Some of the results can be seen in
+Figure 4.3.
+Figure 4.2: Comparison between the original RUST­ONNX setup and the FastAPI setup
+through Python
+Figure 4.3: Results after deploying fastAPI through Python and calling it from RUST
+Real­Time Image Enhancement in ROV Systems
+41
+==PAGE:52==
+4.2.2
+Reducing Input Image Resolution
+Another method to make the process faster is to reduce the input image size. The previous
+tests were conducted with the original input image size, which is 1920x1200. The following
+image resolutions were tested:
+• Square format: 640x640, 832x832, 960x960, 1024x1024, 1280x1280, 1600x1600
+• Original 16:10 ratio format: 960x600, 1280x800, 1600x1000
+Resizing the input images turned out to be an effective way to reduce the processing time.
+Most of the reduced resolutions could be processed under the 500ms mark, making them
+real­time feasible. The average processing times per image can be seen in Figure 4.4. A
+comparison of the average processing times for three different setups, the original Rust
++ ONNX pipeline (1920x1200), and reduced input image sizes (the ones that were under
+the 500ms mark), is shown in Figure 4.5.
+Among the tested resolutions, the 16:10 ratio formats 960x600 and 1280x800 both stayed
+under the 500ms mark and still produced high­quality results. These sizes are a good bal­
+ance between speed and image clarity, especially the 1280x800, which gives a reason­
+ably detailed output while keeping processing time low. Changing the input resolution in
+the script is very easy, so this can be adjusted later depending on whether faster process­
+ing or better visual quality is more important in a specific use case. Some of the results
+for these two resolutions can be seen in Figures 4.6 and 4.7.
+Figure 4.4: Average processing times per image across different image resolutions
+42
+Real­Time Image Enhancement in ROV Systems
+==PAGE:53==
+Figure 4.5: Comparison of average processing time per image across three setups: orig­
+inal Rust + ONNX, Rust calling FastAPI (Python + MPS), and reduced input image sizes.
+Figure 4.6: Results after reducing the input image resolution to 960x600 in RUST
+Real­Time Image Enhancement in ROV Systems
+43
+==PAGE:54==
+Figure 4.7: Results after reducing the input image resolution to 1280x800 in RUST
+4.2.3
+Enabling the GPU through CoreML
+To try improving the processing time, the GPU was enabled using the CoreML execution
+provider in ONNX Runtime. This was done by adjusting the Rust inference script to use
+ExecutionProvider::CoreML , with GPU support turned on. During testing with 20 images,
+the model used around 20% of the MacBook’s GPU, which showed that CoreML was
+active. However, the processing speed stayed almost the same as when running on the
+CPU, which was unexpected.
+One possible reason for this could be that the overhead of preparing and transferring data
+to the GPU cancels out the speed gained during inference, especially for smaller models
+or when images are processed one by one. It’s also possible that the CoreML backend
+is not fully optimized for this specific type of workload. All in all, this method did not help
+decrease the processing time.
+4.2.4
+Quantization to convert the model to FP16
+Quantization is a common technique used to make machine learning models smaller and
+faster. By reducing the numerical precision of model weights and activations (e.g., from
+32­bit floats to 16­bit or 8­bit values), models use less memory, require less storage, and
+can run faster. This can also lead to lower power consumption, which is important for
+deployment on edge devices. While quantization can sometimes slightly reduce model
+accuracy, the trade­off is often worth it for real­time or resource­constrained applications.
+In this section, the focus is on converting the model to FP16 precision. INT8 quantization
+is discussed in subsection 4.2.5 [50].
+To try speeding up the inference, the final ONNX model was converted from FP32 to FP16
+format. This was done using a Python script with the float16 conversion tool. The Python
+script was obtained from an open­source Git repository [51].
+The FP16 model was tested in both Python and Rust, but unfortunately, it didn’t lead to
+any improvements in processing time. In fact, in some cases, the FP16 model performed
+slightly worse than the original FP32 model. Some of the results can be seen in Figure
+4.8. It is visible that the models perform better when deployed in Python. This can be
+explained by the fact that ONNX Runtime is more mature and better optimized for Python.
+44
+Real­Time Image Enhancement in ROV Systems
+==PAGE:55==
+The Python version has built­in support for features like hardware acceleration, caching,
+and graph optimizations. In contrast, the Rust bindings are still limited in terms of backend
+support and optimization options. Additionally, preprocessing and postprocessing are
+handled more efficiently in Python.
+Figure 4.8: Comparison between the FPS results from the ONNX model versions FP32
+and FP16 in RUST and in Python
+This can be explained by the fact that most CPUs, including the one used here (MacBook
+with M2 chip), don’t have native support for fast FP16 operations. Also, the ONNX con­
+version often adds Cast nodes before and after layers to maintain compatibility, which
+increases processing time. On top of that, the model itself (FUnIE­GAN) is not memory­
+bound, so it doesn’t benefit much from reduced precision in terms of speed.
+In short, FP16 quantization didn’t help in this case, and the original FP32 model remained
+the better option for CPU inference.
+4.2.5
+Quantization to Convert the Model to UINT8
+To make the model faster and smaller, post­training quantization was used to convert it to
+8­bit integers. This replaces 32­bit floating point (FP32) values with 8­bit integers (INT8
+or UINT8). It reduces memory usage and can make the model run faster, especially on
+edge devices.
+INT8 was the original goal, but it did not work. ONNX Runtime on macOS does not support
+some operators used in INT8 models, like ConvInteger. Because of this, UINT8 was used
+instead. The main difference is that INT8 supports both negative and positive numbers,
+while UINT8 only supports positive values. UINT8 models are sometimes easier to run on
+different systems, and are also better suited for image processing, because pixel values
+range from 0 to 255 [52].
+The UINT8 model was tested in both Python and Rust. Below, Figure 4.9 compares the
+performance (in frames per second) of the FP32 and UINT8 models at different image
+sizes:
+Real­Time Image Enhancement in ROV Systems
+45
+==PAGE:56==
+Figure 4.9: Comparison between the FPS results from the ONNX model versions FP32
+and INT8 in RUST and in Python
+As the plot shows, the Python version is faster than Rust in all cases. The Python UINT8
+model also performs better than the Rust UINT8 model. Surprisingly, UINT8 is never
+quicker than FP32. In Rust, it even runs slower at higher resolutions. This shows that
+quantization did not bring the expected speed­up.
+There are a few reasons why this might happen:
+• ONNX Runtime in Rust may not support optimized operations for UINT8 yet.
+• Some parts of the model might still run in FP32 behind the scenes.
+• CPUs on macOS might not handle 8­bit operations efficiently.
+So even though the model is smaller and works well visually, it is not faster in this case. On
+other systems with better INT8 or UINT8 support, like ARM devices or Windows machines
+with AVX2, the same model could run much faster. Quantization has potential, but on this
+setup, it did not lead to better performance.
+4.2.6
+Optimizing the Model Using ONNX Optimizers
+The model was further optimized using the ONNX Runtime transformer optimization tool
+by applying the optimize_model function from the onnxruntime.transformers.optimizer
+module. Although this tool is mainly designed for transformer models, it can still be ap­
+plied to other architectures for general graph­level optimizations. The optimization works
+by simplifying the computation graph, removing redundant operations, and fusing multi­
+ple nodes into more efficient kernels. This leads to faster inference times in supported
+environments.
+After applying the optimization, the model ran successfully in Python. However, only
+minimal improvements were seen in processing speed across all tested resolutions. In
+most cases, the optimized model was even slightly slower than the original. This is likely
+because the model was already quite efficient, and the optimization did not have many
+46
+Real­Time Image Enhancement in ROV Systems
+==PAGE:57==
+redundant operations to remove, and likely even made it less efficient. The comparison
+between the original ONNX model and the optimized ONNX model can be seen in Figure
+4.10. Both models are FP32, since that was the format that performed best, as discussed
+in subsections 4.2.4 and 4.2.5.
+Figure 4.10: Comparison between the results from the original ONNX model and the
+optimized ONNX model in Python
+The optimized model could not be loaded in the Rust­based ONNX Runtime setup. The
+error indicated that the model used an unsupported operator set (opset). Specifically, the
+optimizer added operations from an experimental domain (ai.onnx.ml with opset 4), which
+is not officially supported by the Rust ONNX Runtime backend. Rust’s ONNX Runtime
+currently only guarantees compatibility up to opset 3 for this domain. Because of this,
+loading the model fails at runtime due to unrecognized operators.
+Despite the limitation in Rust, the optimization can still be helpful when running inference
+in Python, especially in cases where memory usage or operator fusion could provide
+benefits.
+4.2.7
+Parallelizing the Inference Pipeline Using Threads
+While the current implementation of the real­time dehazing system processes images
+sequentially, future deployment could benefit significantly from the use of multi­threading
+to improve performance. Although the implementation of this functionality has not yet
+been carried out on the UScanner, since the integration of the model into the final system
+is handled by the company, this approach is presented alongside it.
+Multi­threading refers to the use of multiple threads of execution within a single program.
+Modern CPUs contain multiple cores, each capable of running a thread independently. By
+distributing distinct tasks across threads, it is possible to overlap operations that would
+otherwise block or delay the entire pipeline, making the whole process slower. In the case
+of live video dehazing, the processing steps can be divided into three stages:
+• Frame Acquisition: Capturing images from the live feed or camera (UScanner).
+Real­Time Image Enhancement in ROV Systems
+47
+==PAGE:58==
+• Inference: Running the dehazing model on the input frame.
+• Output Handling: Displaying, logging, or saving the enhanced image.
+In a single­threaded implementation, these steps occur in strict sequence, meaning that
+inference cannot begin until the frame has been read, and output is delayed until inference
+is complete. However, with multi­threading, each stage can run in its dedicated thread.
+The suggestion for this setup would look something like this:
+• Thread 1: A camera thread continuously acquires frames and sends them through
+a channel or buffer.
+• Thread 2: An inference thread reads frames from this buffer, performs model infer­
+ence, and sends the output to another channel.
+• Thread 3: An output thread receives the enhanced images and handles visualization
+or storage.
+This structure allows each component of the pipeline to operate independently and in
+parallel, reducing time and potentially increasing the overall frame rate. Importantly, such
+a design also provides flexibility to decouple slow or variable stages (e.g., inference la­
+tency) from time­critical ones (e.g., image acquisition), which is particularly relevant in
+CPU environments. Given that the ONNX model was designed with dynamic input sizes
+and optimized for fast CPU inference, this kind of threaded execution could enable faster
+dehazing of the UScanner’s video feed at higher and more stable frame rates.
+For this approach, a simulation of a real­time scenario was implemented in Rust to test
+and compare different threading strategies. The goal was to evaluate the performance
+of single­threaded and multi­threaded versions of the dehazing pipeline under conditions
+resembling live video input. Three versions of the program were tested:
+• A single­threaded version, where frame loading, inference, and saving were exe­
+cuted sequentially.
+• A multi­threaded version without any frame rate control, allowing threads to process
+images as fast as possible.
+• A multi­threaded version with an artificial delay to simulate an 8 FPS video stream,
+where each frame is sent every 125 milliseconds.
+The multi­threaded implementation was written in Rust using standard libraries such as
+std::thread , std::sync::Arc , and crossbeam_channel for thread­safe communication
+between pipeline stages. The program was structured into three main threads, already
+mentioned above. Communication between the threads was managed using message­
+passing channels, enabling a clean separation of tasks and safe data transfer.
+Each thread runs on a separate CPU core, leveraging the multi­core architecture of mod­
+ern systems. This parallelism allows the frame acquisition to continue independently while
+previous frames are still being processed or written to disk. This setup is especially ben­
+eficial in CPU­only environments where inference may take a significant fraction of the
+total processing time.
+To replicate the behavior of a live video feed, a sleep delay of 125ms was added after each
+frame acquisition in the third version. This constraint mimics the rate at which frames
+would arrive from a real 8 FPS camera, allowing performance evaluation under realistic
+timing conditions. The following line of code was used to simulate this delay:
+48
+Real­Time Image Enhancement in ROV Systems
+==PAGE:59==
+thread::sleep(Duration::from_millis(125));
+The experiment demonstrated that multi­threading not only increased throughput but also
+provided more stable timing behavior when simulating a real frame rate. This confirms that
+threaded execution can be an effective strategy for future integration into the UScanner’s
+live pipeline, especially in cases where CPU inference performance is a limiting factor.
+The comparison between the three versions can be seen in Figure 4.11.
+Figure 4.11: Comparison of the processing time for 20 images between the single­
+threaded, multi­threaded (without the artificial delay), and the multi­threaded (with the
+artificial delay) version
+4.3
+Summary of Optimization Results
+The table in Figure 4.1 presents an overview of the average frame rates (FPS) achieved
+across different optimization methods and image resolutions in RUST. The main goal of
+this project was to achieve real­time performance, defined as processing each image
+in under 500ms, which corresponds to approximately 2 FPS. This reference line helps
+evaluate whether a particular setup is suitable for live deployment. Enabling CoreML, as
+discussed in subsection 4.2.3, did not bring the expected results, so it is not included in
+this table. Optimizing the model through ONNX optimizers, as discussed in chapter 4.2.6,
+can only be deployed in Python; therefore, it is also not included.
+Resolution
+Original
+model
+FastAPI
+FP16
+UINT8
+Parallel Proc.
+(no sleep)
+Parallel Proc.
+(sleep)
+960x600
+3.42
+3.39
+3.51
+2.60
+9.72
+7.69
+1280x800
+1.99
+2.06
+2.02
+1.44
+5.90
+5.79
+1920x1200
+0.93
+0.91
+0.90
+0.54
+1.46
+1.43
+Table 4.1: FPS comparison across optimization methods and resolutions in RUST
+Real­Time Image Enhancement in ROV Systems
+49
+==PAGE:60==
+Among all tested configurations, reducing the input image resolution was the most effec­
+tive method for improving speed. Both 960x600 and 1280x800 resolutions consistently
+stayed above the 2 FPS mark across nearly all test cases. In contrast, other techniques,
+such as FP16 or UINT8 quantization and using the CoreML or FastAPI­based pipelines,
+did not provide significant improvements and, in some cases, even performed worse. The
+multi­threaded implementation showed promise in increasing throughput, especially when
+simulating a real­time scenario.
+Due to the current hardware and software limitations, especially related to GPU support
+in the Rust­based pipeline, resizing the input images remains the most practical solu­
+tion for achieving real­time performance. Future improvements could include deploying
+on systems with better quantization support (e.g., INT8­optimized hardware) or enabling
+more advanced GPU inference. A separate table comparing performance in Python is
+included, see Table 4.2, to highlight the potential of such improvements, especially when
+GPU acceleration is available. Deploying the model in Python holds great improvement
+opportunities in the future.
+Overall, the current setup provides a working and real­time feasible dehazing solution,
+particularly when input resolution is adjusted based on available computing resources.
+Resolution
+Original Model
+FP16
+UINT8
+Optimized Model
+960x600
+4.75
+4.54
+3.70
+4.68
+1280x800
+2.69
+2.57
+1.97
+2.66
+1920x1200
+1.15
+1.15
+1.13
+1.12
+Table 4.2: Comparison of FPS results for different optimization methods in Python
+50
+Real­Time Image Enhancement in ROV Systems
+==PAGE:61==
+5
+Evaluation
+This chapter presents the final evaluation of the developed underwater image enhance­
+ment model. The assessment focuses on two main aspects: runtime performance and vi­
+sual output quality. First, the model’s inference speed is analyzed to determine whether it
+meets the real­time requirement of processing each frame in under 500ms. The evaluation
+considers various optimization methods tested on a CPU. Next, the visual performance
+of the enhanced images is assessed using established no­reference image quality met­
+rics, specifically Underwater Image Quality Measure (UIQM) and Underwater Color Image
+Quality Evaluation (UCIQE). These are used to evaluate perceptual improvements in clar­
+ity, color balance, and contrast. Finally, a selection of example outputs is presented to
+visually demonstrate the model’s capabilities and limitations, including some edge cases
+where performance drops due to differences between training and test environments. To­
+gether, these evaluations provide a comprehensive understanding of how well the model
+meets the project’s goals in terms of speed, reliability, and visual quality.
+5.1
+Inference Speed on CPU
+This section provides a final evaluation of the model’s runtime performance on CPU, sum­
+marizing how well the deployment goals were met in terms of real­time processing. The
+performance results presented in Chapter 4 showed that the model, when deployed in
+Rust and executed on a MacBook with an M2 chip, met the real­time benchmark (defined
+as ≥2 FPS) under specific conditions. These results are shown in Table 4.1.
+• The most effective approach was reducing the input resolution to either 960x600 or
+1280x800. This consistently allowed the model to process images at or above the
+2 FPS threshold.
+• Other tested methods, such as quantization (FP16, UINT8), FastAPI offloading, and
+enabling GPU via CoreML, did not result in significant performance gains in the
+current environment.
+• Using multiple threads made the processing faster, especially when simulating a live
+video feed. This shows that the model can work well in real­time situations.
+Even though Python­based inference was generally faster than Rust, the primary goal of
+real­time performance on CPU was achieved in Rust as well, without needing specialized
+hardware acceleration. These results confirm that the current model setup is suitable
+for real­time deployment on standard laptops, which is a key requirement from the com­
+pany. Further speed­ups could be achieved by deploying on hardware with native INT8
+or GPU acceleration support. These possibilities will be discussed in Chapter 7.
+5.2
+Visual Output Quality
+To assess the perceptual quality of the enhanced images, two no­reference metrics,
+meaning we do not take a ground truth image, just the improved image, were used:
+the Underwater Image Quality Measure (UIQM) and the Underwater Color Image Quality
+Evaluation (UCIQE). These metrics are widely adopted for evaluating underwater image
+enhancement performance. UIQM combines three components: colorfulness, sharpness,
+and contrast, while UCIQE is based on chroma variance, luminance contrast, and satu­
+ration consistency [53, 14].
+Real­Time Image Enhancement in ROV Systems
+51
+==PAGE:62==
+The metrics were computed using Python scripts that process each image individually. For
+each resolution setup (960×600 and 1280×800), 100 enhanced images were evaluated
+using these metrics. The results were then averaged to obtain overall scores.
+To verify that the metric values were in a reasonable range, a separate test was conducted
+using 100 enhanced images from the EUVP [41] dataset. These images are assumed
+to represent high­quality enhancement, and their metric scores are therefore used as a
+reference for comparison.
+Table 5.1 shows the average UIQM and UCIQE values for each setup. The results for
+both 960×600 and 1280×800 resolutions are nearly identical, indicating that the model
+performs consistently across different image sizes. In contrast, the values obtained from
+the EUVP dataset are noticeably higher, especially for UIQM, which suggests that the
+EUVP­enhanced images are of higher perceptual quality. These reference values provide
+a helpful benchmark for interpreting the scores of the proposed method.
+Resolution / Dataset
+Average UIQM
+Average UCIQE
+960x600
+1.474
+3.290
+1280x800
+1.430
+3.384
+EUVP (reference)
+2.696
+3.916
+Table 5.1: Average UIQM and UCIQE scores computed for 100 enhanced images at two
+different resolutions, compared against reference values from the EUVP dataset. Closer
+proximity to the EUVP reference indicates better perceptual quality.
+Figures 5.1­5.3 show the results for 100 images from the EUVP dataset, as well as 100
+enhanced images processed by the dehazing model at resolutions of 1280×800 and
+960×600. When evaluating these results, it also has to be considered that the EUVP
+dataset consists of deep­sea images with bright and vibrant colors.
+In contrast, the
+company datasets were collected in shallow port waters, where conditions are generally
+murkier and less colorful. Considering all of this, the results are auspicious.
+Figure 5.1: UIQM and UCIQE scores for the EUVP dataset
+52
+Real­Time Image Enhancement in ROV Systems
+==PAGE:63==
+Figure 5.2: UIQM and UCIQE scores for enhanced images at 1280×800 resolution
+Figure 5.3: UIQM and UCIQE scores for enhanced images at 960×600 resolution
+5.3
+Example Outputs
+To further illustrate the performance of the final model, this section presents visual results
+for a range of enhanced images. The examples are grouped by resolution (960x600 and
+1280x800) and include both typical results and cases where the model did not perform
+optimally.
+Figures 5.4 and 5.5 show side­by­side comparisons of raw input images and the enhanced
+outputs at 960×600 and 1280×800 resolutions. These examples highlight the model’s
+ability to improve visibility, contrast, and overall clarity in murky port environments. In
+most cases, important structural and textural details become more pronounced after en­
+hancement.
+While the model performs reliably across most samples, some edge cases remain. Fig­
+ures 5.6 and 5.7 show examples where the enhancement introduces color distortions.
+These typically occur in images that differ significantly from the training data, such as
+scenes with very bright lighting or dominant blue tones. The model, having been trained
+mostly on reddish or orange murky waters from UVision ports, can overcorrect or shift
+hues in unfamiliar visual conditions.
+Real­Time Image Enhancement in ROV Systems
+53
+==PAGE:64==
+These outputs confirm that the model is well­suited for the environments it was trained on,
+but may benefit from additional training or tuning when applied to more diverse underwater
+conditions.
+Figure 5.4: Example enhancements using the final model at 960×600 resolution. Input
+images are shown on the left; enhanced outputs are on the right.
+Figure 5.5: Example enhancements using the final model at 1280×800 resolution. Input
+images are shown on the left; enhanced outputs are on the right.
+54
+Real­Time Image Enhancement in ROV Systems
+==PAGE:65==
+Figure 5.6: Examples of color distortion after enhancement at 960×600 resolution. These
+cases typically involve brighter or bluer underwater scenes that differ from the training
+distribution.
+Figure 5.7: Examples of color distortion after enhancement at 1280×800 resolution. Color
+shifts can be seen in scenes that have clearer water or stronger blue tones.
+Real­Time Image Enhancement in ROV Systems
+55
+==PAGE:66==
+56
+Real­Time Image Enhancement in ROV Systems
+==PAGE:67==
+6
+Discussion
+This chapter reflects on the key decisions, constraints, and challenges that shaped the
+final solution. It begins with a review of the shift in deployment strategy, from a GPU­
+capable embedded system to a CPU­only operator laptop, and the impact this had on the
+project’s direction. The discussion then explores how the lack of GPU support influenced
+model optimization, including trade­offs between speed and image quality. Limitations
+related to deploying the solution across different platforms are also considered, along with
+the risk of model bias due to the specific nature of the training data. These reflections
+provide context for understanding both the strengths and the boundaries of the current
+implementation.
+6.1
+Impact of Deployment Decision Shift
+An important turning point in the project occurred when it was decided that the model
+would be deployed on the operator’s laptop rather than on the Jetson Xavier NX module
+integrated in the UScanner. The original plan had assumed deployment on the Xavier
+NX, which comes with a dedicated GPU. This hardware capability initially shaped many
+early design choices, including the selection of a moderately lightweight but GPU­friendly
+model, the decision to work with higher input resolutions, and the intention to explore
+GPU­accelerated inference using CUDA or TensorRT.
+When the deployment target changed in a later stage of the project, many of these initial
+assumptions had to be reevaluated. Unlike the Xavier NX, the operator’s laptop required
+the model to run efficiently on CPU, as GPU availability was no longer guaranteed. At
+that point, the core model and training process were already finalized, so starting from
+scratch with a new architecture explicitly optimized for CPU use was not feasible within
+the project’s time frame.
+As a result, the focus shifted to adjusting the existing model and inference pipeline to
+work under new constraints. This included converting the model to a CPU­compatible
+format, optimizing preprocessing steps, reducing input image resolution, and exploring
+lightweight inference techniques such as quantization and multi­threading. The change
+added complexity but also provided valuable insights into the challenges of adapting ma­
+chine learning models to different deployment environments.
+6.2
+Why a Trainable Model Was Chosen Over Direct
+Preprocessing
+A key decision in this project was to use a trainable model rather than directly deploying
+an existing enhancement algorithm. This choice was driven by both the limitations of
+the available data and the long­term goals of the company. The image data collected by
+UVision was largely unpaired and of poor quality—murky, low­contrast, and lacking clear
+reference targets. To enable supervised learning, preprocessing was used to generate
+synthetic “target” images. These served as stand­ins for ground truth during training.
+While it may seem natural to deploy the best­performing preprocessing algorithm directly
+in the final system, this approach has several drawbacks. First, it locks the enhancement
+process into a fixed pipeline that is difficult to tune or extend. Second, it limits the ability
+to add domain­specific constraints, such as custom loss functions, like the color­balance
+loss introduced in this project. Most importantly, the company expressed a need for a
+Real­Time Image Enhancement in ROV Systems
+57
+==PAGE:68==
+retrainable and future­proof solution. By creating a trainable model, UVision gains the
+ability to improve performance over time as new and better data become available. The
+resulting pipeline is thus not only a solution to the current data problem but a foundation
+for future iterations of underwater visual enhancement.
+6.3
+Why GPU Deployment was not Prioritized
+Most of UVision’s clients operate on platforms that do not have dedicated GPU support. As
+a result, the company prioritized deploying the image enhancement model on CPU rather
+than targeting GPU acceleration. The target use case includes real­time processing on
+machines without discrete graphics cards, making CPU inference the most practical and
+broadly compatible solution.
+The deployment was also carried out using the Rust programming language. While Rust
+is efficient and well­suited for performance­critical applications, GPU support in the Rust
+ONNX Runtime ecosystem is limited, especially on macOS. Although ONNX Runtime
+supports various GPU execution providers like CUDA (on Windows/Linux) or CoreML (on
+macOS), the CoreML backend offers only minimal performance improvements for this
+model. In some cases, CoreML defaults back to CPU execution, particularly when using
+models with dynamic input shapes like in this case. According to GitHub discussions
+and ONNX Runtime documentation, dynamic shapes are often unsupported by CoreML,
+which can lead to the fallback to CPU inference even when CoreML is enabled [54, 55].
+Additionally, ONNX Runtime’s CoreML integration is still under development and does not
+offer the same level of optimization as CUDA on supported hardware. The limited GPU
+gains observed during testing confirmed that relying solely on CPU inference is currently
+the most robust and portable approach for the target environment.
+Potential GPU­related performance improvements, especially on Windows and Linux sys­
+tems using CUDA or other providers, will be discussed in Section 7.3 of Chapter 7.
+6.4
+Reflections on CPU Constraints and the Speed–Quality
+Trade­off
+The decision to deploy the model on the CPU introduced several practical challenges that
+influenced the overall design and optimization strategy. Many of the deployment­oriented
+optimization methods discussed in Section 4.2 were driven by this constraint. While the
+original plan had considered GPU­based inference, the switch to CPU meant that achiev­
+ing acceptable processing speed became a key priority. FunIE­GAN was initially chosen
+for its lightweight architecture, which made it a better fit for real­time performance on less
+powerful hardware.
+The most effective approach, when trying to achieve a faster processing time, turned out to
+be reducing the input resolution. Lowering the image size led to significantly quicker pro­
+cessing while still producing visually solid results. Especially with resolutions like 960x600
+and 1280x800, the model stayed within the target processing time of under 500ms per
+frame and maintained reasonable visual quality. These sizes offered a good balance
+between clarity and performance.
+This trade­off between speed and image quality is an essential part of real­time deploy­
+ment. While higher resolutions (e.g., 1920x1200) gave sharper outputs, they were too
+slow to be used in a live setting. On the other hand, very low resolutions may process
+quickly but can lose critical visual details.
+58
+Real­Time Image Enhancement in ROV Systems
+==PAGE:69==
+Looking forward, these parameters, especially image resolution, can be adjusted depend­
+ing on the specific needs of a deployment. If speed is more important, lower resolutions
+can be used. If visual clarity is the priority, the resolution can be increased at the cost of
+slower performance. The current structure allows for this flexibility going forward.
+6.5
+Limitations of deployment across different devices
+While the model performs well on the current test setup, a macOS device using the Rust­
+based interface, deploying it on other platforms may introduce new challenges. Different
+operating systems and hardware configurations can affect both compatibility and perfor­
+mance.
+For instance, ONNX Runtime behavior can vary between macOS, Windows, and Linux.
+Some execution providers, such as CoreML, are only available on macOS and are not
+supported on other systems. On the other hand, Windows and Linux offer better support
+for CUDA, which enables high­performance inference on NVIDIA GPUs, something not
+available in the current macOS test environment.
+Quantized models, such as those using INT8 or UINT8, also behave differently across
+platforms. Certain operators used in INT8 models (e.g., ConvInteger) are not supported in
+ONNX Runtime on macOS, which caused runtime failures during testing, see subsection
+4.2.5. However, community discussions and ONNX Runtime documentation suggest that
+these operators have more mature support on Windows and Linux systems, particularly
+on hardware with AVX2 or VNNI instruction sets [56, 57]. This means quantized models
+that failed or underperformed on macOS may work well on other systems.
+Overall, the current implementation is optimized for macOS with CPU inference, but future
+deployments on different operating systems will require additional testing. Differences
+in available backends, instruction sets, and ONNX operator support could significantly
+impact performance, compatibility, and real­time feasibility.
+6.6
+Potential Bias
+The final model was trained and fine­tuned using datasets collected from various UVision
+port environments. While these datasets include a wide range of conditions, they still
+represent a specific type of underwater scene, mainly murky, shallow water with reddish
+or orange color casts. As a result, the model has become particularly tuned to these visual
+characteristics.
+This can introduce a bias when the model is applied to environments that are visually
+different. For example, images captured in clearer water or scenes with strong blue or
+green tones may lead to color distortions in the enhanced output. In such cases, the model
+may overcorrect or shift the colors in a way that reflects the training data distribution rather
+than the actual conditions in the new environment.
+Some examples of this behavior are shown in Section 5.3, where the model struggles
+with very clear or very bright underwater images. These results highlight the influence
+of the training data and show that performance may drop when the model is used in
+environments it has not seen before.
+To mitigate this bias in the future, a more diverse training dataset that encompasses dif­
+ferent water types, lighting conditions, and color distributions would be beneficial. This
+would enable the model to generalize more effectively and perform more consistently
+across various underwater environments.
+Real­Time Image Enhancement in ROV Systems
+59
+==PAGE:70==
+60
+Real­Time Image Enhancement in ROV Systems
+==PAGE:71==
+7
+Conclusion and Future Work
+7.1
+Summary of Work
+The goal of this thesis was to develop an underwater image enhancement model that
+can run in real time, defined as processing each frame in under 500ms on the operator’s
+laptop. While the original deployment target was the Jetson Xavier NX, which includes
+a dedicated GPU, the plan changed more than halfway through the project. The new
+goal became a CPU­only deployment through UVision’s operator laptop interface. This
+required a significant shift in focus, from GPU­accelerated inference to CPU­efficient op­
+timization, forcing a rethinking of the deployment pipeline under stricter constraints. As a
+result, the final model is not only capable of meeting the performance target, but is also
+more adaptable, providing support for both CPU and GPU. Further, despite this shift, a
+real­time dehazing solution was successfully developed, achieving the main objective and
+sub­goals of this thesis.
+The lightweight FUnIE­GAN model was selected and trained using the company’s internal
+datasets, as described in Subsection 2.2.2. Since no clean training targets were avail­
+able, several preprocessing methods were evaluated to generate suitable ”ground truth”
+images for supervised training. Rather than deploying a preprocessing algorithm directly,
+this allowed training a flexible and extensible model, one that UVision can retrain in the fu­
+ture as better data becomes available. Various preprocessing and optimization methods
+were explored, and the most effective approach for reaching the 2 FPS benchmark was
+reducing the input image resolution, detailed in Subsection 4.2.2. The final model runs
+within the target time limit when using input resolutions such as 960x600 or 1280x800.
+To integrate the model into UVision’s existing infrastructure, the PyTorch model was con­
+verted to ONNX format. A baseline Rust script provided by Andreas Wendelboe (UVision)
+was used as the starting point. Building on this, several additional Rust scripts were writ­
+ten to test and compare different optimization techniques, including quantization, CoreML
+acceleration, and multi­threading, as discussed in Section 4.2. A parallelized version of
+the pipeline was also implemented, making better use of available CPU cores, as covered
+in Subsection 4.2.7.
+The final model is ready to be integrated into UVision’s Rust­based interface. Since the
+current frontend is in Java and the backend is in Rust, the company plans to convert the
+frontend to Rust as part of the complete system integration. UVision will handle this part
+of the deployment after the thesis project ends.
+All source code of this thesis can be found on GitHub1.
+7.2
+Challenges and Solutions Summary
+This thesis addressed a range of practical and technical challenges encountered when
+developing a real­time underwater dehazing model for ROV operator support. These chal­
+lenges arose not only from the nature of underwater imagery but also from the deployment
+environment and system­level requirements. The following outlines the main challenges
+and summarizes the strategies implemented to meet them:
+• Murky visual conditions in port environments and lack of ground truth.
+Solution: Preprocessing was used to generate target images for supervised training,
+1https://github.com/EszBit/real_time_dehazing_in_ROV_systems
+Real­Time Image Enhancement in ROV Systems
+61
+==PAGE:72==
+as no high­quality ground truth data existed. A learning­based model (instead of
+a static preprocessing algorithm) was developed to enable future improvements,
+such as fine­tuning on new data, testing loss functions (e.g., color balance loss),
+and supporting hardware­specific retraining [8, 9].
+• Strict runtime constraints for real­time deployment.
+Solution: All design choices were centered around the 500ms per­frame processing
+target. The final model was deployed in Rust and extensively tested under various
+optimization strategies, including resolution scaling, quantization, FastAPI­based
+GPU offloading, and multi­threaded CPU inference. Real­time performance (≥2
+FPS) was achieved using image resizing and threading [10].
+• Limited hardware support and platform compatibility.
+Solution: The shift from Jetson Xavier NX to general­purpose operator laptops, often
+without GPU support, required CPU­focused deployment. The model was converted
+to ONNX and tested using Rust­compatible runtimes, under macOS and CPU­only
+conditions. Limitations of GPU access and backend support (e.g., CoreML, INT8)
+were evaluated and documented [11].
+• Bias in training data and overfitting to specific conditions.
+Solution: The final model was trained exclusively on UVision’s port environments,
+which led to strong performance in murky red­toned scenes but caused color shifts
+in unfamiliar (e.g., blue­clear) conditions. These edge cases were analyzed, and
+recommendations for collecting more diverse training data were provided [12].
+• Difficulties in measuring image quality objectively.
+Solution: Since ground truth images were not available, no­reference image quality
+metrics (UIQM and UCIQE) were used for objective evaluation. These scores, com­
+bined with visual inspection and comparison to the EUVP dataset, helped validate
+the model’s enhancement quality [13, 14].
+Together, these solutions contributed to a robust, real­time capable underwater dehazing
+pipeline that is portable, extendable, and ready for integration into UVision’s operational
+systems. Additionally, a comprehensive and modular training workflow was developed,
+encompassing data preparation, training, fine­tuning, and evaluation scripts. This en­
+ables the company to retrain the model on new data, adapt to varying conditions, or test
+alternative configurations without needing to start from scratch.
+7.3
+Suggestions for Further Improvements
+While the final model achieved the target performance on CPU and is ready for deploy­
+ment, several approaches exist for further improvement and future development.
+• Training with more diverse data: The current model was trained on a specific set
+of underwater images, mainly collected from UVision’s port environments. This in­
+troduced a bias, especially toward reddish, murky water conditions. Training with
+a broader dataset that includes a wider range of lighting, color conditions, and un­
+derwater scenes (such as clear blue ocean water or deep­sea imagery) could help
+the model generalize better and reduce color distortions in unfamiliar environments.
+The company could also consider creating dedicated models for different scenarios
+if needed.
+Additionally, the model was trained with downscaled image resolutions and lim­
+ited epochs to reduce training time due to resource constraints. Longer training
+on higher­resolution images could potentially improve visual quality, especially in
+62
+Real­Time Image Enhancement in ROV Systems
+==PAGE:73==
+fine textures and edges. Since the training pipeline is now established, the com­
+pany can reuse the preprocessing and supervised training setup as soon as more
+diverse data becomes available. All scripts developed for training and evaluation
+will be delivered with thorough documentation, allowing the process to be repeated
+or extended by the company.
+• Deploying with GPU acceleration: Although this project focused on CPU­based
+deployment due to current client hardware limitations, many systems could benefit
+from GPU inference. ONNX Runtime provides strong support for CUDA­based GPU
+inference on Windows and Linux platforms. Using the CUDA Execution Provider on
+these systems enables significant performance improvements, especially for Con­
+volutional neural networks (CNNs) like FUnIE­GAN [58, 59].
+In future setups, GPU acceleration could be enabled either for live deployment or
+for faster offline processing tasks. This could also allow for using higher­resolution
+inputs without compromising frame rate. Additionally, INT8 or FP16 models could
+perform better when deployed on systems that support advanced instruction sets
+(e.g., AVX2 or VNNI), which are common in modern GPUs and Windows/Linux con­
+figurations [56, 57].
+• Deploying ONNX models in Python: All deployment in this thesis was performed
+using Rust, as that is the language used by the company’s interface. However,
+ONNX Runtime has significantly more mature support in Python, including full ac­
+cess to optimized backends like CUDA, TensorRT, and OpenVINO [60]. The Python
+API supports features such as graph optimizations, memory reuse, and dynamic
+execution provider selection, which can lead to faster inference and easier exper­
+imentation [61]. In future projects, Python­based deployment could be explored,
+particularly for prototyping or testing performance trade­offs.
+Real­Time Image Enhancement in ROV Systems
+63
+==PAGE:74==
+64
+Real­Time Image Enhancement in ROV Systems
+==PAGE:75==
+Bibliography
+[1]
+Kashif Iqbal et al. Enhancing the low quality images using Unsupervised Colour
+Correction Method. 2010. URL: https://ieeexplore.ieee.org/document/5642311.
+[2]
+Marek Žuži et al. Impact of Dehazing on Underwater Marker Detection for Aug­
+mented Reality. 2018. URL: https://www.frontiersin.org/journals/robotics- and-
+ai/articles/10.3389/frobt.2018.00092/full.
+[3]
+Weikai He Yue Zhang Fuchun Yang. An approach for underwater image enhance­
+ment based on color correction and dehazing. 2020. URL: https://journals.sagepub.
+com/doi/10.1177/1729881420961643.
+[4]
+Asanka Dilshan. Why Underwater Photos Look Dull. URL: https://aaapresets.com/
+blogs/lightroom-tricks/why-underwater-photos-look-dull-and-how-presets-luts-can-fix-
+them?srsltid=AfmBOoqMJXH8DSuCIQY1SgKDhTmx07uf_xBOrq1dOVqU3DGC1DK_
+o4Kl.
+[5]
+Jarina Raihan Ahamed, Pg Emeroylariffion Abas, and Liyanage C De Silva. Review
+of underwater image restoration algorithms. 2019. URL: https://www.researchgate.
+net/publication/334296369_Review_of_underwater_image_restoration_algorithms.
+[6]
+Dana Berman, Tali Treibitz Levy, and Shai Avidan. “Underwater single image color
+restoration using haze­lines and a new quantitative dataset”. In: (2017), pp. 6790–
+6799. DOI: 10.1109/CVPR.2017.717.
+[7]
+Prashant Uplavikar, Md Jahidul Islam, and Junaed Sattar. “All­In­One Underwater
+Image Enhancement using Domain­Adversarial Learning”. In: arXiv preprint arXiv:1905.13342
+(2019). URL: https://arxiv.org/abs/1905.13342.
+[8]
+Harshit Gupta, Kaushik Mitra, and Rakesh Anantharaman. “Underwater image en­
+hancement using CNN”. In: IEEE Transactions on Image Processing (2019).
+[9]
+Islam Md Jahidul, Xia Youya, and Sattar Junaed. “Fast Underwater Image Enhance­
+ment for Improved Visual Perception”. In: IEEE Robotics and Automation Letters
+(2020), pp. 3227–3234.
+[10]
+Jie Zhou, Xiaojun Wang, and Zhiqiang Feng. “Real­time Underwater Image En­
+hancement on Edge Devices”. In: IEEE Access 10 (2022), pp. 13772–13784.
+[11]
+ONNX Runtime: Cross­platform, high performance scoring engine for ML models.
+https://onnxruntime.ai/docs/.
+[12]
+Chongyi Li, Jia Guo, and Chuang Guo. “A Hybrid Method for Underwater Image En­
+hancement Based on Machine Learning”. In: 2016 IEEE International Conference
+on Image Processing (ICIP). IEEE. 2016, pp. 341–345.
+[13]
+Karen Panetta, Chen Gao, and Sos Agaian. “Underwater image quality measure”.
+In: IEEE Transactions on Image Processing 24.12 (2015), pp. 6062–6071.
+[14]
+Ming Yang and Arcot Sowmya. “A benchmark metric for underwater image en­
+hancement”. In: IEEE Transactions on Image Processing 24.12 (2015), pp. 6062–
+6071.
+[15]
+Tasfia Chowdhury Supty. Image Restoration vs. Enhancement. 2024. URL: https:
+//retouchinglabs.com/image-restoration-vs-enhancement/.
+[16]
+HCL Technologies. Traditional Image Processing vs. Deep Learning. Whitepaper.
+2021. URL: https://www.imveurope.com/sites/default/files/content/white-paper/
+pdfs/HCL_IMVE_WP-ImageProcessing_vs_DL.pdf.
+[17]
+Hrithick Sen. Understanding GANs — Deriving the Adversarial loss from scratch.
+2021. URL: https://medium.com/analytics-vidhya/understanding-gans-deriving-the-
+adversarial-loss-from-scratch-ccd8b683d7e2.
+Real­Time Image Enhancement in ROV Systems
+65
+==PAGE:76==
+[18]
+Henri Hoyez et al. “Unsupervised Image­to­Image Translation: A Review”. In: MDPI
+(2022). URL: https://pmc.ncbi.nlm.nih.gov/articles/PMC9654990/pdf/sensors-22-
+08540.pdf.
+[19]
+Nick Barney. What is image­to­image translation? 2024. URL: https://www.techtarget.
+com/searchenterpriseai/definition/image-to-image-translation.
+[20]
+esri Developer. How Pix2Pix works. URL: https://developers.arcgis.com/python/
+latest/guide/how-pix2pix-works/.
+[21]
+Hong Bian Xi Zhao Haizheng Yu. Image to Image Translation Based on Differential
+Image Pix2Pix Model. 2023. URL: https://www.sciencedirect.com/org/science/
+article/pii/S1546221823001145.
+[22]
+esri Developer. How CycleGAN Works? URL: https://developers.arcgis.com/python/
+latest/guide/how-cyclegan-works/.
+[23]
+Guangyi Tang et al. “An Improved CycleGAN­Based Model for Low­Light Image En­
+hancement”. In: IEEE (2024). URL: https://ieeexplore.ieee.org/document/10190309.
+[24]
+U­Net Architecture Explained. 2025. URL: https://www.geeksforgeeks.org/machine-
+learning/u-net-architecture-explained/.
+[25]
+Conditional Generative Adversarial Network. 2025. URL: https://www.geeksforgeeks.
+org/deep-learning/conditional-generative-adversarial-network/.
+[26]
+Omar S. Al­Kadi Alaa Abu­Srhan Mohammad A.M. Abushariah. “The effect of loss
+function on conditional generative adversarial networks”. In: ScienceDirect (2022).
+URL: https://www.sciencedirect.com/science/article/pii/S1319157822000519.
+[27]
+Melanie. “What is a Conditional Generative Adversarial Network (cGAN)?” In: Data­
+Scientest (2023). URL: https : / / datascientest . com / en / what - is - a - conditional -
+generative-adversarial-network-cgan.
+[28]
+Zhou Jingchun et al. “Underwater camera: improving visual perception via adaptive
+dark pixel prior and color correction”. In: International Journal of Computer Vision
+(2023), pp. 1–19.
+[29]
+Zhang Weidong et al. “Underwater Image Enhancement via Piecewise Color Cor­
+rection and Dual Prior Optimized Contrast Enhancement”. In: IEEE Signal Process­
+ing Letters (2022).
+[30]
+An Shunmin et al. “HFM: A hybrid fusion method for underwater image enhance­
+ment”. In: Engineering Applications of Artificial Intelligence (2023). URL: https://
+www.sciencedirect.com/science/article/pii/S0952197623014033.
+[31]
+Carmel Gafa. An Introduction to Type­2 Fuzzy Sets. 2021. URL: https://medium.
+com/data-science/type-2-fuzzy-sets-812c5b4d602d.
+[32]
+Adnan Mazraeh. Week 8: Type­2 Fuzzy Systems. 2025. URL: https://medium.com/
+@adnan.mazraeh1993/week-8-type-2-fuzzy-systems-ac63b035b1c3.
+[33]
+Xinjie Li et al. Enhancing Underwater Image via Adaptive Color and Contrast En­
+hancement, and Denoising. 2021. arXiv: 2104.01073 [cs.CV]. URL: https://arxiv.
+org/abs/2104.01073.
+[34]
+Zhang Weidong, Wang Yudong, and Li Chongyi. “Underwater Image Enhancement
+by Attenuated Color Channel Correction and Detail Preserved Contrast Enhance­
+ment”. In: IEEE Journal of Oceanic Engineering. 2022.
+[35]
+Peixian Zhuang et al. “Underwater Image Enhancement with Hyper­Laplacian Re­
+flectance Priors”. In: IEEE Transactions on Image Processing (2022). Preprint avail­
+able at GitHub. URL: https://github.com/zhuangpeixian/HLRP/blob/main/Underwater%
+20Image%20Enhancement%20With%20Hyper-Laplacian%20Reflectance%20Priors.pdf.
+[36]
+Liu Jun et al. “Rank­One Prior: Real­Time Scene Recovery”. In: IEEE Transactions
+on Pattern Analysis and Machine Intelligence 45.7 (2023), pp. 8845–8860. DOI:
+10.1109/TPAMI.2022.3226276.
+66
+Real­Time Image Enhancement in ROV Systems
+==PAGE:77==
+[37]
+Data Monsters. A Quick Overview of Methods to Measure the Similarity Between
+Images. 2020. URL: https://medium.com/@datamonsters/a- quick- overview- of-
+methods-to-measure-the-similarity-between-images-f907166694ee.
+[38]
+Chaim Eichler. Normalized Absolute Error: A Novel Loss Function for Regression
+Tasks. 2024. URL: https://medium.com/@eichlerchaim/normalized-absolute-error-a-
+novel-loss-function-for-regression-tasks-3882f0596f64.
+[39]
+The Normalized Cross Correlation Coefficient. URL: https://xcdskd.readthedocs.io/
+en/latest/cross_correlation/cross_correlation_coefficient.html.
+[40]
+Signal to Noise Ratio (SNR). URL: https://www.teledynevisionsolutions.com/learn/
+learning-center/imaging-fundamentals/signal-to-noise-ratio-snr/.
+[41]
+The EUVP dataset. URL: https://irvlab.cs.umn.edu/resources/euvp-dataset.
+[42]
+Nich Pai. Gray­World Assumption in Computer Vision. 2024. URL: https://medium.
+com/@weichenpai/gray-world-assumption-in-computer-vision-0a6612c1420a.
+[43]
+Tutorials: White Balance. URL: https://www.cambridgeincolour.com/tutorials/white-
+balance.htm.
+[44]
+Understanding Gamma Correction. URL: https : / / www . cambridgeincolour . com /
+tutorials/gamma-correction.htm.
+[45]
+Zahraa Amar Hashim Noor Fahem Sahib. “Contrast Image Enhancement By Gamma
+Correction”. In: IISTE (2018). URL: https : / / scispace . com / pdf / contrast - image -
+enhancement-by-gamma-correction-3upr34p2k1.pdf.
+[46]
+Peeyush Singhal et al. “Domain Adaptation: Challenges, Methods, Datasets, and
+Applications”. In: IEEE (2023). URL: https://ieeexplore.ieee.org/stamp/stamp.jsp?
+tp=&arnumber=10017290.
+[47]
+The UFO­120 Dataset. URL: https://irvlab.cs.umn.edu/resources/ufo-120-dataset.
+[48]
+Understanding GAN Loss Functions. URL: https : / / neptune . ai / blog / gan - loss -
+functions.
+[49]
+RUST. URL: https://www.rust-lang.org/.
+[50]
+Introduction to AI Model Quantization Formats. URL: https://medium.com/@tubelwj/
+introduction-to-ai-model-quantization-formats-dc643bfc335c.
+[51]
+FP16 ONNX Converter Git Repository. URL: github.com/microsoft/onnxconverter-
+common/blob/master/onnxconverter_common/float16.py.
+[52]
+Difference in performance between using int8 and uint8. URL: https://massedcompute.
+com/faq-answers/?question=Can%20you%20explain%20the%20difference%20in%
+20performance%20between%20using%20int8%20and%20uint8%20data%20types%
+20in%20machine%20learning%20algorithms?#:~:text=Key%20Differences%20Between%
+20int8%20and,is%20processed%20in%20quantized%20models..
+[53]
+Karen Panetta, Chen Gao, and Sos Agaian. “Human­visual­system­inspired under­
+water image quality measures”. In: IEEE Journal of Oceanic Engineering (2016),
+pp. 541–551.
+[54]
+Microsoft. ONNX Runtime GitHub Issue on CoreML Fallback. https://github.com/
+microsoft/onnxruntime/issues/14212. Accessed: 2025­07­09. 2023.
+[55]
+Microsoft Open Source Blog. Scaling PyTorch Inference with ONNX Runtime. https:
+//opensource.microsoft.com/blog/2022/04/19/scaling-up-pytorch-inference-serving-
+billions-of-daily-nlp-inferences-with-onnx-runtime/. Accessed: 2025­07­09. 2022.
+[56]
+ONNX Runtime Contributors. ONNX Runtime INT8 Quantization Support on Win­
+dows. Accessed: 2025­07­08. 2023. URL: https://onnxruntime.ai/docs/performance/
+quantization.html.
+[57]
+ONNX Runtime Contributors. ONNX Runtime: Linux Execution Providers and INT8
+Support. Accessed: 2025­07­08. 2023. URL: https://onnxruntime.ai/docs/execution-
+providers/.
+Real­Time Image Enhancement in ROV Systems
+67
+==PAGE:78==
+[58]
+ONNX Runtime: CUDA Execution Provider. Accessed July 2025. URL: https://
+onnxruntime.ai/docs/build/eps.html#cuda-execution-provider.
+[59]
+ONNX Runtime GitHub: CUDA Execution Provider Overview. Accessed July 2025.
+URL: https : / / github . com / microsoft / onnxruntime / blob / main / docs / execution _
+providers/CUDA.md.
+[60]
+ONNX Runtime Python API Overview. Accessed July 2025. URL: https://onnxruntime.
+ai/docs/api/python/.
+[61]
+ONNX Runtime Python API Examples. Accessed July 2025. URL: https://onnxruntime.
+ai/docs/build/eps.html#python-api-examples.
+68
+Real­Time Image Enhancement in ROV Systems
+==PAGE:79==
+Real­Time Image Enhancement in ROV Systems
+69
+==PAGE:80==
+Technical
+University of
+Denmark
+Brovej, Building 118
+2800 Kgs. Lyngby
+Tlf. 4525 1700
+www.byg.dtu.dk

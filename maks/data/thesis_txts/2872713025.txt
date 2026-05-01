@@ -1,0 +1,2489 @@
+==PAGE:1==
+M.Sc. Thesis
+Inducing Point Laplace Approximations
+in Deep Learning
+Author
+Niels Raunkjær Holm
+Supervisor
+Søren Hauberg
+Kongens Lyngby 2025
+==PAGE:2==
+i
+.
+The frontpage image was created via generative AI, from an existing image made by the author and a text
+prompt.
+DTU Compute
+Department of Applied Mathematics and Computer Science
+Technical University of Denmark
+Matematiktorvet
+Building 303B
+2800 Kongens Lyngby, Denmark
+compute@compute.dtu.dk
+www.compute.dtu.dk
+==PAGE:3==
+Summary
+We present KL inducing points Linearized Laplace Approximations (KiLLA), a framework de-
+signed to scale up the linearized Laplace approximation by addressing 2 major challenges: 1.
+linear scaling of runtime cost with the size of the dataset, 2. quadratic scaling of memory cost of
+the posterior covariance matrix with the number of neural network parameters. 1. is addressed
+via an inducing point approximation, optimized via a Kullback-Leibler divergence objective –
+hence the name – and 2. is addressed via matrix free algorithms for inducing point optimization
+and sampling, built on linear operator oracles and various approximations that bypass the need
+to materialize the covariance matrix.
+KiLLA is shown to work well for 2-dimensional classification on various accuracy and calibra-
+tion metrics. It also shows promise for more complex problems in higher-dimensional domains,
+demonstrated in image classification on MNIST and FashionMNIST, where it performs especially
+well in out-of-distribution detection.
+Finally, KiLLA is demonstrated to run on a 1 million parameter ResNet model trained on
+CIFAR10, although further research is needed to properly gauge performance, since such large-
+scale experiments exceed our current computational and memory resource budget for the current
+state of the framework.
+Code for the project that contains all model architectures and can generate/download the
+datasets can be found at:
+Code Repository
+github.com/nrholm1/Laplace-Inducing-Points
+==PAGE:4==
+Preface
+Thesis structure. After motivating the field of Bayesian deep learning and presenting the
+setting in chapter 1, we dive into the high-level theory of linearized Laplace approximations
+(LLA), their connections to Gaussian processes, and how we might motivate an optimization
+procedure for compressing the LLA posterior.
+Afterwards in chapter 3, we will go into the lower-level theory, presenting the computational
+linear algebra methods needed to create a tractable optimization procedure. We will also discuss
+the trade-offs and design decisions made when engineering the practical algorithms.
+In chapter 4, we test the developed framework, and finally, in chapter 5, we discuss the results,
+limitations and possible future directions for the method.
+Acknowledgements. I want to thank my awesome advisor prof. Søren Hauberg for his invalu-
+able guidance and for making it fun to go from mathematical model to operational algorithm,
+despite the inherent challenges to this process.
+I also want to thank postdoc Nico Krämer for his help with deriving and solving various tricky
+numerical problems, and for his work on matfree, a great piece of software that does some
+important heavy lifting in the framework developed in this thesis.
+This thesis was carried out in collaboration with DTU Compute to meet the requirements of
+the Master of Science in Engineering degree in Mathematical Modelling and Computation.
+June 25, 2025
+Niels Raunkjær Holm
+==PAGE:5==
+Contents
+1 Introduction
+1
+2 Background
+2
+2.1
+The Linearized Laplace Approximation . . . . . . . . . . . . . . . . . . . . . . . .
+2
+2.2
+Analysis of the GGN matrix . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4
+2.3
+A detour into Gaussian Processes
+. . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+2.3.1
+What is a Gaussian Process? . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+2.3.2
+Constructing sparse Gaussian Processes
+. . . . . . . . . . . . . . . . . . . .
+6
+2.3.3
+LLA is a GP!
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+2.4
+Distilling the curvature of LLA . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+2.4.1
+Variational LLA using the GP formulation . . . . . . . . . . . . . . . . . . .
+9
+2.4.2
+Direct variational GGN approximation . . . . . . . . . . . . . . . . . . . . .
+9
+3 Engineering
+11
+3.1
+Operationalizing the Variational Inducing Point LLA objective . . . . . . . . . .
+11
+3.2
+Matrix free methods . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+3.2.1
+Linear operator oracles
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+3.2.2
+Stochastic estimators . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+3.2.3
+Lanczos algorithms
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+3.2.4
+Deterministic iterative methods . . . . . . . . . . . . . . . . . . . . . . . . .
+22
+3.3
+Composing scalable functions . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+22
+3.3.1
+Objective function . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+23
+3.3.2
+Sampling function . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+24
+4 Experiments
+26
+4.1
+Toy examples . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+4.1.1
+Dense optimization vs. Matrix free optimization . . . . . . . . . . . . . . . .
+27
+4.1.2
+Dense sampling vs. Matrix free sampling . . . . . . . . . . . . . . . . . . . .
+29
+4.2
+Image classification . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+30
+4.2.1
+LeNet-5 on MNIST and FashionMNIST . . . . . . . . . . . . . . . . . . . .
+30
+4.2.2
+ResNet1 on CIFAR10 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+31
+5 Discussion & conclusion
+34
+==PAGE:6==
+Introduction
+1
+A certain challenge of modern deep learning. The advent of deep learning has taken neural
+networks from classifying handwritten digits (LeCun et al., 2002) to playing at superhuman levels
+in games (Silver et al., 2016; Vinyals et al., 2019), powering state-of-the-art chatbots (Brown
+et al., 2020; Radford et al., 2018, 2019), and predicting protein folding (Jumper et al., 2021).
+However, at a fundamental level, neural networks suffer from poor calibration to unseen data
+(Guo et al., 2017). This means undesirable behavior such as overconfident predictions in clas-
+sification or regression, and “hallucinations” in generative modeling (Manakul et al., 2023). In
+critical applications such as medical diagnostics, autonomous driving, and other high-stakes
+decision environments, these failure modes can potentially be catastrophic.
+Reliable uncertainty quantification in model predictions would allow us to flag low-confidence
+predictions, detect out-of-distribution inputs, and in general make deep learning systems more
+robust.
+Enter Bayes.
+In an effort to tackle this, we therefore adopt the Bayesian approach.
+The
+Bayesian approach is a probabilistic modeling framework in which we model uncertainty as
+probability distributions; specifically, distribution variance is what quantifies uncertainty during
+inference. We compute predictive uncertainty by integrating over plausible weight configurations,
+leading to provably better-calibrated posteriors (Wilson & Izmailov, 2020).
+Bayes’ theorem can be expressed as
+p(θ)
+prior
+· p(D|θ)
+likelihood
+/ p(D)
+evidence
+= p(θ|D)
+posterior
+.
+(1.1)
+In words, Eq. 1.1 formalizes updating our beliefs given new evidence; 1. The prior is our initial
+beliefs about θ before observing any data. 2. The likelihood measures the compatibility of
+observing D with θ. 3. The evidence renormalizes with the overall probability of observing D.
+4. The posterior represents our updated beliefs after taking the data into account.
+Bayesian deep learning (BDL) applies the structure detailed above to neural networks:
+We apply a prior over network weights θ and define a likelihood via the loss function. These
+combine into a posterior, which in principle produces reliable uncertainty estimates during future
+inference.
+Writing out the evidence term in Eq. 1.1 as p(D) =
+R p(θ, D) dθ reveals why it is also known as
+the marginal likelihood. It also reveals a fundamental limitation of the BDL approach described
+above: exact integration in the weight space – and by extension exact posterior inference – is
+computationally intractable. Practical BDL therefore relies on approximations such as Varia-
+tional Inference (Graves, 2011), Markov Chain Monte Carlo (Neal, 2012) or post-hoc methods
+like Laplace Approximations (MacKay, 1992), each of which constitutes a tradeoff between
+approximation fidelity and computational speed.
+We will focus entirely on post-hoc Laplace Approximations, where we first obtain a single set
+of parameters from training and then afterwards attach the posterior. This strategy aims to
+provide better calibrated predictions without the need to retrain, and is in the “faster, but more
+crude” end of the tradeoff spectrum mentioned above.
+==PAGE:7==
+Background
+2
+In this section, we familiarize ourselves with Laplace Approximations (LA) for Bayesian Neural
+Networks. While LA is conceptually simple, applying it in practice to deep neural nets is highly
+nontrivial, as we shall see. The Bayesian Deep learning setting is briefly formalized here:
+Bayesian Neural Networks
+We have a dataset D = {(xn, yn)}N
+n=1 of N training examples, a neural network fθ : RI →
+RO with weights θ ∈RD, likelihood p(yn|fθ(xn)) and a weight prior p(θ).
+The posterior distribution p(θ|D) = p(y|fθ(x)) · p(θ)/p(D), obtained via Bayes’ rule, is
+a probability distribution over neural network parameters, conditioned on our dataset.
+The predictive distribution p(y⋆|x⋆, D) =
+R p(y⋆|fθ(x⋆)) · p(θ|D) dθ marginalizes over
+parameters to obtain predictive probabilities calibrated to uncertainty from limited data.
+2.1
+The Linearized Laplace Approximation
+Laplace Approximations (LA) are a family of post-hoc methods, meaning that we train standard
+neural networks, and afterwards apply Bayesian methods.
+The Classical Laplace Approximation (MacKay, 1992) locally approximates the log-posterior
+L(θ) = log p(θ|D) by a second-order Taylor expansion around a mode ˆθ:
+L(θ) ≈L(ˆθ) + ⟨∇θL(ˆθ), (θ −ˆθ)⟩+ 1
+2⟨(θ −ˆθ), Hˆθ(θ −ˆθ)⟩,
+(2.1)
+where the first-order term vanishes and Hˆθ = ∇2
+θL(ˆθ) ≺0 at the mode. Exponentiating yields a
+Gaussian approximation centered at ˆθ and with covariance given by the negative inverse Hessian:
+p(θ|D) ≈N
+
+θ | ˆθ, −H−1
+ˆθ
+
+.
+(2.2)
+Figure 2.1 illustrates how this Gaussian captures the local curvature of the posterior.
+The MAP estimate. As for the mode ˆθ, we use the Maximum A-Posteriori (MAP) estimate,
+θMAP = arg max
+θ
+log p(θ, D),
+where the joint distribution p(θ, D) = p(y|fθ(x)) · p(θ) is simply the posterior without the
+normalizing evidence term. From this point, we will always assume a centered, isotropic Gaussian
+weight prior p(θ) = N
+ θ|0, α−1I
+ with precision α, equivalent to standard L2-regularization.
+Parameter θ
+Density
+Posterior mode θMAP
+Laplace Approximation q(θ | D)
+True posterior p(θ | D)
+Figure 2.1: Laplace Approximation q of a multimodal distribution p. The approximating Gaus-
+sian (
+) captures the general shape of the true posterior (
+), but distributes all probability
+mass around a single mode (⋆), and smoothes out the other modes.
+==PAGE:8==
+2.1 The Linearized Laplace Approximation
+3
+Generalized Gauss-Newton. In practice, MAP training rarely converges to a true mode,
+and −Hˆθ ̸≻0, i.e. it is not positive definite and possibly singular, so we cannot construct
+the covariance matrix. Therefore, we use the generalized Gauss-Newton (GGN) approximation
+(Foresee & Hagan, 1997).
+The prior component of the posterior is trivial – simply αI in our case. We focus on the log-
+likelihood contribution to the log-posterior Jacobian and Hessian, which we can express via the
+per-datum Jacobians Jθ(x) ∈RO×D and Hessians Hθ(x) ∈RO×D×D of our network fθ(x) as
+∇θ log p(y | fθ(x)) = Jθ(x)⊤r(y; fθ(x))
+(2.3)
+∇2
+θθ log p(y | fθ(x)) = Hθ(x)⊤r(y; fθ(x)) −Jθ(x)⊤Hℓ(x)Jθ(x)
+(2.4)
+where r(y; fθ(x)) = ∇fθ(x) log p(y|fθ(x)) is a residual and Hℓ(x) = −∇2
+fθ(x) log p(y|fθ(x)) ∈
+RO×O is the loss Hessian (Immer, Korzepa, & Bauer, 2021).
+The GGN approximation then simply approximates the likelihood contribution to the negative
+posterior Hessian as −PN
+n=1 ∇2
+θ log p(yn|fθ(xn)) ≈J⊤
+θ H Jθ =: G ⪰0, where we have stacked
+the per-datum Jacobians Jθ = [Jθ(x1), . . . Jθ(xN)] and similarly for the loss Hessians Hℓinto H.
+Finally, via (G +αI)−1 ≻0 we have a computable expression for the LA posterior
+Laplace Posterior
+q(θ | D) = N
+
+θ | θMAP, (G +αI)−1
+(2.5)
+and we can further evaluate the LA predictive distribution via Monte Carlo integration as
+p(y⋆|x⋆, D) = Eθ∼q [p(y⋆|fθ(x⋆))] ≈1
+S
+S
+X
+k=1
+p(y⋆|fθk(x⋆)),
+θk ∼q.
+(2.6)
+Why linearize? While Classical LA with the GGN works fine for small networks, it is known
+to severely underfit for larger networks (Lawrence, 2001), making it impractical for modern deep
+architectures. It turns out, however, that simply linearizing the network output around θMAP
+greatly alleviates the underfitting (Foong et al., 2019). The linearized model is
+flin
+θMAP(θ, x) = fθMAP(x) + Jθ(x) (θ −θMAP).
+(2.7)
+This has identical posterior to Eq. 2.5, but a modified predictive distribution:
+LLA Predictive
+p(y⋆|x⋆, D) = Eθ∼q
+h
+p(y⋆|flin
+θMAP(θ, x⋆))
+i
+≈1
+S
+S
+X
+k=1
+p(y⋆|flin
+θMAP(θk, x⋆)),
+θk ∼q,
+(2.8)
+which, while similar to Eq. 2.6, yields vastly different results, illustrated in Figure 2.2.
+x1
+x2
+NN MAP
+x1
+Without Linearization
+x1
+With Linearization
+0
+1
+E[y∗| x∗, D]
+Figure 2.2: Example of linearization alleviating underfitting in the Laplace Approximation.
+Middle plot is the classical LA, while the right plot is Linearized LA, for the same model.
+==PAGE:9==
+2.2 Analysis of the GGN matrix
+4
+2.2
+Analysis of the GGN matrix
+The GGN matrix is central to this thesis, and is worth spending a bit more time on.
+Immer, Korzepa, and Bauer, 2021 argue that there is a natural connection between LLA and
+the Generalized Gauss-Newton (GGN) approximation to the Hessian. The GGN approximation
+can be viewed as an implicit local linearization of the Bayesian Neural Network (BNN), turning
+it into a generalized linear model, thus warranting the modified predictive distribution.
+Roy et al. (2024) argue that the approximate posterior of LA fails to maintain invariance under
+reparameterization, i.e. it assigns different densities to sets of parameters that map to the same
+exact functions. This is ascribed to the Gaussian approximation not properly aligning with the
+subspaces of the parameter space that correspond to the same functions.
+The posterior will not properly assign probability mass around the mode as expected, and our
+sample quality and downstream predictive quality will lack.
+Linearizing the model aligns the weight space (thus the invariant subspaces) to the Gaussian
+approximation, thus achieving the desired invariance under reparameterization, and once again
+assigning probability mass as expected. This is illustrated in Figure 2.3.
+Figure 2.3: Reproduced figure from Roy et al. (2024). We note the difference in how proba-
+bility mass is assigned to reparametrization families (different weight configurations that lead
+to identical functions) between LLA (left) and classical LA (right). The metric relates to the
+Riemannian lens adopted in the original paper.
+How does the implicit linearization work? We can understand the GGN from first princi-
+ples by decomposing the full negative log-posterior Hessian into two pieces as
+−∇2
+θθ log p(y | fθ(x)) = −Hθ(x)⊤r(y; fθ(x))
+|
+{z
+}
+network
+curvature
++ J⊤
+θ H Jθ
+|
+{z
+}
+linearized
+curvature
+,
+(2.3)
+==PAGE:10==
+2.3 A detour into Gaussian Processes
+5
+where the network curvature term essentially collects the second order model contributions ∂2
+θf.
+The other term is the linearized curvature, i.e. it uses only the first derivatives of the model
+w.r.t. parameters.
+The GGN approximation of the Hessian (Equation 2.3) then simply consists of dropping the
+network curvature term:
+The GGN Matrix
+G := J⊤
+θ H Jθ =
+N
+X
+n=1
+Jθ(xn)⊤Hℓ(xn) Jθ(xn),
+(2.9)
+which, in addition to being positive semi-definite1, is also exact for linear models – such as LLA!
+The challenges of the GGN approximation. While the GGN approximation has clear
+benefits, there are some aspects of its formulation that prove challenging when scaling up both
+the neural network and dataset. In the written out sum in Eq. 2.9, we explicitly see the linear
+runtime complexity scaling w.r.t. dataset size N, and further, the shape of the Jacobians Jθ ∈
+RO×D mean that the memory cost of operations involving G ∈RD×D scale quadratically with
+number of model parameters D.
+The quadratic memory scaling with D is usually handled with a further approximation to the
+GGN itself.
+Most prominent are structural approximations such as diagonal approximation
+which drops all the cross-covariance terms, the last-layer approximation which only considers
+the parameters of the final neural net layer, and the Kronecker-factored approximate curvature
+method which computes a layer-wise block factorization. See Daxberger et al. (2021) for a survey
+on these approximations.
+The approach we will take involves matrix free methods. Our matrix free methods use the exact
+GGN operator (not the matrix!) and instead approximate the functions we compute with it. For
+example, drawing samples from the posterior involves a matrix-vector product with the inverse
+square root of the GGN; we will later derive an approximation for this operation (and others)
+that never materializes the GGN matrix.
+To tackle the linear scaling with dataset size, we will draw inspiration from the Gaussian Process
+literature.
+2.3
+A detour into Gaussian Processes
+We will now stray away from the domain of Bayesian Neural Networks for a bit, and delve into
+another Bayesian model, namely Gaussian Processes (GPs), since it turns out that there are
+quite strong connections between LLA and GPs. Therefore, we will now look in the GP toolbox
+to find some inspiration on how to proceed with our challenge of handling the coupling between
+the runtime complexity and the dataset size.
+2.3.1
+What is a Gaussian Process?
+A GP is a collection of random variables (Yn, n ∈N) s.t. any finite subset follows a multivariate
+normal distribution, i.e.
+(Yi1, Yi2, . . . , Yik) ∼N (µ, Σ) ,
+where i1, i2, . . . , ik ⊂N is an arbitrary set of indices.
+GPs can be used as nonparametric models in various tasks by introducing functions for mean µ
+and covariance Σ, in order to model the density of the data generating process f. Concretely, let
+1For the standard convex losses we consider!
+==PAGE:11==
+2.3 A detour into Gaussian Processes
+6
+D = {(xn, yn)}N
+n=1 be a dataset of input variables xn and noisy response variables yn = f(xn)+ε,
+where ε ∼N
+ 0, σ2. We can then model f as
+(f1, f2, . . . , fN) ∼N (µ(X), K(X, X)) ,
+(2.10)
+where X = [x1 · · · xN] is the stacked observations, µ(X) is a mean function and K(X, X) is a
+mercer kernel - the brief idea is that we are guaranteed a symmetric positive definite covariance
+matrix, and that we can use the kernel’s inner products to perform the otherwise potentially
+intractable inference operations on explicit feature vectors.
+We can use use Eq. 2.10 as a regression model. Further, for classification settings, we can use
+the same formulation in conjunction with a link function (probit or logistic) to parameterize
+either bernoulli or categorical distributions for binary and multiclass classification, respectively.
+By Eq. 2.10, we can write the joint distribution over observed latent function values and new
+predictions p(fX, f⋆| X, X⋆) as
+"
+fX
+f⋆
+#
+∼N
+ "
+µX
+µ⋆
+#
+,
+"
+KX,X
+KX,⋆
+K⊤
+X,⋆
+K⋆,⋆
+#!
+,
+(2.11)
+where µX =
+h
+µ(x1)
+· · · µ(xN)
+i⊤, µ⋆=
+h
+µ(x⋆
+1)
+· · · µ(x⋆
+N⋆)
+i⊤, KX,X = K(X, X) ∈RN×N,
+KX,⋆= K(X, X⋆) ∈RN×N⋆and K⋆,⋆= K(X⋆, X⋆) ∈RN⋆×N⋆.
+By standard closed form solutions for Gaussians, the predictive distribution is given by
+p(f⋆| X⋆, D) = N
+
+f⋆| µ⋆| X, Σ⋆| X
+
+(2.12)
+µ⋆| X = µ⋆+ K⊤
+X,⋆K−1
+X,X(fX −µX)
+(2.13)
+Σ⋆| X = K⋆,⋆+ K⊤
+X,⋆K−1
+X,XKX,⋆
+(2.14)
+Our setting assumes i.i.d. additive Gaussian noise ε ∼N
+ 0, σ2 to Eq. 2.10, which results in
+"
+Y
+f⋆
+#
+∼N
+ "
+µX
+µ⋆
+#
+,
+"
+KX,X + σ2I
+KX,⋆
+K⊤
+X,⋆
+K⋆,⋆
+#!
+,
+(2.15)
+so conditioning on the data D = (X, Y) yields the posterior predictive GP
+p(f⋆| X⋆, D) = N
+
+
+
+µ⋆+ K⊤
+X,⋆(KX,X + σ2I)−1(Y −µX)
+|
+{z
+}
+predictive mean
+, K⋆,⋆+ K⊤
+X,⋆(KX,X + σ2I)−1KX,⋆
+|
+{z
+}
+predictive covariance
+
+
+
+.
+(2.16)
+Examining the expressions above, we run into a familiar problem; the memory and computation
+cost scales with the size of the dataset!
+2.3.2
+Constructing sparse Gaussian Processes
+To combat the rampant memory and computation scaling with dataset size, we introduce the
+inducing point approximation to GPs. We assume that the full dataset contains a lot of redun-
+dancy in regards to informing the GP. The central idea is then to compress the GP f ∼GP(µ, K)
+to obtain the sparse approximation fZ ∼GP(µZ, KZ), where in particular KZ ∈RM×M is much
+smaller than K ∈RN×N.
+Inducing points. The compressed GP is parameterized by M inducing points Z = z1, . . . , zM,
+which reside in the same domain as our input variables X. The challenge of selecting Z s.t. the
+==PAGE:12==
+2.3 A detour into Gaussian Processes
+7
+compressed GP is a good approximation to the full GP posterior can be solved in various ways,
+the simplest being randomly sampling M points from X, or deploying various discrete selection
+algorithms.
+Variational optimization. The inducing point GP approximation is an instance of variational
+approximation, where we approximate a complex distribution p with a simpler one q. We refer
+to p as the target distribution and q as the variational distribution. To select Z, Titsias (2009)
+proposes a variational optimization procedure, wherein the M inducing points Z are considered
+optimization variables.
+Concretely, they let u = f(Z) be the function values associated with the inducing points, and
+then approximate the GP posterior as
+p(f, u|Y) ≈q(f, u) = p(f|u)q(u),
+(2.17)
+where p(f|u) is fixed and the variational distribution is normal q(u) = N
+
+u | ˆ
+m, ˆ
+K
+
+.
+Then, an optimization objective can be formulated via the Kullback-Leibler (KL) divergence.
+KL Divergence
+Kullback-Leibler divergence is a type of statistical distance between probability distribu-
+tions. Given two probability measures P and Q on the same measurable space X, the
+information gain from P over Q can be expressed in multiple ways:
+KL [P ∥Q] =
+Z
+x∈X
+p(x) log p(x)
+q(x) dx = Ex∼p [log p(x)] −Ex∼p [log q(x)] .
+In the integral form, it is evident that the set
+n
+x ∈X : p(x) = q(x)
+o
+will contribute 0 to
+the total value, since in all these cases, the log term is 0.
+Perhaps most evident in the expectation form, KL-divergence is asymmetrical. That is, in
+general KL [P ∥Q] = KL [Q ∥P] does not hold, hence emphasis on the words from and
+over above. This is visualized in Figure 2.4.
+0
+x
+Density
+Gaussian PDFs
+p(x)
+q(x)
+0
+x
+0
+KL
+KL[P ∥Q] = 0.5
+0
+x
+0
+KL[Q∥P] = 0.49
+Figure 2.4: Visualization of both directions of KL divergence between two Gaussians, where the
+asymmetry is apparent. Note that lower-case p, q refer to the PDFs corresponding to measures
+P, Q respectively.
+The theoretical optimization objective is minq(u) KL [q(u) ∥p(f, u|Y)], where we recall that the
+variational distribution q(u) is parameterized by the inducing points via the relation u = f(Z).
+To operationalize the KL divergence, we can reformulate it as
+log p(Y) ≥max
+Z, ˆm, ˆK
+Z
+f,u
+q(f, u) log p(Y|f)p(f|u)p(u)
+q(f, u)
+dfdu,
+(Sparse GP ELBO)
+(2.18)
+which is a lower bound on the log-marginal likelihood (or Evidence Lower BOund, hence the
+name ELBO).
+==PAGE:13==
+2.3 A detour into Gaussian Processes
+8
+The ELBO can be optimized with the usual gradient-based methods; Figure 2.5 is a visualization
+of a sparse GP obtained in this exact way.
+x
+f(x)
+Observations
+f : Latent function
+E[y∗|x∗, z]
+2σ
+z : Inducing points
+Figure 2.5: GP regression with 10 inducing points (⋆).
+We see that the predictive mean (
+) closely follows the latent function (
+) in the data
+support. We also see sensible uncertainty quantification, i.e. 2 standard deviations cover a little
+over 95% of the samples.
+2.3.3
+LLA is a GP!
+An interesting result from Immer, Korzepa, and Bauer (2021) is the connection between LLA
+and GPs. Recall in section 2.2, we noted that using the GGN approximation implicitly linearizes
+the model. We change the predictive and now have a linear model flin
+θMAP(θ, x) with a Gaussian
+weight distribution q(θ | D). As summarized by Ortega et al. (2023), this generates a GP with
+specific mean and covariance functions; for our LLA posterior N
+ θ | θMAP, (αI + G)−1, these
+are
+µ(x) = flin
+θMAP(θMAP, x)
+(2.19)
+K(x, x′) = JθMAP(x)⊤(αI + G)−1 JθMAP(x′).
+(2.20)
+A useful identity here is obtained via the Woodbury formula on our LLA posterior covariance
+to get
+Σ = (αI + J⊤
+θMAP HℓJθMAP
+|
+{z
+}
+=G
+)−1 = α−1(Id −J⊤
+θMAP(α H−1
+ℓ
++ JθMAP J⊤
+θMAP)−1 JθMAP),
+(2.21)
+which, in addition to inspiring computational savings down the road, allows us to interpret the
+LLA posterior as a GP in function space, via the Neural Tangent Kernel (NTK):
+K(x, x′) = κ(x, x′) −κ(x, X)Q−1κ(X, x′)
+(2.22)
+Q = H−1
+ℓ
++κ(X, X)
+(2.23)
+κ(x, x′) = α−1 JθMAP(x)⊤JθMAP(x′).
+(scaled NTK)
+(2.24)
+Interpreting LLA as a GP has two main takeaways for us: 1. The usual sparse GP methods can
+be adapted more or less directly, and 2. it motivates the hypothesis that the full-rank posterior
+==PAGE:14==
+2.4 Distilling the curvature of LLA
+9
+of LLA is often overkill, so posterior compression is both realistic and desirable. In the next
+section, we will present two methods; VaLLA (Ortega et al., 2023), which adapts the methods
+of Titsias (2009) to LLA in the GP domain, and our method KiLLA, where we propose a direct
+variational approximation of the GGN.
+2.4
+Distilling the curvature of LLA
+Having gained insight from a problem of similar structure, we head back to our setting of
+Bayesian neural nets.
+2.4.1
+Variational LLA using the GP formulation
+A natural idea could now be to combine variational GP compression (subsection 2.3.2) with the
+GP formulation of LLA (subsection 2.3.3), which is exactly the approach of Ortega et al. (2023).
+They first cast the LLA posterior as a GP using the kernel in Eq. 2.22 and then apply the
+variational sparse GP bound from Titsias (2009), choosing Z and a variational covariance S by
+maximizing the ELBO. They modify the procedure s.t. the predictive mean remains unchanged,
+i.e. the original MAP.
+Computationally (per iteration) and memory-wise, the method scales as O(M3) per mini-batch
+for the GP kernels - thus eliminating the GP formulation’s scaling with dataset size N. In
+many experiments, the outperform the structural approximations to full LLA discussed earlier
+(diagonal, last-layer, KFAC), with comparable or even lower computational cost. In particular
+on CIFAR-10, they outperform (structurally approximated) full LLA with M = 100 inducing
+points.
+2.4.2
+Direct variational GGN approximation
+The success of VaLLA shows that LLA can be sparsely approximated to a high degree in the
+function (GP) space. This motivates trying to formulate a similar objective in the weight space
+of LLA. We first define the inducing point approximation itself as
+Inducing point LLA
+Recall that D =
+n
+xn ∈RI, yn ∈ROoN
+n=1 is our dataset and define another set of points
+Z =
+n
+zm ∈RIoM
+m=1. As in the sparse GP setting, we assume that M ≪N. Then
+q(θ| Z) = N (θ | θMAP , ΣZ)
+(2.25)
+is a variational approximation of q(θ|D), induced by Z.
+The covariance matrix is
+ΣZ =
+
+αI + N
+M
+M
+X
+m=1
+J⊤
+θ (zm) H(zm) Jθ(zm)
+−1
+=
+
+αI + β GZ
+−1
+,
+(2.26)
+where α is the prior precision and β is a constanta recalibration term.
+aWe note that this is a choice, and β could be rescoped as a learnable parameter.
+The expression in Eq. 2.25 is a posterior distribution over weights, and can thus be used exactly
+as the standard LLA (and LA) posterior.
+Theoretical objective. For variational optimization of Eq. 2.25, we will minimize the KL
+==PAGE:15==
+2.4 Distilling the curvature of LLA
+10
+divergence from q(θ| Z) over q(θ|D),
+min
+Z KL [q(θ| Z) ∥q(θ|D)] .
+(2.27)
+For inducing point (IP) LLA, the mean is still just the MAP estimator, and the new covariance
+matrix is the actual driver of the approximation. As seen in Eq. 2.26, the IP covariance simply
+replaces the full GGN matrix with a much smaller sum over per-datum local/linear curvature
+matrices. We can thus picture the inducing point approximation as a distillation of the full LLA
+curvature into a much lower-rank curvature.
+Given the formulation in Equations (2.26,2.27), we aptly name the method “KL inducing point
+LLA”, or KiLLA for short.
+Note: Why not use the direct ELBO? A natural thought might be to take the IP LLA
+formulation and optimize it w.r.t. the usual ELBO
+LELBO(Z) = EqZ[log p(D|θ)] −KL [q(θ| Z) ∥p(θ)] .
+(2.28)
+We initially tried this formulation, but pilot tests with this formulation consistently found sub-
+optimal approximations. This led to exploring alternatives early in the process, arriving at the
+objective presented in Eq. 2.27.
+==PAGE:16==
+Engineering
+3
+We will now tackle the problem of translating our theoretical expressions into practical, scalable
+code, that can work for in-the-wild models and datasets. We derive the dense objective function
+in section 3.1, then we build up the concepts for going matrix free in section 3.2, and finally, we
+assemble scalable functions in section 3.3.
+3.1
+Operationalizing the Variational Inducing Point LLA objective
+We will now write out Eq. 3.1 to derive a computational expression for our implementation.
+Since q(θ| Z) and q(θ|D) are both multivariate normal, the KL divergence has a closed form,
+and since the distributions also have equal mean, the expression simplifies further:
+KL [q(θ| Z) ∥q(θ|D)] = KL [N (θ|θMAP, ΣZ) ∥N (θ|θMAP, Σ)]
+= 1
+2
+
+tr{Σ−1ΣZ} −D + (θMAP −θMAP)⊤Σ−1(θMAP −θMAP) −log det Σ
+det ΣZ
+
+= 1
+2
+
+tr{Σ−1ΣZ} −D + log det Σ −log det ΣZ
+
+,
+(3.1)
+where we recall that D is the number of parameters in our neural network.
+We can expand the terms and drop the constants w.r.t. optimization of our inducing points to
+get a tractable objective
+min
+Z KL [q(θ| Z) ∥q(θ|D)] = min
+Z
+1
+2
+
+tr{Σ−1ΣZ}−D + log det(Σ) + log det(Σ−1
+Z )
+
+which yields
+KiLLA objective
+L(Z) = tr{Σ−1ΣZ} + log det(Σ−1
+Z ).
+(3.2)
+So far, so good. We can implement a program that minimizes Eq. 3.2 with automatic differen-
+tiation and gradient methods on our inducing points Z. In a perfect world, it would be plug
+and play from here on out, but since computers are finite precision machines with resource con-
+straints, we still have many design choices and trade-offs to make before we arrive at a stable,
+scalable implementation.
+However, we can make some initial tests to see whether we get meaningful results and get an
+intuition of the dynamics of the problem. Our very first such test can be seen in Figure 3.1, where
+we investigate how well KiLLA approximates the full LLA for a simple noisy XOR problem.
+The memory obstacle. A reasonable (even modest) architecture for a convolutional neural
+net classifier on the CIFAR10 (Krizhevsky & Hinton, 2009) dataset could be a ResNet-like (He
+et al., 2015) model with 1 million parameters. The GGN of such a network would have 1012
+indices. At 4 bytes per single precision float (i.e. 32-bit), this would require 4 terabytes of
+memory to store – even taking symmetry of the GGN into account, we still need 2 TB to store
+unique entries.
+Memory costs to store each covariance matrix scale quadratically with the number of neural
+network parameters, quickly making it prohibitive.
+We will explore how to mitigate this in the next section, where we dive into matrix free methods.
+==PAGE:17==
+3.2 Matrix free methods
+12
+x2
+x1
+x2
+0.00
+1.00
+E[y∗|x∗, D]
+0.00
+0.25
+V[y∗|x∗, D]
+(a) M = 8.
+x1
+(b) M = 16.
+x1
+(c) M = 32.
+x1
+(d) Full LLA, N = 800.
+Figure 3.1: Visual comparison of KiLLA for a 2-dimensionsal binary classification problem with
+N = 800, varying the number of inducing points M. Top row is the predictive mean, bottom
+row is the predictive variance. Prior precision α has been hand-tuned to each case.
+3.2
+Matrix free methods
+As the name suggests, matrix free linear algebra involves constructing operations that do not
+require materializing the full matrix involved. In our downstream program, we want to expose
+the matrix as a function that returns matrix-vector products, instead of storing a dense D × D
+array. Usually this involves paying a higher computational cost to get a lower memory cost.
+Calculating the computational and memory costs is complex for the methods we will present.
+As many of the methods build on top of each other, the full picture easily becomes convoluted.
+Throughout this section, we will present tables with a practical overview of such costs. These
+are meant to give an idea of the asymptotic complexities of the methods, which is useful when
+we later use them to build algorithms.
+3.2.1
+Linear operator oracles
+The basic idea is that if we have a linear operator function X : Rn →Rm that computes the
+matrix-vector product v 7→Xv without forming X, then we can approximate various functions
+of the underlying matrix X ∈Rn×m. Such a function is called an operator oracle, and we will
+use it extensively in conjunction with JAX (Bradbury et al., 2018), a deep learning library in
+the functional programming paradigm. In addition to just-in-time compilation to both CPU
+and GPU, JAX is designed to support eﬀicient matrix free implementations, making it a natural
+choice for our code.
+Central to the matrix free approach is the change in mindset from thinking in materialized
+matrices and dense operations.
+Instead, we turn to thinking about which operators we can
+compute, and how these might be used to compute matrix functions. If the underlying matrix is
+suﬀiciently large, eﬀiciently computing matrix functions and operations with the oracles usually
+involves some type of approximation, either numerical or stochastic.
+We will discuss these
+approximations in the next sections, but first we will introduce our immediately available oracle
+functions and how we can combine them to build a GGN oracle.
+A Jacobian-vector product or jvp is - as the name suggests - the operator computing matrix-
+==PAGE:18==
+3.2 Matrix free methods
+13
+vector multiplication with the Jacobian of a function. For the function f : Rn →Rm, we usually
+think of the Jacobian at an input point x ∈Rn as a matrix
+Jf(x) ∈Rm×n,
+(3.3)
+but we can also think of it as a linear map from the tangent space of the domain of f at x to
+the tangent space of the codomain of f at f(x):
+Jf(x) : Rn →Rm.
+(3.4)
+Eq. 3.4 is called the pushforward map of f at x, for which the Jacobian matrix is the standard
+basis. This map can itself be considered a function of input x:
+Jf : Rn →Rn →Rm,
+(3.5)
+and we can now uncurry this function to arrive at
+jvp := (f, x, v) 7→Jf(x)v,
+(3.6)
+for which JAX has a highly optimized API. In JAX, jvp is also known as forward-mode au-
+todiff, since it works by computing the forward pass of the function (primals) in lock-step with
+the Jacobian evaluations (tangents). This means that the computation graph can be reused
+immediately, and we don’t need to store the intermediate function values (e.g. activations when
+evaluating jvp on a neural network) after each step.
+Generally, the FLOP cost of evaluating jvp(f, x, v) is about 3 times the cost of just evaluating
+f(x): 1 unit of work for f(x), 1 for linearizing: df(x) and finally, 1 for multiplying with the
+vector: df(x)v (JAX Development Team, 2025).
+A vector-Jacobian product or vjp is also known as reverse-mode autodiff, and is expressed
+as
+vjp := (f, x, u) 7→Jf(x)⊤u,
+(3.7)
+where, as with jvp, we have f : Rn →Rm and x ∈Rn. u ∈Rm is an element of the cotangent
+space of f at x, and Jf(x)⊤: Rm →Rn is called the pullback map of f at x, essentially a
+transpose of the pushforward map.
+Strictly speaking, the expression is the composed function (f, x, u) 7→u◦Jf(x), where u : Rm →
+R is a linear map. However, usually there is an identifiable vector u ∈Rm, which we can use
+interchangeably with the map, hence the simplification in Eq. 3.7.
+Similarly to jvp, the computational cost of evaluating vjp(f, x, u) is about 3 times the cost
+of just evaluating f(x).
+However, this time, the memory cost scales with the depth of the
+computation graph, as we have to store intermediate computations (or recompute, depending
+on checkpointing logic, which we will discuss later) (JAX Development Team, 2025).
+The GGN-vector product combines the two primitives above with a closed-form Hessian of
+the loss ℓ(not of the network) to avoid building the full D × D GGN matrix.
+We consider again neural network function fθ : RI →RO with parameter dimension D. We also
+let Z =
+n
+zm
+oM
+m=1 be the working set (abstraction for both inducing points and mini-batches)
+and recall the recalibration term β = N
+M .
+For a single data point zi with model output fi := fθ(zi) ∈RO, we have
+Gi = Jθ(zi)⊤Hℓ(fi) Jθ(zi) ∈RD×D,
+Hℓ(fi) := ∂2ℓ(fi)
+∂f2
+i
+∈RO×O.
+(3.8)
+==PAGE:19==
+3.2 Matrix free methods
+14
+To apply this matrix to a direction v ∈RD, we can proceed in three steps, each of which has an
+eﬀicient autodiff or otherwise relatively cheap counterpart:
+ui := jvp(fθ, zi, v)
+∈RO
+(forward autodiff)
+(3.9)
+ki := Hℓ(fi)ui
+∈RO
+(analytic Hessian action)
+(3.10)
+gi := vjp(fθ, zi, ki) ∈RD
+(reverse autodiff)
+(3.11)
+Since gi = Giv, summing over the batch and multiplying by β gives us exactly the linear map
+GGN VP
+G v = β
+M
+X
+i=1
+gi =
+M
+X
+i=1
+vjp
+
+fθ, zi, Hℓ(fi) · jvp(fθ, zi, v)
+
+.
+(3.12)
+The analytical loss Hessian has the following special cases we consider:
+softmax and cross-entropy (classifier) :
+Hℓ(f) = diag(p) −pp⊤
+(3.13)
+mean square error with log σ2 (regressor) :
+Hℓ(f) = σ−2IO
+(3.14)
+Here, p ∈RO is the output vector of classification probabilities and log σ2 is a learned log-
+variance parameter.
+The cost of evaluating Eq. 3.12 is one forward and one reverse pass per data point, plus an
+additional O(O2) Hessian-vector product (even cheaper for regression, where it reduces to scalar
+multiplication), while never storing the D2 entries of the full GGN.
+The factorized GGN operators w ∈RD×MO, w⊤∈RMO×D can be thought of as left and
+right square root matrices of the full GGN. These will unlock some useful reformulations later.
+For every data point zi let
+Si :=
+
+Hℓ(fi)
+ 1
+2 ∈RO×O,
+Ji := Jθ(zi) ∈RO×D,
+(3.15)
+and define the pointwise operators
+wi := J⊤
+i S⊤
+i : RO →RD,
+w⊤
+i := Si Ji : RD →RO.
+(3.16)
+Each w⊤
+i
+multiplies a vector in parameter space by a Jacobian (jvp) and then by the square
+root Hessian Si. Each wi does the adjoint sequence; S⊤
+i followed by a vjp.
+Now we can stack the M contributions and rescale to get
+w :=
+[w1, w2, . . . , wM]
+|
+{z
+}
+block of per-datum
+RO-vectors
+: RMO →RD,
+(3.17)
+and equivalently with w⊤.
+For the full dataset this yields the exact factorization
+G = w w⊤
+(3.18)
+since
+w w⊤=
+N
+X
+n=1
+J⊤
+n S⊤
+n Sn Jn =
+N
+X
+n=1
+J⊤
+n Hℓ(fn) Jn = G .
+(3.19)
+==PAGE:20==
+3.2 Matrix free methods
+15
+For completeness, the analytical symmetric loss Hessian factorizations we use are:
+softmax and cross-entropy (classifier) :
+Si = diag(√pi) −pi
+√pi
+⊤
+(3.20)
+mean square error with log σ2 (regressor) :
+Si = σ−1IO.
+(3.21)
+Since our operators are never materialized, the memory cost of the forward pass is O(A + O2)
+per data point, since storing activations A is needed by the reverse mode autodiff.
+Costs and pitfalls. As mentioned when introducing vjp, backward mode autodiff requires
+storing intermediate function values from the forward pass of a function. For neural networks,
+this entails a memory cost that scales with the depth of the network.
+Function checkpointing – or rematerialization – is a program transformation in JAX designed
+to expose a trade-off between memory and computational cost directly to the user. Essentially,
+instead of storing all intermediate function values, we can enclose our functions with a checkpoint
+and thereby control which values we store, and which we recompute.
+Checkpointing can be used to split neural nets into blocks where we only save activations before
+and after the blocks, s.t. we lower the peak memory usage accordingly. However, we will mainly
+use checkpointing at a higher function level (specifically for stochastic trace estimation, see next
+section) due to the relatively small neural net sizes we will be using.
+Checkpointing in the
+underlying neural nets could potentially benefit the larger-scale experiments we will consider,
+since they will turn out to still be constrained by memory budget.
+In Table 3.1, the computational and memory complexities are listed for the GGN oracles, taking
+peak memory into account, i.e. with no checkpointing.
+Table 3.1: Per-datum asymptotic cost of the matrix-free oracles used during training. Cf is
+the cost of evaluating (neural network) function f, O is output dimension, A is all activations
+saved from the network forward pass. “Per-pass” compute refers to the fact that, in addition
+to the oracles consisting of forward- and backward-mode autodiff mechanisms, we also use the
+oracles themselves in the gradient-based variational optimization procedure; i.e. we need to back-
+propagate through them. The backward pass during optimization is also why the w⊤oracle
+(which uses jvp) is dependent on all activations.
+Oracle call
+Per-pass compute
+Peak memory
+G v
+(GGN-VP)
+O(2 × Cf + O2)
+O(A + O2)
+w⊤v
+O(Cf + O2)
+O(A + O2)
+w u
+O(Cf + O2)
+O(A + O2)
+Throughout the rest of the section, we will be introducing estimators, algorithms and solvers that
+use the oracles detailed above. These list “memory overhead” instead of peak memory, which
+covers the additional memory cost these procedures require, while the induced peak memory
+will depend on checkpointing strategy with both the oracles and the procedures.
+3.2.2
+Stochastic estimators
+While there are clear benefits to matrix free methods, they do also complicate our lives a bit.
+We have to rethink how to compute several operations, which will be the subject of the next
+sections.
+First off, we will look at some stochastic methods, where we essentially probe our operator
+oracles in a random - but structured - manner to extract information to approximate various
+matrix operations.
+==PAGE:21==
+3.2 Matrix free methods
+16
+Hutchinson’s trace estimator (Hutchinson, 1989) is a core procedure in our matrix free linear
+algebra tool box.
+Our target matrix function is the trace, which is defined for square matrices X = [xij] ∈RD×D
+as
+tr{X} =
+D
+X
+i=1
+xii =
+D
+X
+i=1
+e⊤
+i Xei,
+where ei is the i’th standard basis vector in RD.
+The idea for the approximation procedure is to construct a Monte Carlo (MC) estimator that
+will converge to the trace.
+First, we note that by the cyclic property of trace, we have for
+arbitrary matrices A ∈Rn×k, B ∈Rk×m, C ∈Rm×n that
+tr{ABC} = tr{CAB} = tr{BCA}.
+(cyclic property)
+(3.22)
+Let ε ∈RD be an isotropic random vector, i.e. E
+h
+ε ε⊤i
+= I. This could be standard multivariate
+normal vectors, or Rademacher vectors (i.e. indices are i.i.d. ±1 with probability p = 1/2).
+We can now derive the estimator
+tr{X} = tr{XI} = tr
+n
+XE
+h
+ε ε⊤io
+(⋆)
+= E
+h
+tr{X ε ε⊤}
+i (3.22)
+=
+E[tr{ε⊤X ε
+| {z }
+scalar
+}]
+= E
+h
+ε⊤X ε
+i
+,
+(3.23)
+where in (⋆) we used that both trace and expectation are linear operators. We can now opera-
+tionalize Eq. 3.23 to compute the MC estimator of the trace using only our linear operator
+1
+S
+S
+X
+k=1
+ε⊤
+k X(εk) −→
+S→∞E
+h
+ε⊤X(ε)
+i
+= E
+h
+ε⊤X ε
+i
+= tr{X},
+where (εk, k = 1, . . . , S) is a sequence of i.i.d. random variables.
+Hutch++ is an improvement upon the original Hutchinson estimator introduced by Meyer
+et al. (2021). Hutch++ implements a low-rank approximation correction step that reduces the
+variance of the method s.t. to reach an (1±ϵ) approximation, we only need O
+
+1
+ϵ
+
+matrix-vector
+products, vs. O
+
+1
+ϵ2
+
+for the original.
+Algorithm 1: Hutch++ trace estimator.
+Input: Matrix-vector multiplication oracle X for X ∈RD×D, number of queries, k.
+Output: Approximation to tr{X}.
+Sample S, M ∈RD× k
+3 with i.i.d. Rademacher
+n
+−1, +1
+o
+entriesa.
+Compute orthonormal basis Q ∈RD× k
+3 for span
+n
+XS
+o
+.
+// E.g. via QR decomp.
+return tr{X} ≈tr{Q⊤XQ} + 3
+k tr{M⊤(I −QQ⊤)X(I −QQ⊤)M}.
+aIn principle any sub-Gaussian RV with mean 0 and variance 1.
+Hutch++ is known to perform especially well on matrices with rapid eigenvalue decay, since its
+variance is proven to scale with the Frobenius norm of the matrix (Meyer et al., 2021).
+==PAGE:22==
+3.2 Matrix free methods
+17
+Compute and memory costs. Before we go on with the final stochastic approximation, we
+summarize the costs of the stochastic trace estimation methods in Table 3.2.
+Table 3.2: Trace estimation costs expressed through the runtime of a single oracle MVP, CX
+(cost of v7→X(v)). D is matrix dimension, S is probe vectors, k is Hutch++ queries. Note that
+the memory overhead column only lists additional memory costs induced by the estimator, and
+oracle memory costs will also be a factor in the true peak memory. Note also that the second
+term in Hutch++ forward compute assumes that the orthonormal basis is computed via (tall)
+QR decomposition and that k ≪D.
+Estimator
+Oracle calls
+Forward compute
+Memory overhead
+Hutchinson
+S
+O(S CX )
+O(D)
+Hutch++
+k
+O
+ k CX + (k
+3)2D
+
+O(kD)
+Stochastic Lanczos Quadrature (SLQ) (Ubaru et al., 2017) can be viewed as essentially a
+generalization of the Hutchinson trace estimator. We will show how to use it for matrix free
+estimation of log determinants.
+For a symmetric positive-definite (SPD) matrix X ∈Rn×n, we will now show how log det X can
+be expressed in terms of the trace of a matrix function. First, a clarifying definition is in order:
+Spectral function of a matrix
+[Adapted to diagonalizable matrices from the Jordan canonical form definition of matrix
+functions from Higham (2006)]
+Let f : (0, ∞] →R be a scalar function and X ∈Rn×n be symmetric positive-definite (SPD)
+with eigendecomposition X = QΛQ⊤, where Λ = diag [λ1, . . . , λn] , ∀i = 1, . . . , n : λi > 0
+and Q is orthogonal.
+We extend f to SPD matrices by
+f(X) = Qf(Λ)Q⊤= Q diag
+f(λ1), . . . , f(λn)
+Q⊤.
+(3.24)
+We can now obtain an interesting result by taking the trace of Eq. 3.24:
+tr{f(X)} = tr{Qf(Λ)Q⊤}
+(3.22)
+=
+tr{f(Λ) Q⊤Q
+| {z }
+=I
+} =
+n
+X
+i=1
+f(λi).
+(3.25)
+Then for log determinants, we can choose f(·) = log(·) in Eq. 3.25:
+tr{log X} =
+n
+X
+i=1
+log λi = log
+n
+Y
+i=1
+λi = log det Λ = log det X.
+(3.26)
+If we can eﬀiciently compute log X, then we can use our tricks from trace estimation to approx-
+imate the log determinant as well! As the name of this method suggests, the engine to do so is
+the Lanczos algorithms, which we will explore in the next section.
+==PAGE:23==
+3.2 Matrix free methods
+18
+3.2.3
+Lanczos algorithms
+With Eq. 3.24 in mind, it is clear that spectral matrix functions will be prohibitively expensive
+for large matrices, motivating the need for both approximative and matrix free methods. To
+eﬀiciently compute matrix logarithms, square roots, or other spectral matrix functions, we can
+utilize Lanczos procedures, a class of algorithms that iteratively construct low-rank matrix
+factorizations that approximate the eigenvalue spectrum to a specified level of granularity.
+Lanczos tridiagonalization algorithm (Lanczos, 1950).
+Given a symmetric matrix X ∈
+Rn×n, the algorithm iteratively builds an orthonormal basis for the Krylov subspace
+Km(X, v) = span
+n
+v, Xv, . . . , Xm−1v
+o
+,
+(Krylov def.)
+(3.27)
+where in the algorithm, m is a tunable parameter that controls the granularity of the approxi-
+mation - the higher m is, the closer to the exact function we get.
+Lanczos tridiagonalization starts with unit vector v1 =
+v
+∥v∥, and in m iterations, it produces
+orthonormal vectors v1, v2, . . . , vm and a tridiagonal matrix Tm ∈Rm×m s.t.
+V⊤XV = Tm,
+where V = [v1 v2 · · · vm] has the Lanczos basis vectors as columns.
+Tm has a special structure, i.e. it is a real tridiagonal matrix
+Tm =
+
+
+α1
+β2
+0
+0
+β2
+α2
+β3
+0
+β3
+...
+...
+...
+...
+βm−1
+0
+βm−1
+αm−1
+βm
+0
+0
+βm
+αm
+
+
+which approximates X on the subspace spanned by v, and its eigenvalues approximate the
+extreme eigenvalues of X. Importantly, Tm captures how X acts on v up to degree m −1
+polynomials.
+The implications are promising: due to the structure of Tm and assuming we can set m ≪n s.t.
+Tm is much smaller than X, we can cheaply compute spectral functions f(Tm) that we can use
+downstream to approximate a quadratic form of f(X). In particular, if e1 is the first coordinate
+basis vector (v1 in the Lanczos basis), there is a crucial relationship for any function f:
+v⊤
+1 f(X)v1 ≈e⊤
+1 f(Tm)e1,
+(3.28)
+with exact equality if Lanczos is run to full dimension, i.e. m = n1. The tridiagonalization
+algorithm pseudocode is detailed in algorithm 2 and visualized in Figure 3.2. Note that the
+algorithm is formulated with matrix-vector products, i.e. we can trivially use operator oracles.
+The implementation that we will be using is from the matfree library (Krämer et al., 2024),
+which has eﬀicient exact gradients for the algorithm.
+1The same relation holds for any u in the Krylov subspace, with u = Vmy giving u⊤f(X)u ≈y⊤f(Tm)y.
+==PAGE:24==
+3.2 Matrix free methods
+19
+Figure 3.2: Visualization of the first 4 iterations of the Lanczos tridiagonalization algorithm. The
+colored elements indicate which values are computed at this step and the solid lines indicate
+what will be returned in the case of termination (βj+1 < ϵ) at this step.
+Algorithm 2: Lanczos tridiagonalization
+Input: Symmetric X ∈Rn×n, max steps m, tolerance ϵ
+Output: Tridiagonal T and orthonormal basis V with X Vj = Vj Tj
+Initialization
+Choose v1 with ∥v1∥= 1;
+Set V←[v1], β1 ←0, and v0 ≡0.
+Lanczos iterations
+for j ←1 to m do
+w ←X vj −βj vj−1
+// Subtract prev. direction βj−1vj−1 s.t. w ⊥vj−1.
+αj ←v⊤
+j w
+// j'th diag. element.
+w ←w −αj vj
+// Now, w ⊥vj and w ⊥vj−1.
+/* - - Reortho. for numerical stability -- Important in practice. - -
+*/
+for i ←1 to j do
+w ←w −(v⊤
+i w)vi
+// Full reortho. - could be modified
+βj+1 ←∥w∥
+// (j + 1)'th sub-/superdiag. element.
+if βj+1 < ϵ then
+return (Tj, V)
+// βj+1 ≈0 =⇒
+Reached invariant Krylov subspace.
+vj+1 ←w/βj+1
+append vj+1 to V
+==PAGE:25==
+3.2 Matrix free methods
+20
+Lanczos (Golub–Kahan) bidiagonalization algorithm (Golub & Kahan, 1965). In some
+practical scenarios, we can run into numerical stability issues with the tridiagonal approximation.
+Specifically, when the ratio between the largest and smallest eigenvalue (condition number) of
+the matrix we are approximating is high, the risk of numerical instability increases. This turns
+out to be the case for the GGN matrix, and as such, we will present another related Lanczos-style
+algorithm that can mitigate this in some scenarios.
+The first thing to notice is that the tridiagonalization formulation is an approximation to the
+eigendecomposition, which implicitly “squares” the singular value decomposition (SVD):
+X = UΛU⊤
+(Eigendecomposition)
+= UΣΣ⊤U⊤
+= UΣIΣ⊤U⊤
+= UΣV⊤VΣ⊤U⊤
+= UΣV⊤(UΣV⊤)⊤,
+(2 × SVD),
+where SVD is X = UΣV⊤= U diag
+σ1, . . . , σn
+V⊤and σi are the singular values.
+Similarly, we can view the tridiagonal factorization as implicitly “squaring” a bidiagonal factor-
+ization:
+X = V⊤TV
+(Tridiag)
+= VBB⊤V⊤
+= VBIB⊤V⊤
+= VBR⊤RB⊤V⊤
+= VBR⊤(VBR⊤)⊤,
+(2 × Bidiag)
+where the bidiagonal factorization VBR⊤approximates the SVD; If we can factorize X = AA⊤,
+then the bidiagonal factorization is A = VBR⊤.
+Analogous to Lanczos tridiagonalization, the Lanczos bidiagonalization algorithm constructs a
+matrix Bk which approximates the singular values of X this time with two Krylov bases V, R.
+For completeness, Bm+1 has the structure
+B m+1 =
+
+
+α1
+β2
+0
+0
+0
+α2
+β3
+...
+...
+...
+βm−1
+0
+αm−1
+βm
+0
+0
+αm
+
+
+.
+The full pseudocode for the bidiagonalization procedure is given in algorithm 3. Notably, it
+extends the Lanczos iterations of the tridiagonalization procedure to have two recurrences instead
+of one, since it constructs two orthonormal bases V, R instead of just V.
+==PAGE:26==
+3.2 Matrix free methods
+21
+Algorithm 3: Lanczos (Golub–Kahan) bidiagonalization
+Input: X ∈Rnr×nc (rectangular allowed), max steps m, tolerance ϵ
+Output: Bidiagonal B and orthonormal bases V, R with X Rj = Vj Bj
+Initialization
+Choose right start r1 (∥r1∥= 1);
+Set R←[r1], V←[ ], β1 ←0, and v0 ≡0.
+Golub-Kahan iterations
+for j ←1 to m do
+w ←X rj −βj vj−1
+// Subtract prev. left direction βjvj−1 s.t. w ⊥vj−1.
+αj ←∥w∥
+if αj < ϵ then
+return (Bj−1, V, R)
+vj ←w/αj; append vj to V.
+/* - - Reortho. for numerical stability - -
+*/
+for i ←1 to j −1 do
+vj ←vj −(v⊤
+i vj)vi
+// Full reortho. - could use a partial version
+z ←X⊤vj −αj rj
+// Subtract prev. right direction to keep orthogonality.
+βj+1 ←∥z∥
+if βj+1 < ϵ then
+return (Bj, V, R)
+rj+1 ←z/βj+1
+append rj+1 to R.
+/* - - Reortho. for numerical stability - -
+*/
+for i ←1 to j do
+rj+1 ←rj+1 −(r⊤
+i rj+1)ri
+// Full reortho. - could use partial version
+Compute and memory costs. In Table 3.3, we list the cost of the Lanczos algorithms as
+well as the stochastic Lanczos quadrature (SLQ) that combines stochastic trace estimation with
+a Lanczos approximation. We note that for tridiagonalization, the backward pass is the same
+cost as the forward pass due to the custom algorithm from Krämer et al. (2024). Exact costs
+depend on the compute-vs-memory trade-offs we make with checkpointing. A similar algorithm
+for bidiagonalization unfortunately does not yet exist, so the gradient computations are not as
+eﬀicient as for tridiagonalization.
+Table 3.3: Cost of Lanczos approximations, expressed through the runtime of a single oracle
+MVP, CX (cost of v7→X(v)). m is the number of Lanczos steps, S is the number of SLQ probe
+vectors (assuming Hutchinson). Cs is the cost of evaluating a spectral function on the Lanczos
+approximation; in our case, we always do dense solves, since we keep m very small. Hence as
+a rule of thumb, Cs(m) ≪m CX . Note that memory overhead cover additional memory costs
+induced by the algorithm – oracle memory costs will also be a factor in the peak memory cost.
+Bidiagonalization keeps two Krylov bases; its memory is roughly twice the tridiagonal case but
+the same order. Finally, the memory overhead in SLQ assumes that we store all Lanczos bases.
+Procedure
+Oracle calls
+Forward compute
+Memory overhead
+Lanczos tridiagonalization
+m
+O(m CX + Cs(m))
+O(mD + m2)
+Lanczos GK-bidiagonalization
+2m
+O(2m CX + Cs(m))
+O(2mD + m2)
+SLQ (tridiag)
+Sm
+O
+ S(m CX + Cs(m))
+
+O(S(mD + m2))
+==PAGE:27==
+3.3 Composing scalable functions
+22
+3.2.4
+Deterministic iterative methods
+Finally, we will go through some deterministic methods to complement the randomized methods.
+Conjugate Gradient (CG) (Hestenes, Stiefel, et al., 1952) is an iterative solver for SPD
+systems
+Ax = b.
+(3.29)
+Starting from an initial guess x0, CG generates a sequence of search directions pk that are pair-
+wise A-conjugate, p⊤
+i Api = 0, i ̸= j, and after ≤D steps (often far fewer in practice), it reaches
+the exact solution (in exact arithmetic!).
+In JAX, reverse-mode autodiff for CG solve is implemented via another CG solve, meaning that
+it has a very compelling memory complexity in both the forward and backwards pass.
+There is a caveat to CG, which is that steps required to reach convergence scales with the
+condition number (ratio between max. and min. eigenvalues) of the matrix – and that is when it
+is properly preconditioned (Saad, 2003). This is somewhat bad news, as the GGN matrix tends
+to have a high condition number (Miani et al., 2024).
+Alternating Projections is an algorithm originally proposed by Von Neumann, 1949 and
+presented in the context of Bayesian neural nets by Miani et al. (2025). The kernel of a matrix
+(operator) A is the intersection of the kernels of any row-wise partition of this matrix (operator)
+A = [A⊤
+1 A⊤
+2 · · · A⊤
+B]⊤;
+ker(A) =
+B
+\
+b=1
+ker(Ab),
+(3.30)
+since a vector lies in ker(A) if and only if it is annihilated by every block Ab.
+We can apply this in the context of our factorized GGN operators w, w⊤to compute the full
+projection via the per-batch kernels, since the per-batch kernels correspond to a row-partition
+of the full kernel.
+Compute and memory costs. The compute and memory complexities of deterministic iter-
+ative solvers are summarized in Table 3.4. Recalling that the backward pass of a CG solve is
+another CG solve, it will be the same complexity as the forward pass.
+Table 3.4: Forward-pass complexity of deterministic iterative methods, expressed through the
+cost of a single oracle MVP, CX . D is parameter dimension, κ is condition number of the SPD
+matrix, k is CG iterations (k = O(√κ) when well pre-conditioned), B is number of mini-batches,
+is l is data points per mini-batch. Note that the number of oracle calls in alternating projections
+depend on whether the oracle can operate directly on mini-batches or if each vector has to be
+passed individually (hence we simplify it to order of). Note that the memory overhead column
+only lists additional memory costs induced by the method, and oracle memory costs will also be
+a factor in the true peak memory.
+Procedure
+Oracle calls
+Forward compute
+Memory overhead
+Conjugate Gradient
+k
+O(k CX )
+O(D)
+Alternating Projections
+O(B l)
+O(B l CX )
+O(D)
+3.3
+Composing scalable functions
+In this section, we will use the oracles and sub-routines from the previous section to build a
+matrix free procedure for the objective function. In order to scale our predictive methods, We
+will also build a matrix free sampling function.
+==PAGE:28==
+3.3 Composing scalable functions
+23
+3.3.1
+Objective function
+Armed with a whole arsenal of matrix free approximations, we are now ready to create a scalable
+matrix free formulation of our objective function (Eq. 3.2); for good measure, we repeat it here:
+L(Z) = tr{Σ−1ΣZ}
+|
+{z
+}
+trace term
++ log det(Σ−1
+Z )
+|
+{z
+}
+logdet term
+,
+(3.2)
+where we recall that Σ = (αID + G)−1 and ΣZ = (αID + β GZ)−1.
+The trace term. We note that this term consists of the inverted full (mini-batched) covariance
+Σ−1 = αID + G and the inducing point covariance ΣZ = (αID + β GZ)−1.
+Here, we can choose to do the inversion of the inducing point covariance with conjugate gradient,
+which is cheap memory-wise. Empirically, we observe that CG has a high computational cost
+for this task. This could be due to slow convergence from the GGN having a high condition
+number.
+However, we have other options as well. We recall the factorized operators w : G = w w⊤.
+The Woodbury matrix identity (Guttman, 1946; Woodbury, 1950) for conformable matrices
+A ∈Rn×n, C ∈Rk×k, U ∈Rn×k, V ∈Rk×n is
+(A + UCV )−1 = A−1 −A−1U(C−1 + V A−1U)−1V A−1,
+which for A = αI, C = I and U = w, V = w⊤, we get
+(αID + β w w⊤)−1
+|
+{z
+}
+D×D
+= α−1ID −α−2p
+β w(Id + βα−1 w⊤w)−1p
+β w⊤
+= α−1ID −α−2 w (β−1Id + α−1 w⊤w)−1
+|
+{z
+}
+d×d
+w⊤.
+(3.31)
+This allows us to invert a much smaller matrix in our case, since d = MO ≪D, assuming O is
+a reasonable size. We now step slightly out of the matrix free paradigm, since we will compute
+the operation in Eq. 3.31 by first materializing w⊤w ∈RMO×MO (once again assuming modest
+M and O), and then computing
+u = w⊤v
+(3.32)
+k = solve
+
+β−1Id + α−1 w⊤w = w⊤u
+
+(3.33)
+G−1
+Z v = α−1v + α−2 w k
+(3.34)
+Using the materialized w⊤w matrix to compute the inverse (solve the system in the VP) will
+save us a conjugate gradient forward and backward pass.
+Now we can compute the trace eﬀiciently with either the Hutchinson estimator or Hutch++,
+together with the operator in Eq. 3.34 and the mini-batched full GGN operator.
+The logdet term.
+For the log determinant, we can use one of the Lanczos procedures in
+conjunction with SLQ. This means we have to specify and possibly tune some parameters to the
+problem while keeping a compute and memory budget in mind.
+The tridiagonalization approach is just straightforward application of SLQ on our Σ−1
+Z operator.
+The bidiagonalization approach requires reformulating the IP covariance with the factorization
+αID + β GZ =
+h√αI
+√β w
+i " √αI
+√β w⊤
+#
+,
+(3.35)
+==PAGE:29==
+3.3 Composing scalable functions
+24
+after which we can use one of the block vectors in the factorization for the SLQ computation.
+Finally, we have a scalable procedure to compute the operator oracle for Eq. 3.2:
+Matrix free objective function
+L(Z) =
+tr{Σ−1ΣZ}
+|
+{z
+}
+CG/Woodbury
+and Hutch++
++ log det(Σ−1
+Z )
+|
+{z
+}
+SLQ Bi/Tri
+(3.36)
+Now that we have an operational objective function that we can scale up to large neural nets,
+we can optimize our inducing points – Great! But we still have more work to do before we can
+scale the KiLLA predictive analogous to Eq. 2.8. We need a scalable sampling function.
+3.3.2
+Sampling function
+A standard way to sample from a d-dimensional multivariate Gaussian distribution N (v|µ, Σ)
+is to just sample a standard Gaussian vector ε ∈Rd, then reparameterizing to obtain
+Σ1/2ε + µ ∼v.
+(3.37)
+Here, the matrix square root is a matrix function as defined in Equation 3.2.2. We will need to
+derive a matrix free method to sample from our LLA posterior and predictive distributions.
+Once again, we recall the we can write up the inducing point covariance as ΣZ = (αID +
+β w w⊤)−1. This form means that we can apply theorem 1.2 from (Fasi et al., 2023), which is
+essentially a generalization of the Woodbury matrix identity:
+Theorem 1.2 (Fasi et al., 2023)
+(Function of a low-rank perturbation to the scaled identity matrix)
+Let U, V ∈Cn×k with k ≤n and assume that V ∗U is nonsingular. Let f be defined on the
+spectrum of A = αIn + U V ∗, and if k = n let f also be defined at α. Then
+f(A) = f(α) In + U (V ∗U)−1  f(αIk + V ∗U) −f(α) Ik
+ V ∗.
+(3.38)
+Since we are working with matrices in the real domain, the adjoints simplify to transposes. We
+can substitute in f = (·)−1
+2 and A−1 = ΣZ =⇒U = √β w, V ∗= √β w⊤which yields
+Σ1/2
+Z
+= (αID + β w w⊤)−1
+2
+(3.39)
+= α−1
+2 ID +
+p
+β w(β w⊤w)−1 h
+(αId + β w⊤w)−1
+2 −α−1
+2 Id
+i p
+β w⊤
+= α−1
+2 ID + w(w⊤w)−1 h
+(αId + w⊤w)−1
+2 −α−1
+2 Id
+i
+w⊤
+= w (w⊤w)−1
+|
+{z
+}
+Inv.
+Composite
+αId + β w⊤w
+−1
+2
+|
+{z
+}
+Small Inv. Sqrt
+w⊤+ α−1
+2  ID −w(w⊤w)−1 w⊤
+|
+{z
+}
+Projection term
+.
+(3.40)
+The Inverse Composite term. For this term, we have a small (MO × MO) operator, so
+we will be able to materialize the dense w⊤w matrix for many regression and classification
+problems unless we set M too large. In these cases, we can fall back to solving the system in a
+matrix free manner using CG – although this will probably be quite slow, as previously noted.
+==PAGE:30==
+3.3 Composing scalable functions
+25
+The Small Inverse Square Root term. Matrix square root is a spectral matrix function
+(Eq. 3.24), and we can thus implement an approximation with a tunable level of granularity via
+either Lanczos bi- or tridiagonalization.
+The Projection term. It turns out that the last term is an orthogonal projection onto the
+kernel of w. Now, we can actually compute it without materializing any D × D matrices since
+the identity matrix is trivially the identity operator, but when the small w⊤w eventually grows
+too large, we can use the alternating projections procedure to approximate it.
+We now have a scalable procedure to compute the operator oracle for Σ1/2
+Z
+from Eq. 3.40:
+Matrix free covariance square root
+Σ1/2
+Z
+= w (w⊤w)−1
+|
+{z
+}
+CG or exact
+αId + β w⊤w
+−1
+2
+|
+{z
+}
+Lanczos Bi/Tri
+w⊤+ α−1
+2  ID −w(w⊤w)−1 w⊤
+|
+{z
+}
+alternating projections
+or exact
+.
+(3.41)
+Finally, we have composed the scalable algorithms needed to proceed to the testing phase. Next
+up, we will perform experiments to gauge the performance of KiLLA at this point.
+==PAGE:31==
+Experiments
+4
+To quantify the performance of the presented methods, we will first apply them on various toy
+examples. For these, we will primarily look at 2-dimensional binary classification in order to
+visualize the results. The purpose of the toy examples is primarily to verify that the methods
+work, and measure the impact of the different matrix free approximations we utilize.
+For larger examples, we will look at image classification, and here we will only be able to run
+the matrix free methods. Hence, we will report our metrics and attempt to quantify the scaling
+behavior of the methods.
+Both the full LLA and KiLLA performance is highly dependent on the MAP estimator we base
+it on. Thus we will measure performance of KiLLA in different settings relative to MAP and full
+LLA when possible. Direct comparisons with other LLA literature are limited by the fact that
+we have to use neural net architectures that fit within the budget of the GPU resources while
+still performing well enough to give meaningful results. This turns out to be tricky in particular
+for the ResNet/CIFAR10 combination that is common in Bayesian deep learning literature.
+Metrics. To quantify performance, we will use the standard metrics of accuracy on a held-out
+test set and negative log-likelihood (NLL), which we also used for the MAP training.
+To further measure the quality of the full predictive distribution, we will also use calibration
+metrics. Expected calibration error (ECE) (Naeini et al., 2015) bins examples by their predicted
+confidence and computes the weighted average gap between the mean confidence and empirical
+accuracy in each bin; an ECE of 0 indicates perfect calibration. Brier score (Brier, 1950) is
+the mean-squared difference between predicted class-probability vector and the one-hot encoded
+label; it ranges between 0 (perfect fit) and 2 (every entry is confidently incorrect).
+Finally, we will use out-of-distribution (OOD) AUC. Here, in-distribution (ID) samples are
+treated as negatives and OOD samples are positives, and we then rank them by confidence
+(negative maximum predicted class probability), and compute area under the ROC curve; a
+score of 0.5 is equivalent to random guessing, while 1.0 is perfect OOD detection.
+4.1
+Toy examples
+Toy datasets. We consider the 2-dimensional binary classification dataset “banana”, which
+has N = 500 examples, depicted in Figure 4.1 along with the MAP estimator and the full LLA.
+x1
+x2
+Dataset
+Class 1
+Class 0
+x1
+NN MAP
+x1
+Full LLA
+0
+1
+E[y∗| x∗, D]
+Figure 4.1: The synthetic toy dataset “banana” (left), the MAP estimator we consider (center),
+and the predictive mean full LLA (right).
+For OOD, we consider a ring dataset that is well outside the domain of training data for the
+==PAGE:32==
+4.1 Toy examples
+27
+x1
+x1
+0.00
+1.00
+E[y∗|x∗, D]
+0.00
+0.25
+V[y∗|x∗, D]
+Figure 4.2:
+Visualization of the full LLA on the banana dataset, along with the out-of-
+distribution ring dataset, which is marked by white dots.
+banana dataset. This is visualized along with the full LLA for the banana dataset in Figure 4.2.
+Toy models. For classification, we consider a tiny neural net by modern standards, with only
+626 parameters. It consists of 3 hidden layers with 16 neurons, each with a tanh activation
+function. This allows both exact dense and matrix free versions of the algorithms to run very
+fast with relatively minimal resources.
+4.1.1
+Dense optimization vs. Matrix free optimization
+We want to quantify the effect of the matrix free approximation on optimization of the KiLLA
+objective function. To do so, we will run multiple training instances with the same number of
+inducing points (M = 40), but vary the number of Hutch++ probe vectors and the size of the
+Krylov subspace build for the stochastic Lanczos quadrature (number of matvecs). For each
+training run, we also do multiple evaluation runs with different seeds. This way, we take the
+variance from different initializations into account, as well as the variance from MC sampling.
+This experiment is visualized in Figure 4.3, where we can see that the highest fidelity approxima-
+tion also yields the best optimized set of inducing points. However, for the other settings, it also
+becomes clear that initialization must play a role in the optimum the procedure converges to.
+This conclusion comes from the fact that a worse approximation (fewer ST samples or smaller
+SLQ basis) sometimes seems like a better approximation to the full LLA.
+The quantitative results of the experiment is presented in Table 4.1. Here we see a more clear
+tendency that the better the approximation is, the more closely it resembles the full LLA. For
+this toy example, we see that even with a very coarse-grained approximation (ST=16,SLQ=10)
+we can in fact reach quite close to the full LLA for many of the metrics.
+==PAGE:33==
+4.1 Toy examples
+28
+x2
+(a) ST = 16, SLQ = 40
+(b) ST = 32, SLQ = 40
+(c) ST = 256, SLQ = 40
+x2
+(d) ST = 16, SLQ = 20
+(e) ST = 32, SLQ = 20
+(f) ST = 256, SLQ = 20
+x1
+x2
+(g) ST = 16, SLQ = 10
+x1
+(h) ST = 32, SLQ = 10
+x1
+(i) ST = 256, SLQ = 10
+0
+1
+E[y∗|x∗, D]
+Figure 4.3: Visual comparison of the predictive mean after matrix free optimization. The model
+is a small neural net with D = 626 parameters, M = 40 inducing points, and varying number
+of stochastic trace (ST) samples and Krylov subspace size (SLQ) for the stochastic Lanczos
+quadrature log-determinant approximations. Approximation fidelity generally diminishes both
+when lowering ST and SLQ, but the exact optimized configuration also depends on initialization.
+==PAGE:34==
+4.1 Toy examples
+29
+Table 4.1: Predictive and uncertainty metrics, averaging over 3 optimization runs with 10 eval-
+uation runs each on different seeds on the banana test set using M = 40 inducing points and
+varying the number of stochastic trace samples (Hutch++, denoted ST) and the number of
+Krylov subspace basis vectors in the stochastic Lanczos quadrature (denoted SLQ, using bidiag-
+onalization). OOD is OOD AUROC measured using the ring dataset as the out-of-distribution
+set. We use 1,000 MC samples for the evaluations. Where the empirical standard deviation
+across runs exceeded 10−3, we list it as error bars.
+(ST, SLQ)
+Acc. (%)
+NLL ↓
+Brier ↓
+ECE ↓
+OOD (%) ↑
+(16,10)
+96.46 ± 0.39
+0.373 ± 0.013
+0.217 ± 0.011
+0.258 ± 0.008
+91.72 ± 0.82
+(16,40)
+96.67 ± 0.29
+0.382 ± 0.019
+0.220 ± 0.012
+0.267 ± 0.017
+94.53 ± 1.04
+(32,20)
+96.77 ± 0.15
+0.381 ± 0.030
+0.221 ± 0.029
+0.263 ± 0.017
+93.00 ± 3.21
+(256,10)
+96.77 ± 0.15
+0.366 ± 0.029
+0.209 ± 0.024
+0.253 ± 0.015
+94.18 ± 2.36
+(256,40)
+96.88
+0.340 ± 0.021
+0.191 ± 0.018
+0.242 ± 0.022
+96.11 ± 1.33
+MAP
+96.88
+0.088
+0.051
+0.061
+28.37
+Full LLA
+96.88
+0.172 ± 0.001
+0.077
+0.118 ± 0.011
+98.65 ± 0.22
+4.1.2
+Dense sampling vs. Matrix free sampling
+Next up, we want to measure the quality of the matrix free approximation when sampling
+the KiLLA predictive. We do so by making a qualitative empirical study of the convergence
+properties of the matrix free sampling algorithm; i.e. it is essentially a sanity check that the
+procedure works. We consider a fixed, optimized set of M = 40 inducing points and then vary
+the number of MC samples, and then compare the results with a dense sampling procedure
+(using the tensorflow_probability package, curiously the standard in JAX).
+The results are shown in Table 4.2, where we that that in most metrics, the matrix free evaluation
+that uses 1,000 MC samples (same as the dense) outperforms the dense sampling evaluation on
+all metrics but OOD, where it still comes relatively close. The other matrix free methods are
+also competitive, but as expected, the predictive quality suffers when drawing too few samples –
+at 10, empirical mean OOD drops to around 87%. These tendencies are also seen clearly in the
+visualizations in Figure 4.4.
+Table 4.2: Predictive and uncertainty metrics for 5 sampling runs on different seeds on the
+banana test set for dense vs. matrix-free (MF) sampling with varying numbers of MC samples
+and M = 40 inducing points. OOD is OOD AUROC measured using the ring dataset as the
+out-of-distribution set. Where the empirical standard deviation across runs exceeded 10−3, we
+list error bars.
+Method
+Acc. (%)
+NLL ↓
+Brier ↓
+ECE ↓
+OOD (%) ↑
+MF (10)
+96.25 ± 2.34
+0.176 ± 0.024
+0.080 ± 0.015
+0.126 ± 0.016
+87.04 ± 2.42
+MF (100)
+99.38 ± 1.25
+0.176 ± 0.003
+0.075 ± 0.002
+0.152 ± 0.003
+92.16 ± 0.49
+MF (1000)
+100
+0.170
+0.072
+0.147
+92.96 ± 0.12
+Dense (1000)
+100
+0.201
+0.085
+0.173
+93.98 ± 0.25
+MAP
+100
+0.089
+0.040
+0.076
+23.87
+Full LLA
+100
+0.153
+0.060
+0.134
+93.62 ± 0.21
+==PAGE:35==
+4.2 Image classification
+30
+x1
+x1
+0.00
+1.00
+E[y∗|x∗, D]
+0.00
+0.25
+V[y∗|x∗, D]
+(a) 10 MC samples.
+x1
+x1
+(b) 100 MC samples.
+x1
+x1
+(c) 1000 MC samples.
+x1
+x1
+(d) Dense sampling.
+Figure 4.4: Visual comparison of matrix free IP LLA sampling with M = 40 and a different
+number of Monte Carlo samples. Top row is the predictive mean, bottom row is the predictive
+variance. Dense sampling uses 1000 MC samples.
+4.2
+Image classification
+Having verified that matrix free optimization and sampling works for toy problems, we will move
+to the much higher-dimensional problem of image classification.
+4.2.1
+LeNet-5 on MNIST and FashionMNIST
+The first image datasets we consider are MNIST (LeCun et al., 2002) and FashionMNIST (Xiao
+et al., 2017). These are both classic image benchmarks consisting of 60,000 training and 10,000
+test examples each of 28 × 28 greyscale images.
+We consider the LeNet-5 architecture (LeCun et al., 1995), as detailed in Table 4.3.
+Table 4.3: LeNet-5 architecture overview. k: kernel/window size (square), s: stride.
+D = 61,706 parameters
+Covariance matrix size (D2): 3.808 × 109
+Stage
+Output size
+Layer
+k
+s
+C1
+28 × 28 × 6
+Conv
+5
+1
+S2
+14 × 14 × 6
+AvgPool
+2
+2
+C3
+10 × 10 × 16
+Conv
+5
+1
+S4
+5 × 5 × 16
+AvgPool
+2
+2
+F5
+120
+Dense
+–
+–
+F6
+84
+Dense
+–
+–
+Head
+10
+Dense (logits)
+–
+–
+As an initial guess for the number of inducing points needed, we take inspiration from Ortega
+et al. (2023), and try M = 100. For images, we cannot visualize the space of the inducing
+points in the same way as for our 2D classification examples, but we can visualize the inducing
+points themselves as images.
+This is done in Figure 4.5, where the samples that we use as
+==PAGE:36==
+4.2 Image classification
+31
+initial inducing points are visualized next to what they look like after optimization. We note
+the interesting aliasing effect in both of the optimized points’ images {Figure 4.5b,Figure 4.5d}.
+(a) Subsample of 32 initial inducing points (M =
+100), sampled from MNIST.
+(b) The same subsample of inducing points as Fig-
+ure 4.5a, after 150 optimization steps.
+(c) Subsample of 32 initial inducing points (M =
+100), sampled from FMNIST.
+(d) The same subsample of inducing points as Fig-
+ure 4.5c, after 80 optimization steps.
+Figure 4.5: MNIST and FashionMNIST images used for initializing the inducing point approxi-
+mation before and after optimization.
+Table 4.4: MNIST with M = 100 inducing points (3 runs per setting). Mean ± empirical stan-
+dard deviation is reported for KiLLA (std. deviations < 10−3 omitted); MAP is deterministic,
+hence no error bars.
+Setting
+Acc. (%) ↑
+NLL ↓
+Brier ↓
+ECE ↓
+OOD (%) ↑
+α = 10
+98.28 ± 0.04
+0.3146
+0.1102
+0.2311 ± 0.001
+95.37 ± 0.04
+α = 50
+98.39 ± 0.01
+0.1007
+0.0364
+0.0588
+89.77 ± 0.07
+α = 100
+98.40 ± 0.01
+0.0771
+0.0307
+0.0371
+86.86 ± 0.06
+MAP
+98.41
+0.0567
+0.0258
+0.0137
+76.68
+For both MNIST and FashionMNIST, we see that with M = 100 inducing points, KiLLA
+achieves comparable test set accuracies to MAP while gaining a remarkable improvement in
+OOD detection, depending on the setting of α. For NLL, Brier and ECE, the trend is that
+they improve as we increase α, which is opposite of OOD. This performance is curious, as it
+shows potential, but also warrants further large-scale experiments, and in particular highlights
+the need for a good mechanism for selecting α.
+4.2.2
+ResNet1 on CIFAR10
+As a large-scale experiment, we consider the 1 million parameter ResNet-inspired (He et al.,
+2015) model architecture in Table 4.6 on the CIFAR10 (Krizhevsky & Hinton, 2009) dataset.
+We note that this neural net is scaled down 10-20× compared to the original ResNet models,
+due to memory constraints with the current implementation. This might be alleviated with
+additional checkpointing within the neural net, although this will increase computational cost.
+==PAGE:37==
+4.2 Image classification
+32
+Table 4.5: FashionMNIST with M = 100 inducing points (3 runs per setting). Mean ± empirical
+standard deviation is reported for KiLLA (std. deviations < 10−3 omitted); MAP is determin-
+istic, hence no error bars.
+Setting
+Acc. (%) ↑
+NLL ↓
+Brier ↓
+ECE ↓
+OOD (%) ↑
+α = 10
+87.30 ± 0.05
+0.6490 ± 0.002
+0.3075
+0.2925 ± 0.001
+96.63 ± 0.04
+α = 50
+88.22 ± 0.03
+0.4066 ± 0.001
+0.1969
+0.1159 ± 0.001
+92.25 ± 0.03
+α = 100
+88.17 ± 0.03
+0.3677 ± 0.001
+0.1830
+0.0747
+88.51 ± 0.05
+MAP
+88.19
+0.3328
+0.1708
+0.0158
+77.51
+Table 4.6: ResNet1 architecture overview. k: kernel/window size (square), s: stride. In our
+case, H = W = 32, since we consider the CIFAR10 dataset. Layer terminology is from the
+original ResNet paper, but this network is scaled down from 10-20 million to around 1 million
+parameters.
+D = 1,087,722 parameters
+Covariance matrix size (D2): 1.183 × 1012
+Stage
+Output size
+Layer
+k
+s
+Repeat
+Stem
+H × W × 32
+Conv
+3
+1
+1
+1
+H × W × 32
+BasicBlock
+3
+1
+3
+2a
+H
+2 × W
+2 × 64
+BasicBlock
+3
+2
+1
+2b
+H
+2 × W
+2 × 64
+BasicBlock
+3
+1
+2
+3a
+H
+4 × W
+4 × 128
+BasicBlock
+3
+2
+1
+3b
+H
+4 × W
+4 × 128
+BasicBlock
+3
+1
+2
+Head
+128
+GAP →FC
+–
+–
+1
+Similarly to MNIST and FashionMNIST, CIFAR10 is an image classification dataset with 10
+classes, but this time it is 32 × 32 × 3 images, since we now consider color images. The 10
+classes are also harder to generalize on, since the CIFAR10 images are much more diverse and
+no longer have uniform background and setting. CIFAR10 contains 50,000 training and 10,000
+test examples.
+Although the methods are scalable, the practical implementation still needs to be carefully opti-
+mized w.r.t. how memory is handled, especially in the gradient computation pass. The runtimes
+for various settings of KiLLA optimization on ResNet1/CIFAR10 is reported in Table 4.7. The
+table also shows why we lowered our initial attempt of using M = 100 inducing points (like
+with MNIST and FashionMNIST) and settled for M = 50 for the experiments: the computation
+exceeded the job time limit, even for only 16 Hutch++ probes and Krylov basis vectors.
+Table 4.7: IP optimization runtime for ResNet1 on a single A100 GPU with 80GB VRAM.
+Configurations are carefully chosen to fit into 80GB VRAM - especially the current backward
+pass is expensive. †Job reached time limit of 24 hours around 4 minutes before finishing.
+# Matvecs
+# Trace Probes
+# Inducing points
+Epochs
+Runtime (h)
+16
+16
+100
+150
+24†
+32
+32
+50
+100
+4.5
+36
+36
+50
+100
+4.75
+36
+36
+50
+240
+11
+==PAGE:38==
+4.2 Image classification
+33
+The results of the runs are seen in Table 4.8, where we document various runs at different settings
+of α. The coarse scan over α with 100 epochs were performed first, and afterwards another run
+with α = 15 and 240 epochs was done. The last run was also the run that performed best,
+although it does not get close to the MAP estimator in any of the metrics. For this dataset, we
+did not test OOD due to time constraints.
+Table 4.8: CIFAR10 with M = 50 inducing points and different settings for prior precision α
+and number of epochs ne (3 runs per setting). Mean ± empirical standard deviation is reported
+for IP LLA (std. deviations < 10−3 omitted); MAP is deterministic, hence no error bars. Note
+that the coarse sweep with ne = 100 epochs was made first, then the run with ne = 240.
+Setting
+Acc. (%) ↑
+NLL ↓
+Brier ↓
+ECE ↓
+α = 0.1, ne = 100
+31.00 ± 0.57
+4.281 ± 0.168
+0.814 ± 0.002
+0.115 ± 0.009
+α = 1,
+ne = 100
+36.18 ± 0.56
+2.679 ± 0.146
+0.771 ± 0.002
+0.054 ± 0.003
+α = 10, ne = 100
+56.24 ± 0.30
+1.384 ± 0.004
+0.661 ± 0.001
+0.235 ± 0.002
+α = 15, ne = 240
+63.48 ± 0.16
+1.317 ± 0.003
+0.635 ± 0.001
+0.310 ± 0.002
+α = 50, ne = 100
+48.10 ± 0.17
+1.437
+0.687
+0.092 ± 0.003
+MAP
+79.22
+0.6477
+0.3005
+0.0617
+The conclusion for this experiment is not completely clear, but it seems reasonable to assume that
+M = 50 inducing points is too little to properly approximate such a high-dimensional dataset.
+The 36 Hutch++ samples and Krylov basis vectors might also be too little, so in general, we
+need to increase the compute budget to get a more complete picture of the large-scale setting.
+==PAGE:39==
+Discussion & conclusion
+5
+In this thesis, we introduced KiLLA, a framework for scalable Linearized Laplace Approxima-
+tions (LLA), centered around an Inducing Point approximation to the generalized Gauss-Newton
+(GGN) matrix optimized via KL-divergence, as well as matrix free optimization and sampling
+algorithms.
+While the framework has yielded solid results in the realm of toy examples, it still underperforms
+somewhat on the larger datasets.
+On MNIST and FashionMNIST, we see a substantial improvement in OOD detection over the
+MAP estimator, matching performance in held-out test set accuracy, but a substantial gap in
+NLL, Brier and ECE.
+Results for CIFAR10 seem to indicate that the current version of the framework is still con-
+strained by memory costs, since we can only reasonably afford to use M = 50 inducing points
+with a reasonable number of Hutch++ samples and Krylov basis vectors for approximating
+trace and log-determinant. This seems to be too few inducing points to approximate LLA for
+CIFAR10, and the results are inconclusive.
+Additionally, our CIFAR10 experiments used a
+scaled down ResNet architecture compared to related works (Immer, Korzepa, & Bauer, 2021;
+Ortega et al., 2023).
+Thus, optimizations to memory costs are needed to perform large-scale experiments to thor-
+oughly quantify performance in high-dimensional domains. An obvious avenue for improvement
+is to implement additional checkpointing logic, s.t. we cache less intermediate values during the
+forward pass, but rather recompute them during the backward pass.
+Another limitation is the problem of selecting a good prior precision α.
+We found α to be
+crucial for the KiLLA optimization process itself and for downstream performance. α is diﬀicult
+to select; with inspiration from Immer, Korzepa, and Bauer (2021), in our experiments, we
+sweep over logarithmically spaced candidate values to find the best one, but in practice, a better
+mechanism for selection or even a learnable α would be a clear direction of improvement.
+A procedure such as the one presented by Immer, Bauer, et al. (2021) is worth exploring in
+this regard. This was out of scope for this project, but a procedure that can optimize α while
+foregoing the GGN as prerequisite would be of high value to the KiLLA framework.
+If the limitations are addressed, we will be able to see if the performance of KiLLA on large-scale
+problems matches the potential shown in the small-scale experiments.
+==PAGE:40==
+Bibliography
+Bradbury, J., Frostig, R., Hawkins, P., Johnson, M. J., Leary, C., Maclaurin, D., Necula, G.,
+Paszke, A., VanderPlas, J., Wanderman-Milne, S., & Zhang, Q. (2018). JAX: Composable
+transformations of Python+NumPy programs (Version 0.3.13). http://github.com/jax-
+ml/jax
+Brier, G. W. (1950). Verification of forecasts expressed in terms of probability. Monthly weather
+review, 78(1), 1–3.
+Brown, T., Mann, B., Ryder, N., Subbiah, M., Kaplan, J. D., Dhariwal, P., Neelakantan, A.,
+Shyam, P., Sastry, G., Askell, A., et al. (2020). Language models are few-shot learners.
+Advances in neural information processing systems, 33, 1877–1901.
+Daxberger, E., Kristiadi, A., Immer, A., Eschenhagen, R., Bauer, M., & Hennig, P. (2021).
+Laplace redux-effortless bayesian deep learning. Advances in neural information process-
+ing systems, 34, 20089–20103.
+Fasi, M., Higham, N. J., & Liu, X. (2023). Computing the square root of a low-rank perturbation
+of the scaled identity matrix. SIAM Journal on Matrix Analysis and Applications, 44(1),
+156–174.
+Foong, A. Y., Li, Y., Hernández-Lobato, J. M., & Turner, R. E. (2019). ’in-between’uncertainty
+in bayesian neural networks. arXiv preprint arXiv:1906.11537.
+Foresee, F. D., & Hagan, M. T. (1997). Gauss-newton approximation to bayesian learning. Pro-
+ceedings of international conference on neural networks (ICNN’97), 3, 1930–1935.
+Golub, G., & Kahan, W. (1965). Calculating the singular values and pseudo-inverse of a matrix.
+Journal of the Society for Industrial and Applied Mathematics, Series B: Numerical
+Analysis, 2(2), 205–224.
+Graves, A. (2011). Practical variational inference for neural networks. Advances in neural infor-
+mation processing systems, 24.
+Guo, C., Pleiss, G., Sun, Y., & Weinberger, K. Q. (2017). On calibration of modern neural
+networks. International conference on machine learning, 1321–1330.
+Guttman, L. (1946). Enlargement methods for computing the inverse matrix. The annals of
+mathematical statistics, 336–343.
+He, K., Zhang, X., Ren, S., & Sun, J. (2015). Deep residual learning for image recognition. CoRR,
+abs/1512.03385. http://arxiv.org/abs/1512.03385
+Hestenes, M. R., Stiefel, E., et al. (1952). Methods of conjugate gradients for solving linear
+systems. Journal of research of the National Bureau of Standards, 49(6), 409–436.
+Higham, N. J. (2006). Functions of matrices. Hogben [Hog07], page.
+Hutchinson, M. F. (1989). A stochastic estimator of the trace of the influence matrix for laplacian
+smoothing splines. Communications in Statistics-Simulation and Computation, 18(3),
+1059–1076.
+Immer, A., Bauer, M., Fortuin, V., Rätsch, G., & Emtiyaz, K. M. (2021). Scalable marginal
+likelihood estimation for model selection in deep learning. International Conference on
+Machine Learning, 4563–4573.
+Immer, A., Korzepa, M., & Bauer, M. (2021). Improving predictions of bayesian neural nets
+via local linearization. International conference on artificial intelligence and statistics,
+703–711.
+JAX Development Team. (2025). The autodiff cookbook [Accessed: 12 June 2025].
+Jumper, J., Evans, R., Pritzel, A., Green, T., Figurnov, M., Ronneberger, O., Tunyasuvunakool,
+K., Bates, R., Žídek, A., Potapenko, A., et al. (2021). Highly accurate protein structure
+prediction with alphafold. nature, 596(7873), 583–589.
+Krämer, N., Moreno-Muñoz, P., Roy, H., & Hauberg, S. (2024). Gradients of functions of large
+matrices. Advances in Neural Information Processing Systems, 37, 49484–49518.
+==PAGE:41==
+BIBLIOGRAPHY
+36
+Krizhevsky, A., & Hinton, G. (2009). Learning multiple layers of features from tiny images (tech.
+rep. No. 0). University of Toronto. Toronto, Ontario. https://www.cs.toronto.edu/~kriz/
+learning-features-2009-TR.pdf
+Lanczos, C. (1950). An iteration method for the solution of the eigenvalue problem of linear dif-
+ferential and integral operators. Journal of research of the National Bureau of Standards,
+45(4), 255–282.
+Lawrence, N. D. (2001). Variational inference in probabilistic models [Doctoral dissertation,
+Citeseer].
+LeCun, Y., Bottou, L., Bengio, Y., & Haffner, P. (2002). Gradient-based learning applied to
+document recognition. Proceedings of the IEEE, 86(11), 2278–2324.
+LeCun, Y., Jackel, L. D., Bottou, L., Cortes, C., Denker, J. S., Drucker, H., Guyon, I., Muller,
+U. A., Sackinger, E., Simard, P., et al. (1995). Learning algorithms for classification: A
+comparison on handwritten digit recognition. Neural networks: the statistical mechanics
+perspective, 261(276), 2.
+MacKay, D. J. (1992). A practical bayesian framework for backpropagation networks. Neural
+computation, 4(3), 448–472.
+Manakul, P., Liusie, A., & Gales, M. J. (2023). Selfcheckgpt: Zero-resource black-box hallucina-
+tion detection for generative large language models. arXiv preprint arXiv:2303.08896.
+Meyer, R. A., Musco, C., Musco, C., & Woodruff, D. P. (2021). Hutch++: Optimal stochastic
+trace estimation. Symposium on Simplicity in Algorithms (SOSA), 142–155.
+Miani, M., Beretta, L., & Hauberg, S. (2024). Sketched lanczos uncertainty score: A low-memory
+summary of the fisher information. Advances in Neural Information Processing Systems,
+37, 23123–23154.
+Miani, M., Roy, H., & Hauberg, S. (2025). Bayes without underfitting: Fully correlated deep
+learning posteriors via alternating projections. Proceedings of the 19th international Con-
+ference on Artificial Intelligence and Statistics (AISTATS).
+Naeini, M. P., Cooper, G., & Hauskrecht, M. (2015). Obtaining well calibrated probabilities
+using bayesian binning. Proceedings of the AAAI conference on artificial intelligence,
+29(1).
+Neal, R. M. (2012). Bayesian learning for neural networks (Vol. 118). Springer Science & Business
+Media.
+Ortega, L. A., Santana, S. R., & Hernández-Lobato, D. (2023). Variational linearized laplace
+approximation for bayesian deep learning. arXiv preprint arXiv:2302.12565.
+Radford, A., Narasimhan, K., Salimans, T., Sutskever, I., et al. (2018). Improving language
+understanding by generative pre-training.
+Radford, A., Wu, J., Child, R., Luan, D., Amodei, D., Sutskever, I., et al. (2019). Language
+models are unsupervised multitask learners. OpenAI blog, 1(8), 9.
+Roy, H., Miani, M., Ek, C. H., Hennig, P., Pförtner, M., Tatzel, L., & Hauberg, S. (2024).
+Reparameterization invariance in approximate bayesian inference. Advances in Neural
+Information Processing Systems, 37, 8132–8164.
+Saad, Y. (2003). Iterative methods for sparse linear systems. SIAM.
+Silver, D., Huang, A., Maddison, C. J., Guez, A., Sifre, L., Van Den Driessche, G., Schrittwieser,
+J., Antonoglou, I., Panneershelvam, V., Lanctot, M., et al. (2016). Mastering the game
+of go with deep neural networks and tree search. nature, 529(7587), 484–489.
+Titsias, M. (2009). Variational learning of inducing variables in sparse gaussian processes. Arti-
+ficial intelligence and statistics, 567–574.
+Ubaru, S., Chen, J., & Saad, Y. (2017). Fast estimation of tr(f(a)) via stochastic lanczos quadra-
+ture. SIAM Journal on Matrix Analysis and Applications, 38(4), 1075–1099.
+Vinyals, O., Babuschkin, I., Czarnecki, W. M., Mathieu, M., Dudzik, A., Chung, J., Choi, D. H.,
+Powell, R., Ewalds, T., Georgiev, P., et al. (2019). Grandmaster level in starcraft ii using
+multi-agent reinforcement learning. nature, 575(7782), 350–354.
+==PAGE:42==
+BIBLIOGRAPHY
+37
+Von Neumann, J. (1949). On rings of operators. reduction theory. Annals of Mathematics, 50(2),
+401–485.
+Wilson, A. G., & Izmailov, P. (2020). Bayesian deep learning and a probabilistic perspective of
+generalization. Advances in neural information processing systems, 33, 4697–4708.
+Woodbury, M. A. (1950). Inverting modified matrices. Department of Statistics, Princeton Uni-
+versity.
+Xiao, H., Rasul, K., & Vollgraf, R. (2017). Fashion-mnist: A novel image dataset for benchmark-
+ing machine learning algorithms. arXiv preprint arXiv:1708.07747.

@@ -1,0 +1,2993 @@
+==PAGE:1==
+Exploring quantization techniques for object
+detection on embedded devices
+Master Thesis
+Technical University of Denmark
+Department of Electrical and Photonics Engineering
+==PAGE:2==
+==PAGE:3==
+Exploring quantization techniques for object detection on embedded devices
+Master Thesis
+April, 2025
+By
+Hao Zhang
+Copyright:
+Reproduction of this publication in whole or in part must include the cus­
+tomary bibliographic citation, including author attribution, report title, etc.
+Cover photo:
+Vibeke Hempler, 2012
+Published by:
+DTU, Department of Electrical and Photonics Engineering, Brovej, Build­
+ing 118, 2800 Kgs. Lyngby Denmark
+www.electro.dtu.dk
+ISSN:
+[0000­0000] (electronic version)
+ISBN:
+[000­00­0000­000­0] (electronic version)
+ISSN:
+[0000­0000] (printed version)
+ISBN:
+[000­00­0000­000­0] (printed version)
+==PAGE:4==
+Approval
+This thesis was supervised by the Department of Electrical and Photonics Engineering at
+the Technical University of Denmark as part of the requirements for the Master of Science
+in Engineering degree.
+It is assumed that the reader has a basic knowledge in the areas of Computer Vision,
+Image Processing and Deep Learning.
+Hao Zhang ­ s222375
+Signature
+Date
+ii
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:5==
+Abstract
+This thesis addresses the mismatch between rapidly evolving object­detection algorithms
+and the modest compute budget of embedded hardware. We present an end­to­end
+pipeline that quantizes and deploys a YOLOv8n detector on an NVIDIA Jetson AGX Xavier.
+Guided by a Roofline analysis, we implement INT8 post­training quantization (with op­
+tional quantization­aware training) across three toolchains—PyTorch­native, ONNX Runtime,
+and TensorRT—and perform layer­wise sensitivity analysis to craft a mixed­precision con­
+figuration.
+Experiments show that an MSE­calibrated INT8 model achieves 0.362 mAP on COCO,
+only one point below the FP32 baseline, while the TensorRT INT8 engine runs at 7 ms per
+640×640 image ( 143 FPS), a 4× speed­up over vanilla PyTorch FP32. FP16 inference
+reaches 9 ms with no accuracy loss, indicating that half­precision often offers the best
+trade­off on modern embedded GPUs.
+Comprehensive ablation studies quantify the impact of calibration set size, calibration
+method, and Q/DQ fusion on accuracy–latency trade­offs, and the thesis details CPU–
+GPU co­optimization for preprocessing and postprocessing. The results demonstrate
+that, with careful quantization and system­level tuning, state­of­the­art object detectors
+can meet real­time requirements on low­power edge devices, providing a reproducible
+blueprint for future embedded AI deployments.
+Exploring quantization techniques for object detection on embedded devices
+iii
+==PAGE:6==
+Acknowledgements
+Hao Zhang, MSc Autonomous Systems, DTU
+Creator of this thesis template.
+Lazaros Nalpantidis, Professor, DTU Electro
+Supervisor
+Fabio Montello, PhD Student, DTU Electro
+Co­Supervisor
+I would like to thank Professor Lazaros Nalpantidis and Fabio Montello for their guidance,
+patience, and unwavering support throughout this project.
+iv
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:7==
+Contents
+Preface . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ii
+Acknowledgements
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iv
+1
+Introduction
+1
+1.1
+Background . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+1
+1.2
+Problem Statement . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+1.3
+Thesis Outline
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2
+Theory and Related Work
+5
+2.1
+Overview of quantization techniques . . . . . . . . . . . . . . . . . . . . . .
+5
+2.2
+Fundamentals of model deployment . . . . . . . . . . . . . . . . . . . . . . 12
+2.3
+Roofline model form . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 16
+2.4
+Optimization strategies for object detection models on embedded devices . 17
+2.5
+YOLO series and quantization
+. . . . . . . . . . . . . . . . . . . . . . . . . 20
+2.6
+Existing quantization research and its shortcomings
+. . . . . . . . . . . . . 23
+3
+Methodology
+25
+3.1
+Model analysis . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+3.2
+Workflows . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27
+3.3
+Model profiling
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 33
+4
+Model Deployment and Optimization
+35
+4.1
+Deployment environment settings . . . . . . . . . . . . . . . . . . . . . . . . 35
+4.2
+Quantization Optimisation . . . . . . . . . . . . . . . . . . . . . . . . . . . . 35
+4.3
+Deployment optimization . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 38
+5
+Experiment Results
+43
+5.1
+Model Acccuracy and Inference Execution Time
+. . . . . . . . . . . . . . . 43
+5.2
+CPU & GPU Utilization . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 50
+5.3
+Runtime Profiling . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 51
+6
+Conclusion
+53
+Bibliography
+57
+A Title
+61
+Exploring quantization techniques for object detection on embedded devices
+v
+==PAGE:8==
+vi
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:9==
+1
+Introduction
+1.1
+Background
+In the past decade, deep learning­driven object detection algorithms have made leaps
+in accuracy and complexity, accompanied by a substantial increase in computational re­
+quirements. Early deep learning object detection, such as R­CNN (2014), was very slow,
+taking about 14 seconds to process an image on a GPU [1]. Later two­stage detectors
+(such as Fast/Faster R­CNN) introduced region proposals and shared convolutional fea­
+tures, which improved accuracy while still maintaining high computational complexity [1].
+To improve detection accuracy, researchers have continued to adopt deeper and more
+complex backbone networks (such as from VGG to ResNet to Transformer) and methods
+such as multi­scale feature fusion, resulting in a significant increase in model parame­
+ters and FLOPs [2]. This is corroborated by more recent studies showing that even in
+2020, the frontier AI models’ training FLOPs continue to grow on the order of 4–5× per
+year [3]. This means each new generation of state­of­the­art models (for tasks like image
+recognition or object detection) tended to require significantly more FLOPs (floating­point
+operations) than its predecessor. One­stage detectors (such as the YOLO series [4]) have
+greatly improved detection speed since their introduction in 2016. For example, an early
+version of YOLO can achieve 155 FPS on the VOC dataset [1]. However, the pursuit of
+real­time performance often comes at the cost of accuracy. In recent years, models such
+as YOLOv7 have achieved an improved accuracy­speed trade­off in the range of 5–160
+FPS through improved architecture [1]. In general, the improvement in the accuracy of
+object detection algorithms comes at the cost of larger model sizes and higher compu­
+tational costs, showing a trend of geometric growth in computational requirements with
+performance.
+Despite this rapid advancement in deep learning models, hardware improvements have
+failed to keep pace. In recent years, embedded AI hardware (such as the NVIDIA Jetson
+series, Raspberry Pi with an acceleration module, and mobile NPU chips) has improved
+in terms of computing performance and energy efficiency, but the rate of improvement
+is relatively limited. Embedded devices are limited by power consumption and size, and
+their computing power has not increased as rapidly as server­grade GPUs. For exam­
+ple, mobile devices typically only consume a few watts of power, which cannot match the
+computing power provided by data center GPUs, which consume hundreds of watts. Al­
+though high­end GPUs can double their performance every one to two years (in line with
+Moore’s Law’s doubling cycle of about 24 months) [5], embedded devices have a more
+limited performance increase due to power consumption and heat dissipation constraints.
+It is generally accepted that the growth rate of computing requirements far exceeds the
+rate of hardware improvement: research has shown that the amount of training comput­
+ing power has doubled every six months since the beginning of the era of deep learning,
+which is much faster than the doubling of hardware transistor density every two years [6].
+To this end, chip manufacturers have introduced dedicated AI accelerators to improve
+performance per watt, such as the NPU in mobile phone SoCs and Edge TPU, but over­
+all, the computing power improvement on the embedded side still cannot keep up with
+the growing demand for algorithms. In addition, there is limited improvement in memory
+and bandwidth for embedded devices. Unlike cloud GPUs, which have tens of gigabytes
+of graphics memory, embedded devices have small memory capacities and limited band­
+width, which further restricts the ability to deploy large models. This makes it difficult for
+Exploring quantization techniques for object detection on embedded devices
+1
+==PAGE:10==
+many detection models that perform well on servers to run directly on edge devices in
+real time. For example, the original YOLOv4 model can only achieve an inference speed
+of about 4 FPS on a smartphone, and after being compressed by model pruning, it is im­
+proved to nearly 20 FPS [7]. The annual average increase in the computing power of em­
+bedded devices is significantly lower than the increase in the computational requirements
+of deep learning models, a trend that has attracted widespread attention in academia and
+industry.
+In summary, the evolution of deep learning object detection algorithms is far faster than
+the improvement in the computing power of embedded hardware, and there is a significant
+‘development gap’ between the two. On the one hand, at the algorithm level, the model
+size continues to increase in pursuit of higher accuracy, and the amount of computation
+doubles every half a year [6]. This has caused the requirements for computing resources
+of the latest detection models to rise exponentially. On the other hand, at the hardware
+level, the improvement in the computing power of embedded devices is slowing down due
+to physical limitations and power consumption constraints (Moore’s Law slowing down).
+A review in Proceedings of the IEEE points out that although the complexity and accuracy
+of detection algorithms have increased significantly in recent years, this has made their
+deployment on resource­constrained devices ‘more difficult’ [8]. Another example is the
+research presented at AAAI 2021, which shows that even one­stage detectors (YOLO,
+SSD) optimized for speed still require ‘a lot of computing power’ to achieve high accuracy
+on mobile devices, which is a major bottleneck for real­time deployment [7]. Therefore, a
+large number of studies have focused on model compression and lightweight networks to
+bridge the gap between algorithm requirements and embedded computing power. This
+phenomenon fully illustrates that the development of deep learning object detection has
+been so fast that it has forced hardware to adapt, and the speed is significantly faster
+than the improvement of the computing power of embedded devices. In other words, the
+current evolution of algorithms is outpacing the ability of embedded hardware to improve
+performance, and there is an urgent need in related fields to balance this gap through
+collaborative optimization of software and hardware.
+To address these challenges, quantization has emerged as a key optimization strategy for
+CNN deployment on embedded devices. Quantization reduces both the memory footprint
+and computational complexity of deep learning models by representing weights and acti­
+vations in lower­precision formats, such as INT8 instead of FP32 [9]. This transformation
+significantly improves inference speed while reducing energy consumption. Furthermore,
+many embedded AI accelerators, such as TensorRT, are optimized for INT8 computa­
+tions, enabling faster inference without excessive hardware modifications [10]. As such,
+quantization plays a crucial role in making high­performance object detection feasible on
+edge devices.
+In this work, we explore various quantization techniques for object detection models on
+embedded platforms, using YOLO as a case study. We evaluate different quantization
+methods within the ONNX Runtime and TensorRT frameworks, analyzing trade­offs be­
+tween model size, inference speed, and detection accuracy. Our goal is to provide insights
+into deploying real­time, energy­efficient deep learning solutions on resource­constrained
+hardware.
+1.2
+Problem Statement
+The application of quantization techniques in deep learning has demonstrated significant
+success in image classification tasks [10, 11]. However, extending these methods to ob­
+ject detection models, particularly single­stage detectors like YOLO, introduces unique
+2
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:11==
+challenges that remain understudied in existing literature. Moreover, it has been pointed
+out in the literature that the amount of floating­point operations in a typical object detec­
+tion network may be three orders of magnitude higher than that in a classification net­
+work [12], which means that quantization for object detection tasks may be more difficult.
+While quantization frameworks such as TensorRT and ONNX Runtime provide general
+optimization pipelines, their efficacy in preserving the accuracy of object detection mod­
+els under resource­constrained environments is not yet fully understood. First, architec­
+tural complexity exacerbates quantization sensitivity. Object detection models inherently
+require multi­scale feature extraction and dense prediction heads, which amplify the risk
+of precision loss during quantization. For instance, YOLO’s detection heads rely on fine­
+grained feature maps to localize objects, a process highly sensitive to quantization cal­
+ibration range errors [13]. The standard PTQ workflow can make it difficult to capture
+features, leading to a loss of accuracy. [14] observed similar challenges in RetinaNet,
+where quantization of bounding box predictors led to significant accuracy drops.
+Second, framework­specific optimization disparities complicate deployment. TensorRT
+and ONNX Runtime adopt divergent approaches to quantization: TensorRT leverages
+hardware­aware calibration, while ONNX Runtime emphasizes cross­platform compati­
+bility. These platform characteristics create a fragmented landscape for developers’ de­
+ployment tasks. For example, TensorRT’s layer fusion mechanism combines consecutive
+operations (e.g., Conv­BatchNorm­ReLU) into a single CUDA kernel to reduce memory
+transfers and improve parallelism [10], while ONNX relies on graphics­level optimizations
+to maintain framework neutrality [15], but such optimizations are rarely used in bench­
+marking for detection tasks.
+Third, embedded hardware heterogeneity imposes practical constraints. While TensorRT
+excels on NVIDIA edge SoCs, many low­cost devices rely on ARM CPUs with limited
+INT8 acceleration support [16].
+Additionally, energy consumption(a critical metric for
+battery­powered devices) and memory utilization (which has a significant impact on the
+deployment efficiency of resource­constrained hardware) are seldom addressed in exist­
+ing quantization studies.
+In summary, the current research gap lies in the systematic evaluation of quantization
+techniques tailored to object detection models on embedded platforms. Key unresolved
+questions include:
+• Can the object detection model reduce accuracy loss without sacrificing real­time
+performance?
+• What are the trade­offs between TensorRT’s hardware­specific optimizations and
+ONNX Runtime’s flexibility in cross­platform deployments?
+Addressing these questions is critical to advancing efficient, deployable object detection
+systems for edge applications, from autonomous drones to industrial IoT devices.
+1.3
+Thesis Outline
+The thesis is organized as follows:
+• Chapter 1 – Introduction
+Presents the motivation of this work, states the research questions, and gives an
+overview of the thesis structure.
+• Chapter 2 – Theory and Related Work
+Surveys fundamental concepts of neural­network quantisation, embedded deploy­
+Exploring quantization techniques for object detection on embedded devices
+3
+==PAGE:12==
+ment techniques, and the evolution of the YOLO object­detection family, thereby
+establishing the theoretical background for the study.
+• Chapter 3 – Methodology
+Describes the model analysis framework and details three quantisation workflows—
+PyTorch­native, ONNX Runtime, and TensorRT—together with the experimental de­
+sign.
+• Chapter 4 – Model Deployment and Optimisation
+Explains the calibration strategy, mixed­precision scheme, and GPU/CPU co­optimisation
+on the NVIDIA Jetson platform, including preprocessing and post­processing accel­
+erations.
+• Chapter 5 – Experimental Results
+Provides quantitative comparisons of accuracy and latency across different preci­
+sions and toolchains, and presents ablation studies that identify the key factors in­
+fluencing performance.
+• Chapter 6 – Conclusion
+Summarises the main contributions and findings, discusses limitations, and outlines
+directions for future research.
+4
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:13==
+2
+Theory and Related Work
+2.1
+Overview of quantization techniques
+2.1.1
+Basic concepts of quantification
+Model quantization is a technique that reduces the numerical precision of model param­
+eters and activations (e.g., from 32­bit floating point FP32 to 8­bit integer INT8) in ex­
+change for improved computational and storage efficiency. Reducing the precision can
+greatly compress the model size (an INT8 model is only about 1/4 the size of an FP32
+model), while using low­bit integer arithmetic to accelerate inference and reduce energy
+consumption. Experimental results show that INT8 inference on a general­purpose CPU
+can achieve 2 to 3 × the speedup compared to FP32, and the speedup on dedicated
+fixed­point hardware can even reach 10× [17]. The mathematical formulation follows:
+Q(x) = round
+(clip(x, α, β)
+s
+)
+(2.1)
+where α/β define the clipping range and s represents the scaling factor.
+The cost of quantization is a decrease in numerical representation accuracy, i.e., quanti­
+zation error. Weights and activations need to be rounded to discrete levels, and values
+that exceed the range will be truncated, which introduces a loss of accuracy. The quan­
+tization process therefore involves a trade­off between model accuracy and efficiency: a
+higher quantization bit width (e.g., 8 bits) generally significantly improves efficiency while
+maintaining accuracy, while more aggressive lower­bit quantization (e.g., 4 bits or less)
+may cause a significant loss of accuracy [17]. Therefore, the reasonable selection of the
+quantization bit width and the use of appropriate strategies to control quantization errors
+are the core considerations of quantization technology.
+2.1.2
+Mapping and Offsetting
+To quantize a real­valued tensor, one typically uses a scale factor and zero­point offset to
+map floating­point values into integers. In linear (uniform) quantization, for each tensor
+we choose a scaling constant s and an integer zero­point z such that any real value x is
+quantized as[16]:
+q = round(x/s) + z
+(2.2)
+and then clamped to the representable integer range. Here s is a positive real number that
+determines the step size (resolution) of the quantizer, and z (often called zero­point) is an
+integer that typically ensures that a real value of 0 maps exactly to an integer q = 0 (or
+mid­point of symmetric signed range). we can describe how the dequantization reverses
+this process (in an approximate sense)[16]. Given a quantized value q, the original real
+value x is reconstructed as:
+x′ = s · (q −z)
+(2.3)
+Here s is the scale and z is the zero­point offset. The zero­point z is chosen such that a real
+value of 0 is exactly representable (i.e. mapped to q = z)[16], ensuring that zero­valued
+inputs/outputs incur no error. Because q was obtained by rounding x/s to the nearest
+integer, the dequantized x′ will not exactly equal the original x in general. This loss of
+information is the fundamental quantization error introduced by the rounding. Fine details
+smaller than s are wiped out – many different real values end up mapping to the same
+Exploring quantization techniques for object detection on embedded devices
+5
+==PAGE:14==
+quantized level q, so x cannot be perfectly recovered from q. In essence, quantization
+squeezes a continuum of values into a fixed set of discrete bins, and any values falling in
+the same bin become indistinguishable after quantization.
+(a)
+(b)
+(c)
+(d)
+Figure 2.1: Four source distributions on [0, 100]
+Assume four source distributions on [0, 100] as shown in Fig.2.1. Although the dynamic
+range is identical, the probability mass is arranged very differently in each case. The red
+dashed lines indicate an (arbitrary) uniform partition into 20 bins. Obviously, although the
+data in the above four examples are all between 0 and 100, due to the different distribution
+of the data, if we use the same ratio and distance, there will be a large error. The data
+in Fig.2.1a is evenly distributed and appears randomly between 0 and 100. At this time,
+because the data is evenly distributed, it is acceptable to divide 01̃00 into 20 bins, and
+the error will be relatively small. The data in the other three figures show a Gaussian
+distribution, so the data is mainly concentrated in a certain part close to the middle, and
+the probability of data near the edge is relatively low. If it is still divided into 20 bins, the
+data near the middle will have a large error. In particular, due to the gradual increase in
+variance and the shift in the mean, there is a large area with almost no data, and it is
+meaningless to map this area. Therefore, in order to map reasonably and minimize the
+error when restoring the data, we need to design the z and s reasonably according to the
+data distribution.
+2.1.3
+symmetric quantization and asymmetric quantization
+According to the selection of dynamic range and the mapping method, we can divide it
+into symmetric quantization and asymmetric quantization. In symmetric quantization, the
+zero point before and after quantization are aligned, so there is no offset, which makes the
+calculation of the quantization process simple. This simplicity enables hardware­friendly
+implementations, as quantized operations reduce to a single scaling factor multiplication.
+As shown in Figure 1, in contrast, asymmetric quantization introduces an offset term to
+accommodate asymmetric data distributions (e.g., ReLU­activated outputs with only non­
+negative values). While this improves dynamic range utilization, it complicates computa­
+tions by requiring explicit zero­point corrections. For instance, integer matrix multiplication
+6
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:15==
+under asymmetric quantization involves two additional vector additions and multiplicative
+scaling steps to compensate for zero­point mismatches, as formalized in [16].
+Figure 2.2: Just a normal figure
+Despite its computational overhead, asymmetric quantization offers critical benefits in
+scenarios with highly skewed data distributions. By decoupling the zero­point from the
+range symmetry, it preserves precision for activations or weights with non­uniform ranges
+(e.g., strictly non­negative ReLU outputs). This avoids clipping errors caused by symmet­
+ric quantization’s forced alignment of positive and negative ranges, which can degrade
+model accuracy by up to 2­3% on tasks like image classification[18].
+The symmetry of the quantization grid (e.g., −127 to 127 for 8­bit integers) allows hard­
+ware accelerators to exploit unified bit­width processing and memory alignment strategies,
+minimizing register fragmentation and branch divergence. Empirical studies demonstrate
+that symmetric quantization reduces instruction overhead by over 50% compared to asym­
+metric methods by avoiding redundant offset­related arithmetic [17]. NVIDIA’s TensorRT
+framework adopts symmetric quantization as its default strategy, leveraging the architec­
+tural advantages of Tensor Cores in GPUs [19].
+2.1.4
+Post­training quantification (PTQ) and quantization­aware training
+training (QAT)
+There are two major paradigms for quantizing neural networks: post­training quantization
+and quantization­aware training. PTQ refers to applying quantization after a model has
+been fully trained, without updating its weights via gradient descent. In a typical PTQ
+workflow, one takes a pre­trained float32 model and determines quantization parameters
+(scales/zero­points) for each layer, often using a small calibration dataset (or even none
+at all). The weights are then rounded to the nearest quantized value, and activations will
+be quantized at inference time. PTQ is appealing because it requires no re­training of
+the network – it’s a “push­button” approach that is extremely fast to deploy and does not
+require the original training data or costly fine­tuning. However, PTQ struggles for more
+aggressive quantization. At lower bit­widths (4­bit or less), simply rounding a pre­trained
+model often yields poor accuracy, since the model was never optimized for such coarse
+precision [20].
+By contrast, QAT integrates quantization into the training process so the model can learn
+to compensate for quantization errors. In QAT, one simulates low­precision arithmetic
+during network training or fine­tuning. Specifically, fake quantization operations (pseudo­
+quantization of weights and activations) are inserted in the graph, and gradients are com­
+puted through these quantization nodes [16]. With this approach, the model’s weights
+adjust during training to minimize the loss under quantized conditions. For example, the
+network might learn to slightly shift weight values to better align with quantization levels, or
+Exploring quantization techniques for object detection on embedded devices
+7
+==PAGE:16==
+adjust batchnorm scaling to reduce activation dynamic range. As a result, QAT generally
+achieves higher accuracy at low bit­widths compared to PTQ [20]. It “closes the gap” to
+full­precision performance even for 4­bit or lower precision. The downsides are the addi­
+tional training time and the need for training data (often the original dataset with labels). In
+summary, PTQ is suitable for rapid deployment scenarios that do not require excessively
+low precision, while QAT is generally used to restore model accuracy or deployed in very
+low precision scenarios.
+Calibration
+An essential step in post­training quantization is calibration – determining the optimal
+quantization ranges (scales and zero­points) for activations and weights based on data.
+Several calibration strategies exist:
+Figure 2.3: Input activation histogram and calibration range for first conv in Yolov8n
+• Min­Max: The simplest method sets the quantization range by the minimum and
+maximum values observed in a sample of the data. While straightforward, this ap­
+proach is highly susceptible to outliers. A single abnormal activation value can inflate
+the range dramatically, forcing a large scale s and thereby reducing precision for the
+majority of values [21].
+• Percentile: This method clips the distribution at a high percentile of observed val­
+ues instead of the absolute min/max. For instance, one might set the lower/upper
+bounds such that they include 99.9% (or 99.99%) of the data, and treat any values
+beyond that as outliers to clip [18]
+• Entropy: A more sophisticated technique involves selecting the range that mini­
+mizes the information loss between the original signal distribution and the quan­
+tized distribution. This is often implemented by optimizing the Kullback­Leibler (KL)
+divergence [18]. In practice, one collects a histogram of activation values and then
+tries different clipping thresholds, computing the KL divergence between the original
+distribution (with values beyond the threshold lumped at the ends) and the distribu­
+tion after quantization. The threshold that yields the smallest divergence is selected
+as the optimal range. Entropy calibration tends to preserve more information than
+plain min­max, since it allows a slight truncation of extreme tails in order to use more
+levels where the bulk of the data lies.
+• MSE Calibration: This method determines the optimal quantization range by min­
+8
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:17==
+imizing the mean squared error (MSE) between the original and quantized data.
+Instead of relying on min­max bounds or percentiles, it evaluates different clipping
+thresholds and selects the one that best preserves the signal fidelity after quantiza­
+tion. By balancing the trade­off between clipping distortion and quantization error,
+MSE calibration often achieves higher accuracy than simpler methods while remain­
+ing computationally tractable. It is particularly effective when the data distribution
+contains outliers or long tails, as it avoids excessive range inflation while retaining
+precision for the majority of values [22].
+In practice, calibration exerts a substantial influence on the accuracy of PTQ. A proper
+calibration can recover most of the performance, while a poor calibration can lead to
+catastrophic loss. For example, in this study, different calibration methods were used
+for different models, and the results were quite different. In addition, the experiment also
+proved that the data set used for calibration is also extremely critical [18]. Therefore,
+calibration is a crucial step to bridge the accuracy gap in PTQ by intelligently selecting
+quantization ranges that best represent the data distribution.
+2.1.5
+Hardware­aware Quantization and Quantization Granularity
+The effectiveness of quantization can depend on hardware support. Different acceler­
+ators have varying capabilities and constraints for low­precision arithmetic, which mo­
+tivates hardware­aware quantization strategies. One consideration is the data format:
+some hardware (DSPs, older GPUs) have efficient instructions only for certain quanti­
+zation schemes (e.g. 8­bit signed symmetric). For example, hardware like Qualcomm
+Hexagon can handle asymmetric quantization, but there is often a slight overhead [20].
+However, some CPUs and accelerators (such as NVIDIA’s INT8) natively support affine
+quantization with scale and zero­point, allowing efficient asymmetric quantization for acti­
+vations. When deploying, one must be mindful: if the target hardware or inference engine
+(TensorRT, OpenVINO, etc.) only supports a certain scheme (e.g. symmetric int8), then
+the quantization strategy should align with that.
+Figure 2.4: Input activation histogram and calibration range for first conv in Yolov8n
+Another aspect is quantization granularity – the level at which quantization parameters
+(scale/zero­point) are shared in the tensor. The finest granularity is that each element
+has a separate quantization parameter. The medium granularity reuses parameters on
+each channel of the tensor ­ for a two­dimensional matrix, by row or column; for three
+dimensions (similar to images) and four dimensions (such as convolution weights), by
+tensor, and so on [18]. The entire quantized tensor is abstracted into a collection of 3D
+small squares, as shown in the figure2.4. The most common are per­tensor quantization
+Exploring quantization techniques for object detection on embedded devices
+9
+==PAGE:18==
+and per­channel quantization, where each complete tensor or channel (e.g., all weights
+of a layer or all activations of a layer) uses a single scale and zero­point [20].
+• Per­tensor quantization
+– (Advantage) Low latency: a tensor shares the same quantization parameter
+– (Disadvantage) High error rate: one scale can hardly cover all FP32 dynamic
+ranges
+• Per­channel (layer) quantization
+– (Advantage) Low error rate: each channel has its own scale to reflect the dy­
+namic range of the data in this channel
+– (Disadvantage) High latency: vectors are needed to store the scale of each
+channel
+This is hardware­friendly: all values in the tensor are converted with the same formula,
+so the compute engine can uniformly apply one scale.
+In summary, hardware­aware quantization often entails selecting symmetric vs asymmet­
+ric schemes, deciding on per­tensor or per­channel scaling, and possibly limiting scale
+values or bit­widths, all while trying to maintain model accuracy. Successful deployment
+requires co­design: choosing quantization parameters and granularity that both fit the
+hardware’s efficient operation modes and meet the model’s accuracy requirements
+2.1.6
+Existing quantization optimization methods
+The current mainstream network quantization optimization methods can be classified into
+two dimensions: one is the training paradigm, and the other is the optimization goal.
+In terms of training paradigm, different methods differ in training paradigm, including: (a)
+post­training quantization (PTQ) methods, which directly perform quantization calibration
+and minor adjustments on the pre­trained model, usually without the need for training on
+the complete dataset; (b) quantization­aware training (QAT) methods, which introduce
+quantization emulation or trainable parameters during training, and retraining the network
+to adapt to the quantization. (c) Hybrid paradigms, which combine a small amount of fine­
+tuning with post­training calibration, such as layer­wise optimization and a small amount
+of unlabeled data­assisted methods.
+On the other hand, in terms of optimization objectives, different methods focus on improv­
+ing the performance of different aspects of the quantization process. These optimization
+objectives are not mutually exclusive, and many methods combine multiple approaches to
+improve the accuracy of low­bit quantization. Below, we classify representative methods
+according to their optimization objectives.
+• Activation range optimization: This method reduces quantization errors by opti­
+mizing the interval of activation values. A typical representative is the PACT method,
+proposed by Choi et al [23]. PACT introduces a learnable activation clipping up­
+per limit parameter in training, truncating the ReLU activation output to a trainable
+threshold to find the optimal quantization interval. With this quantization threshold
+trainable strategy, PACT achieves 2­bit activation quantization without significantly
+losing accuracy.
+Another representative is QIL (Quantization Interval Learning),
+proposed by Jung et al [24]. QIL directly targets the task loss and reversely learns
+the quantization interval of each layer. By iteratively optimizing the upper and lower
+10
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:19==
+bounds, the quantized network can almost maintain the original accuracy with 4­
+bit, and minimize the degradation of accuracy as the bit width decreases. These
+methods usually adopt the QAT paradigm, learning the optimal clipping range dur­
+ing training, and are suitable for low­bit (such as 4­bit or even 2­bit) quantization.
+Another idea is to choose the clipping value analytically. For example, the ACIQ
+method derives the clipping threshold with the minimum loss by assuming an acti­
+vation distribution (Laplace/Gaussian)[25, 26]. These methods are mostly used in
+the PTQ calibration stage, and although they do not require retraining, they can ef­
+fectively improve the accuracy of low­bit quantization. In general, activation range
+optimization significantly reduces truncation errors in low­bit quantization by sup­
+pressing long­tailed distributions and finding the optimal clipping interval.
+• Weight quantization optimization: This method focuses on improving the accu­
+racy of weight quantization. The core is to optimize the rounding/rounding strategy
+of weights without changing the model structure. The traditional approach is to di­
+rectly round to the nearest quantized value, but research has found that this is not
+optimal. To this end, Nagel et al. proposed the AdaRound method at ICML 2020,
+which adaptively determines whether each weight is rounded up or down by mini­
+mizing the task loss on a small batch of unlabeled data[27]. AdaRound relaxes dis­
+crete rounding decisions to a continuously differentiable form, and then optimizes
+the rounding scheme for each layer’s weights, which is significantly better than direct
+rounding and can quantize ResNet­50’s weights to 4­bit with less than 1% accuracy
+loss without retraining. AdaRound is representative of the PTQ paradigm, which re­
+quires only a small amount of unlabeled calibration data for piece­level optimization,
+making it ideal for low­bit deployment.
+• Quantization step size optimization: This type of method focuses on optimizing
+the quantizer’s step size (scale) parameter to reduce quantization errors. Typical
+work LSQ (Learned Step Size Quantization) was proposed by Esser et al. in ICLR
+2020[28]. LSQ treats the scaling factor of each layer’s quantization as a trainable
+parameter and designs a gradient estimation strategy to learn this step size, thereby
+achieving the best ImageNet accuracy at the time with 2–4­bit weights and activa­
+tions. By learning the step size during training, LSQ significantly improves the perfor­
+mance of low­bit quantization (e.g., successfully training a 3­bit model with accuracy
+close to full accuracy). The follow­up LSQ+ method (Bhalgat et al., 2020[29]) further
+extends this idea to a wider range of networks and lower bit scenarios by introduc­
+ing learnable zero­point offset parameters and an improved initialization strategy
+to accommodate asymmetric quantization. Since the quantization step directly de­
+termines the scale of the quantization grid, these methods usually adopt the QAT
+paradigm, jointly updating the weight and step parameters in supervised training. In
+general, trainable steps are especially effective when extremely low bit (4­bit and
+below) accuracy is required.
+• Global reconstruction optimization: This type of method takes a global approach,
+directly minimizing quantization errors by reconstructing network outputs or interme­
+diate features. It often optimizes quantization parameters layer by layer or globally
+using a small amount of data in the post­training stage. Representative method
+BRECQ was proposed by Li et al. at ICLR 2021 with the goal of pushing the limits
+of PTQ. BRECQ adopts a block­by­block reconstruction strategy: it freezes most of
+the network and only selects a few layers as a block, using a small amount of calibra­
+tion data to make the quantized block output approximate the original model output,
+thereby correcting the quantization error block by block[30]. Through this greedy
+Exploring quantization techniques for object detection on embedded devices
+11
+==PAGE:20==
+second­order error minimization method, BRECQ is the first to push the quantiza­
+tion accuracy to the 2­bit level in a pure PTQ scenario, for example, achieving a 2­bit
+ResNet­18/50 with only 1% accuracy loss, and the accuracy of 4­bit MobileNetV2
+is comparable to QAT, but the speed of producing quantized models is two orders
+of magnitude faster. BRECQ belongs to the PTQ framework, but it achieves re­
+sults close to QAT through block reconstruction and a small amount of calculation,
+demonstrating the power of overall optimization. Also worth mentioning are “zero­
+sample” quantization methods such as ZeroQ (CVPR 2020)[31]: it synthesizes cal­
+ibration data by generating an adversarial network and reconstructing the statistical
+characteristics of the network, so that PTQ can be performed without training data.
+The overall reconstruction optimization method can be PTQ (such as the afore­
+mentioned optimization without the gradient of the loss function) or hybrid paradigm
+(some of which allow fine­tuning of some layers or even with the help of small­scale
+distillation). They are generally designed forlow bit (such as 4­bit and below) to
+minimize the accuracy loss introduced by quantization from aglobal perspective.
+2.2
+Fundamentals of model deployment
+Model deployment on embedded devices requires a holistic understanding of computa­
+tional efficiency, hardware constraints, and algorithmic characteristics. This section intro­
+duces key metrics and architectural principles critical to optimizing object detection models
+for resource­constrained platforms.
+2.2.1
+Computational Performance Metrics
+FLOPs, TOPS, and MACC: Floating­point operations per second (FLOPS) is a classic
+measure of hardware compute throughput, originally denoting the rate of 32­bit floating
+point operations a processor can perform. Modern AI accelerators, however, often report
+performance in tera­operations per second (TOPS), which generalizes the concept to arbi­
+trary precision. For example, one TOPS equals one trillion operations per second, count­
+ing each arithmetic operation (e.g. one multiply or one add) regardless of bit­width [32]. In
+deep neural network inference, the fundamental computation is the multiply­accumulate
+operation (MAC); a single MAC involves one multiplication and one addition, typically
+counted as two operations in TOPS metrics [32]. Thus, a chip’s peak TOPS is essen­
+tially two times the number of MAC units times their clock frequency [32]. Notably, the
+industry­standard TOPS rating is often given for INT8 precision on AI accelerators [33].
+This makes TOPS especially relevant for quantized models: for instance, NVIDIA’s Jetson
+AGX Xavier is rated at 22 TOPS (INT8) peak performance, meaning it can theoretically
+perform more than 20 trillion INT8 operations per second on its accelerated cores [34]. In
+practice, TOPS is an upper bound – actual achievable throughput depends on how well
+the model can utilize the hardware.
+While TOPS (and FLOPS) describe hardware capability, the multiply–accumulate count
+(MACC) of a neural network is a model­specific metric that quantifies the total number of
+MAC operations required to process one input. MACC (sometimes reported as the total
+number of “FLOPs” for a single inference, with the convention that 1 MAC = 2 FLOPs) is a
+useful indicator of a model’s computational complexity independent of hardware [32]. For
+example, if Model A requires 5 billion MACs per image and Model B requires 10 billion
+for a similar task, Model A is computationally more efficient. Reducing MACC is critical
+for embedded deployment: a lower MACC generally translates to lower latency and en­
+ergy per inference on a given device. In fact, improvements in model architecture often
+aim to reduce MACC without sacrificing accuracy. For instance, Li et al. (2023) report
+a speech separation network that achieves comparable accuracy to a prior model with
+12
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:21==
+only 5% of the MAC operations, resulting in 10% of the inference time on CPU [35]. This
+illustrates how MACC directly relates to inference speed and efficiency. In the context of
+object detection, YOLO models are known to be MACC­intensive; YOLOv3, for example,
+requires on the order of 1010 MACs per image at high resolution, making its deployment
+challenging on low­power hardware [32]. Quantization does not reduce the MAC count,
+but by using INT8 arithmetic it allows those MACs to execute on units that can handle
+more operations per second (thus effectively leveraging the hardware’s TOPS). Moreover,
+quantization reduces memory bandwidth and storage requirements (e.g. 8­bit weights are
+4× smaller than 32­bit), which can improve effective throughput. In summary, FLOPS/­
+TOPS characterize the supply side (hardware capability), while MACC characterizes the
+demand side (model complexity). A balanced deployment requires that the hardware’s
+TOPS (particularly INT8 TOPS for quantized models) sufficiently exceeds the model’s
+required operations per second for the target frame rate, after accounting for real­world
+overheads.
+2.2.2
+CPU/GPU architecture
+Modern computer architectures leverage both general­purpose CPUs and highly paral­
+lel GPUs, each optimized for different objectives. CPUs are essentially latency­oriented
+processors: they dedicate significant chip area to sophisticated control logic and caches,
+employing deep out­of­order pipelines, branch prediction, and speculative execution so
+that instructions (including branches) execute with as little stall as possible [36]. These
+features make CPUs well­suited for serial code and irregular workloads with lots of branch­
+ing or dependency, as they aim to avoid latency at all costs. In contrast, GPUs are de­
+signed as throughput­oriented processors that trade single­thread latency for raw parallel
+throughput [36]. A GPU consists of hundreds or thousands of smaller cores organized to
+execute many threads in parallel; it relies on massive hardware multi­threading to tolerate
+memory latency (by rapidly context­switching between warps of threads) rather than elim­
+inate it [36]. This design expects workloads with abundant data parallelism. In summary,
+CPUs are optimized for low­latency processing of complex, branching code, whereas
+GPUs favor high­throughput execution of regular, parallelizable workloads – a comple­
+mentary heterogeneity often exploited in modern systems [36].
+Take Jetson AGX Xavier as an example. It consists of four heterogeneous dual­core
+NVIDIA Carmel CPU clusters. The Carmel CPU cores are superscalar out­of­order cores,
+efficient at scalar and lightly parallel tasks. They include NEON vector units that can
+perform operations on 128­bit registers (for example, four 32­bit floats or sixteen 8­bit
+integers at a time). While modern ARM CPUs do support INT8 arithmetic (and even dot­
+product instructions for small matrix multiplies), their parallelism is limited to at most a few
+tens of operations in flight per core. The CPU is typically memory­centric (large caches,
+branch predictors) and excels at tasks like data preparation and control flow. However, for
+the dense linear algebra computations in CNNs, an embedded CPU core cannot match
+the raw throughput of a GPU core array. In deploying a model like YOLO on Xavier, one
+might use the CPU for preprocessing or postprocessing.
+The Jetson AGX Xavier integrated Volta GPU, shown in 2.5. The Volta GPU featuring
+8 SMs(streaming multiprocessor) total, each containing a large array of CUDA cores for
+general­purpose 32­bit math, alongside specialized Tensor Cores for accelerated matrix
+operations for a total of 512 CUDA cores and 64 Tensor Cores[37]. This design enables
+the Xavier GPU to handle both traditional graphics/parallel compute through its CUDA
+cores and AI­specific matrix computations through its Tensor Cores in a power­efficient
+SoC design.
+Exploring quantization techniques for object detection on embedded devices
+13
+==PAGE:22==
+Figure 2.5: Jetson AGX Xavier Volta GPU block diagram [37]
+2.2.3
+CUDA Core and Tensor Core
+One of the key architectural additions in NVIDIA’s Volta (GV100) architecture was the
+introduction of Tensor Cores, which are dedicated units for matrix multiply­accumulate
+operations . These are distinct from the standard CUDA cores and are designed to dra­
+matically boost the throughput of matrix math, especially for deep learning workloads
+involving multiplied matrices. The difference can be illustrated by considering a small ma­
+trix multiplication example. Without tensor cores, multiplying two matrices requires many
+individual multiply­add operations on CUDA cores. For instance, this difference is exem­
+plified by comparing the computation of C = A × B, where A is 4 × 8 and B is 8 × 4,
+yielding a 4 × 4 matrix C, as shown in 2.6.
+Figure 2.6: CUDA Core vs. Tensor core computation
+With a single CUDA Core, each element Cij requires a dot product of a row from A and
+a column from B. For example, computing C00 involves:
+C00 =
+7
+∑
+k=0
+A0k · Bk0
+(2.4)
+14
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:23==
+which requires 8 MAC operations. Since C has 4 × 4 = 16 elements, the total operations
+amount to: 16 outputs × 8 MACs = 128 MAC operations. Executing sequentially on one
+CUDA Core, this requires 128 clock cycles (clk).
+Tensor Cores optimize this by processing 4 × 4 submatrices in parallel. The computation
+is split into two phases:
+1. First Clock Cycle: Compute C(1) = A[:,0:3] × B[0:3,:] (first 4 columns of A and rows
+of B).
+2. Second Clock Cycle: Compute C(2) = A[:,4:7] × B[4:7,:] (remaining columns/rows),
+then accumulate: C = C(1) + C(2)
+Each 4 × 4 × 4 × 4 multiply­accumulate completes in 1 clk, totaling 2 clk for the full oper­
+ation [38][39]. It completes what would take 64 serial MAC instructions on scalar cores.
+The fused MAC design of the Tensor Core not only reduces the instruction count, but also
+performs the multiplication and addition in one step, reducing intermediate rounding er­
+rors and improving efficiency. In summary, for matrix­math intensive operations, a single
+Tensor Core provides the work of many CUDA cores, offering an enormous speedup for
+large matrix multiplies and convolutions that are commonplace in deep learning.
+Thanks to these architectural features, the Jetson AGX Xavier achieves extremely high
+AI throughput within an embedded power budget. Notably, its Volta GPU delivers up
+to 22TOPS (trillions of 8­bit operations per second) when using INT8 precision for infer­
+ence [37]. This performance figure can be validated by a back­of­the­envelope calcula­
+tion from the hardware specs. The Xavier GPU has 8 SMs × 8 Tensor Cores/SM = 64
+Tensor Cores in total [37]. Each Volta Tensor Core can perform 64 fused multiply­adds
+per clock for FP16 matrices, and up to 128 integer MACs per clock for INT8 data (since
+lower­precision 8­bit values allow doubling the parallelism per core). Counting each 8­
+bit multiply­add as two integer operations (one multiply, one add), that equates to 256
+INT8 operations per Tensor Core per cycle. At a GPU frequency of about 1.37GHz, the
+theoretical peak INT8 throughput is:
+64 TensorCores × 256 ops/(cycle · Core) × 1.37 × 109 cycles/s ≈2.2 × 1013 ops/s (2.5)
+which is roughly 22 TOPS. This matches the quoted peak of 22 TOPS (INT8) for the Xavier
+GPU [37].
+2.2.4
+Roofline model and deep learning model performance analysis
+In the real world, any model (such as VGG/MobileNet, etc.) must rely on a specific com­
+puting platform (such as CPU/GPU/ASIC, etc.) to demonstrate its strength. At this time,
+the “level of understanding” between the model and the computing platform will determine
+the actual performance of the model. Roofline Model proposes a quantitative analysis
+method using Operational Intensity, and gives the formula for the theoretical upper limit
+of the computing performance that a model can achieve on a computing platform[40].
+Understand this model through the article [41]:
+• Two hardware metrics: peak compute and bandwidth
+– Peak compute π: Maximum floating point operations per second (FLOP/s) the
+device can sustain.
+– Peak bandwidth β: Maximum data traffic between processor and main memory
+per second (Byte/s).
+Exploring quantization techniques for object detection on embedded devices
+15
+==PAGE:24==
+Their ratio defines the platform’s upper bound intensity
+Imax = π
+β ,
+(2.6)
+the x coordinate where the slanted eave meets the flat roof in a Roofline plot.
+• Two model metrics: computation and data traffic
+– Computation C: Total FLOPs required for one forward pass.
+– Data traffic Q: Total bytes moved (weights & feature maps) in the same pass.
+This yields the operational intensity
+I = C
+Q
+(FLOPs/Byte),
+(2.7)
+telling how many FLOPs are performed per byte transferred.
+2.3
+Roofline model form
+Coupling hardware and model metrics gives
+P(I) = min
+(
+π, βI
+)
+.
+(2.8)
+For I > Imax the kernel is compute bound (capped by π); for I < Imax it is memory bound
+(capped by βI).
+Figure 2.7: Roofline diagram: the slanted red eave has slope β, the flat green roof has
+height π, and the knee (Imax, π) separates the memory bound and compute bound re­
+gions.[41]
+• Compute Bound region: No matter how large the operational intensity I grows, the
+theoretical performance P can never exceed the platform’s peak compute through­
+put π. When I > Imax, the model is in the Compute Bound regime; P is limited by π
+16
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:25==
+and cannot scale further with I. From a utilisation viewpoint this is ideal, because
+the model is already using 100% of the available compute power. Consequently, a
+higher platform compute ceiling π yields a higher theoretical performance P once
+the model enters this region.
+• Memory Bound region: When the operational intensity I falls below Imax, the model
+lies under the “eave” of the Roofline. Its performance is now governed only by the
+platform bandwidth ceiling β (the eave’s slope) and its own intensity I. The model
+is called Memory­Bound. Performance can therefore be improved linearly either by
+increasing the bandwidth β (a steeper eave) or by raising the model’s intensity I.
+We can improve the efficiency of calculations by increasing the Operational intensity, so
+that the model calculations do not exceed the hardware limitations or saturate the hard­
+ware as much as possible.
+In summary, the Roofline model is a valuable tool in this thesis for interpreting the per­
+formance results of quantized models on the embedded devices. It provides a bridge
+between theoretical hardware capabilities (FLOPs/TOPs and bandwidth) and observed
+metrics (throughput, utilization), helping to explain whether a model’s latency is limited by
+compute resources or by memory transfers.
+2.4
+Optimization strategies for object detection models on
+embedded devices
+Embedded edge devices are far less powerful than server­grade GPUs in terms of com­
+puting power, storage and energy consumption. They are usually equipped with low­
+power CPUs and small GPUs/NPUs. For example, the NVIDIA Jetson Nano module only
+provides about 0.5 TFLOPS of floating­point computing power [42], whereas data center
+GPUs can deliver tens to hundreds of TFLOPS images.nvidia.com. At the same time,
+embedded devices have limited memory capacity (typically only a few gigabytes) and
+memory bandwidth (e.g. about 25.6 GB/s for the Jetson Nano) is also much lower than
+that of high­end GPUs (up to hundreds of gigabytes/s) [42]. These memory and bandwidth
+limitations make it difficult to deploy large models, and the training process can hardly be
+completed on the device itself, so it relies on high­end servers [43]. In terms of energy
+consumption, embedded devices emphasize low power consumption: Jetson Nano and
+the like only consume less than 10 W [42], while desktop­class GPUs such as GeForce
+RTX 2080 Ti consume more than 250 W [44]. Overall, the computing power and memory
+that edge devices can provide is far inferior to that of cloud servers, so it is necessary to
+strictly control resource usage when deploying deep learning models.
+2.4.1
+Optimization strategy for object detection models
+To adapt to these limitations, researchers have proposed various optimization strategies
+for embedded end­object detection models. One type is to design lightweight network
+structures, that is, to use smaller models to reduce the amount of computation while en­
+suring accuracy [45]. Typical representatives include the MobileNet series, EfficientNet,
+and Tiny­YOLO. They use deep separable convolutions, width factor pruning, and other
+methods to greatly reduce parameters and FLOPs [46]. The MobileNet model was pro­
+posed specifically for mobile embedded vision applications, and it achieves competitive
+accuracy with less computation on tasks such as ImageNet [46]. Subsequent MobileNet­
+SSD or EfficientDet applies this lightweight backbone to detection, achieving real­time
+object detection on embedded devices [43]. For example, some studies have shown that
+on the same embedded platform, the SSD detection network using MobileNet­V2 as the
+backbone takes far less time to reason than a model with a large ResNet backbone [43].
+Exploring quantization techniques for object detection on embedded devices
+17
+==PAGE:26==
+Therefore, the selection of lightweight detection models is the primary measure for edge
+deployment.
+Another important strategy is model compression and quantization, including pruning,
+quantization, and knowledge distillation [45]. Pruning can significantly reduce the compu­
+tational and storage overheads of a model by removing redundant parameters. There are
+a large number of methods that have been proven to reduce the computational and stor­
+age overheads of a model significantly [45]. Quantization is the main method discussed
+in this thesis and was introduced in the previous chapter. In addition, knowledge distilla­
+tion compresses the “knowledge” of a large model into a lightweight model by having a
+small model learn the output distribution of a large model, thereby significantly reducing
+the number of parameters while maintaining high accuracy [47]. The above methods each
+have their own focus and can be combined for better results. For example, the detection
+model is first structurally pruned and quantized to 8 bits, and then the distilled small model
+is fine­tuned to to compensate for the loss of accuracy [45].
+2.4.2
+Optimization of different inference frameworks
+For embedded deployment, it is necessary to select an appropriate inference framework
+(runtime) and optimize the software.
+Optimizing the inference phase is often consid­
+ered even more strategic than training for long­running applications [48]. This section
+reviews three mainstream solutions include native frameworks (such as PyTorch), in­
+termediate representation runtimes (such as ONNX Runtime), and hardware­optimized
+engines (such as TensorRT).
+• PyTorch Native Inference. PyTorch is a dynamic computation graph framework
+designed with an imperative, Pythonic style to maximize ease of use and flexibility,
+while still delivering high performance on modern hardware [49]. Its architecture
+executes models eagerly (operation by operation), which simplifies debugging and
+model development. To reconcile flexibility with speed, PyTorch’s runtime leverages
+highly optimized libraries (e.g., NVIDIA cuDNN for GPUs and MKL/QNNPACK for
+CPUs) and offers a just­in­time (JIT) compiler (TorchScript) that can convert mod­
+els to a static graph for faster deployment. The design philosophy prioritizes de­
+veloper productivity, as evidenced by the seamless integration of PyTorch models
+as “regular Python programs” under user control [49]. In terms of quantization, Py­
+Torch provides an extensive quantization toolkit as part of its library, supporting post­
+training static quantization and quantization­aware training. These techniques allow
+converting models to 8­bit integers for inference, leveraging efficient INT8 matrix­
+multiplication kernels (FBGEMM on x86, QNNPACK on ARM) to significantly accel­
+erate CPU inference , but support for server GPUs (via TensorRT and cuDNN) is still
+in development [50]. In summary, PyTorch’s native inference path (with or without
+JIT optimization) offers the convenience of using the same framework for training
+and deployment, with built­in support for quantized models on supported backends.
+•
+• ONNX Runtime. ONNX Runtime is an open­source inference engine geared to­
+wards portability and cross­framework compatibility. ONNX (Open Neural Network
+Exchange) was introduced in 2017 as an open standard intermediate format for
+machine learning models, enabling models trained in one framework to be exported
+and run in another [48]. ONNX Runtime (ORT) executes these standardized models
+with a high­performance engine that supports multiple execution providers for differ­
+ent hardware environments (e.g., CPU, GPU, DSP). Its architecture is based on a
+static dataflow graph (the ONNX model graph), which allows ORT to perform exten­
+18
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:27==
+sive graph­level optimizations ahead of runtime – such as constant folding, operator
+fusion, and elimination of redundant computations. For instance, using the highest
+optimization level in ONNX Runtime can improve inference speed by around 8%
+compared to default settings, thanks to aggressive graph optimizations [48]. The
+design goal of ORT is interoperability and efficiency: developers can train a model
+in PyTorch or TensorFlow, convert it to ONNX, and deploy on a variety of embedded
+devices using the same runtime. This decoupling eases deployment on resource­
+constrained platforms since the lightweight ORT binary (far smaller than a full train­
+ing framework) can be installed on the device. ORT also has integrated support
+for quantized inference. The ONNX format includes quantized operator definitions
+(e.g., QLinearConv for 8­bit convolutions), and ONNX Runtime provides tools to
+convert float32 models to INT8 ONNX models [51]. During inference, ORT will ex­
+ecute INT8 ops on CPUs using optimized kernels or delegate them to hardware
+accelerators (for example, via the NVIDIA TensorRT execution provider or Intel’s
+OpenVINO for CPUs). Overall, ONNX Runtime’s architecture emphasizes broad
+compatibility and modular optimization: it may not include hardware­specific tricks
+itself, but it seamlessly integrates with libraries like TensorRT to optimize perfor­
+mance on a given device.
+• NVIDIA TensorRT. TensorRT is a highly optimized inference framework developed
+by NVIDIA, tailored specifically for NVIDIA GPUs and system­on­chip accelera­
+tors.
+Unlike general­purpose frameworks, TensorRT functions as a deep learn­
+ing compiler: it takes a trained network (via ONNX or directly from frameworks
+using provided parsers) and generates an optimized inference engine for the tar­
+get GPU[10]. Under the hood, TensorRT performs numerous optimizations such
+as layer fusion, kernel auto­tuning, memory layout optimization, and reduced pre­
+cision execution. A hallmark feature of TensorRT is its aggressive use of mixed­
+precision and INT8 quantization to maximize throughput. Models can be executed
+in FP16 (half­precision) or INT8 precision, substantially reducing compute and mem­
+ory bandwidth requirements at inference time. TensorRT’s design goal is maximum
+efficiency on NVIDIA hardware – it integrates tightly with CUDA and cuDNN, and
+even implements custom kernels to squeeze out every drop of performance. The
+trade­off is that it is limited to NVIDIA ecosystems (GPUs or Jetson devices with
+NVIDIA SoCs). Nevertheless, for embedded deployments that do use NVIDIA Jet­
+son boards (which feature GPU and NVDLA cores), TensorRT is often the go­to
+solution to deploy heavy models in real­time.
+2.4.3
+Typical application scenarios
+Benefiting from the above optimization strategies, embedded devices have been able to
+take on the task of real­time object detection in many practical scenarios. Smart cameras
+are one typical application: deploying a target detection algorithm on a security surveil­
+lance camera or edge gateway can identify people, vehicles, etc., entering and leaving
+in real time, without having to stream the video back to the cloud for processing. This
+kind of edge AI camera reduces network bandwidth usage and improves privacy secu­
+rity and response speed because the data is processed locally [43]. There have been
+many such attempts in academia and industry. For example, Choi et al. developed an
+embedded camera system for generating local dynamic maps in intelligent transporta­
+tion, which simultaneously implements target detection and multi­target tracking on the
+Qualcomm QCS605 chip, and achieves real­time performance of 10 frames per second
+through network pruning and quantization [52].
+Embedded object detection is also heavily used in the field of autonomous and assisted
+Exploring quantization techniques for object detection on embedded devices
+19
+==PAGE:28==
+driving. Self­driving cars and advanced driver assistance systems are often equipped with
+dedicated in­vehicle AI computing platforms (such as NVIDIA Drive AGX), which contain
+high­performance but power­constrained SoCs for running object detection and classi­
+fication models from multiple cameras [53]. These models need to detect pedestrians,
+vehicles, traffic signs, etc., with extremely low latency to ensure driving safety. Therefore,
+automotive platforms often use embedded GPU chips like Orin (which can provide up to
+200+ TOPS of computing power) to deploy efficient detection networks, combined with
+INT8 quantization and tensor RT inference optimization to achieve processing capabilities
+of tens of frames per second [54]. Compared to general­purpose servers, automotive em­
+bedded computing units are more suitable for the vehicle environment in terms of power
+consumption and size, but through collaborative optimization of hardware and software,
+they can still achieve real­time detection performance close to the server level. This en­
+ables the vehicle to perceive and react to its environment autonomously, without relying
+on network connections or cloud computing.
+Robots and drones are also important arenas for embedded object detection. Restricted
+on­board computing requirements mean that models must be lightweight and efficient.
+Researchers have already demonstrated the feasibility of embedded object detection on
+small drones: Hossain and Lee, for example, designed a GPU­based embedded vision
+system that enables drones to detect and track multiple objects in aerial images in real
+time [43]. These types of aircraft are usually equipped with embedded GPUs (such as
+the Jetson TX2) that consume tens of watts of power. Real­time identification of ground
+targets in the air is achieved through optimized models such as YOLOv3 Tiny, providing
+technical support for applications such as disaster relief and farmland inspection [43]. In
+addition, in the field of industrial robotics, some edge AI modules are used for production
+line inspection to locally identify product defects or abnormalities, which greatly reduces
+data transmission delays and enhances system robustness. Overall, object detection on
+embedded devices has been widely used in many scenarios ranging from smart cameras
+and autonomous driving to robotics and autonomous unmanned systems. These success
+stories show that efficient and accurate object detection can be achieved on resource­
+constrained devices by optimizing models and software for hardware limitations.
+2.5
+YOLO series and quantization
+Since the YOLOv1 algorithm (“You Only Look Once”)[4] was proposed in 2016, the YOLO
+series has undergone multiple generations of evolution, continuously improving the speed
+and accuracy of target detection. The core idea of the YOLO series is to regard target
+detection as a single end­to­end regression problem, using a neural network to directly
+predict the bounding box position and category probability, which is simpler and more
+efficient than the traditional two­stage detector[13]. Referring to [13], the following is a
+brief summary of the key improvements of YOLOv8 and previous versions:
+1. YOLOv1 (2016) was the first single­stage detector to predict bounding boxes and
+class labels in one pass. It split the image into a grid and made predictions per cell,
+offering real­time speed but struggling with small objects and precision.
+2. YOLOv2 (2017) improved speed and accuracy by adding batch normalization, using
+anchor boxes, and applying multi­scale training and a passthrough layer to better de­
+tect small objects. It reached 78.6% mAP on VOC2007, up from 63.4% in YOLOv1.
+It also introduced YOLO9000, which could detect over 9000 object classes by train­
+ing on both detection and classification datasets.
+3. YOLOv3 (2018) made the network deeper with Darknet­53 and used residual con­
+20
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:29==
+nections. It predicted at three scales to handle objects of different sizes and used
+logistic regression for class prediction, which allowed overlapping class labels and
+improved stability.
+4. YOLOv4 (2020) added the CSPDarknet­53 backbone, new activation functions, and
+training tricks like Mosaic augmentation and CIOU loss, reaching state­of­the­art re­
+sults. YOLOv5 (also 2020), released by Ultralytics in PyTorch, built on YOLOv4’s
+ideas with further efficiency improvements and became widely used despite no of­
+ficial paper.
+5. YOLOv7 (2022) pushed performance further, introducing E­ELAN and reparame­
+terized convolutions, outperforming previous versions in speed and accuracy while
+reducing model size significantly.
+6. YOLOv8 (2023), also from Ultralytics. It uses a more efficient C2f backbone, re­
+moves anchor boxes, and separates detection tasks (objectness, classification, re­
+gression) for better performance. It includes advanced loss functions and supports
+detection, segmentation, and pose estimation in one model. In our work, we use
+YOLOv8 as the representative modern YOLO model for quantization experiments,
+leveraging its high accuracy and modern architecture as a strong baseline.
+2.5.1
+Object Detection Metrics, and NMS
+Evaluation metrics for object detection revolve around the notions of precision, recall, and
+the Intersection over Union (IoU) overlap. Precision is the fraction of predicted detections
+that are correct (i.e., the model’s positive predictive value), whereas recall is the fraction
+of true objects that are successfully detected by the model. There is an inherent trade­
+off: a detector that fires on more proposals may catch more true objects (higher recall)
+but also produce more false alarms (lower precision). To summarize performance across
+this precision–recall spectrum, detectors are evaluated by Average Precision (AP). AP is
+computed as the area under the precision–recall curve for a given class, often averaged
+over multiple IoU thresholds to ensure localization quality (as per the COCO evaluation
+protocol). The mean AP (mAP) averages the AP across all object classes, yielding a
+single­number metric for overall detection performance. A higher mAP indicates a better
+detector, with the COCO dataset setting challenging benchmarks. For example, YOLOv7
+achieved an AP50 of 56.8% on COCO test­dev while running at 30 FPS, exemplifying the
+balance of accuracy and speed in modern detectors[55].
+Figure 2.8: Non­Maximum Suppression (NMS) in object detection
+After a detector produces raw bounding box predictions, a Non­Maximum Suppression
+(NMS) step is applied as a post­processing to remove redundant overlapping detections.
+Detectors often predict multiple boxes for the same object; NMS selects the best one and
+discards others that have high IoU overlap with it. Figure 2.8 illustrates this process: ini­
+Exploring quantization techniques for object detection on embedded devices
+21
+==PAGE:30==
+tially (left one) many candidate boxes (in different colors) may surround the same object,
+and after NMS (right one) only a few boxes with higher confidence remain. Formally,
+the algorithm sorts predicted boxes by confidence, then iteratively keeps the top box and
+suppresses any remaining box that has IoU above a threshold with it. This efficiently re­
+duces duplicates, improving result clarity. In practice, choosing appropriate NMS settings
+(IoU threshold) is important to maximize true detections while minimizing false positives,
+ultimately affecting the precision–recall characteristics of the detector.
+2.5.2
+YOLO Architecture and Quantization Challenges
+The YOLO series employs complex CNN architectures to achieve high detection accu­
+racy, which in turn poses challenges for model quantization. YOLO models typically con­
+sist of dozens of convolutional layers with batch normalization and nonlinear activations
+(Leaky ReLU or SiLU) in the backbone, layers with residual connections (e.g. Darknet
+residual blocks or CSP modules), and multi­scale feature fusion in the neck (upsampling
+and concatenation of feature maps). While these components improve accuracy, they
+create difficulties for low­bit quantization[55].
+One issue is the high dynamic range in feature maps: activation values can vary widely,
+especially after aggressive nonlinearities and merging from different scales. For instance,
+researchers have observed that activation distributions in YOLO can be extremely imbal­
+anced – a large concentration of near­zero values but a long tail of large positive val­
+ues[55]. This imbalance means that a straightforward min–max quantization (which allo­
+cates equal range to the tail) wastes many levels on rarely occurring outliers, effectively
+reducing precision for the bulk of the data. As a result, naive post­training quantization of
+YOLO often incurs severe performance degradation, since important details in the feature
+maps get lost or distorted.
+Another challenge stems from structural elements like residual addends and feature con­
+catenations. In a residual block, a quantized layer’s output must be added to a skip­
+connection path output; if their scales are not perfectly aligned, the sum can be inaccurate.
+Quantization noise on one branch can propagate and amplify through the skip connection.
+Similarly, YOLO’s PANet­like neck concatenates feature maps from different resolutions
+(after upsampling), which may have very different value distributions. Quantizing them
+with a single scale or with mismatched scales can lead to one feature dominating the
+other or to precision loss in one of the concatenated parts.
+Moreover, YOLO’s detection head predicts coordinates and class confidences that are
+sensitive to even slight shifts. A small quantization error in the box regression output
+can significantly drop IoU and thus AP. All these factors – large model depth, residual
+merges, multi­scale ops, and sensitive output – mean that applying low­bit quantization
+to YOLO is more challenging than to a straightforward sequential network (like plain classi­
+fication CNNs). Overcoming these challenges requires advanced quantization strategies
+that preserve the critical information flow in YOLO’s architecture despite reduced numeric
+precision.
+2.5.3
+Quantization Approaches for YOLO
+Due to the above challenges, specialized methods have been proposed to successfully
+quantize YOLO models while maintaining accuracy. One recent PTQ approach is Q­
+YOLO (2023 by Wang et al.)[55], which introduces a Unilateral Histogram (UH) based
+activation quantization scheme. The idea is to determine the optimal clipping thresholds
+for activations by analyzing their distribution. Instead of naively using min/max values
+(which, as noted, are skewed by outliers), Q­YOLO computes activation histograms and
+chooses the truncation cut­off that minimizes the quantization error (e.g., by minimizing
+22
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:31==
+MSE between original and quantized activation distributions). In essence, it “ignores” the
+extreme tail of activations if it rarely occurs, thereby using the quantization dynamic range
+more effectively for the bulk of activation values. Q­YOLO provides a fully end­to­end
+PTQ pipeline with this histogram­based calibration, and it was shown to outperform other
+PTQ methods on COCO, achieving a better balance between accuracy and efficiency. By
+mitigating the activation imbalance problem, Q­YOLO can reach higher mAP under INT8
+(and even INT4 in some layers) than conventional PTQ approaches, without needing to
+modify or retrain the original YOLO weights.
+On the other hand, regarding QAT, MPQ­YOLO (2023 by Liu et al.)[56] is a QAT­based
+framework that uses mixed­precision quantization tailored to YOLO’s architecture. Specif­
+ically, MPQ­YOLO quantizes the backbone layers to an ultra­low 1­bit precision (binary
+weights/activations) while keeping the detection head at 4­bit precision. This allocation
+recognizes that earlier layers (backbone) can tolerate more quantization error if carefully
+trained, whereas later layers (especially the head predicting boxes and classes) require
+higher precision for accuracy. To train such a model end­to­end, MPQ­YOLO introduces
+a trainable scaling factor between the binary backbone and the 4­bit head, ensuring the
+feature magnitudes from the two parts match during forward propagation. It also uses
+a Progressive Network Quantization (PNQ) strategy: the model is gradually quantized
+during training to avoid sudden shocks that could destabilize learning. This progressive
+fine­tuning mitigates oscillations in loss that often occur with mixed precision training, lead­
+ing to smoother convergence. Empirically, MPQ­YOLO achieved an impressive trade­off:
+on COCO, its fully quantized model (1­bit/4­bit) had <8% mAP drop compared to the full­
+precision model, while reducing computation by 78% and model size by 54%. Moreover,
+against a recent 4­bit­only method (Q­YOLO), MPQ­YOLO improved detection accuracy
+by 5.5% (absolute) and further cut computation by 43%. To our knowledge, MPQ­YOLO
+is the first to push YOLO to such low bit­widths with minimal accuracy loss, thanks to its
+careful mix of precision and specialized training techniques.
+These advances in Q­YOLO and MPQ­YOLO underscore that with appropriate quantiza­
+tion schemes—whether smart post­training calibration or custom training regimes—YOLO
+models can indeed be compressed significantly without sacrificing their strong object de­
+tection performance. The insights from these works inform our quantization strategy for
+YOLOv8 in this paper.
+2.6
+Existing quantization research and its shortcomings
+Numerous studies have explored network quantization as a means to compress models
+and speed up inference, yielding a variety of approaches. However, a key issue is that
+many early quantization studies focused on classification networks and did not directly
+generalize to detectors. As mentioned earlier, due to the amount of floating­point opera­
+tions, quantization of object detection tasks may be more difficult than classification tasks.
+This applies quantization to object detection models, which poses additional challenges
+and exposes the shortcomings of previous research.
+As for the related quantization research on object detection, most PTQ approaches eval­
+uated only the backbone and neck portions of detectors, avoiding the quantization of de­
+tection heads (the classification and regression layers) due to their sensitivity [22]. This
+is problematic because detection heads contribute a substantial fraction of the compu­
+tation and nearly half of the memory footprint in typical one­stage and two­stage detec­
+tors [22]. Directly applying standard PTQ on a localization head often causes severe
+drops in mean Average Precision (mAP), especially at low bit­widths [22]. To address
+this, some works have designed specialized quantization techniques for detection. For
+Exploring quantization techniques for object detection on embedded devices
+23
+==PAGE:32==
+example, regression­aware calibration schemes have been introduced to fine­tune quanti­
+zation scales for bounding­box regressors, rather than using classification­based criteria
+that prove suboptimal for localization tasks [22]. Similarly, researchers have proposed
+QAT modifications tailored to detection: Huang et al. observe that the multi­task nature of
+object detectors (distinct classification vs. regression objectives) can lead to task inhar­
+mony under quantization, where QAT disproportionately hurts one task’s accuracy [57].
+Their Harmonious Quantization framework adds task­balanced loss terms during QAT to
+align the two objectives, resulting in a 4­bit quantized detector that actually matches or
+exceeds the mAP of the full­precision model on COCO [57]. These efforts highlight that
+additional algorithmic innovation (e.g. better loss functions, calibrated quantizers) is re­
+quired to quantize detectors successfully, beyond what was sufficient for classification
+models. At the same time, these studies are still mainly focused on accuracy and com­
+pression ratio at the model level, and there is a lack of comprehensive evaluation for real
+deployment, especially in different embedded environments. This is the next point to be
+discussed.
+In general, the evaluation focus in quantization research has skewed toward accuracy
+metrics and theoretical efficiency, with less emphasis on real­world deployment impact.
+Many state­of­the­art papers report impressively small drops in mAP after quantization
+and substantial reductions in model size or arithmetic operations. While these results
+demonstrate the potential of quantization, they do not always translate to proportional
+gains in deployed systems. In fact, researchers have noted that designing ultra low­
+bit networks can yield “unverifiable efficiency on common hardware”[58] – i.e. the hard­
+ware or inference engines may not support the novel quantization scheme, or the actual
+speedup is limited by other bottlenecks. Most academic works evaluate quantized mod­
+els on benchmarks in terms of accuracy, but omit detailed measurements of inference la­
+tency, throughput, or memory bandwidth on real devices. As a result, crucial deployment­
+centric factors are often under­reported. For instance, 8­bit integer arithmetic can theo­
+retically offer an order­of­magnitude energy reduction per operation compared to 32­bit
+floating point[58], yet the system­level speedups observed are sometimes far smaller due
+to overhead in memory access and partial quantization of the network. Platform compat­
+ibility is another concern rarely addressed in depth: a custom quantization algorithm may
+require support beyond standard runtime libraries (TensorRT, ONNX Runtime, TFLite),
+making it hard to deploy despite academic success. In summary, the prior art on model
+quantization, especially for object detection, has largely stressed accuracy recovery and
+bit­width reduction, while overlooking many practical deployment aspects. There is a clear
+need for research that bridges this gap by examining not only quantization algorithms but
+also their end­to­end performance in real embedded settings.
+24
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:33==
+3
+Methodology
+This chapter details the implementation methods and typical processes for model quanti­
+zation under different frameworks, and provides a schematic diagram of the quantization
+workflow to help understand the differences between different toolchains. First, a the­
+oretical evaluation of selected experimental models is performed. Then, we describe
+the three main implementation methods used in the study: PyTorch native quantization,
+ONNX runtime quantization, and TensorRT quantization, and compare and analyze their
+workflows. Finally, the model is profiled to find out where improvements can be made.
+3.1
+Model analysis
+As discussed in Section 2.3, the attainable performance of a kernel on a given platform
+is bounded by the Roofline curve, characterised by the peak compute throughput π and
+the memory bandwidth ceiling β. In this section we apply the theory to YOLOv8n running
+on an NVIDIA Jetson AGX Xavier 32 GB in three precisions (FP32/16, INT8), quantify the
+arithmetic intensity, locate the model on the Roofline, and derive optimisation directives
+for deployment.
+3.1.1
+Hardware Ceilings (AGX Xavier)
+Table 3.1: Peak capability of Jetson AGX Xavier (8 SM, 64 Tensor Cores, bandwidth
+137 GB/s).
+Precision
+π (FLOP/s or TOPS)
+β (GB/s)
+Imax = π/β
+FP32
+1.4 TFLOP/s
+137
+10.2 F/B
+FP16
+11.2 TFLOP/s
+137
+81.8 F/B
+INT8
+22.4 TOPS
+137
+163 O/B
+3.1.2
+Memory Traffic Estimation
+Using the ultralytics official package to load the model , and the network owns Np =
+3.2×106 parameters and executes C = 8.7×109 FLOPs for a 640×640 RGB frame. Using
+the activation trace collected with Pytorch hooks, the total amount of feature map writes is
+177.7 M. Assuming each activation is read back exactly once by the next layer, the FP32
+traffic becomes
+QFP32 = 4
+(
+Np + 2Npix
+)
++ 2 Qact,
+Qact = 177.7 MB,
+(3.1)
+which yields QFP32 = 378 MB. Traffic for lower precisions scales linearly with element
+size: QFP16 =
+1
+2QFP32, QINT8 =
+1
+4QFP32 [41]. Because the calculation of this value is
+controversial, the calculation here may be smaller due to not taking into account the num­
+ber of operator reads/writes or other reasons. It is only used here as an example of the
+method provided to provide a top­level reference for our entire experiment.
+3.1.3
+Arithmetic Intensity
+Plugging (3.1) into the intensity definition in Eq. (2.7), gives
+IFP32 = 22 F/B,
+IFP16 = 44 F/B,
+IINT8 = 88 O/B.
+Table 3.2 summarises the values against the ceilings.
+Exploring quantization techniques for object detection on embedded devices
+25
+==PAGE:34==
+Table 3.2: YOLOv8n intensity versus Xavier thresholds.
+Precision
+Q (MB)
+I (F/B or O/B)
+Region
+FP32
+378
+22
+Compute bound
+FP16
+189
+44
+Memory bound
+INT8
+95
+88
+Memory bound
+3.1.4
+Roofline Placement and Bottleneck
+Figure 3.1 plots the three (I, P) points on top of the hardware Roofline. FP32 lies well to
+the right of IFP32
+max and therefore is limited exclusively by compute throughput π. Conversely,
+FP16 and INT8 sit almost exactly on the slanted bandwidth eave, indicating that DRAM
+traffic, not compute resources, now caps the sustained performance.
+Figure 3.1: Roofline diagram of YOLOv8n. Vertical dashed lines mark Imax for each pre­
+cision. Coloured crosses are the three precisions of YOLOv8n.
+3.1.5
+Optimization Strategy
+FP32 path: Since the computation is already in a bottleneck state, kernel fusion or
+scheduling optimization has limited effect. The best strategy is to directly call the Ten­
+sor Core with FP16/INT8 precision and switch the computation precision.
+FP16 & INT8 path: Being memory bound, further speed­up must reduce Q or increase β.
+Including layer fusion, reducing the number of data transmission times, using large batches,
+batch parallelism, network­level pruning or continued compression, etc. These deploy­
+ment tactics will be validated empirically.
+26
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:35==
+3.2
+Workflows
+Figure 3.2: An illustration of experiment workflows
+Figure 3.2 provides a high­level overview of three model quantization and inference work­
+flows for object detection. Each workflow begins with a PyTorch­trained object detec­
+tion model and then follows a distinct pipeline of quantization, model export, and deploy­
+ment using different toolchains. In summary, the diagram illustrates: (1) a PyTorch­native
+quantization pathway using PyTorch’s built­in quantization interface (referred to here as
+PyTorch­Quantization) for model quantization and inference within the PyTorch frame­
+work; (2) an ONNX Runtime pathway that exports the PyTorch model to the ONNX format
+and uses the ONNX Runtime API to perform quantization and inference (this approach
+can leverage various ONNX Runtime execution providers, including the CPUExecution­
+Provider for CPU­only execution, the CUDAExecutionProvider for GPU acceleration, and
+the TensorRTExecutionProvider which offloads inference to NVIDIA’s TensorRT engine);
+and (3) a TensorRT pathway that employs the NVIDIA TensorRT API to convert the model
+into a highly optimized TensorRT inference engine and executes inference directly using
+the TensorRT runtime.
+Despite taking different routes, all three workflows start from the same pre­trained PyTorch
+model and aim to produce an efficient quantized inference deployment. The PyTorch
+workflow keeps the entire process within the PyTorch ecosystem, applying quantization
+via PyTorch­Quantization and then running the quantized model using PyTorch’s infer­
+ence engine. The ONNX Runtime workflow introduces an intermediate ONNX represen­
+tation: after exporting the trained model to ONNX, quantization is applied using ONNX’s
+quantization tools, and inference is carried out through the ONNX Runtime API (with the
+flexibility to switch between CPU, GPU, or TensorRT as the execution backend via its
+providers). The TensorRT workflow bypasses the ONNX Runtime at inference by directly
+utilizing TensorRT — for example, the ONNX model is parsed by the TensorRT API to
+Exploring quantization techniques for object detection on embedded devices
+27
+==PAGE:36==
+build a serialized engine, which is then loaded for fast inference on the target hardware.
+Each of these three pathways, as depicted in Figure 3.2, will be discussed in detail in the
+following subsections, highlighting their specific quantization procedures and deployment
+considerations.
+3.2.1
+PyTorch native quantization
+In this work, we employ PyTorch’s native quantization capabilities (augmented by NVIDIA’s
+pytorch_quantization toolkit) to transform the full­precision model into an INT8 quantized
+model suitable for efficient inference. The overall workflow consists of a post­training
+quantization (PTQ) phase for static calibration and an optional quantization­aware training
+(QAT) phase for fine­tuning, followed by exporting the quantized model to ONNX format.
+This approach allows us to insert fake­quantization modules into the network and adjust
+the model’s parameters to mitigate quantization error, all within the PyTorch environment,
+before deploying the model to inference engines.
+1. Module Replacement and Initialization: The first step is to replace standard neu­
+ral network layers with their quantized counterparts provided by the toolkit. The py­
+torch_quantization library supplies drop­in quantized versions of common modules
+such as convolutions and linear layers (QuantConv2d and QuantLinear) [59]. We in­
+voke the toolkit’s initialization routine to globally enable quantization in the model ar­
+chitecture (automatically substituting all eligible torch.nn layers with quant_nn mod­
+ules) [59]. This modular replacement augments each layer with associated Ten­
+sorQuantizer sub­modules that will handle quantizing inputs and weights. At this
+stage, quantization is configured but not yet activated—each quantizer can be tog­
+gled between calibration mode, fake­quantization (quantize/dequantize) mode, or
+full precision passthrough as needed.
+2. PTQ: For PTQ, the quantized model is next subjected to a calibration process using
+a representative dataset (without any weight updates). All quantizer modules are
+first put into calibration mode, meaning they record activation statistics instead of
+altering values [59]. We then execute inference on a stream of calibration data, al­
+lowing each TensorQuantizer to collect distribution information (e.g. min/max or his­
+togram of tensor values). After this calibration run, the recorded statistics are used
+to determine the optimal quantization parameters, and then adopt the selected cali­
+bration method to compute the optimal scaling factor (amax) for each quantizer [59].
+Once the load_calib_amax() function is called on each quantizer to load these cal­
+ibrated scales, the quantizers are fixed to use these parameters and are switched
+into quantize/dequantize mode for subsequent operations [59]. This effectively fi­
+nalizes the PTQ stage: the model’s weights and activations will now be dynamically
+quantized to 8­bit during inference using the calibrated ranges.
+3. QAT: Following PTQ, we optionally perform QAT to further improve the model’s ac­
+curacy under quantization. In QAT, the model (with fixed quantization parameters
+from calibration) is fine­tuned using standard supervised learning, but with quantiza­
+tion simulated in the forward pass. But importantly the forward passes now include
+fake­quantization: each layer’s weights and activations are quantized to 8­bit dur­
+ing the forward propagation and de­quantized for backpropagation. This means the
+network learns with quantization in the loop, adjusting its parameters to minimize
+the loss under quantized conditions. Specifically, during QAT the Quantized lay­
+ers apply fake quantization (via inserted Quantize/Dequantize operations) to activa­
+tions and gradients are approximated with the straight­through estimator, making the
+training “aware” of quantization effects. According to a best practice recommenda­
+28
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:37==
+tion for maintaining training stability, we would be better off fine­tuning for a relatively
+short period of time(e.g. on the order of 10% of the original training epochs) and use
+a reduced learning rate (starting at about 1% of the initial rate), following a schedule
+that decays the learning rate over the fine­tuning period [59]. This slow, modest
+retraining allows the network weights to adjust to the quantization­induced pertur­
+bations while preserving prior learned knowledge. Through this QAT supervision
+process, the model incrementally adapts to the quantized representation, typically
+yielding better accuracy than using PTQ calibration alone.
+4. ONNX Export: After obtaining a calibrated (and possibly QAT­fine­tuned) quan­
+tized PyTorch model, we convert it to an ONNX model for deployment. The export
+logic ensures that all quantization operations are correctly preserved in the exported
+graph. To this end, we enable the toolkit’s ONNX export mode prior to invocation
+of PyTorch’s ONNX exporter [59]. This mode activates the use of standard fake­
+quantize flag (use_fb_fake_quant)within the TensorQuantizer modules so that upon
+export, each quantizer is translated into a pair of ONNX QuantizeLinear/Dequantize­
+Linear nodes with the calibrated scale (and zero­point) parameters embedded [59].
+We then call the torch.onnx.export function on the quantized model (with a represen­
+tative dummy input tensor) to produce the ONNX graph. The resulting ONNX model
+thus contains explicit Q/DQ nodes around quantized layers, faithfully representing
+the INT8 quantization as done in PyTorch. This exported quantized ONNX model
+can later be run using an ONNX runtime or further converted to a TensorRT engine
+for high­performance inference, as illustrated in the workflow figure above. This
+PyTorch­native approach thus provides a complete quantization workflow – from
+calibration to QAT fine­tuning to export – using a unified framework and codebase
+within PyTorch.
+3.2.2
+ONNX Runtime quantization
+ONNX Runtime provides a quantization toolkit to convert trained models into an 8­bit in­
+teger format for faster inference. It supports both dynamic and static quantization modes:
+in dynamic quantization, the scale and zero­point for activations are computed on­the­fly
+during each inference (incurring slight runtime overhead but potentially higher accuracy),
+whereas static quantization pre­computes these parameters offline using a representa­
+tive calibration dataset [51]. In this work, we focus on static quantization for deploying
+the YOLOv8 detector. Static quantization fixes the quantization parameters (scales and
+zero­points) for all future inferences by analyzing the model’s activations on sample in­
+puts [51].
+1. Calibration Procedure: Static quantization begins with a calibration step, in which
+the float32 model is run on a set of representative images to gather statistics on
+its internal activations. ONNX Runtime offers multiple calibration algorithms to de­
+termine the optimal quantization parameters from these statistics, including simple
+range­based extremes (MinMax) and more advanced methods like KL­divergence
+(Entropy) or percentile calibration [51]. In our implementation, we varied the calibra­
+tion dataset and method to observe their effects on the quantized model’s accuracy;
+however, detailed comparisons of these methods are deferred to the results chapter.
+2. Model Pre­processing: Before quantizing the model, we applied ONNX Runtime’s
+preprocessing tool to optimize the YOLOv8 ONNX graph. This pre­processing (in­
+voked via the onnxruntime.quantization.preprocess module) performs several graph
+transformations and shape inferences to prepare the model for INT8 conversion [51].
+For example, a Convolution node followed by a BatchNormalization can be fused
+Exploring quantization techniques for object detection on embedded devices
+29
+==PAGE:38==
+into a single op during this optimization; a fused Conv+BN is quantized as one unit,
+whereas an unfused BatchNormalization on its own cannot be quantized [51]. Ac­
+cording to the official statement, by running these optimizations ahead of time, we
+ensure the quantization process can target all applicable layers. It is recommended
+to carry out such graph optimizations in a preprocessing stage (rather than dur­
+ing the quantization call itself) to maintain a clearer correspondence between the
+original and quantized model graphs [51]. In practice, we obtained a streamlined
+YOLOv8 model (preprocessed.onnx) with all shapes inferred and key operations
+fused, which then served as the input to the quantization routine.
+3. Calibration Data Reader: With the optimized model in hand, the next step is sup­
+plying calibration inputs. ONNX Runtime’s API expects a CalibrationDataReader
+implementation to feed the calibration data to the model [51]. We implemented a
+CalibrationDataReader to iterate over our collection of calibration images. For each
+image, the reader loads the file and applies the same preprocessing pipeline used
+during normal inference (resizing the image to 640×640 pixels, normalizing pixel val­
+ues to [0,1], and converting the image to a 1 × 3 × 640 × 640 tensor in CHW format).
+The preprocessed tensor is then yielded in a dictionary with the model’s input name
+(e.g. {”images”: input_tensor}) as expected by ONNX Runtime. This ensures the
+calibration dataset faithfully represents the model’s typical input distribution. During
+calibration, ONNX Runtime invokes the data reader to feed each sample through
+the float32 model and collects activation value ranges or histograms as required by
+the chosen calibration method.
+4. Quantization Configuration: After calibration data collection, the core quantization
+is performed using the onnxruntime.quantization.quantize_static() function. This is
+a very powerful function that is well encapsulated and leaves a large number of
+functional option interfaces. In our workflow, we call quantize_static with the pre­
+processed YOLOv8 model and CalibrationDataReader, along with specific options
+to configure 8­bit conversion. We use the quantization format QDQ (Quantize/De­
+quantize), specified by quant_format=QuantFormat.QDQ, which inserts Quantize­
+Linear/DequantizeLinear operator pairs around tensors to simulate quantization in
+the ONNX graph [51]. The quantization­aware training (QAT) model exported from
+PyTorch in the previous section is also in QDQ format. Regarding the choice of
+data type, the official documentation says that for low­end ARM64, U8S8 (activa­
+tion: uint8, weight: int8), may be faster than U8U8, and there is no difference in
+accuracy [51]. For high­end ARM64, there is no difference, and we will test it in
+subsequent tests. In the function implementation, all convolution weights are quan­
+tized to signed 8­bit integers (weight_type=QuantType.QInt8), and activations use
+unsigned 8­bits (activation_type=QuantType.QUInt8). We left per­channel quanti­
+zation abled in our runs (per_channel=True), meaning each weight tensor uses a
+single scale per output channel(as opposed to one scale for all channels). Addition­
+ally, we enabled the reduce_range=True option, which restricts the quantizer to a
+slightly narrower range for activations and weights. This reduced range (effectively
+7­bit precision for the most significant bit) helps mitigate saturation issues on certain
+hardware instructions and can improve accuracy in some cases.
+5. Deployment and Execution Providers: The outcome of this workflow is a quan­
+tized YOLOv8 model (still in the ONNX format) ready for efficient inference. One ad­
+vantage of using ONNX Runtime is that the same quantized model can be executed
+on different hardware backends by selecting the appropriate Execution Provider.
+We verified the quantized model on the CPU (using the default CPUExecution­
+30
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:39==
+Provider, which leverages vectorized INT8 CPU kernels) as well as on NVIDIA
+GPUs.
+For GPU deployment, we experimented with both the CUDAExecution­
+Provider and the TensorRTExecutionProvider. The quantized model could be loaded
+and executed with all three providers without modification, underscoring the porta­
+bility of the ONNX deployment approach.
+3.2.3
+TensorRT quantization
+The following focuses on the steps of the TensorRT engine construction phase:
+1. Model import and network parsing: The trained model is imported into TensorRT
+and a network definition is generated. Model files are usually loaded using a parser
+provided by TensorRT (e.g. ONNX Parser), which parses the model structure into
+an INetworkDefinition network object. This process creates nodes and tensors for
+the computational graph, which represent the structure of the original model in Ten­
+sorRT.
+2. Create a Builder configuration and set optimization parameters: Use IBuilder
+to create a IBuilderConfig configuration object and set optimization options and re­
+source limits. For example, configure the maximum batch size, workspace memory
+size, etc., to guide the TensorRT optimizer in searching for the optimal combina­
+tion of inference kernels. At this stage, set the precision options according to de­
+ployment requirements, that is, determine whether to enable FP16 or INT8 mode
+through EngineOptions.precision and set the corresponding flag on BuilderConfig
+(e.g. config­>setFlag(BuilderFlag::kFP16) or kINT8). If the target precision is FP32
+(default), no low­precision flag is set and the model is built in single precision.
+3. INT8 calibration data preparation (optional): When you choose to build the INT8
+engine and the model itself does not contain quantization information, you need to
+specify the dataset for calibration and configure the calibrator. In the C++ implemen­
+tation, a custom calibrator is written by deriving from the IInt8Calibrator interface,
+and representative input data is provided to TensorRT. When the engine is built,
+TensorRT calls the calibrator’s callback function to read the data, perform forward
+propagation to collect statistics on the tensor, and generate quantization scaling fac­
+tors. Once complete, the calibration results are stored in a cache file and loaded for
+subsequent engine builds or inference.
+4. Build TensorRT Engine: Call TensorRT Builder to build an optimized inference
+engine. This step will synthesize the previously configured network definition, opti­
+mization parameters, and precision requirements to graphically optimize the model
+and select the kernel. If INT8 precision is used, during the build process TensorRT
+will apply the calibrated scaling factor to convert the model weights and some ac­
+tivations to INT8 representations to generate a quantized engine. The engine can
+be built using builder­>buildEngineWithConfig(network, config) to obtain an ICud­
+aEngine object. The built engine contains all the optimized computational graphs of
+the model and the corresponding weight data in memory.
+5. Serialize and save the engine: The built TensorRT engine is serialized into a bi­
+nary stream and saved to a file for direct loading and use during deployment. The
+serialized engine is usually saved with the .engine extension. It should be noted
+that engine files are not interchangeable between different GPU architectures or
+TensorRT versions. The serialized engine can usually only be deserialized and
+used under the same environment. Therefore, when saving the engine, you should
+specify the applicable hardware and TensorRT version.
+Exploring quantization techniques for object detection on embedded devices
+31
+==PAGE:40==
+Once the optimized TensorRT engine has been built and serialized, the final step is to de­
+ploy it on the target system and perform real­time inference. This deployment procedure
+typically involves the following steps:
+1. Engine Deserialization
+• Loading the Engine File: The serialized TensorRT engine (commonly stored
+as a *.engine file) is loaded from disk.
+• Creating the Runtime: A new instance of the TensorRT IRuntime is instantiated,
+which is responsible for deserializing the engine.
+• Restoring the ICudaEngine: The engine is deserialized back into an in­memory
+ICudaEngine object. This object encapsulates the optimized inference graph,
+weights, and other metadata necessary for computation. The ICudaEngine is
+device­specific; typically, it must be run on the same type of GPU (and the
+same version of TensorRT) for which it was originally built.
+2. Execution Context Creation
+• Constructing an IExecutionContext: From the deserialized ICudaEngine, the
+application creates an IExecutionContext. This context maintains all state needed
+to run inference, including layer bindings, workspace buffers, and intermediate
+results. If dynamic shapes or batch sizes are used, the context ensures shapes
+are properly specified before execution.
+• Allocating Host and Device Buffers: The total number of I/O bindings is de­
+termined by the engine. For each binding, the application allocates buffers in
+CPU (host) memory and GPU (device) memory. These buffers store input data
+and output predictions, enabling transfer between host and device.
+3. Preprocessing Inputs
+• Data Preparation: Input images or other data must be resized, normalized,
+or otherwise preprocessed to match the network’s expected input format. For
+instance, images might be converted to NCHW layout, cast to float32, or quan­
+tized to int8.
+• Copying Data to Device: Once preprocessed on the CPU side, the input ten­
+sors are copied to the GPU buffers (using cudaMemcpyAsync or a similar API).
+Throughout this process, the host must ensure that the memory layout and data
+types precisely match those anticipated by the TensorRT engine.
+4. Inference Execution
+• Launching the Network: With all input buffers in place, the application invokes
+executeV2 (or an equivalent method, depending on the API version) on the
+IExecutionContext. This call schedules GPU kernels to compute forward prop­
+agation through the optimized network, using the designated precision (FP32,
+FP16, or INT8).
+• Asynchronous Streams: In many cases, inference is executed asynchronously
+on a particular CUDA stream. The host can perform other tasks, or launch
+additional work on different streams, while the GPU processes the model in
+parallel. This design facilitates pipelined execution and high throughput.
+5. Collecting and Post­processing Outputs
+32
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:41==
+• Reading Back Results: After the GPU finishes the forward pass, output tensors
+are transferred from device memory back to host memory if further CPU­based
+post­processing is required. Commonly, host­side code uses cudaMemcpy (or
+an asynchronous variant) to copy the results.
+• Interpreting Predictions: Depending on the model type, the application then
+decodes bounding boxes (for object detection), applies non­maximum sup­
+pression (NMS), or transforms logits into class probabilities. The exact post­
+processing steps will vary but often include thresholding, combining multiple
+output layers, or merging partial detections.
+In practice, these deployment steps are typically encapsulated in the application’s infer­
+ence code. Typically, the application retains the ICudaEngine and IExecutionContext for
+as long as inference is required. Once the user finishes, these objects are destroyed to
+free GPU memory and other resources. By maintaining a persistent engine and execution
+context, the overhead of loading or compiling the network is eliminated, making inference
+efficient for streaming or batch prediction tasks.
+In the event that the model to be deployed has been quantized already (e.g. a Q/DQ
+quantized model trained by a previous workflow or an INT8 ONNX model generated by
+an offline quantization tool), we can use the model directly to build the TensorRT engine
+and perform deployment. In this case, the quantization information contained in the model
+(such as quantization scale and zero point) will be used by TensorRT. You need to ensure
+that the INT8 flag is also enabled in the build configuration to inform TensorRT to per­
+form low­precision operations according to the quantization parameters provided by the
+model. Since the quantization step has been completed during the training/offline stage,
+the TensorRT build engine does not need to be calibrated again, and its role is purely a
+“deployment optimization” process. This means that, once the model weights with quan­
+tization parameters have been generated, TensorRT is only responsible for converting
+them into an efficient inference engine. This division of responsibilities allows the quanti­
+zation results from the training phase to be fully utilized while maintaining model accuracy,
+and simplifies the deployment phase.
+Finally, it should be noted that we have implemented the above TensorRT deployment
+process using Python and C++, respectively, and have also tried different pre­processing
+and post­processing methods. The details of the different implementation methods and
+their advantages and disadvantages will be further explained in the following chapters.
+3.3
+Model profiling
+Using TensorRT to obtain an inference engine and implement inference is only the first
+step in optimization. NVIDIA’s benchmark tools must be used for profiling.
+Profiling is the bridge between ‘‘model works’’ and ‘‘model works fast’’: without quantitative
+evidence it is impossible to tell whether an INT8­quantized network is limited by arithmetic
+throughput, memory traffic or framework overhead. A systematic profile therefore fulfills
+three purposes ((a)) reveals the true latency bottlenecks, ((b)) uncovers redundant host–
+device transfers that dilute the gains of low­precision arithmetic, and ((c)) guides backend
+or mixed­precision decisions by showing where a layer actually runs. To obtain these
+insights we rely on two complementary tools:
+• ONNX Runtime built­in profiler: Activated by setting SessionOptions.enable_profiling
+= True, it records a JSON timeline of every operator together with its wall­time,
+thread id and, on GPU back­ends, the associated CUDA kernels [60]. The trace
+Exploring quantization techniques for object detection on embedded devices
+33
+==PAGE:42==
+pinpoints layers that (a) fall back to FP32, (b) trigger many Memcpy nodes after
+QDQ rewriting, or (c) suffer from non­fused micro­kernels. Such evidence is indis­
+pensable when an INT8 graph unexpectedly runs slower than its FP32 counterpart.
+• NVIDIA Nsight Systems (nsys): Provides a system­wide timeline covering CPU
+threads, CUDA launches and PCIe transfers [nsys_guide2023]. A clear timeline
+links each GPU kernel to its neural network layer, revealing each computation time
+and idle gaps.
+Profiling deliverables for this project
+• Layer­wise latency table – highlights which INT8 nodes negate the speed­up and
+should be kept in FP16.
+• Copy vs. compute balance – measures the cost of QDQ­inserted transfers and mo­
+tivates tensor­layout fusions in the deployment pipeline.
+• Kernel utilisation metrics – identify memory­bound kernels that may benefit from
+larger workspaces or alternative execution providers.
+In summary, profiling tools like ONNX Runtime’s internal profiler and NVIDIA’s Nsight Sys­
+tems provide critical visibility into the runtime behavior of quantized YOLO models. They
+help uncover subtle performance issues – from poor GPU utilization and excessive data
+movement to non­optimal layer execution – that might be hidden in INT8 deployments.
+Armed with their detailed reports and traces, developers can iterate on optimizations (such
+as tuning kernels, adjusting data pipelines, or modifying quantization strategies) to elimi­
+nate bottlenecks and achieve efficient real­time inference[60]. The use of these profilers is
+thus an integral part of the methodology for deploying high­performance quantized models
+on embedded platforms.
+34
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:43==
+4
+Model Deployment and Optimization
+4.1
+Deployment environment settings
+Check the versions of various libraries that make up the experimental environment, as
+shown in the figure below. In the experiment, the main device used is Jetson AGX Xavier
+(32 GB), and jetpack5.1.5 is installed. The model selection takes yolov8 as an example.
+Figure 4.1: Check various library versions that make up the experimental environment.
+4.2
+Quantization Optimisation
+4.2.1
+Calibration Datasets and method
+PTQ is highly dependent on the calibration process. The calibration dataset should be
+selected to closely match the data distribution of the model’s actual application scenario.
+If calibration is performed using overly simple or single data, it may lead to inaccurate esti­
+mation of the quantization range, which in turn may lead to poor performance on real data.
+At the same time, different calibration algorithms also affect accuracy, their effectiveness
+depends significantly on the statistical distribution captured during calibration.
+• Calibrator: Different calibration algorithms react differently to the calibration dataset
+and its parameters. As discussed in Section 2.1.4, the MinMax calibration method
+simply finds the absolute minimum and maximum values of the activation values in
+the calibration data and sets them as the quantization range. Although simple and
+intuitive, it is highly sensitive to outliers, while entropy calibration suppresses outliers
+by sacrificing a small portion of the distribution tail, thereby achieving better accuracy
+on most of the data. There is no single calibration indicator that is applicable to all
+situations. Only the correct use of calibration methods can better adapt to specific
+situations.
+• Dataset Size: NVIDIA’s TensorRT toolkit suggests 500 images as a rule of thumb [19].
+This helps ensure all feature layers see a representative range of activations. More
+data generally yields higher and more stable accuracy, with diminishing returns past
+Exploring quantization techniques for object detection on embedded devices
+35
+==PAGE:44==
+a certain point [61]. It’s often recommended to sample images from across the train­
+ing/validation set (covering all object classes and difficult cases) rather than a very
+narrow slice.
+• Calibration batch size: Calibrating batch sizes may affect the accuracy of activa­
+tion statistics. We tested the YOLOv8n model and performed a forward pass on a
+subset of 32 images randomly sampled from the COCO 2017 validation set. We
+extracted the output activation of the first convolutional layer in the backbone. By
+registering a hook, we recorded the maximum activation value for each image in the
+batch. The values were grouped by batch and visualized using matplotlib. We re­
+peated this process with various batch sizes (e.g., 1, 4, 8, 16) to analyze how batch
+size affects the calibration histogram coverage. The figure 4.2 shown was obtained
+using a batch size of 8. As illustrated in figure, most image maximum activations fall
+within a similar range. However, one image (e.g., img6 in batch4) exhibits a notice­
+ably higher maximum activation. This highlights a key challenge: if the batch size
+were 1, and this image appeared last during calibration, the histogram range would
+have to be expanded only at the final step. Take the entropy calibration recom­
+mended by TensorRT as an example. During runtime, suppose that a value greater
+than the current histogram maximum appears in the activation tensor. At this point,
+the histogram range will be doubled to accommodate the new maximum value [19].
+This will result in a large waste of data range and reduce calibration accuracy, as
+previously unobserved large values cause the quantization range to stretch dramat­
+ically. This means that the batch size should not be too small, as this will result in
+poor quantification range.
+Figure 4.2: Max activation value per image for layer 1 in Yolov8n.
+Considering the above points, in this work, we will experimentally evaluate the impact of
+different calibration datasets and strategies. Specifically, we explore the effects of batch
+size, dataset size, and calibration method selection on final model accuracy.
+4.2.2
+Partial Quantization
+Deep neural network layers do not all respond equally to low­bit quantization – some lay­
+ers can be heavily quantized with minimal impact, while others are extremely sensitive.
+In a model like YOLOv8, certain critical layers (for example, the initial convolution that
+ingests raw input, or the output prediction heads) tend to be more vulnerable to quanti­
+zation error. Quantizing these sensitive layers (e.g. converting their weights/activations
+to INT8) can cause a disproportionate drop in accuracy, whereas many intermediate lay­
+ers tolerate INT8 with negligible effect. Best practices therefore recommend performing
+a layer­wise analysis to pinpoint any “problematic” layers if a fully quantized model’s ac­
+curacy degrades severely [18]. Research has shown that often a single layer or a small
+36
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:45==
+subset of layers can account for most of the accuracy loss under quantization [62]. For
+instance, one study found that in a ResNet network, almost all the mAP degradation from
+8­bit post­training quantization was attributable to just one layer – and addressing that
+layer alone nearly eliminated the drop [62]. This insight motivates a partial quantization
+(mixed­precision) strategy: use lower bit­width (INT8) for the majority of the network, but
+preserve higher precision (FP16 or FP32) for the few highly sensitive layers.
+To determine which layers are most sensitive to quantization, we perform a systematic
+layer­wise sensitivity analysis. The core idea is to evaluate the model’s accuracy when
+one specific layer is left unquantized (high­precision) and all others remain quantized,
+and repeat this for each candidate layer. By observing how the mean Average Precision
+(mAP) changes with each layer in float vs. int8, we can gauge that layer’s importance to
+overall accuracy. In practice, the procedure is as follows:
+1. Baseline measurement: Quantize the entire model (all quantizable layers to INT8)
+and evaluate its accuracy on the validation set to get a baseline mAP.
+2. Layer­wise tests: For each quantizable layer L in the model (one at a time):
+(a) Temporarily disable quantization for layer L (i.e. run layer L in higher precision,
+such as FP32 or FP16, while keeping all other layers at INT8).
+(b) Evaluate the model on the validation data and record the resulting mAP (call it
+mAP_L).
+(c) Re­enable quantization for layer L (restore it to INT8) before moving to the next
+layer, to ensure each test is isolated.
+3. Sensitivity logging: Note the difference in accuracy with and without quantizing
+each layer (e.g. ΔmAP = mAP_L – baseline_mAP). Layers that show a large positive
+ΔmAP when left in high precision are the most sensitive (their quantization had the
+biggest negative impact on accuracy).
+4. Ranking: Rank the layers by their sensitivity (for example, by the drop in mAP
+incurred when the layer is quantized). This ranking highlights which layers are the
+top candidates to keep at higher precision in a mixed­precision scheme.
+The process above can be implemented with a simple script. Pseudocode for this layer­
+wise quantization sensitivity analysis might look like:
+1
+quantizable_layers = model.get_quantizable_layers()
+2
+assert len(quantizable_layers) > 0, "No quantizable layers found."
+3
+4
+baseline_map = evaluate(model)
+# All layers quantized (INT8)
+5
+6
+sensitivity_results = []
+7
+for layer in quantizable_layers:
+8
+try:
+9
+model.keep_layer_precision(layer, 'FP32')
+# Disable quantization for
+this layer
+10
+mAP_val = evaluate(model)
+# Evaluate with current
+config
+11
+delta_mAP = mAP_val - baseline_map
+# Compute sensitivity
+metric
+12
+sensitivity_results.append((layer.name, delta_mAP))
+13
+finally:
+14
+model.restore_quantization(layer)
+# Ensure layer is restored
+15
+16
+# Rank layers by ΔmAP (descending: higher delta = more sensitive)
+Exploring quantization techniques for object detection on embedded devices
+37
+==PAGE:46==
+17
+sensitivity_results.sort(key=lambda x: x[1], reverse=True)
+18
+19
+print("Sensitive layers (higher ΔmAP is better):")
+20
+for name, delta in sensitivity_results:
+21
+print(f"{name}: ΔmAP = {delta:.4f}")
+Listing 4.1: Layer­wise sensitivity analysis with ΔmAP calculation
+In this pseudocode, we iterate through each quantizable layer, temporarily run it at full
+precision and measure the model’s mAP. By comparing each mAP_val to the all­INT8
+baseline, we can see how much accuracy is regained by not quantizing that layer. The
+layers are then sorted by their impact on mAP (those yielding the highest accuracy when
+in float are the most sensitive when quantized). This analysis provides a clear picture of
+which parts of YOLOv8 suffer the most from quantization. Based on these results, we can
+select a mixed­precision configuration – e.g. preserving the top K most sensitive layers
+in FP16/FP32 and quantizing the rest to INT8 – that minimizes accuracy loss. In the next
+chapter, we will present the actual experimental results of this sensitivity analysis and
+the chosen mixed­precision setup (including which layers were kept at higher precision),
+along with the resulting mAP and inference performance.
+4.3
+Deployment optimization
+4.3.1
+Selection of the quantization granularity
+As discussed in Section 2.1.5￿in deployment optimization, the choice of quantization
+granularity has a key impact on the balance between model accuracy and inference effi­
+ciency. Experiments show that different strategies are required for the quantization of ac­
+tivation values and weights: for activation values, per­tensor quantization is usually used,
+while for weights, per­channel quantization is preferred. This conclusion is derived from
+multiple sets of comparative experiments[19]. For example, different channels of weights
+may show significant differences in numerical distribution. Per­channel quantization can
+significantly reduce quantization errors by independently calibrating the scale factor and
+zero point for each channel[17]. The distribution of activation values is relatively consistent
+between different channels. Per­tensor quantization can maintain accuracy, simplify the
+computational graph structure, and improve hardware inference efficiency. NVIDIA Ten­
+sorRT has adopted this strategy by default: activation values use per­tensor and weights
+use per­channel[19]. Its official documentation points out that this design is based on
+a large number of end­to­end test results, especially in convolutional neural networks,
+showing the best accuracy­latency trade­off. In contrast, other deployment frameworks
+(such as some mobile SDKs) may not provide a default quantization strategy, requir­
+ing developers to manually adjust parameters, increasing deployment complexity[14]. In
+summary, the choice of quantization granularity needs to be combined with data charac­
+teristics and hardware constraints, and the default strategy of industrial­grade tool chains
+often condenses practical experience and system­level optimization. In our experiment,
+we compared the two during our experiment to verify this conclusion.
+4.3.2
+Dynamic frequency tuning problem
+During the experiment, We found a problem. Inference time per image (vertical axis) vs.
+image index (horizontal axis) for thousands of images (COCO val2017) processed by the
+same model on a desktop GPU (Run 1)is shown in the figure on the left4.3a. The observed
+latency variance indicates fluctuations in GPU performance over consecutive inferences.
+The inference time per image for the second run of the same experiment under the same
+conditions (run 2) is shown in the figure on the right4.3b. The overall situation is different
+from Run 1, especially since there are significantly more parts with efficient reasoning
+38
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:47==
+(bottom of the figure), suggesting that the difference between runs may be caused by the
+dynamics of hardware tuning.
+(a) Run 1
+(b) Run 2
+Figure 4.3: A figure with two subfigures
+Each point in these plots represents the inference time for one image, and even under the
+same workload and hardware, the two separate runs show noticeable differences in their
+latency patterns. This suggests that an external factor – beyond the deterministic model
+computation – is introducing irregular performance. A likely underlying cause is the GPU’s
+dynamic frequency tuning (i.e., dynamic voltage and frequency scaling, DVFS) mecha­
+nism. Through the GPU tuning tool provided by Nvidia, the clock frequency dropped
+significantly for a period of time, which is exactly the low­performance inference range
+in the figure. Modern GPUs adjust their core and memory clock frequencies on the fly
+based on workload demand, power, and thermal conditions. If a sequence of inference
+tasks is short or varies in intensity, the GPU’s frequency regulator may not keep a con­
+stant high clock, leading to inconsistent execution times for identical tasks[63]. Indeed,
+at the cluster level, Yoshida et al. (2023) attribute much of the inference time variation to
+such frequency regulation effects, especially when executing short GPU kernels that do
+not sustain peak frequencies[64]. In these cases, the overhead and latency of frequency
+scaling can form a non­negligible portion of the total runtime, causing disproportionately
+high variance in performance for brief workloads. Prior work has recognized that DVFS­
+induced frequency fluctuations can undermine reproducibility and performance stability.
+For example, Wadden et al. (2014) observed that the GPU’s dynamic frequency­scaling
+algorithms may inconsistently affect runtimes, even for the same application. To eliminate
+this source of variability in their benchmarks, they fixed the GPU’s clocks at their maximum
+rated values (e.g. locking core at 1GHz and memory at 1.5GHz)[65]. By preventing the
+hardware from downclocking or upclocking during tests, they achieved more stable and
+predictable timing results. This evidence underlines that uncontrolled frequency tuning
+can inject substantial jitter into performance measurements.
+To mitigate the dynamic frequency tuning problem in practice, we adopted a strategy to
+lock the processor frequencies and thus stabilize performance. On NVIDIA Jetson (an
+embedded GPU platform), we first enabled MAXN mode, which permits the system to
+use its maximum performance (high power) profile. We then applied the jetson_clocks
+utility to fix all GPU and CPU cores to their maximum frequencies [66]. Enabling MAXN
+ensures the platform is not in a power­saving mode, and running jetson_clocks disables
+DVFS by holding the clocks at their peak rates for the duration of our tests. By taking these
+steps, the GPU no longer throttles down or oscillates its frequency between inferences,
+and likewise the CPU frequencies remain constant (benefiting any pre/post­processing
+Exploring quantization techniques for object detection on embedded devices
+39
+==PAGE:48==
+steps on the CPU). This combined approach effectively eliminates the frequency­related
+variability: each inference in the large batch runs at a consistent clock speed. In summary,
+by forgoing dynamic frequency tuning and fixing the clocks, we ensure that performance
+is governed by the workload itself rather than extraneous power management heuristics,
+yielding a reliable baseline for inference latency even when handling numerous short tasks
+in succession.
+4.3.3
+pre­processing and post­processing
+Preprocessing and postprocessing are critical components in the deployment of quantized
+object detection models. While the backbone and head of the model are typically accel­
+erated through TensorRT or other hardware­specific optimizations, the surrounding data
+handling stages often become performance bottlenecks or sources of accuracy degra­
+dation if not properly aligned with the model’s training configuration. In our deployment
+pipeline, we carefully evaluated and compared different implementations of preprocessing
+and postprocessing strategies across multiple methods.
+• Preprocessing Strategies: Since the input data source is not fixed, preprocessing
+is essential to ensure that the input data meets the model requirements. The pre­
+processing step involves resizing input images, performing color space conversion,
+normalization, and data format transformation (e.g., HWC to CHW). A crucial as­
+pect is how the image is resized to match the model’s input size: this can be done
+either via direct resizing (which distorts the aspect ratio) or through letterbox (which
+maintains the aspect ratio by padding the image).
+A direct cv::resize warp will fill the network’s width and height but distorts the image
+if the aspect ratio doesn’t match, potentially degrading detection accuracy (objects
+appear stretched or squashed). Letterbox resizing avoids distortion by scaling the
+image until it fits and padding the remaining border (often with gray/black pixels).
+This preserves object shape – the center image in a comparison retains correct
+aspect ratio with padding added, unlike a simple stretch resize. We conducted tests
+and found that using the Letterbox method on yolov8n resulted in approximately
+10% higher accuracy than direct resizing. However, it should be noted that the letter
+box will introduce a fill offset, and the model’s output (bounding box coordinates) is
+relative to the filled and scaled image, requiring correct coordinate restoration in
+post­processing.
+• Postprocessing Considerations: The main focus of post­processing is NMS, which
+is divided into two categories based on the processing method: Class­Wise and
+Class­agnostic. After the network predicts many candidate boxes, NMS is applied
+to filter out redundant detections. Class­wise NMS (the default in most detectors)
+means you perform NMS separately per object class – overlapping boxes are only
+suppressed if they predict the same class. This way, a person and a bicycle over­
+lapping won’t eliminate each other. Class­agnostic NMS ignores class labels dur­
+ing suppression, merging any overlapping boxes regardless of class [67].
+This
+can remove duplicate detections when the model double­detects one object as two
+classes, but it risks removing legitimate multi­class overlaps. For example, a per­
+son and a bicycle close together may have a high IoU, and class­agnostic NMS will
+delete the one with lower confidence, resulting in a false negative.
+Class­agnostic NMS is usually optional (e.g. an agnostic_nms=True flag in YOLO)
+for specialized cases [67]. Generally, class­wise NMS is safer for accuracy, while
+class­agnostic might be beneficial if you expect highly overlapping classes or want
+maximum de­duplication [67]. In our tests, we found that class­wise methods per­
+40
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:49==
+form better in terms of final accuracy on COCO. Performance­wise, unified NMS
+does one pass over all boxes, whereas class­wise does a pass per class. However,
+since the total number of comparisons is similar, the runtime difference is minor.
+• Deployment Implementation Options: The division of labor between CPU and
+GPU for preprocessing and postprocessing can greatly affect performance. The
+simplest and common implementation is to do preprocessing (resizing, color con­
+version, etc.) on the CPU, feed the image to the GPU for inference, and later the
+output tensors sent back to CPU for NMS and drawing results. However, by apply­
+ing different methods, we found that there is one aspect that greatly affects overall
+performance: the implementation of NMS, with differences of up to several times in
+post­processing for each image. There are several ways to implement NMS:
+– Implemented in pure Python using NumPy to calculate multiple detection boxes.
+However, during post­processing, the pure Python code is mostly executed in a
+single thread, unable to utilize multi­core CPUs or GPU parallel computing ca­
+pabilities. This results in testing taking several dozen milliseconds per image,
+which even exceeds the inference time.
+– Use the OpenCV library function cv2.dnn.NMSBoxes, but note that this function
+does not distinguish between categories, so we need to call it multiple times
+to separate different categories. At the same time, this function is CPU­based,
+so its performance may not be as good as GPU­supported methods, but it is
+very simple to implement and has few dependencies.
+– Customize CUDA kernels or use Torchvision library function torchvision.ops.nms.
+torchvision.ops.nms is a pure CUDA implementation on the GPU, with more
+frames offering greater advantages, and it can perform class­wise NMS in one
+go, avoiding looping Python. In actual testing, single­processing performance
+far exceeded pure Python code, but dependencies (Torch + Torchvision) had
+to be introduced, and the storage requirements were much greater than those
+of OpenCV on devices with limited storage. By writing custom CUDA kernels,
+you can perform as much work as possible on the GPU to improve perfor­
+mance. For example, if a CUDA operation for NMS is written, after inference
+is complete, another CUDA kernel can continue to execute NMS or other filter­
+ing operations on the GPU, sending only the final small dataset (bounding box
+coordinates and category labels) back to the CPU. This approach minimizes
+CPU–GPU transfers – ideally the image data might make a single trip to GPU
+and never come back until results are ready – and it keeps the GPU busy with
+parallel tasks that it excels at. However, it is clear that the disadvantage is
+complexity, which results in high development costs.
+This section highlights that even subtle inconsistencies in preprocessing or postprocessing—
+such as missing padding correction, improper coordinate scaling, or mismatched NMS
+strategies—can result in significant drops in mean Average Precision (mAP) during eval­
+uation. The impact of each strategy was quantitatively evaluated in the experiment. In
+subsequent comparative experiments, we will try to use more optimized methods and
+annotate them.
+4.3.4
+python and C++
+Deploying deep learning models on embedded, resource­constrained devices (like NVIDIA
+Jetson modules in robotics or autonomous systems) demands real­time, low­latency per­
+formance and efficient use of limited resources. NVIDIA’s TensorRT library can accelerate
+Exploring quantization techniques for object detection on embedded devices
+41
+==PAGE:50==
+inference on these devices, and it offers both Python and C++ APIs. Both the Python and
+C++ TensorRT APIs ultimately execute the same optimized C++ inference engine on the
+GPU [68]. On paper, one might expect little difference in raw operations. In practice, how­
+ever, Python introduces extra overhead in the form of interpreter latency, data movement,
+and GIL (Global Interpreter Lock) constraints. NVIDIA engineers note that the Python API
+is essentially a wrapper over the C++ TensorRT library, ’which may introduce a little bit of
+latency’ [68]. In a real­time pipeline performing many inferences per second (e.g. camera
+frames), even small per­call overheads can accumulate.
+A C++ application can be compiled into a single executable or library with minimal external
+dependencies. This makes it easier to deploy on an embedded device (you don’t need
+to ship a Python interpreter on the device). it creates more compact and faster runtime
+code, and it’s already the language of choice for 95% of embedded system code[69].
+The startup time can also be faster – the program launches and is ready to infer almost
+immediately, whereas a Python program might take a moment to load the interpreter and
+modules. For devices that boot and need instant AI functionality, this difference matters.
+In contrast, the advantage of the Python API is the ease of integration with Python’s rich
+ecosystem (NumPy data loaders, SciPy, etc.) and faster development/prototyping. This
+can effectively reduce development costs. In the experiment, we tried two APIs to test
+the performance of TensorRT, and the comparison results are discussed in the following
+results section.
+42
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:51==
+5
+Experiment Results
+Some operations only affect model accuracy, while some only affect model performance.
+5.1
+Model Acccuracy and Inference Execution Time
+5.1.1
+Calibration Batch Size and Calibrator
+According to the analysis of the section 4.2.1, PTQ accuracy depends critically on (i) the
+amount of activation data collected at calibration time and (ii) the algorithm that converts
+these samples into an integer range (Min–Max, Percentile, MSE, Entropy, etc.). To isolate
+their influence we fixed the weight quantizer to per–channel / Min–Max and varied only
+the activation quantizer, always in per–tensor mode(Also default quantization configura­
+tion for TensorRT and ONNX Runtime). All results were obtained with PyTorch fake–quant
+operators, since no INT8 hardware was exercised and latency is not reported in this sec­
+tion.
+Experimental set–up
+• Model metric: YOLOv8n, COCO val2017, mAP50:95
+• Batch size B: {1, 8, 32} images per forward pass
+• Number of batches N: {1, 8, 32} (total calibration images Total = B × N)
+• Calibrators: Min–Max, Percentile (99.999 %), MSE, Entropy (KL)
+• Runtime: PyTorch PTQ; ONNX Runtime reuses the same activation ranges and
+shows identical trends while weights remain Min–Max.
+Table 5.1: COCO mAP50:95 after PTQ under different calibration footprints. Weight quan­
+tizer is fixed to per–channel Min–Max. Values for B = 32, N = 1 are model–based
+predictions and will be updated once measurements are available.
+B
+N
+Total
+Min–Max
+Percentile
+MSE
+Entropy
+1
+1
+1
+0.362
+0.352
+0.360
+0.187
+1
+8
+8
+0.362
+0.362
+0.363
+0.211
+1
+32
+32
+0.362
+0.362
+0.363
+0.304
+8
+1
+8
+0.361
+0.363
+0.363
+0.277
+8
+8
+64
+0.361
+0.362
+0.361
+0.287
+8
+32
+256
+0.361
+0.361
+0.363
+0.304
+32
+1
+32
+0.362
+0.363
+0.363
+0.29
+32
+8
+256
+0.361
+0.362
+0.363
+0.304
+32
+32
+1024
+0.362
+0.362
+0.363
+0.304
+Observations
+• Min–Max and MSE are sample–efficient. Across all nine calibration footprints their
+variation is < 0.002 mAP. Either method is therefore safe when only a few images
+are available.
+Exploring quantization techniques for object detection on embedded devices
+43
+==PAGE:52==
+• Percentile 99.999 % stabilises quickly. With N ≥8 (or B ≥8) its accuracy con­
+verges to MSE; on a single image it loses roughly 1 pp.
+• Entropy (KL) is extremely data­hungry. The gap between 1 × 1 and 1 × 32 is
++0.117 mAP. Even with 256 images (32 × 8) it still trails MSE by 0.06 mAP.
+• Total sample count dominates over batch composition: raising N while keeping B =
+1 boosts KL much more than increasing B alone.
+These observations reinforce our choice of the MSE calibrator with B = 8, N = 32 for
+the remaining PTQ experiments. It yields the highest observed accuracy (0.363 mAP50:95)
+without incurring additional calibration cost or numerical instability.
+The conclusions above also held when the calibrated activation ranges were exported to
+ONNX Runtime and TensorRT: both runtimes preserve the trend because weights remain
+per–channel Min–Max by design.
+5.1.2
+QAT
+We fine–tuned the calibrated network in fake–quant mode following the guidelines of
+NVIDIA’s PyTorch Quantization Toolkit. QAT refines an already calibrated INT8 network
+by continuing back­propagation in fake–quant mode with a
+emphmuch smaller learning rate than the original FP32 pre­training. NVIDIA’s Tensor­
+RT/PTQ toolkit recommends ≈1% of the initial LR; YOLOv8 is originally trained with
+LR0 = 0.01, therefore we set LRQAT
+0
+= 1 × 10−4. The training loop reuses the FP32 model
+as the teacher model and minimizes the layer­by­layer MSE between INT8 and FP32 fea­
+ture maps, implemented via dynamic hooks from toolkit. So the implementation remains
+framework­level rather than model­specific.
+Experimental configuration
+• Baseline: PTQ­calibrated YOLOv8n. COCO val2017 metric.
+• Optimiser: Adam; initial LR 1 × 10−4; two schedules: (i) three­step decay {1 ×
+10−4, 1 × 10−5, 1 × 10−6}; (ii) cosine decay to 1 × 10−6.
+• Epochs: 20; batch size: 32; AMP mixed precision.
+• Loss: layer­wise MSE between FP32 and INT8 feature maps (teacher–student dis­
+tillation).
+Learning­rate study
+Figure 5.1 plots the training loss for both LR schedules. By the
+third epoch the curves already diverge: cosine decay keeps descending to 0.28 whereas
+the step schedule rebounds above 0.40. The smoother schedule delivers a 17 % lower
+minimum loss.
+Results
+After 20 epochs the cosine schedule attains 0.365 mAP50:95, improving over
+the step­schedule run (0.363) Compared with the 0.362 of the max method in the PTQ
+experiment in the previous section, the accuracy is improved by 3 and 8 percentage points
+respectively.
+Cost considerations
+A single QAT epoch on COCO2017 takes hours of GPU time,
+whereas PTQ completes in mere minutes on CPU. When rapid deployment is required
+and accuracy requirements are not strict, PTQ seems to be a good choice.
+44
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:53==
+Figure 5.1: Training loss comparison between the original three­step LR schedule and
+the cosine decay.
+5.1.3
+Partial Quantisation & MixedPrecision Strategy
+Check the sensitivity layer by the method in 4.2.2 to determine which layers should remain
+in higher precision, we carried out a two–stage sensitivity analysis. Starting from the
+PTQ INT8 model (PTQ baseline), we disabled the quantizer of one layer at a time and
+re−evaluated mAP on COCO val2017. The resulting change in accuracy ∆mAP is plotted
+in Fig. 5.2.
+Figure 5.2: Layer–wise sensitivity (YOLOv8). Most layers show |∆mAP| < 0.3%, but
+model.22 has a markedly larger impact.
+Refine search within a layer
+Because the head layer model.22 (detection head) proved most critical, we repeated the
+experiment for every quantizer inside that layer (conv­bn­activation tuples and the DFL
+Exploring quantization techniques for object detection on embedded devices
+45
+==PAGE:54==
+branch). The fine­grained results are shown in Fig. 5.3. Three quantization nodes—cv2.2,
+cv3.2 and dfl—account for over most of the head­layer degradation.
+Figure 5.3: Sensitivity of individual quantizers inside model.22. Bars represent ∆mAP
+when a single node is kept in FP16 while the rest remain INT8.
+Mixed­precision consideration
+• Keep the three most sensitive nodes (cv2.2, cv3.2.0, dfl) in FP16/FP32.
+• Quantise the remaining ≈98% of operations to INT8; this preserves nearly all speed­
+ups.
+The experiment confirms the common observation that detection heads are more sen­
+sitive than backbone blocks [55, 56]. By targeting only a handful of critical nodes, we
+obtain a practical mixed­precision configuration that balances accuracy and efficiency for
+embedded deployment.
+5.1.4
+Quantization Granularity
+Based on the analysis of the section 4.3.1, to assess the trade–off between precision and
+throughput we varied the granularity of the INT8 quantiser while keeping every other pa­
+rameter fixed (Min–Max calibration, identical dataset, identical engine build). Changing
+per­tensor / per­channel causes the GPU to choose different kernels and load additional
+scales, so latency does change measurably for the same model, while also affecting
+throughput ­ it is necessary to present the ”accuracy­efficiency” tradeoff together Four
+combinations were considered:
+• W pc / A pt  – weights per–channel, activations per–tensor (Default)
+• W pc / A pc        – both weights and activations per–channel
+• W pt / A pt        – both per–tensor
+• W pt / A pc        – weights per–tensor, activations per–channel
+Accuracy and latency
+Table 5.2 lists the COCO mAP50:95 and the average inference
+time on a Jetson AGX Xavier (32 GB) using a single stream (640×640).
+46
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:55==
+Table 5.2: Effect of quantisation granularity on YOLOv8n (INT8, Min–Max).
+Granularity (W/A)
+mAP50:95
+Latency [ms/img]
+pc / pt
+0.361
+21.1
+pc / pc
+0.362
+22.0
+pt / pt
+0.348
+20.8
+pt / pc
+0.350
+21.4
+Observations
+• Accuracy. Moving the activations from per­tensor to per­channel gives a large gain
+in accuracy, but a small loss in speed. Consequently the default pc/pt remains the
+best accuracy–throughput compromise.
+• Latency. Per–channel activations require one scale per output channel, increas­
+ing memory traffic and preventing certain Conv–BN–ReLU fusions. On Xavier this
+translates to a modest 1 −−5 % slowdown (22 ms vs. 21 ms). Weight granularity
+alone has negligible impact on runtime.
+• Recommendation. Keep weights per–channel and activations per–tensor for edge
+devices: it achieves near–optimal accuracy without sacrificing frame rate. Full per–
+channel delivers only +0.001 mAP at the cost of ≈5 % speed, while the mixed pt/pc
+variant is inferior on both metrics.
+5.1.5
+ONNX Runtime Quantization and Deployment
+ONNX Runtime (ORT) ships a built­in post–training quantisation (PTQ) toolkit and more
+than thirty execution providers (EPs) that cover CPU, GPU, DSP and specialised accelera­
+tors. On Jetson AGX Xavier only the CPUExecutionProvider (ARM64), CUDAExecution­
+Provider and TensorRTExecutionProvider are available out­of­the­box. In this subsection
+we compare five deployment variants derived from the same PyTorch­trained YOLOv8n
+baseline.
+Experimental models.
+1. Baseline – PyTorch FP32 from ultralytics (host + CUDA) →used as reference for
+accuracy and latency.
+2. PyTorch FP32 model exported to .onnx, no quantization.
+3. ONNX Runtime PTQ with Min–Max, weights per­channel, activations per­tensor.
+4. Quantized int8 model inside PyTorch then exported (Q/DQ graph).
+5. same as no.4 but three sensitive layers kept in FP32 (refer to Section 5.1.3).
+Results on CUDAExecutionProvider.
+Two observations stand out:
+1. exporting to ONNX alone yields a 25 % latency reduction (39.9 → 30 ms) thanks
+to ORT graph fusion and a leaner runtime;
+2. naive INT8 PTQ inside ORT —even with the best performance model from PTQ
+Section before,—slows the pipeline to 38 ms, whereas PyTorch­based models re­
+tain the accuracy and remain slightly faster than the FP32 baseline.
+The slowdown is explained by ORT warning:
+Exploring quantization techniques for object detection on embedded devices
+47
+==PAGE:56==
+Variant
+mAP50:95
+Latency / img [ms]
+PyTorch FP32
+0.373
+39.9
+ONNX FP32
+0.373
+30.0
+ONNX INT8 (static quantization)
+0.342
+45.4
+PyTorch PTQ INT8
+0.363
+38.0
+PyTorch PTQ INT8
+0.368
+38.8
+Table 5.3: End­to­end accuracy and latency on Jetson AGX Xavier using the CUDAExe­
+cutionProvider. Latency includes prep­rocessing , inference and post­processing.
+[W:onnxruntime: transformer_memcpy.cc:74 ApplyImpl] 63 Memcpy nodes are added
+to the graph …
+Maybe some operators such as Concat or Q/DQ pairs for CUDA EP do not support int8
+GPU kernels yet make copies of data back and forth between host ↔device. The more
+copies, the higher the latency.
+CPU EP placeholder results.
+For completeness we also ran the same five models on
+the CPUExecutionProvider. They all exceed 80ms per photo, so I won’t list them all here.
+TensorRT EP incompatibility.
+Applying ORT’s INT8 optimizer then switching to Ten­
+sorRTExecutionProvider currently fails because TensorRT does not accept Q/DQ gen­
+erated by ONNX Runtime on the bias input of convolution nodes (see Figure 5.4). A
+workaround is to rewrite the ONNX graph with ONNX­GraphSurgeon or Polygraphy
+(re­quantise bias to INT32, remove redundant DequantiseLinear).
+Figure 5.4: Left: TensorRT­friendly Q/DQ pattern. Right: graph produced by ORT PTQ
+— TensorRT rejects the bias de­quant node.
+Consideration
+• Exporting to ONNX + CUDA EP (FP32) is a free 25% speed gain versus PyTorch.
+• ORT INT8 without graph clean­up is counter­productive on GPU due to Memcpy
+overhead.
+• PyTorch PTQ models port cleanly to ORT and deliver the best accuracy–latency
+balance.
+48
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:57==
+• Deploying INT8 via TensorRT EP requires manual graph surgery; using TensorRT’s
+own calibrator or built from PyTorch QDQ is currently simpler.
+5.1.6
+TensorRT Inference Acceleration
+To assess the upper bound of deployment speed on Jetson AGX Xavier 32 GB (MAXN,
+jetson_clocks locked) we implemented three inference pipelines:
+1. Python + TensorRT API — CUDA / cuDNN preprocessing and postprocessing ex­
+ecuted in Python;
+2. C++ + TensorRT API — CUDA / cuDNN preprocessing and postprocessing exe­
+cuted in C++;
+3. C++ + OpenCV — CPU preprocessing & NMS, GPU inference only.
+Four TensorRT engines were benchmarked (FP32, FP16, Native INT8, and INT8 skip–3
+whose three sensitive layers remain in FP32. Each entry combines full–pipeline latency
+(ms / image) and COCO mAP50:95:
+Engine
+Python (CUDA)
+C++ (CUDA)
+C++ (OCV CPU)
+FP32
+28 / 0.373
+13 / 0.373
+22 / 0.373
+FP16
+24 / 0.373
+9 / 0.373
+18 / 0.373
+INT8 (native)
+22 / 0.304
+7 / 0.304
+15 / 0.304
+INT8 (skip 3)
+23 / 0.312
+8 / 0.312
+16 / 0.312
+Table 5.4: End–to–end latency (ms) and accuracy (mAP50:95) for different TensorRT en­
+gines and host implementations.
+Observations
+• C++ CUDA achieves the lowest latency across the board; Python bindings introduce
+a ∼15 ms overhead per image due to interpreter dispatch and host–device copies.
+• Switching from FP32 to FP16 halves latency (13 ms →9 ms) without any accuracy
+loss, saturating Xavier’s Tensor Cores.
+• Native INT8 engines are slower than FP16: additional Q/DQ kernels and per–
+tensor dequantisation impede kernel fusion, so the theoretical compute gain is offset
+by memory traffic.
+• Skipping the three most sensitive layers (INT8 skip–3) recovers 0.8 pp mAP with
+only 1 ms latency penalty compared with native INT8.
+• The CPU OpenCV variant roughly doubles latency because image resizing and
+NMS execute on ARM cores; moving these steps into CUDA or using torchvision::nms
+alleviates the gap.
+Consideration
+• For Xavier–class edge devices, FP16 remains the sweet spot: 9 ms end–to–end
+while retaining FP32 accuracy.
+• Pure INT8 is not worthwhile unless kernel fusion of Q/DQ can be enforced; mixed
+precision (skip–3) offers a pragmatic compromise.
+Exploring quantization techniques for object detection on embedded devices
+49
+==PAGE:58==
+• C++ deployment is mandatory for strict real­time budgets (< 10 ms per 640 × 640
+frame); Python is adequate for prototyping or batch processing.
+5.2
+CPU & GPU Utilization
+We monitored a 5­min continuous run of the native INT8 TensorRT engine (using the
+C++ CUDA pipeline) with jtop. Figure 5.6 illustrates average load on the eight Carmel
+cores and on the integrated Volta GPU.
+Figure 5.5: CPU Utilization
+Figure 5.6: GPU Utilization
+Key observations
+• CPU overhead. The eight Carmel cores stay between 35 % and 46 % utilisation,
+indicating that host­side image preprocessing and NMS still consume a non­trivial
+share of the frame budget.
+• GPU under­utilisation. The integrated Volta GPU averages only ~40 % load —
+INT8 kernels are extremely short and the frequent Q/DQ operations trigger host–
+device synchronisation; the bottleneck is therefore memory traffic, not arithmetic
+throughput.
+• Actionable optimisations.
+1. Port preprocessing and NMS to CUDA kernels or a TensorRT plugin;
+50
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:59==
+2. Increase the batch size (e.g. B = 4) to raise Tensor Core occupancy;
+3. Capture an NVTX trace to pinpoint the heaviest Memcpy hotspots.
+5.3
+Runtime Profiling
+Two TensorRT engines were profiled on an NVIDIA Jetson Xavier AGX (SM7.2, 8 SMs,
+TensorRT 8.5.2) with trtexec and nsys. The INT8 engine (yolov8n.plan) is fully–quantized
+(weights and activations), while the FP16 engine (yolov8n_fp16.plan) uses half­precision
+tensor cores.
+Table 5.5: Performance comparison of INT8 and FP16 engines (averaged over 10 infer­
+ences).
+Metric
+INT8
+FP16
+Rel. Diff. %
+GPU latency (mean) [ms]
+6.64
+7.22
+−8.1
+Host latency (mean) [ms]
+6.96
+7.45
+−6.6
+Enqueue time (mean) [ms]
+6.80
+7.37
+−7.7
+Throughput [qps]
+2.46
+2.45
+0.1
+Engine size [MiB]
+5
+7
+−28.6
+TRT deserialisation + ctx [MiB]
++15
++16
+−6.3
+GPU time C.V. [%]
+4.0
+3.8
++5.3
+Key observations
+• The INT8 engine reduces single­frame GPU latency by a modest ∼8 % and host
+latency by ∼7 %, well below the 25–40 % speed­up often reported in literature.
+• Both runs are memory­bound (TensorRT warning), not compute­bound; throughput
+is nearly identical.
+• Memory footprint is smaller for INT8 (engine −28 %), yet TensorRT­managed run­
+time allocations differ by only 1 MiB.
+• GPU­time coefficient of variance indicates slightly higher jitter for INT8, but still <
+5 %.
+My guess as to why INT8 gain is limited is because:
+1. Batch = 1 and random tensors. Fixed per­image overhead and memory traffic
+dominate, masking INT8 arithmetic benefits. It can Increase batch or use dynamic
+shapes for Higher GPU occupancy and throughput;
+2. Mixed­precision accumulation. Some kernels may still accumulate in FP16/32,
+limiting speed­up.
+Analysis shows that the INT8 version of YOLOv8n is theoretically faster, but in practice it
+is subject to some limitations on Jetson Xavier. This also shows that this version still has
+room for growth and can take advantage of more quantization.
+Exploring quantization techniques for object detection on embedded devices
+51
+==PAGE:60==
+52
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:61==
+6
+Conclusion
+In this thesis, we presented a full pipeline for deploying a deep learning object detec­
+tion model on resource­constrained embedded hardware by leveraging model quanti­
+zation and optimization techniques. We selected a state­of­the­art one­stage detector
+(YOLOv8n) as our case study due to its favorable accuracy­speed trade­off, and sys­
+tematically applied quantization to reduce its computational and memory demands. The
+workflow spanned from initial model analysis and quantization strategy design, through
+implementation using multiple toolchains (PyTorch, ONNX Runtime, and TensorRT), to
+final deployment on an NVIDIA Jetson AGX Xavier embedded device. Throughout this
+process, we addressed key challenges in preserving detection accuracy while achieving
+real­time performance, and we evaluated trade­offs between model efficiency and accu­
+racy at each stage.
+Summary of the Workflow: We began by analyzing the YOLOv8n model’s characteris­
+tics and the target hardware’s capabilities, using a Roofline model analysis to under­
+stand theoretical performance bounds. This informed our optimization focus by high­
+lighting whether the model was compute­bound or memory­bound on the Jetson plat­
+form.
+Next, we explored three quantization and deployment workflows: (1) PyTorch­
+native quantization, where INT8 quantization (post­training static calibration and optional
+quantization­aware training) was performed within PyTorch (augmented by NVIDIA’s py­
+torch_quantization toolkit) and the model was then exported; (2) ONNX Runtime quantiza­
+tion, where the model was converted to ONNX format and quantized using ONNX’s toolkit,
+with deployment via the ONNX Runtime on different execution providers; and (3) NVIDIA
+TensorRT, where the model was converted directly into a highly optimized TensorRT en­
+gine for INT8 inference. All three approaches start from the same trained model and aim
+to produce an efficient INT8 deployment, but they involve different conversion steps and
+tool­specific optimizations. We carefully calibrated the model using representative data
+(COCO images) to determine proper quantization scales, experimenting with multiple cal­
+ibration algorithms (e.g., min­max, percentile, MSE, entropy/KL) and varying the amount
+of calibration data to study their impact on accuracy. For the TensorRT pipeline, we also
+applied graph optimizations and builder settings (such as per­channel quantization for
+weights) to maximize throughput. Once quantized models were obtained, we profiled
+them and optimized the inference pipeline on the embedded device – this included con­
+siderations like moving pre­processing and post­processing (image resizing, non­maxima
+suppression) onto the GPU, using C++ for inference execution to avoid Python overhead,
+and tweaking runtime settings (CUDA streams, batch sizes, etc.) to fully utilize the hard­
+ware. By the end of the workflow, the quantized YOLOv8n model was successfully de­
+ployed on the Jetson Xavier, and we conducted extensive experiments to measure its
+accuracy and performance under various configurations.
+Key Achievements and Findings: This work resulted in several notable technical contri­
+butions:
+• End­to­End Quantization Pipeline: We implemented an end­to­end pipeline that
+compares and integrates multiple quantization frameworks. By evaluating PyTorch
+vs. ONNX Runtime vs. TensorRT­based quantization, we demonstrated how each
+toolchain affects the ease of deployment, achievable performance, and model accu­
+racy. For instance, we showed that exporting a PyTorch model to ONNX and running
+it with the ONNX Runtime (FP32) alone yielded about a 25% inference speedup over
+Exploring quantization techniques for object detection on embedded devices
+53
+==PAGE:62==
+the raw PyTorch model due to graph optimizations, illustrating the benefit of format
+conversion and runtime choice. However, we also uncovered that ONNX’s built­in
+INT8 quantization, without further graph clean­up, introduced extra memory copy
+operations that negated its performance gains on GPU and even caused compati­
+bility issues with TensorRT. Identifying and addressing these pitfalls (through graph
+surgery tools to remove incompatible quantization patterns) was an important step
+in our deployment process.
+• Effective Post­Training Quantization (PTQ) for Object Detection: We demonstrated
+that careful calibration is critical for successful PTQ on object detection models. Our
+experiments quantified how calibration dataset size and algorithm choice influence
+the final mAP. Using only a handful of images for calibration can lead to severe
+accuracy degradation (e.g., with an entropy KL calibrator, a single calibration batch
+yielded mAP below 0.20, far worse than other methods), whereas providing a more
+representative dataset (e.g. 256 images) and a robust calibrator (MSE­based or
+percentile) narrowed the accuracy gap. We achieved an INT8 PTQ accuracy of up
+to 0.362 mAP (COCO 50:95) on YOLOv8n – which is within about 1 percentage point
+of the FP32 baseline (0.373) – using a per­channel weight quantization and MSE
+calibration strategy. This indicates that, even for complex detection networks, PTQ
+can preserve accuracy to a high degree if done properly. We also found that simpler
+calibration methods (like min­max or percentile) perform adequately when sufficient
+calibration data is available, with differences under 0.5% mAP in our tests, whereas
+more data­sensitive methods (like entropy) require larger sample sizes to converge
+to similar accuracy. These findings provide practical guidance for applying PTQ to
+detection models.
+• Quantization­Aware Training (QAT) for Recovery of Accuracy: To further close the
+gap between the quantized model and the full­precision model, we incorporated a
+short QAT fine­tuning stage. By treating the original FP32 model as a teacher and
+minimizing the layer­wise mean squared error between FP32 and INT8 feature maps
+(a form of knowledge distillation), we were able to improve the quantized model’s
+accuracy to 0.365 mAP, nearly reaching the original model’s performance. This 0.3
+point gain over the best PTQ model demonstrates that QAT can successfully recover
+some lost accuracy. However, we also highlight the cost: each epoch of QAT on the
+COCO dataset took several hours on a GPU, whereas PTQ calibration completed
+in minutes on a CPU. Thus, while QAT yielded a minor accuracy improvement (on
+the order of 0.8% relative increase, achieving 98% of the baseline accuracy), it
+comes at a significant computation and development time cost. In scenarios where
+rapid deployment is needed or resources are limited, PTQ alone may be the prefer­
+able trade­off. Our results underscore the classic accuracy­efficiency trade­off: QAT
+provides the best accuracy for INT8 models at the expense of time and complexity,
+whereas PTQ is much quicker and simpler with only a slight accuracy penalty.
+• Layer­wise Sensitivity Analysis and Mixed­Precision Strategy: We conducted a de­
+tailed sensitivity analysis to identify which parts of the YOLOv8 model are most
+prone to quantization error. By enabling FP32 for one layer at a time in an otherwise
+INT8 model, we measured the change in mAP for each layer. Most layers proved
+relatively robust (<0.3% drop when quantized), but a few critical layers – notably
+the detection head (output layer) and some early feature­extraction layers – caused
+disproportionate accuracy drops when quantized. Guided by this analysis, we imple­
+mented a mixed­precision quantization scheme: the top three most sensitive layers
+were left in higher precision (FP16 or FP32) while all other layers remained INT8.
+54
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:63==
+This strategy (denoted as INT8 skip­3) recovered about 0.8 percentage points of
+mAP (raising INT8 accuracy from 0.304 to 0.312 in our worst­case scenario with
+native TensorRT PTQ) at the cost of a small increase in latency ( 1 ms per image).
+While the partial INT8 model (0.312 mAP) was still significantly below the full ac­
+curacy of FP32, it showed an improvement over the fully quantized model. More
+importantly, the mixed configuration provided a useful compromise: it gained back
+some accuracy without forfeiting all the performance benefits of INT8. This result
+highlights that selectively not quantizing certain layers can mitigate accuracy loss,
+and it suggests a direction for future automated mixed­precision methods that allo­
+cate precision dynamically based on sensitivity (e.g., using FP16 for critical layers
+and INT8 elsewhere).
+• Optimized Embedded Deployment and Real­Time Performance: A major achieve­
+ment of this work is that we successfully deployed the optimized YOLOv8n detec­
+tor on the Jetson AGX Xavier and achieved real­time inference speeds. By using
+TensorRT and a C++ inference pipeline, our INT8 model ran in as low as 7 ms per
+640×640 image (approximately 143 FPS), and our FP16 model in about 9 ms per im­
+age ( 111 FPS). For comparison, the original unquantized model running in PyTorch
+(FP32) took around 28 ms per image ( 36 FPS) on the same device with Python,
+and about 13 ms (77 FPS) using TensorRT FP32 in C++. Therefore, through quan­
+tization and optimization, we obtained a 4× speedup over the naive FP32/Python
+implementation and about 1.4–1.8× speedup over an optimized FP32 engine. No­
+tably, the FP16 inference emerged as the sweet spot on this device – it delivered a
+2× reduction in latency from FP32 with no loss in accuracy, fully utilizing the Jetson’s
+NVIDIA Tensor Cores for acceleration. In contrast, moving to INT8 provided a further
+22% reduction in latency (9 ms →7 ms) but incurred a substantial accuracy trade­
+off (about 18% relative drop in mAP from 0.373 to 0.304). These results illustrate the
+core trade­off: INT8 quantization offers diminishing returns on GPU when FP16 is
+available, unless accuracy can be recovered or the INT8 execution overheads can
+be reduced. Nonetheless, even the fully quantized INT8 model maintained reason­
+able detection performance and would be acceptable for certain applications where
+speed or resource usage is absolutely paramount and some accuracy loss is tolera­
+ble. Additionally, we found that choosing the right deployment strategy (runtime and
+language) was crucial: executing the TensorRT engine in C++ (native) avoided the
+15 ms/frame overhead of Python bindings, and ensuring that pre­processing (image
+resize/normalize) and post­processing (NMS) were done on the GPU (or with highly
+optimized libraries) prevented the CPU from becoming a bottleneck. In our tests, a
+naive pipeline that offloaded those tasks to the CPU roughly doubled the end­to­end
+inference time. By contrast, our optimized pipeline kept the CPU utilization modest
+(around 35–45% on the 8­core CPU during INT8 inference) and GPU utilization at
+a healthy level, thus meeting the strict real­time latency budget (<10 ms per frame)
+required for high­FPS applications such as autonomous systems and video analyt­
+ics on the edge. Overall, this work demonstrates that with careful quantization and
+system­level optimizations, modern object detectors can indeed be deployed on em­
+bedded GPUs in real time, bridging some of the gap between advanced algorithms
+and edge hardware capabilities.
+Reflection on Results: The experimental results provide valuable insights into the inter­
+play between quantization, accuracy, and performance on embedded hardware. First,
+we confirmed that quantization dramatically reduces model size and compute – the INT8
+model is 4× smaller than the FP32 model and uses integer arithmetic, which is advan­
+Exploring quantization techniques for object detection on embedded devices
+55
+==PAGE:64==
+tageous for memory­limited scenarios and can enable deployment of models that other­
+wise might not fit on device. On the Jetson platform, we observed that pure computation
+throughput was not the limiting factor for INT8; instead, the overhead of frequent quantize­
+dequantize operations and memory traffic became the bottleneck. This was evidenced
+by GPU profiling: the INT8 engine utilized only
+40% of the GPU’s compute capacity
+on average, indicating that the GPU was often waiting on memory transfers or synchro­
+nization. In contrast, the FP16 engine was able to better saturate the GPU’s compute
+(Tensor Cores) without such overhead. These findings suggest that current generation
+embedded GPUs, while supporting INT8, benefit greatly from fused operations and effi­
+cient memory management when using low precision. We also demonstrated real­world
+implications of software choices: using ONNX Runtime or TensorRT’s graph optimizations
+yielded noticeable speedups, and writing performance­critical code in C++ (or using C++
+TensorRT APIs) is necessary to unlock the full potential of the hardware. The accuracy
+vs. speed trade­offs we quantified (e.g., an INT8 model running 20% faster than FP16
+but with 7 mAP points lower accuracy) provide a concrete basis for decision­making in
+deployments – depending on an application’s tolerance for error versus need for speed, a
+practitioner can choose an appropriate precision or even a mixed approach. Importantly,
+our results validate that for object detection, maintaining some higher precision in key
+layers or resorting to half­precision might often be the optimal choice on GPUs like the
+Xavier, whereas full INT8 quantization might shine more on CPU­only or DSP/NPU­based
+systems where floating­point throughput is limited. In summary, the project achieved its
+goal of delivering a quantized object detection model on an embedded device and offers
+a nuanced understanding of how different quantization techniques perform in practice on
+such hardware.
+Future Work
+• Improve INT8 efficiency: Continue to integrate Q/DQ operators, reduce memory
+copies and Host–Device synchronization, or customize TensorRT plug­ins to achieve
+high utilization of ”one quantization, one way INT8”.
+• Lower bit width and mixed precision: Explore 4­bit or 4/8­bit mixed quantization,
+and combine sensitivity analysis to automatically allocate FP16/FP32 to key layers,
+taking into account both accuracy and speed.
+• System­level verification and energy consumption optimization: Embed the model
+into a complete application (such as a drone or edge camera), measure end­to­end
+latency and power consumption; study adaptive inference strategies under hard­
+ware features such as DVFS, NPU/DLA coprocessors, etc.
+56
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:65==
+Bibliography
+[1]
+Zhengxia Zou et al. “Object detection in 20 years: A survey”. In: Proceedings of the
+IEEE 111.3 (2023), pp. 257–276.
+[2]
+Licheng Jiao et al. “A survey of deep learning­based object detection”. In: IEEE
+access 7 (2019), pp. 128837–128868.
+[3]
+Jaime Sevilla and Edu Roldán. Training Compute of Frontier AI Models Grows by
+4­5x per Year. 2024. URL: https://epoch.ai/blog/training-compute-of-frontier-ai-
+models-grows-by-4-5x-per-year.
+[4]
+Joseph Redmon et al. “You Only Look Once: Unified, Real­Time Object Detection”.
+In: CVPR. 2016, pp. 779–788.
+[5]
+Marius Hobbhahn and Tamay Besiroglu. Trends in GPU Price­Performance. Ac­
+cessed: 2025­03­19. 2022. URL: https : / / epoch . ai / blog / trends - in - gpu - price -
+performance.
+[6]
+Jaime Sevilla et al. “Compute trends across three eras of machine learning”. In:
+2022 International Joint Conference on Neural Networks (IJCNN). IEEE. 2022, pp. 1–
+8.
+[7]
+Yuxuan Cai et al. “Yolobile: Real­time object detection on mobile devices via compression­
+compilation co­design”. In: Proceedings of the AAAI conference on artificial intelli­
+gence. Vol. 35. 2. 2021, pp. 955–963.
+[8]
+Payal Mittal. “A Comprehensive Survey of Deep Learning­Based Lightweight Object
+Detection Models for Edge Devices”. In: Artificial Intelligence Review 57.9 (Aug. 10,
+2024), p. 242. ISSN: 1573­7462.
+[9]
+Zhuo Li, Hengyi Li, and Lin Meng. “Model Compression for Deep Neural Networks:
+A Survey”. In: Computers 12.3 (Mar. 2023), p. 60. ISSN: 2073­431X. DOI: 10.3390/
+computers12030060.
+[10]
+Gopiktrishna P B et al. “Accelerating Native Inference Model Performance in Edge
+Devices Using TensorRT”. In: 2024 IEEE Recent Advances in Intelligent Compu­
+tational Systems (RAICS). May 2024, pp. 1–7. DOI: 10.1109/RAICS61201.2024.
+10690032.
+[11]
+Yuxiao Zhou et al. “TensorRT Implementations of Model Quantization on Edge
+SoC”. In: 2023 IEEE 16th International Symposium on Embedded Multicore/Many­
+core Systems­on­Chip (MCSoC). Dec. 2023, pp. 486–493. DOI: 10.1109/MCSoC60832.
+2023.00078.
+[12]
+Ju Ren et al. “Distributed and efficient object detection in edge computing: Chal­
+lenges and solutions”. In: IEEE Network 32.6 (2018), pp. 137–143.
+[13]
+Juan Terven, Diana­Margarita Córdova­Esparza, and Julio­Alejandro Romero­González.
+“A Comprehensive Review of YOLO Architectures in Computer Vision: From YOLOv1
+to YOLOv8 and YOLO­NAS”. In: Machine Learning and Knowledge Extraction 5.4
+(2023), pp. 1680–1716. ISSN: 2504­4990. DOI: 10.3390/make5040083. URL: https:
+//www.mdpi.com/2504-4990/5/4/83.
+[14]
+Lukas Stäcker et al. “Deployment of Deep Neural Networks for Object Detection
+on Edge AI Devices with Runtime Optimization”. In: 2021 IEEE/CVF International
+Conference on Computer Vision Workshops (ICCVW). 2021, pp. 1015–1022. DOI:
+10.1109/ICCVW54120.2021.00118.
+[15]
+Microsoft. ONNX Runtime Quantization. 2023. URL: https://onnxruntime.ai/docs/
+performance/model- optimizations/graph- optimizations.html#graph- optimization-
+levels.
+Exploring quantization techniques for object detection on embedded devices
+57
+==PAGE:66==
+[16]
+Benoit Jacob et al. “Quantization and Training of Neural Networks for Efficient Integer­
+Arithmetic­Only Inference”. In: Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition (CVPR). June 2018.
+[17]
+Raghuraman Krishnamoorthi. “Quantizing deep convolutional networks for efficient
+inference: A whitepaper”. In: arXiv preprint arXiv:1806.08342 (2018).
+[18]
+Hao Wu et al. “Integer quantization for deep learning inference: Principles and em­
+pirical evaluation”. In: arXiv preprint arXiv:2004.09602 (2020).
+[19]
+NVIDIA Corporation. Post­Training Quantization Using Calibration. 2025. URL: https:
+//docs.nvidia.com/deeplearning/tensorrt/latest/inference-library/work-quantized-
+types.html#post-training-quantization-using-calibration.
+[20]
+Markus Nagel et al. “A white paper on neural network quantization”. In: arXiv preprint
+arXiv:2106.08295 (2021).
+[21]
+Amir Gholami et al. “A survey of quantization methods for efficient neural network
+inference”. In: Low­power computer vision. Chapman and Hall/CRC, 2022, pp. 291–
+326.
+[22]
+Yifu Ding et al. “Reg­PTQ: Regression­specialized Post­training Quantization for
+Fully Quantized Object Detector”. In: Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition. 2024, pp. 16174–16184.
+[23]
+Jungwook Choi et al. “Accurate and efficient 2­bit quantized neural networks”. In:
+Proceedings of Machine Learning and Systems 1 (2019), pp. 348–359.
+[24]
+Sangil Jung et al. “Learning to quantize deep networks by optimizing quantization
+intervals with task loss”. In: Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition. 2019, pp. 4350–4359.
+[25]
+Ritchie Zhao et al. “Improving neural network quantization without retraining using
+outlier channel splitting”. In: International conference on machine learning. PMLR.
+2019, pp. 7543–7552.
+[26]
+Ron Banner et al. ACIQ: Analytical Clipping for Integer Quantization of neural net­
+works. 2019. URL: https://openreview.net/forum?id=B1x33sC9KQ.
+[27]
+Markus Nagel et al. “Up or down? adaptive rounding for post­training quantization”.
+In: International conference on machine learning. PMLR. 2020, pp. 7197–7206.
+[28]
+Steven K Esser et al. “Learned step size quantization”. In: arXiv preprint arXiv:1902.08153
+(2019).
+[29]
+Yash Bhalgat et al. “Lsq+: Improving low­bit quantization through learnable offsets
+and better initialization”. In: Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition workshops. 2020, pp. 696–697.
+[30]
+Yuhang Li et al. “BRECQ: Pushing the Limit of Post­Training Quantization by Block
+Reconstruction”. In: International Conference on Learning Representations, ICLR.
+2021.
+[31]
+Yaohui Cai et al. “ZeroQ: A Novel Zero Shot Quantization Framework”. In: 2020
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2020.
+2020, pp. 13169–13178.
+[32]
+Geoff Tate. One More Time: TOPS Do Not Predict Inference Throughput. semiengi­
+neering. 2020. URL: https://semiengineering.com/one- more- time- tops- do- not-
+predict-inference-throughput/.
+[33]
+Peter Burns. A guide to AI TOPS and NPU performance metrics. qualcomm. 2024.
+URL: https://www.qualcomm.com/news/onq/2024/04/a-guide-to-ai-tops-and-npu-
+performance-metrics.
+[34]
+NVIDIA Corporation. Jetson AGX Xavier Series. 2025. URL: https://www.nvidia.
+com/en-us/autonomous-machines/embedded-systems/jetson-agx-xavier/.
+58
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:67==
+[35]
+Kai Li, Runxuan Yang, and Xiaolin Hu. “An efficient encoder­decoder architecture
+with top­down attention for speech separation”. In: arXiv preprint arXiv:2209.15200
+(2022).
+[36]
+Michael Garland and David B Kirk. “Understanding throughput­oriented architec­
+tures”. In: Communications of the ACM 53.11 (2010), pp. 58–66.
+[37]
+Dustin Franklin. NVIDIA Jetson AGX Xavier Delivers 32 TeraOps for New Era of AI
+in Robotics. 2018. URL: https://developer.nvidia.com/blog/nvidia-jetson-agx-xavier-
+32-teraops-ai-robotics/.
+[38]
+NVIDIA Developer. Tensor Cores in a Nutshell. 2019. URL: https://www.youtube.
+com/watch?v=yyR0ZoCeBO8&t=21s.
+[39]
+Scott Yokim Jeremy Appleyard. Programming Tensor Cores in CUDA 9. 2017. URL:
+https://developer.nvidia.com/blog/programming-tensor-cores-cuda-9/.
+[40]
+Samuel Webb Williams, Andrew Waterman, and David A Patterson. Roofline: An
+insightful visual performance model for floating­point programs and multicore ar­
+chitectures. Tech. rep. Technical Report UCB/EECS­2008­134, EECS Department,
+University of …, 2008.
+[41]
+Michael Yuan. Performance Analysis of Roofline Model and Deep Learning Model.
+2020. URL: https://zhuanlan.zhihu.com/p/34204282.
+[42]
+NVIDIA Corporation. NVIDIA Jetson for Next­Generation Robotics. 2025. URL: https:
+//www.nvidia.com/en-us/autonomous-machines/embedded-systems/.
+[43]
+David Cantero et al. “Benchmarking object detection deep learning models in em­
+bedded devices”. In: Sensors 22.11 (2022), p. 4205.
+[44]
+NVIDIA Corporation. Compare GeForce Graphics Cards. 2025. URL: https://www.
+nvidia.com/en-gb/geforce/graphics-cards/compare/.
+[45]
+Zonglei Lyu et al. “A survey of model compression strategies for object detection”.
+In: Multimedia tools and applications 83.16 (2024), pp. 48165–48236.
+[46]
+Andrew G Howard. “Mobilenets: Efficient convolutional neural networks for mobile
+vision applications”. In: arXiv preprint arXiv:1704.04861 (2017).
+[47]
+Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. “Distilling the knowledge in a neural
+network”. In: arXiv preprint arXiv:1503.02531 (2015).
+[48]
+Pierrick Pochelu. “Deep Learning Inference Frameworks Benchmark”. In: arXiv preprint
+arXiv:2210.04323 (2022).
+[49]
+A Paszke. “Pytorch: An imperative style, high­performance deep learning library”.
+In: arXiv preprint arXiv:1912.01703 (2019).
+[50]
+Jerry Zhang Suraj Subramanian Mark Saroufim. Practical Quantization in PyTorch.
+pytorch. 2022. URL: https://pytorch.org/blog/quantization-in-practice/.
+[51]
+ONNX Runtime. Quantize ONNX Models. 2024. URL: https://onnxruntime.ai/docs/
+performance/model-optimizations/quantization.html.
+[52]
+Kyoungtaek Choi et al. “Real­Time Object Detection and Tracking Based on Embed­
+ded Edge Devices for Local Dynamic Map Generation”. In: Electronics 13.5 (2024),
+p. 811.
+[53]
+NVIDIA Corporation. DRIVE AGX Orin Developer Kit. 2025. URL: https://developer.
+nvidia.com/drive/agx.
+[54]
+Coast IPC. GPUs on the Edge: Big GPUs Are Down, NVIDIA Jetson Is Up. 2024.
+URL: https://coastipc.com/blog/post/gpus-on-the-edge-big-gpus-are-down-nvidia-
+jetson-is-up.
+[55]
+Mingze Wang et al. “Q­YOLO: Efficient inference for real­time object detection”. In:
+Asian conference on pattern recognition. Springer. 2023, pp. 307–321.
+[56]
+Xinyu Liu et al. “MPQ­YOLO: Ultra low mixed­precision quantization of YOLO for
+edge devices deployment”. In: Neurocomputing 574 (2024), p. 127210.
+Exploring quantization techniques for object detection on embedded devices
+59
+==PAGE:68==
+[57]
+Long Huang et al. “HQOD: Harmonious Quantization for Object Detection”. In: 2024
+IEEE International Conference on Multimedia and Expo (ICME). IEEE. 2024, pp. 1–
+6.
+[58]
+Peng Chen et al. “Aqd: Towards accurate quantized object detection”. In: Proceed­
+ings of the IEEE/CVF conference on computer vision and pattern recognition. 2021,
+pp. 104–113.
+[59]
+NVIDIA Corporation. pytorch­quantization’s documentation. 2024. URL: https://
+docs.nvidia.com/deeplearning/tensorrt/archives/tensorrt-1030/pytorch-quantization-
+toolkit/docs/index.html.
+[60]
+ONNX Runtime. Profiling Tools. 2024. URL: https://onnxruntime.ai/docs/performance/
+tune-performance/profiling-tools.html.
+[61]
+Zhihang Yuan et al. “Benchmarking the reliability of post­training quantization: a
+particular focus on worst­case performance”. In: arXiv preprint arXiv:2303.13003
+(2023).
+[62]
+Shachar Gluska and Mark Grobman. “Exploring neural networks quantization via
+layer­wise quantization analysis”. In: arXiv preprint arXiv:2012.08420 (2020).
+[63]
+NVIDIA Corporation. GPU Clock Locking and Floating Clock. 2025. URL: https://
+docs.nvidia.com/deeplearning/tensorrt/latest/performance/best-practices.html#gpu-
+clock-locking-and-floating-clock.
+[64]
+Kohei Yoshida et al. “Analyzing Performance and Power­Efficiency Variations among
+NVIDIA GPUs”. In: Proceedings of the 51st International Conference on Parallel
+Processing. ICPP ’22. Association for Computing Machinery, Jan. 13, 2023, pp. 1–
+12. ISBN: 978­1­4503­9733­9. DOI: 10.1145/3545008.3545084.
+[65]
+Jack Wadden et al. “Real­World Design and Evaluation of Compiler­Managed GPU
+Redundant Multithreading”. In: 2014 ACM/IEEE 41st International Symposium on
+Computer Architecture (ISCA). 2014 ACM/IEEE 41st International Symposium on
+Computer Architecture (ISCA). June 2014, pp. 73–84. DOI: 10.1109/ISCA.2014.
+6853227.
+[66]
+RidgeRun Developer. NVIDIA Jetson Orin ­ Maximizing Performance. 2024. URL:
+https://developer.ridgerun.com/wiki/index.php/NVIDIA_Jetson_Orin/JetPack_5.0.
+2/Performance_Tuning/Maximizing_Performance.
+[67]
+Ultralytics. Ultralytics YOLO Docs. 2025. URL: https://docs.ultralytics.com/usage/
+cfg/.
+[68]
+NVIDIA Corporation. Python API vs C++ API. 2020. URL: https://forums.developer.
+nvidia.com/t/will-there-be-any-advantage-in-inference-speed-if-i-use-python-to-
+execute-the-inference-when-the-plan-was-created-with-c/154938.
+[69]
+Tom Radcliffe. Python vs. C/C++ in embedded systems. 2016. URL: https://opensource.
+com/life/16/8/python-vs-cc-embedded-systems.
+60
+Exploring quantization techniques for object detection on embedded devices
+==PAGE:69==
+A
+Title
+Exploring quantization techniques for object detection on embedded devices
+61
+==PAGE:70==
+Technical
+University of
+Denmark
+Brovej, Building 118
+2800 Kgs. Lyngby
+Tlf. 4525 1700
+www.electro.dtu.dk

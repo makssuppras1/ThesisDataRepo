@@ -1,0 +1,3396 @@
+==PAGE:1==
+Building a Formally Verified Compiler for a
+Linearly Typed Programming Language
+Master Thesis
+DTU Compute
+Department of Applied Mathematics and Computer Science
+==PAGE:2==
+==PAGE:3==
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+Master Thesis
+January, 2023
+By
+Philip Alexander Ahlberg
+Copyright:
+Reproduction of this publication in whole or in part must include the cus-
+tomary bibliographic citation, including author attribution, report title, etc.
+Cover photo:
+Vibeke Hempler, 2012
+Published by:
+DTU, Department of Applied Mathematics and Computer Science, Build-
+ing 324, 2800 Kgs. Lyngby Denmark
+www.compute.dtu.dk
+ISSN:
+[0000-0000] (electronic version)
+ISBN:
+[000-00-0000-000-0] (electronic version)
+ISSN:
+[0000-0000] (printed version)
+ISBN:
+[000-00-0000-000-0] (printed version)
+==PAGE:4==
+Approval
+This thesis has been prepared over five months at the Section for Software Systems En-
+gineering, Department of Applied Mathematics and Computer Science, at the Technical
+University of Denmark, DTU, in partial fulfilment for the degree Master of Science in En-
+gineering, MSc Eng.
+Philip Alexander Ahlberg - s174291
+Signature
+Date
+ii
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:5==
+Abstract
+Linear type systems statically eliminate common errors associated with handling resources
+such as files, threads, and memory allocations, and facilitate certain kinds of optimiza-
+tions, such as alias analysis, that would otherwise be difficult to implement correctly. In
+this project, a compiler for a programming language with linear types is designed and
+implemented. The compiler outputs programs for a resource-aware virtual machine, ex-
+ploiting some of the benefits of the linear type system. The compiler is implemented and
+formalized in the Coq proof management system, and a proof of soundness of the linear
+type system and associated type checker is shown. In addition, a well-known framework
+for semantic preservation is adapted for use in the compiler, and the first translation step
+is shown to preserve the semantics of the input program via this framework. For the re-
+maining two translation steps, the proof of semantic preservation is not completed in full,
+but substantial progress has been made towards it. Overall, the formalization provides
+high confidence that the implementation is correct.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+iii
+==PAGE:6==
+iv
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:7==
+Contents
+Preface . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ii
+Abstract . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iii
+1
+Introduction
+1
+1.1
+Related Work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2
+Background
+5
+2.1
+Lambda Calculus . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+2.2
+Compilers . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+2.3
+Mechanical Verification in Coq
+. . . . . . . . . . . . . . . . . . . . . . . . .
+8
+3
+Overview of the Architecture
+9
+4
+The Semantic Preservation Framework
+11
+4.1
+Semantics . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+4.2
+Correspondence . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13
+4.3
+Forward Simulation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 16
+4.4
+Backward Simulation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 18
+4.5
+Forward to Backward Simulation . . . . . . . . . . . . . . . . . . . . . . . . 20
+5
+The LinLambda Language
+24
+6
+The Linear Type System
+28
+7
+The DeBruijn Language
+48
+8
+The StackVM Language
+60
+9
+The LinVM Language
+66
+10 Evaluation
+74
+10.1 Results
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 74
+10.2 Technical Improvements . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 75
+10.3 Extensions
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 75
+11 Conclusion
+77
+Bibliography
+79
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+v
+==PAGE:8==
+vi
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:9==
+1
+Introduction
+Compilers are an integral part of any software stack used to create programs that have
+strict requirements for efficiency, safety, or access to low-level system components. By
+enabling the use of high-level programming languages, many of the difficulties in writing
+low-level programs are abstracted away. High-level programming languages use type
+systems to statically prevent common errors in programs, and as type systems evolve,
+they prevent broader classes of errors.
+High-level programming languages commonly rely on automatic runtime memory man-
+agement like garbage collection to achieve memory safety, which imposes some compu-
+tational overhead. For performance-critical domains where such overhead is unaccept-
+able, programs are usually implemented in C or C++, where memory can be handled
+manually. These languages do not prevent memory safety errors by default, so such pro-
+grams are prone to memory safety [1] errors. In large, complex software systems, this
+results in a vast number of security vulnerabilities [2] [3] [4].
+Substructural type systems, which include linear type systems, have gained popularity in
+recent years due to their ability to enforce certain desirable properties of programs, such
+as resource safety.
+A linear type system is a type system that is based on linear logic. In linear logic, assump-
+tions must be used exactly once; they cannot go unused, nor can they be used more than
+once. Similarly, in a linear type system, a typing assumption must be used exactly once.
+The result is that programs that are well-typed in such a type system must use their re-
+sources exactly once. This property can prevent common errors associated with the use
+of resources, such as threads, files, or memory.
+Moreover, linear types facilitate optimizations that are difficult to implement with an unre-
+stricted type system. Alias analysis is commonly used in compilers to determine whether
+two pointers point to the same memory location. This information can then be used to
+optimize a program, e.g. by reordering reads and writes if they are found to be indepen-
+dent. This optimization is a common source of errors, even in industry-standard compilers
+[5] [6], but with the at-most-once guarantee of linear types, such an optimization could be
+applied pervasively. However, in practice, dependencies on the aforementioned industry-
+standard compilers prevent such pervasive use [7].
+Formal verification is a crucial technique for ensuring the correctness of software systems
+that require the highest levels of safety and reliability, such as medical and automotive
+applications. Formal verification of programs reason about program behavior via a pro-
+gramming language semantics, which formally defines the meaning of the constructs of
+the language. In order for such reasoning to be valid, it is critical that the meaning of
+the program is preserved through translation to a lower-level representation, such as As-
+sembly code; a mistake in such a translation could render any argumentation about the
+program invalid. For this reason, if a compiler is used in such a system, it must be be
+formally verified.
+By implementing linear types in a formally verified compiler, the resulting compiler extends
+the benefits of linear types to domains where correctness is paramount.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+1
+==PAGE:10==
+The goal of this work is to design, implement and verify a compiler for a functional pro-
+gramming language with linear types that produces programs in a stack-based resource-
+aware language. This work is divided into six parts:
+1. A framework for compiler correctness. The adaptation of a well-known frame-
+work of compiler correctness for the verification of the translations made by the
+compiler in order to produce the final output.
+2. A linear type system. The design of a linear type system for the source language,
+and a proof of soundness of this type system.
+3. A typechecker. The implementation of a typechecker for the linear type system,
+and a proof of soundness of this typechecker.
+4. The programming languages. The design of a stack-based resource-aware lan-
+guage, suitable for representing the final output of the compiler, as well as the de-
+sign of two languages suitable for the intermediate representations internal to the
+compiler.
+5. The translation steps. The implementation of three translation steps of programs,
+starting from the source language, producing some intermediate representations,
+and outputting the final representation in the stack-based resource-aware language.
+6. Verification. The verification of correctness of the three translation steps.
+The remainder of this thesis is divided into the following chapters:
+• Background. A brief summary of the background knowledge that is required for
+the following chapters.
+• Overview of the Architecture. A brief overview of the compiler architecture is
+provided.
+• The Semantic Preservation Framework. The adaptation of the well-known frame-
+work of compiler correctness is presented, including a discussion on the particular
+modifications made with arguments for their validity.
+• The LinLambda Language.
+A presentation of the syntax and semantics of the
+source language and some initial results.
+• The Linear Type System. A presentation of the syntax and rules of the linear type
+system, as well as a rigorous treatment of the proof of soundness.
+• The DeBruijn Language. A presentation of the syntax and semantics of the first
+intermediate language and some initial results. Additionally, the translation of
+LinLambda programs into DeBruijn programs is presented, and the semantic preser-
+vation of this translation is established.
+• The StackVM Language. A presentation of the syntax and semantics of the sec-
+ond intermediate language and some initial results. Additionally, the translation of
+DeBruijn programs into StackVM programs is presented, and an analysis and sub-
+sequent sketch of the semantic preservation proof is provided.
+• The LinVM Language. A presentation of the syntax and semantics of the final output
+language and some initial results. Additionally, the translation of Stack programs
+into LinVM programs is presented, and an analysis and subsequent sketch of the
+semantic preservation proof is provided.
+2
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:11==
+• Evaluation. An evaluation of the results that were obtained in this work, and a
+discussion of the results that were not obtained. Additionally, potential avenues for
+future work are hypothesized.
+• Conclusion. A general conclusion of the contents of the preceding chapters.
+1.1
+Related Work
+The Compcert project.
+The CompCert compiler [8] is a formally verified compiler for
+the C programming language, formalized in Coq. The compiler has for some time been
+the subject of active research, and is available on GitHub [9], free for for non-commercial
+use. As part of the formalisation of the compiler, the CompCert project includes concrete
+definitions of notions such as semantic preservation, with associated textual treatment of
+the topic[10]. This project is in large part inspired by this work, and derives its framework
+of semantic preservation from the CompCert project, which will be discussed in detail in
+chapter 4.
+Previous work.
+The work in this project is, to some extent, based on earlier work done
+in the context of coursework at the Program Verification course at the IT University of
+Copenhagen in Spring 2022.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+3
+==PAGE:12==
+4
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:13==
+2
+Background
+This project requires some background knowledge on the subject of programming lan-
+guages, type systems, compilers, and verification in Coq. In this chapter, relevant back-
+ground knowledge is very briefly summarised.
+2.1
+Lambda Calculus
+Lambda calculus is a formal system of computation, and can be thought of as a prototypi-
+cal functional programming language. The core calculus consists of just three syntactical
+elements, which comprise terms: variables, abstractions, and application of abstractions.
+An abstraction consists of a name and an encapsulated term, and an application consists
+of two arbitrary terms. A variable is commonly represented by text, most often just a single
+character. The figure 2.1 shows one syntax for lambda calculus terms.
+<term> ::= x
+[V ar]
+| (λx. <term>)
+[Abs]
+| <term> <term>
+[App]
+Figure 2.1: The syntax of lambda calculus terms
+Following this syntax, an example of a lambda term is:
+(λx. x) y
+In this example, the occurrence of the variable x inside the abstraction on the left is said
+the be bound by the abstraction, while the occurrence of y on the right is said to be free
+since it is not bound by any abstraction. A term that has no free variables is said to be
+closed.
+When an abstraction is applied to some term, all occurrences of the bound name in the
+abstraction is substituted for the term that it was applied to. In this project, for the appli-
+cation of the abstraction (λx. t1) to the arbitrary term t2, the notation used to denote “the
+substitution of all occurrences of x in t1 by the term t2” is:
+[x := t2] t1.
+A semantics ascribes meaning to the constructs of a language. There are different ways
+to specify a semantics [11]. In this project, a semantics is defined via a small-step opera-
+tional semantics, in which inference rules describe how to carry out some quantum step
+of computation. An example of a small-step operational semantics for lambda calculus
+terms is shown in figure 2.2.
+The rules of a semantics can then be recursively applied in order to reduce a term, until
+there are no longer any rules that apply. When there are no more rules to apply for some
+term, that term is said to be in normal form.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+5
+==PAGE:14==
+ST_AppAbs
+(λx. t1) t2 −→[x := t2] t1
+t1 −→t′
+1
+ST_App1
+t1 t2 −→t′
+1 t2
+t2 −→t′
+2
+ST_App2
+t1 t2 −→t1 t′
+2
+Figure 2.2: An example small-step operational semantics for lambda calculus terms.
+The semantics shown in figure 2.2 is quite lax. For a given lambda term, there may be sev-
+eral applicable rules. When that is the case, a semantics is said to be non-deterministic.
+Conversely, if there is only ever a single rule that applies for any term, then a semantics
+is said to be deterministic.
+A common extension to the lambda calculus is to add types to terms. Types impose lim-
+itations on the valid construction of terms, in order to avoid certain kinds of undesirable
+terms. For example, the term (λx. x x) (λx. x x) results in the infinitely recursive appli-
+cation of (λx. x x) to itself, which might be problematic if the point of reducing the term
+was to arrive at some result. The simply typed lambda calculus adds the function type
+constructor, written →:
+<term> ::= x
+[V ar]
+| (λx : <type>. <term>)
+[Abs]
+| <term> <term>
+[App]
+<type> ::= a
+[Base]
+| <type> ⊸<type>
+[Arrow]
+Figure 2.3: The syntax of the simply typed lambda calculus. The type a represents some
+unspecified base type.
+A type system can be thought of as the semantics for types. Like a semantics, it can be
+defined in terms of inference rules. A typing relation for the simply typed lambda calculus
+is shown in figure 2.4.
+6
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:15==
+(x 7→T) ∈Γ T_Var
+Γ ⊢x ∈T
+(x 7→T2; Γ) ⊢t1 ∈T1
+T_Abs
+Γ ⊢(λx : T2. t1) ∈(T2 →T1)
+Γ ⊢t1 ∈(T2 →T1)
+Γ ⊢t2 ∈T2 T_App
+Γ ⊢t1 t2 ∈T1
+Figure 2.4: A typing relation for the simply typed lambda calculus.
+If a lambda term is consistent with the typing rules, then it is said to be well-typed, or
+that it “has type T”, where T is some specific type. A type system is commonly said to
+be sound if it guarantees that well-typed terms to not exhibit “undefined” behavior, i.e. if
+either there is always an applicable rule in the semantics, or the term has some inherent
+value (such as a plain number). Determining if a lambda term is consistent with the typing
+rules is called typechecking. A typechecking algorithm is said to be sound if whenever
+it determines a term to be well-typed, it is in fact well-typed. It is said to be complete if
+whenever a term is well-typed, it determines that the term is well-typed.
+A substructural logic is a logic in which one of the three substructural rules of logic are
+absent. The structural rules are called Weakening, Exchange, and Contraction. They are
+shown in figure 2.5.
+Γ ⊢φ
+Weakening
+Γ, ψ ⊢φ
+Γ, ∆⊢φ Exchange
+∆, Γ ⊢φ
+Γ, ψ, ψ ⊢φ Contraction
+Γ, ψ ⊢φ
+Figure 2.5: The structural rules.
+When a structural rule is absent, it limits the ways in which assumptions can be used
+in order to arrive at a conclusion. For example, if the weakening rule is absent, then
+assumptions cannot be removed from the context. Similarly, if the contraction rule is
+absent, then assumptions cannot be duplicated. In linear logic, those two rules are absent,
+meaning that assumptions have to be used at least once and at most once - that is, exactly
+once. A linear type system is one that is based on linear logic, so that typing assumptions
+must be used exactly once. A typed lambda calculus equipped with a linear typing relation
+is commonly called a linear lambda calculus, or a linearly typed lambda calculus.
+2.2
+Compilers
+Compilers for realistic programming languages tend to be very complex programs, since
+the task of translating some program from a representation in a high-level programming
+language to a low-level programming language can be challenging. Most often, compilers
+are composed of several, smaller steps of translation rather than one translation from
+source to target language; each such step going in the direction of the lower level of
+abstraction, for this reason sometimes called lowering. When a language at either end of
+the lowering is not the source or target language, it is commonly called an intermediate
+representation.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+7
+==PAGE:16==
+2.3
+Mechanical Verification in Coq
+The Coq home page describes Coq as follows:
+“Coq is a formal proof management system. It provides a formal language to write math-
+ematical definitions, executable algorithms and theorems together with an environment
+for semi-interactive development of machine-checked proofs.”[12]
+These facilities make Coq an excellent tool for modelling and working with programming
+languages and their type systems.
+Coq is based on a constructive foundation, meaning that in order to prove a proposition,
+it must be shown how to build the proposition from ground definitions. This is in contrast
+to classical logics, where e.g. the law of excluded middle, p ∨¬p, allows propositions to
+be shown indirectly, for example by showing that the negation of the proposition leads
+to a contradiction. As a result of being constructive, a negation in Coq is defined as the
+implication leading to False, which is impossible to construct, thus posing a contradiction
+by existence. By the principle of explosion, anything follows from this.
+More generally, one can define inductive propositions in Coq, through which e.g. the se-
+mantics of a programming language, or the typing rules of a type system can be modelled.
+An inductive definition is then automatically supplied with a suitable induction principle, so
+that propositions can be proven by induction on instances of such definitions, a procedure
+that is exceedingly common in this project.
+While Coq allows for the implementation of recursive functions, it imposes some restric-
+tions on their definitions. Principally, functions must be “obviously” terminating (for some
+vague definition of “obviously”), since otherwise absurd facts can be derived from them,
+by virtue of the Curry-Howard correspondence.
+Functions can be extracted to OCaml programs, more suitable for practical use. However,
+this extraction mechanism - as well as the OCaml compiler - are unverified, meaning that
+some confidence in the correctness of an implementation, as established by verification,
+is lost upon extraction. This means that such an extracted program intended for use in
+practical circumstances should still be accompanied by rigorous automated tests.
+8
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:17==
+3
+Overview of the Architecture
+The project is conceptually divided into three parts:
+1. The formalisation of the source language, including its type system, as well as the
+target and intermediate languages.
+2. The implementation of the compiler.
+3. The formalisation and verification of the compiler.
+All three parts are implemented in Coq. The implementation of the compiler is thus embed-
+ded alongside its proof of correctness, guaranteeing that the formalisation of the compiler
+matches the implementation. The tradeoff here is that the implementation would have
+to be translated to OCaml code via the Coq extraction mechanism in order to be used
+in practice. Both the extraction mechanism and the OCaml compiler are unverified, so
+this is a potential weakness in the toolchain. In practical terms, the formalisation of the
+languages are contained in one compiler-agnostic package (Theory), while the compiler
+is contained in a separate package (Compiler) that depends on the former.
+The compilation process is factored into four phases:
+1. The source program is typechecked.
+2. If typechecking succeeds, then the source program is lowered into the first interme-
+diate language.
+3. The first intermediate representation is lowered into the second intermediate repre-
+sentation.
+4. The second intermediate representation is lowered to produce the target program.
+This split facilitates a reduction in the density of complexity of both the implementation - as
+it would in an unverified compiler - but also of the correctness proof [8]. The verification of
+the compiler comprises the verification of the typechecker and each of the lowering steps.
+In the implementation, the source, intermediate, and target languages are referred to as
+LinLambda, DeBruijn, StackVM, and LinVM, respectively. These names will be used in the
+following chapters as well.
+An overview of the compilation process is provided in figure 3.1.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+9
+==PAGE:18==
+Figure 3.1: A visual representation of the compilation process. Solid lines represent trans-
+formations. Dotted line represents additional step. Solid boxes represent source or target
+program. Dashed boxes represent intermediate representations.
+10
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:19==
+4
+The Semantic Preservation Framework
+In order to verify the semantic preservation of compiled programs, this project employs
+the conceptual framework outlined by Leroy et al. [8], as used in the CompCert project,
+but with some technical simplifications. Due to the altered definitions, key results are
+restated.
+The CompCert framework uses the notion of simulations between source and target pro-
+grams to reason about the preservation of behavior. Leroy et al. divide them into three
+general categories:
+1. Bisimulation: The source and target programs have exactly the same set of be-
+haviours.
+2. Forward simulation: Any behavior of the source program is also a possible behavior
+of the target program.
+3. Backward simulation: Any behavior of the target program is also a possible behavior
+of the source program.
+Bisimulation is the strongest of the three, but also the strictest; a compiler might want to
+specialize on some subset of behaviors of the source program (such as by selecting an
+evaluation order), but bisimulation does not allow this. Forward simulation is not generally
+strong enough, as the target program could have other, potentially undesirable behaviors.
+Backward simulation is, in this sense, more generally useful, but forward simulation is
+posited to be generally easier to show. Leroy et al. capitalize on the insight that if the
+target semantics is deterministic, then a forward simulation implies a backward simulation;
+if the target program has only one possible behavior, then there cannot be some other,
+potentially undesirable behavior. Thus the approach used in the CompCert project is to
+show a forward simulation, and that the target language is deterministic.
+The assumption that the target language is deterministic is reasonable. In the case of
+CompCert, the source language, C, is non-deterministic due to the evaluation order of
+expressions being undefined. This non-determinism is then trivially eliminated by select-
+ing an evaluation order in compiled code.
+In this project, the source language is also deterministic. When this is the case, the com-
+bination of forward simulation and backward simulation becomes a bisimulation; the sets
+of behaviors are both singleton sets. In addition, it enables the use of a weaker notion
+of forward and backward simulation, which is easier to show as a consequence, yet with
+determinism of both languages, it is argued here that the definitions become equivalent.
+In the following, in order to distinguish between the definitions, this project’s definition will
+be referred to as a weak simulation, while that of the CompCert project will be referred to
+as a strong simulation.
+The remainder of this chapter will proceed as follows:
+1. Key definitions for the general modelling of semantics, as used in this project, are
+introduced. A few basic results are established for these definitions.
+2. The notion of correspondence is introduced, and a few useful results are shown.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+11
+==PAGE:20==
+3. The notion of forward simulation as used in this project is introduced, and the con-
+crete differences between this definition and the one given in the CompCert project
+are discussed.
+4. Similarly, the notion of backward simulation as used in this project is introduced.
+5. Mirroring the CompCert result, it is shown that a backward simulation can be derived
+from a forward simulation when the target language is deterministic.
+6. Finally, semantic preservation as used in this project is defined.
+4.1
+Semantics
+For the purpose of this project, a semantics is defined by:
+1. The type of its states.
+2. A relation step between states that describes the possible steps of computation
+(written s −→S s′ for a semantics S).
+3. A predicate final_state that describes the final states of computation.
+4. A proof that final states are normal forms of the step relation.
+Here, the definition of normal forms is the usual; an element is a normal form of a relation
+R if R does not relate it to any other element.
+This definition of semantics differs from the one employed in the CompCert project. Con-
+cretely, it has no notion of global environments, traces, or initial states. The first two points
+are omitted on account of there being no need for them; the languages employed in this
+project do not have global state nor side-effects. In the CompCert project, an initial state
+is defined as the opposite of a final state, i.e. a state that has no previous states. How-
+ever, for the variants of lambda calculus used in this project, such an initial state cannot
+be defined. Instead, part of this burden is moved to the definition of semantic preservation
+by requiring that the state (or term, in the case of the lambda calculi) that is produced by
+compilation must correspond to the state (or term) that it was compiled from.
+The reflexive-transitive closure of a relation R is used extensively in the remainder of this
+chapter. For reference, it is defined via left-step extension (and this shapes the induction
+principle accordingly):
+Definition 4.1.1 (multi). The transitive, reflexive closure of a relation R is written R∗. The
+rules are shown in figure 4.1.
+multi_refl
+R∗x x
+R x y
+R∗y z multi_step
+R∗x z
+Figure 4.1: The rules of the reflexive-transitive closure of a relation R, written R∗.
+Similarly, the transitive closure of a relation R is also defined via left-step extension:
+Definition 4.1.2 (plus). The transitive closure of a relation R is written R+. The rule is
+shown in figure 4.2.
+12
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:21==
+R x y
+R∗y z plus_step
+R+ x z
+Figure 4.2: The rule of the transitive closure of a relation R, written R+.
+Moreover, the following definition of safe terms is used:
+Definition 4.1.3 (safe). A state s in a semantics S is safe if for all states s′ such that
+s −→∗
+S s′, either s′ is a final state or there exists an s′′ such that s′ −→S s′′.
+safe S s ≡∀s′, s −→∗
+S s′ =⇒final_state S s′ ∨∃s′′, s′ −→S s′′.
+Safety is preserved through −→∗:
+Lemma 1 (multistep_preserves_safe). If s −→∗
+S s′, and s is safe, then s′ is also safe.
+∀s s′, s −→∗
+S s′ =⇒safe S s =⇒safe S s′.
+Proof. The proof amounts to showing that whatever term s′ steps to, s also steps to. This
+is shown via transitivity of the reflexive-transitive closure itself.
+The inverse of a safe state is a stuck state:
+Definition 4.1.4 (stuck). A state is stuck if it is a normal form but not a final state.
+stuck S s ≡normal_form (step S) s ∧¬final_state S s.
+A safe state never gets stuck:
+Lemma 2 (safe_not_stuck). Safe states do not get stuck.
+∀S s, safe S s =⇒∀s′, s −→∗
+S s′ =⇒¬stuck S s′.
+Proof. The proof proceeds by deriving a contradiction from the assumption that s is safe,
+but s′ is neither a final state nor steps to anything.
+4.2
+Correspondence
+Simulations reason about the behavior of states of programs from (possibly) distinct se-
+mantics. In order to do so, a notion of correspondence between states of the simulated
+program and the simulating program must be defined (written ∼) for each simulation.
+Definition 4.2.1 (correspondence). A correspondence ∼is a relation between the states
+of two semantics S and T.
+A correspondence can be ascribed the eventually modality (written ∼∗), producing a re-
+lation between states of two semantics (thus itself a correspondence), describing that the
+two states eventually correspond:
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+13
+==PAGE:22==
+Figure 4.4:
+A visual representation of the eventually rules eventually_step_s and
+eventually_step_t. Arrows represent transitions. Solid lines represent premises, dashed
+lines represent conclusions.
+Figure 4.5: A visual representation of the eventually_multi lemma. Arrows represent
+transitions, stars represent zero or more. Solid lines represent premises, dashed lines
+represent conclusions.
+Definition 4.2.2 (eventually). A pair of states s and t, belonging to a pair of semantics S
+and T, respectively, eventually correspond if either or both of the states can step some
+number of times to a pair of states that correspond. The inference rules of the eventually
+modality for a correspondence ∼are shown in figure 4.3.
+s ∼t
+eventually_immediately
+s ∼∗t
+s −→S s′
+s′ ∼∗t eventually_step_s
+s ∼∗t
+t −→T t′
+s ∼∗t′
+eventually_step_t
+s ∼∗t
+Figure 4.3: The inference rules of ∼∗.
+The eventually modality extends via −→∗on either side:
+Lemma 3 (eventually_multi). A pair of states s and t eventually correspond if either one
+can multistep to a state that eventually corresponds with the other.
+∀s s′, s −→∗
+S s′ =⇒∀t t′, t −→∗
+T t′ =⇒s′ ∼∗t′ =⇒s ∼∗t.
+Proof. The proof is split in two; multistep-extension on the left-hand side and right-hand
+14
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:23==
+Figure 4.7: A visual representation of the eventually_exist lemma. Arrows represent
+transitions, stars represent zero or more. Solid lines represent premises, dashed lines
+represent conclusions.
+side respectively. The proofs proceed identically by induction on the −→∗relation. The
+left-hand side extension is elaborated here.
+In the base case, the terms eventually correspond by assumption.
+In the inductive case, it must be shown that s ∼∗t where s −→∗
+S s′ and s′ −→∗
+S s′′ such
+that s′′ ∼∗t. The rule eventually_step_s applies with s′, where s −→S s′ is given by
+assumption and s′ ∼∗t is given by the induction hypothesis since s′′ ∼∗t.
+Figure 4.6: A visual representation of the two cases of the eventually_multi lemma. Ar-
+rows represent transitions, stars represent zero or more. Solid lines represent premises,
+dashed lines represent conclusions.
+When two terms eventually correspond, then they must both multistep to some terms that
+correspond:
+Lemma 4 (eventually_exist). If a pair of states s and t eventually correspond, then they
+multistep to some s′ and t′, respectively, that correspond.
+∀s t, s ∼∗t =⇒∃s′ t′, s −→∗s′ ∧t −→∗t′ ∧s′ ∼t′.
+Proof. The proof proceeds by induction on s ∼∗t.
+In the base case, s ∼t by assumption.
+In the first inductive case, s −→S s′ where s′ ∼∗t by assumption. The induction hypoth-
+esis provides a pair of states s′′ and t′′ such that s′ −→∗
+S s′′, t −→∗
+T t′′, and s′′ ∼t′′. Thus
+s′′ and t′′ solve the goal, with s −→∗
+S s′′ being given by the multi_step rule and the rest
+being given by assumption.
+The second inductive case proceeds similarly.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+15
+==PAGE:24==
+4.3
+Forward Simulation
+A forward simulation is a simulation of a source semantics S by a target semantics T. It
+is obtained in two parts. The first part is forward simulation of final states:
+Definition 4.3.1 (forward_simulation_final_states). If a pair of states s and t correspond,
+and s is a final state, then t must also be a final state.
+∀s t, s ∼t =⇒final_state S s =⇒final_state T t.
+With this definition, the correspondence is important for the validity of the simulation. For
+example, if the correspondence relates any two (final) states that represent numbers,
+then the simulation does not guarantee that the source and target programs arrive at the
+same result for a given numerical computation. Thus care must be taken when designing
+a correspondence.
+The second part is forward simulation of stepping states:
+Definition 4.3.2 (forward_simulation_step). If a pair of states s and t correspond, and s
+steps to a state s′, then t must step to some t′ such that s′ and t′ eventually correspond.
+∀s t, s ∼t =⇒∀s′, s −→S s′ =⇒∃t′, t −→T t′ ∧s′ ∼∗t′.
+With this definition, given one step in S, it must be possible to choose one step in T such
+that those resulting states must eventually correspond, meaning that it must further be
+possible to choose some subsequent series of steps in either or both of the semantics such
+that the resulting states correspond. This definition is a significant departure from that of
+the CompCert project. For reference, the CompCert definition is as follows (excluding the
+modelling of traces):
+∀s s′, s −→S s′ =⇒∀i t, s ∼i t =⇒∃i′ t′, (t −→+
+T t′ ∨(t −→∗
+T t′ ∧i′ < i)) ∧s ∼i′ t′.1
+This definition can be considered as two separate possibilities, with the first one being:
+∀s s′, s −→S s′ =⇒∀i t, s ∼i t =⇒∃i′ t′, t −→+
+T t′ ∧s′ ∼i′ t′.
+Here, given one step in S, it must be possible to choose one or more steps in T such
+that the resulting states correspond. This case cleanly encapsulates the notion that any
+behavior in the source program must be a behavior of the target program, with the addi-
+tional flexibility that the target program might take more steps in order to exhibit that same
+behavior. This is also valid for this project’s definition: s′ ∼∗t′ if ∃t′′, t′ −→∗t′′ ∧s′ ∼t′′.
+However, this is not sufficient for cases where it is not the case that a single step in S
+translates to one or more steps in T. This is covered by the second case:
+∀s s′, s −→S s′ =⇒∀i t, s ∼i t =⇒∃i′ t′, t −→∗
+T t′ ∧i′ < i ∧s′ ∼i′ t′.
+1The names and notations have been modified to match the conventions of this project for the purpose of
+comparison.
+16
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:25==
+Here, given one step in S, it must be possible to choose zero or more steps in T such that
+the resulting states correspond. Furthermore, the index i' in the post-step correspon-
+dence must be strictly less than the index i in the pre-step correspondence. By allowing
+zero steps in T, the simulation can apply multiple times in succession, making it possible
+for a single state in T to correspond to multiple states in S, so that it is possible to take
+more steps in S than in T. This project’s definition also allows for more steps to be taken
+in S, with the argument being similar to the inverse situation where more steps are taken
+in T.
+The requirement that the ordering must be well-founded is put in place in order to avoid
+the infinite stuttering problem:
+“The original program P1 could perform infinitely many silent transitions S1 −→S2 −→
+... −→Sn −→... while the transformed program P2 is stuck in a state S′ such that Si ∼S′
+for all i. In this case, P1 diverges while P2 does not, and semantic preservation does not
+hold.” [10]
+By indexing the correspondence with i and i', it limits the number of times that the zero-
+or-more case can apply, which limits the number of extra steps in S to some finite number,
+thus avoiding the situation described above. This project’s definition avoids the infinite
+stuttering problem by requiring unconditionally that the corresponding state t must step
+at least once.
+In summary, both definitions allow for either program to take more steps than the other
+in order to reach a corresponding state, and both definitions avoid the infinite stuttering
+problem. While being similar in these aspects, there are two key differences. First, with
+this project’s definition, a single state in T cannot correspond to multiple states in S. One
+might imagine that it could be encoded into the correspondence that only the last oc-
+currence of such prospective correspondences is a valid correspondence, and if this is
+generally possible, then the difference is merely a question of perspective. The second
+difference is more significant, however. With the CompCert definition, the series of steps
+in S that may be taken in successive instances of the simulation are given, and the steps
+in T must be chosen. With this project’s definition, only the first step in S is given, while all
+steps in S beyond the first, as well as the steps in T, must be chosen. Thus it is generally
+a weaker statement. However, if S is a deterministic semantics, then whatever choice of
+steps in S beyond the first is also the only choice, and the statements become equivalent.
+The two parts combine into a forward simulation:
+Definition 4.3.3 (forward_simulation). A forward simulation of semantics S and T and a
+correspondence ∼is the combination of a forward simulation of stepping states and a
+forward simulation of final states.
+forward_simulation S T ∼≡forward_simulation_step S T ∼∧
+forward_simulation_final_states S T ∼.
+Like with a strong forward simulation, a lockstep forward simulation of stepping states is
+a valid way to show a forward simulation of stepping states:
+Definition 4.3.4 (forward_simulation_lockstep). A lockstep forward simulation of stepping
+states is a forward simulation of stepping states where the states correspond immediately
+after stepping once each.
+∀s t, s ∼t =⇒∀s′, s −→S s′ =⇒∃t′, t −→T t′ ∧s′ ∼t′.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+17
+==PAGE:26==
+Lemma 5 (forward_simulation_lockstep_correct). A lockstep forward simulation of step-
+ping states implies a forward simulation of stepping states.
+forward_simulation_lockstep S T ∼=⇒
+forward_simulation_step S T ∼.
+Proof. The proof proceeds by directly deriving a t′ from the lockstep assumption which
+solves the goal, using eventually_immediately to show that s′ ∼∗t.
+4.4
+Backward Simulation
+A backward simulation is a simulation of a target semantics T by a source semantics S.
+It is obtained in three parts. The first part is progress of corresponding states:
+Definition 4.4.1 (backward_simulation_progress). If s ∼t and s is safe, then t must either
+be a final state or there must be some t′ such that t −→t′.
+∀s t, s ∼t =⇒safe S s =⇒final_state T t ∨∃t′, t −→T t′.
+The second part is backward simulation of final states:
+Definition 4.4.2 (backward_simulation_final_states). If s ∼t, and t is a final state, then s
+must also be a final state.
+∀s t, s ∼t =⇒safe S s =⇒final_state T t =⇒final_state S s.
+Contrary to the CompCert definition, backward simulation of final states does not allow
+for the source state to step an arbitrary number of times to reach its final state.
+The third and last part is backward simulation of stepping states:
+Definition 4.4.3 (backward_simulation_step). If s ∼t, and s is safe, and t −→T t′, then
+there must be some s′ such that s −→S s′ such that s′ ∼∗t′.
+∀s t, s ∼t =⇒safe S s =⇒∀t′, t −→T t′ =⇒∃s′, s −→S s′ ∧s′ ∼∗t′.
+The same arguments apply here as for the forward simulation of stepping states, but in
+reverse; the semantics T must be deterministic for this to be equivalent to strong backward
+simulation.
+A backward simulation is the conjunction of the three parts:
+Definition 4.4.4 (backward_simulation). A backward simulation of a semantics T by a
+semantics S is the conjunction of three proof obligations.
+backward_simulation S T ∼≡
+backward_simulation_progress S T ∼∧
+backward_simulation_step S T ∼∧
+backward_simulation_final_states S T ∼.
+For completeness, like with a forward simulation, a lockstep backward simulation of step-
+ping states is a valid way to show a backward simulation of stepping states.
+18
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:27==
+Definition 4.4.5 (backward_simulation_lockstep). A lockstep backward simulation of step-
+ping states is a backward simulation of stepping states where the states correspond im-
+mediately after stepping once each.
+∀s t, s ∼t =⇒safe S s =⇒∀t′, t −→T t′ =⇒∃s′, s −→S s′ ∧s′ ∼t′.
+Lemma 6 (backward_simulation_lockstep_correct). A lockstep backward simulation of
+stepping states implies a backward simulation of stepping states.
+backward_simulation_lockstep S T ∼=⇒backward_simulation_step S T ∼.
+Proof. The proof proceeds by directly deriving an s′ such that s′ ∼t′ from the lockstep
+assumption which solves the goal, using eventually_immediately to show that s′ ∼∗t′.
+Lastly, a backward simulation for semantics S and T implies that if s ∼t, and s is safe,
+then t is also safe. Before the lemma can be stated, a supporting lemma is required.
+Lemma 7 (backward_simulation_multi_eventually_correspond). Assuming a backward
+simulation of semantics S and T, where T is deterministic, then for all states s and t
+where s ∼∗t, if s is safe, and t −→T t′, then s −→S s′ such that s′ ∼∗t′.
+backward_simulation S T ∼=⇒
+deterministic −→T =⇒
+∀t t′, t −→∗
+T t′ =⇒
+∀s, s ∼∗t =⇒safe S s =⇒
+∃s′, s −→∗
+S s′ ∧s′ ∼∗t′
+Proof. The proof proceeds by induction on t −→t′.
+Base case. The goal is to show that there exists an s′ such that s −→∗s′ ∧s′ ∼∗t. By
+assumption, s ∼∗t, and s −→∗s by definition, so s solves the goal.
+Inductive case. The goal is to show that there exists an s′ such that s1 −→∗s′ ∧s′ ∼∗t′.
+By assumption, t1 −→T t2, t2 −→∗
+T t3, and s1 ∼∗t1, and s1 is safe.
+t1, t2, t′ : state T
+s1 : state S
+t1 −→T t2
+t2 −→∗
+T t3
+s1 ∼∗t1
+safe S s1
+IH : ∀s, s ∼∗t2 =⇒safe S s =⇒∃s′, s −→∗
+S s′ ∧s′ ∼∗t′.
+∃s′, s1 −→∗s′ ∧s′ ∼∗t′.
+Since s1 ∼∗t1, there must exist some states s3 and t3 such that s1 −→∗s3, t1 −→∗t3,
+and s3 ∼t3. Then, either t1 = t3 (multi_refl) or t1 −→t′
+2 ∧t′
+2 −→∗t3 (multi_step).
+In the former case, since s3 is safe by preservation from s1, the backward simulation
+of stepping states assumption provides an s4 such that s3 −→s4 and s4 ∼∗t2. More-
+over, s4 is safe by preservation from s3. Since s1 −→∗s4, it holds that s1 ∼∗t2 via
+eventually_multi. With this, the induction hypothesis provides an s′ that solves the goal.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+19
+==PAGE:28==
+In the latter case, t1 −→t′
+2 and t′
+2 −→∗t3. Since T is deterministic, t′
+2 and t2 must be the
+same. Then s1 ∼∗t2 since s1 −→∗s3, t2 −→∗t3, and s3 ∼t3. With this, the induction
+hypothesis provides an s′ that solves the goal.
+With this lemma, the correspondence of safety can be shown.
+Lemma 8 (backward_simulation_correspond_safe). A backward simulation for semantics
+S and T implies that if s ∼t, and s is safe, then t is also safe.
+backward_simulation S T ∼=⇒
+deterministic −→T =⇒
+∀s t, s ∼t =⇒safe S s =⇒safe T t.
+Proof. The goal is to show that the state t′ is either a final state, or it steps to some t′′.
+The assumptions state that s ∼t, t −→∗
+T t′, and s is safe.
+s : state S
+t, t′ : state T
+s ∼t
+safe S s
+t −→∗
+T t′
+final_state T t′ ∨∃t′′, t′ −→t′′.
+Since s ∼t implies by definition that s ∼∗t, there must be an s′ such that s −→∗s′ and
+s′ ∼∗t′. Then, via eventually_exist, there must be a pair s′′ and t′′ such that s′ −→∗s′′,
+and t′ −→∗t′′, and s′′ ∼t′′. Moreover, s′′ is safe by preservation from s. Since t′ −→∗t′′,
+either t′ = t′′ (multi_refl) or t′ −→t′′′ and t′′′ −→∗t′′ (multi_step). In the former case,
+s′′ ∼t′, and by progress of corresponding states, t′ is either a final state or there is a t′′′
+such that t′ −→t′′′, thus solving the goal. In the latter case, the right-hand side of the goal
+holds since t′ −→t′′′.
+4.5
+Forward to Backward Simulation
+With the definitions of semantics, forward simulations, and backward simulations in place,
+the process of deriving a backward simulation from a forward simulation under the as-
+sumption of determinism of the target semantics T can be elaborated.
+The first step is to derive progress of corresponding states:
+Lemma 9 (forward_to_backward_simulation_progress). A forward simulation of seman-
+tics S and T, where T is deterministic, implies backward progress of corresponding states.
+forward_simulation S T ∼=⇒
+deterministic −→T =⇒
+backward_simulation_progress S T ∼.
+Proof. The goal is to show that t is either a final state, or there exists a t′ such that t −→t′.
+The proof proceeds by case analysis on whether s is a final state or steps to some s′.
+20
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:29==
+s : state S
+t : state T
+s ∼t
+safe S s
+final_state T t ∨∃t′, t −→t′.
+If s is a final state, then so is t by the assumption of forward simulation of final states,
+which solves the goal.
+If s −→s′ then t −→t′ (and s′ ∼∗t′ by assumption of forward simulation of stepping
+states. Thus t′ solves the goal.
+Next, backward simulation of final states.
+Lemma 10 (forward_to_backward_simulation_final_states). A forward simulation of se-
+mantics S and T, where T is deterministic, implies backward simulation of final states.
+forward_simulation S T ∼=⇒
+deterministic −→T =⇒
+backward_simulation_final_states S T ∼.
+Proof. The goal is to show that s is a final state. The assumptions are that s ∼t, s is safe,
+and t is a final state. The proof proceeds by case analysis on whether s is a final state or
+steps to some s′.
+s : state S
+t : state T
+s ∼t
+safe S s
+final_state T t
+final_state S s.
+In the former case, the proof is immediate by assumption.
+In the latter case, s −→s′ so there must also be a t′ such that t −→t′ by forward simulation
+of stepping states. This contradicts the fact that t is a final state, and thus the proof is
+complete.
+Last, backward simulation of stepping states.
+Lemma 11 (forward_to_backward_simulation_step). A forward simulation of semantics
+S and T, where T is deterministic, implies backward simulation of stepping states.
+forward_simulation S T ∼=⇒
+deterministic −→T =⇒
+backward_simulation_step S T ∼.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+21
+==PAGE:30==
+Proof. The goal is to show that there exists a state s′ such that s −→s′ and s′ ∼∗t′. The
+assumptions are that s ∼t, s is safe, and t −→T t′. The proof proceeds by case analysis
+on whether s is a final state or it steps to some s′.
+s : state S
+t : state T
+s ∼t
+safe S s
+t −→T t′
+∃s′, s −→S s′ ∧s′ ∼∗t′.
+If s is a final state, then t must also be a final state by forward simulation of final states;
+but t −→t′ poses a contradiction, thus discharging the case.
+If s −→s′, then there must be a t′′ such that t −→t′′ and s′ ∼∗t′′ by forward simulation
+of stepping states. Since −→T is deterministic, t′ and t′′ must be the same, thus s′ ∼∗t′,
+so s′ solves the goal.
+By combining the three parts, forward to backward simulation via determinism of the target
+semantics is obtained.
+Lemma 12 (forward_to_backward_simulation). A forward simulation of a semantics S by
+a deterministic semantics T implies a backward simulation.
+forward_simulation S T ∼=⇒
+deterministic −→T =⇒
+backward_simulation S T ∼.
+Finally, semantic preservation is defined as the combination of a forward simulation, a
+backward simulation, and proofs of determinism for both languages, as well as a proof of
+correspondence between some initial states s and t:
+Definition 4.5.1 (semantic_preservation). Semantic preservation is the combination of a
+forward and a backward simulation between two semantics S and T with a given corre-
+spondence ∼.
+semantic_preservation S T ∼s t ≡
+s ∼t ∧
+forward_simulation S T ∼∧
+backward_simulation S T ∼∧
+deterministic −→S ∧
+deterministic −→T .
+However, a backward simulation follows trivially from the forward simulation for a deter-
+ministic target semantics, so it is not necessary:
+Lemma 13 (forward_simulation_semantic_preservation). Forward simulation between a
+source semantics S and a deterministic target semantics T implies semantics preservation
+22
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:31==
+from S to T.
+forward_simulation S T ∼=⇒
+deterministic −→S ∧
+deterministic −→T =⇒
+∀s t, s ∼t =⇒
+semantic_preservation S T ∼s t.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+23
+==PAGE:32==
+5
+The LinLambda Language
+The source programming language is based on the simply typed lambda calculus [13],
+with the unrestricted type system replaced by a linear type system. In addition to variables,
+abstractions and applications, the language also has natural numbers with addition. This
+section will elaborate first on the semantics of the language, and then the type system.
+The language syntax is shown in 5.1. Notably, the linear function type is written ⊸as is
+convention.
+The inference rules of the LinLambda semantics are shown in 5.2.
+It is a small-step semantics, with a fixed left-to-right evaluation order. The value propo-
+sition describes terms that have inherent value, and this is used as a premise in rules
+such as ST_App2 and ST_Add2 in order to enforce the left-to-right evaluation order. This
+works under the assumption that value indeed describes normal forms, which is correct:
+Lemma 14 (value_is_nf). Values are normal forms.
+∀t, value t =⇒normal_form t.
+Proof. The goal is to show that there is no t′ such that t −→t′. The proof proceeds by case
+analysis on value t, and in btoh cases, assumes that t −→t′ and derives a contradiction
+from this.
+Since the semantics enforces a left-to-right evaluation order, it is deterministic:
+Theorem 15 (step_deterministic). The −→relation is deterministic.
+∀t′ t′′, t −→t′ =⇒t −→t′′ =⇒t′ = t′′.
+Proof. The proof proceeds by induction on t, and in all cases, performs case analysis on
+the two assumptions t −→t′ and t −→t′′, respectively. This produces a total of 18 cases,
+but each of those cases fall in just one of three categories:
+<term> ::= x
+[V ar]
+| (λx : <type> . <term>)
+[Abs]
+| <term> <term>
+[App]
+| n
+[Const]
+| <term> + <term>
+[Add]
+<type> ::= Nat
+[Ty_Nat]
+| <type> ⊸<type>
+[Ty_Arrow]
+Figure 5.1: The syntax of the language
+24
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:33==
+v_abs
+value (λx : T, t)
+v_const
+value n
+value t2
+ST_AppAbs
+(λx : T. t1) t2 −→[x := t2] t1
+t1 −→t′
+1
+ST_App1
+t1 t2 −→t′
+1 t2
+value t1
+t2 −→t′
+2 ST_App2
+t1 t2 −→t1 t′
+2
+n = n1 + n2
+ST_AddConsts
+n1 + n2 −→n
+t1 −→t′
+1
+ST_Add1
+t1 + t2 −→t′
+1 + t2
+value t1
+t2 −→t′
+2 ST_Add2
+t1 + t2 −→t1 + t′
+2
+Figure 5.2: The LinLambda semantics, based on [13].
+1. Trivial equalities. These are solved by trivial rewriting of assumed equalities. One
+such example is the case where t is an application of an abstraction, and stepping
+results in substitution. Here, the name of the binding, the content of the abstraction,
+and the term that the abstraction is applied to, are all the same. Thus, the results of
+stepping are trivially equal.
+2. Contradictions. These are solved by deriving a contradiction from the fact that t
+steps, while being unable to do so. This is generally the case when the two as-
+sumptions involving −→are not cases of the same rule being applied. One such
+example is the case where t has the form t1 t2, i.e. an application of an abstrac-
+tion, and one assumption is that the rule ST_AppAbs applies, thus implying that the
+left-hand side is an abstraction, while the other assumption states that ST_App1
+applies, thus implying that the left-hand side steps. In that case, the contradiction is
+that the abstraction steps.
+3. Inductive cases. These are solved via the induction hypothesis. These are the
+remaining cases after discharging the trivial equlities and contradictory cases. Thus,
+the two stepping assumptions agree on the rule that applies, and so the induction
+hypothesis applies to solve the case.
+In the mechanisation, this proof is solved by abstracting the cases via tactics. The trivial
+equalities are solved automatically by the congruence tactic, while the contradictory and
+inductive cases are solved with tactics specifically designed to recognize those situations:
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+25
+==PAGE:34==
+1
+Ltac solve_by_contradiction :=
+2
+match goal with
+3
+| H1: value ?T, H2: step ?T ?T’ |−_ ⇒
+4
+exfalso; eapply (value_is_nf T); eauto
+5
+| H: step (Const ?N) ?T’ |−_ ⇒
+6
+exfalso; eapply (value_is_nf (Const N)); eauto
+7
+| H: step (Abs ?X ?T ?B) ?T’ |−_ ⇒
+8
+exfalso; eapply (value_is_nf (Abs X T B)); eauto
+9
+end.
+10
+11
+Ltac solve_by_induction_hypothesis :=
+12
+| H1: step ?T ?T1, H2: step ?T ?T2 |−_ ⇒
+13
+assert (T1 = T2) by eauto; subst; reflexivity
+14
+end.
+The result is that the mechanisation of step_deterministic is very succinct:
+1
+Theorem step_deterministic: deterministic step.
+2
+Proof.
+3
+intros t.
+4
+induction t; intros t’ t’’ H’ H’’;
+5
+inversion H’; inversion H’’; subst;
+6
+try congruence;
+7
+try solve_by_contradiction;
+8
+solve_by_induction_hypothesis.
+9
+Qed.
+The substitution in ST_AppAbs is not capture-avoiding; it performs naïve substitution.
+The assumption is that terms are closed upon substitution. Since the semantics does not
+reduce under abstraction, open terms are never produced - so if terms are closed to begin
+with, they remain closed after stepping:
+Lemma 16 (step_preserves_closed). If t −→t′, and t is closed, then t′ is also closed.
+∀t t′, t −→t′ =⇒closed t =⇒closed t′.
+Proof. The proof proceeds by induction on t −→t′.
+ST_AppAbs. This case is shown by contradiction. First, it is assumed that a variable x′
+appears free in [x := t2] t1. Then, case analysis is performed on whether x and x′ are
+the same. If x and x′ are the same, then x′ cannot appear free in [x := t2] t1 since it is
+the target of substitution, thus posing a contradiction with the assumption that it does. If
+x and x′ are not the same, then substitution is irrelevant, and x′ must appear free in the
+abstraction body. However, since the abstraction is closed, only the bound variable x may
+appear free in the abstraction body; this again poses a contradiction.
+ST_AddConsts. This case is also shown by contradiction. First, it is assumed that a
+variable x appears free in the term t′, which is a sum of two constants. This cannot
+happen, so it is an immediate contradiction.
+ST_App1, ST_App2, ST_Add1, ST_Add2. These cases proceed similarly. In order to
+show that t′ is closed, it suffices to show that its component terms are closed. From the
+26
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:35==
+assumption that t is closed, it is derived that the component terms must also be closed.
+As a result, the goal is given on one side by assumption, on the other side by the induction
+hypothesis.
+The fact that −→preserves the closedness of terms is important for the proof of semantic
+preservation, which will be elaborated in section 7.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+27
+==PAGE:36==
+6
+The Linear Type System
+A linear typing relation can be given in declarative terms[14]. One such relation is shown
+in figure 6.1. The rules can be briefly summarised as follows:
+• T_V ar. The rule for variables requires that the context contains exactly one as-
+sumption, and that the assumption pertains to that variable.
+• T_Abs. The rule for abstractions requires that the context Γ does not already contain
+an assumption for a variable of the same name as the one bound in the abstraction
+itself.
+• T_App. The rule for application of abstraction requires that the context is split into
+two non-overlapping contexts Γ1 and Γ2, one for each of the subterms in the appli-
+cation.
+The rules of the linear typing relation are inextricably linked together. Considering these
+rules together, the declarative linear typing relation enforces linearity by:
+1. Prohibiting the shadowing of variables in abstractions, so that variables cannot be
+”forgotten”.
+2. Prohibiting variables from appearing multiple times by requiring that terms with mul-
+tiple subterms, such as applications, must allocate each assumption to exactly one
+of the typing derivations of its subterms, not both.
+3. Prohibiting assumptions in the context from being ”thrown away” by requiring deriva-
+tions to have only the necessary assumptions.
+The declarative linear typing relation is mathematically simple, but poses some challenges
+for an implementation in a typechecker. The context splitting operator is an integral piece.
+The rule T_App provides no hints on its own as to how this operation should be done.
+However, an important observation to make from the full set of typing rules is that the
+resulting contexts must cover exactly the set of free variables of the terms; thus a type-
+checker implementation must be able to determine this set, the verification of which is an
+additional burden. Moreover, a naïve implementation would potentially have to determine
+this mutiple times for a single term.
+An alternative to the declarative linear typing relation is an algorithmic linear typing re-
+lation [14]. An algorithmic linear typing relation introduces an output context, describing
+the unused portion of the input context in the typing derivation. Rather than splitting the
+T_Var
+(x 7→T1) ⊢x ∈T1
+x /∈dom Γ
+(x 7→T2; Γ) ⊢t1 ∈T1 T_Abs
+Γ ⊢(λx : T2. t1) ∈(T2 ⊸T1)
+Γ ̸⊑∆
+Γ ⊢t1 ∈(T2 ⊸T1)
+∆⊢t2 ∈T2 T_App
+(Γ, ∆) ⊢t1 t2 ∈T1
+Figure 6.1: A declarative linear typing relation.
+28
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:37==
+Γ x = Some T
+AT_Var
+Γ ⊢x ∈T ; Γ \ x
+(x 7→T2; Γ1) ⊢t1 ∈T1; Γ2
+x /∈dom Γ2
+AT_Abs
+Γ1 ⊢(λx : T2, t1) : T2 ⊸T1; (x 7→Γ1 x; Γ2)
+Γ1 ⊢t1 : T2 ⊸T1; Γ2
+Γ2 ⊢t2 : T2; Γ3 AT_App
+Γ1 ⊢t1 t2 : T1; Γ3
+AT_Nat
+Γ1 ⊢n : N; Γ1
+Γ1 ⊢t1 : N; Γ2
+Γ2 ⊢t2 : N; Γ3 AT_Add
+Γ1 ⊢t1 + t2 : N; Γ3
+Figure 6.2: The inference rules of the algorithmic typing relation.
+context into parts for terms with multiple subterms, the output context of one subterm is
+used as input context to another.
+The rules of the algorithmic linear typing relation used in this project are given in figure
+6.2. They can be summarised as follows:
+• AT_V ar. The rule for variables requires that the input context contains an assump-
+tion about the given variable. The assumption is removed from the input context to
+form the output context.
+• AT_Abs. The rule for abstraction adds an assumption for the bound variable to the
+context, and uses that to type the abstraction body. The output context must not
+contain any assumption about the bound variable. Any previous assumption about
+a variable of the same name as the bound variable is restored afterwards.
+• AT_App. The rule for application requires the output context of the left-hand side
+to be provided as input to the right-hand side.
+• AT_Nat. The rule for natural numbers imposes no requirements on the context,
+and the output context is equal to the input context.
+• AT_Add. The rule for addition is similar to that of application.
+The algorithmic typing relation is in some sense clearer in its enforcement of linearity.
+Firstly, the restriction that variables can appear at most once is enforced by the AT_V ar
+rule; they are removed from the context when they appear. Secondly, the restriction that
+variables must appear at least once is enforced by the AT_Abs rule directly; the vari-
+able must have been used before it would otherwise go out of scope at the end of the
+abstraction.
+Furthermore, the algorithmic typing relation provides an attractive set of tradeoffs for the
+purpose of implementing and verifying a linear type checker. It is no longer necessary
+to determine the set of free variables in subterms in order to split the context; this is
+done implicitly and incrementally. As a result, it is significantly easier to implement a
+typechecker for this typing relation. In addition, it enables some properties of the type
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+29
+==PAGE:38==
+system to be expressed that would otherwise be difficult or impossible to express for a
+declarative typing relation.
+6.0.1
+Soundness of the Type System
+The type system is proven sound to ensure that it correctly prohibits undesirable behavior,
+following the usual syntactic type soundness definition. Specifically, soundness is defined
+as the property that well-typed terms are safe, using the definition of safe from section 4.
+The proof relies on the usual combination of progress and preservation with the addition
+of an output context. However, in order to prove progress and preservation, a number of
+supporting lemmas are established first. The high-level overview of the approach is as
+follows:
+1. Show that the algorithmic typing relation is monotonically decreasing with regard to
+the context.
+2. Show the relationship between the contexts for assumptions about variables that
+appear free in the term, and for variables that do not appear free in the term.
+3. Show that free variables appear exactly once in a well-typed term.
+4. Show context invariance, in turn providing weakening and strengthening lemmas.
+5. Use all of the above to prove progress and preservation.
+A fundamental property of the algorithmic typing relation is that it is monotonically de-
+creasing with regard to the context; the output context is a subset of the input context.
+This is expressed here in three lemmas:
+Lemma 17 (algorithmic_monotonicity_some). Any assumption in the output context must
+also be in the input context.
+∀Γ t T Γ′, Γ ⊢t ∈T; Γ′ =⇒∀x U, Γ′ x = Some U =⇒Γ x = Some U.
+Proof. The proof proceeds by induction on Γ ⊢t ∈T; Γ′.
+AT_V ar. In this case, t = y and Γ′ = Γ \ y. The goal is to show that Γ x = Some U.
+Γ : string ⇀ty
+x, y : string
+T, U : ty
+Γ y = Some T
+(Γ \ y) x = Some U
+Γ x = Some U.
+It must be the case that x ̸= y; if x = y, then (Γ \ y) x = None, which contradicts the
+assumption. Thus, via rewriting, the assumption (Γ \ y) x = Some U is equivalent to
+Γ x = Some U, and this solves the goal.
+AT_Abs. In this case, t = (λy : T2. t1) and Γ′ = (y 7→Γ1 y; Γ2) where (y 7→T2; Γ1) ⊢t1 ∈
+T1; Γ2 and Γ2 y = None.
+30
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:39==
+Γ1, Γ2 : string ⇀ty
+x, y : string
+T1, T2, U : ty
+(y 7→T2; Γ1) ⊢t1 ∈T1; Γ2
+Γ2 y = None
+(y 7→Γ1 y; Γ2) x = Some U
+Γ2 x = Some U =⇒(y 7→T2; Γ1) x = Some U.
+Γ1 x = Some U.
+The case proceeds by case analysis on whether y and x are the same. If y = x, then
+(y 7→Γ1 y; Γ2) x = Some U reduces to Γ1 y = Some U, and this solves the goal. If
+y ̸= x, then it instead reduces to Γ2 x = Some U, and the induction hypothesis reduces
+to Γ2 x = Some U =⇒Γ1 x = Some U, thus solving the goal.
+AT_Add, AT_App. Both cases are solved by immediate application of the two induction
+hypotheses.
+AT_Nat. In this case, t = n and Γ′ = Γ. The goal is immediate by assumption.
+Lemma 18 (algorithmic_monotonicity_none). If the input context does not contain any
+assumptions about x, then neither does the output context.
+∀Γ t T Γ′, Γ ⊢t ∈T; Γ′ =⇒∀x, x /∈Γ =⇒x /∈Γ′.
+Proof. The procedure is similar to the previous proof, with the only difference being the
+trivial reductions. This is omitted for brevity.
+Lemma 19 (algorithmic_monotonicity_disj). The output context in the algorithmic typing
+relation is a subset of the input context.
+∀Γ t T Γ′, Γ ⊢t ∈T; Γ′ =⇒∀x U, Γ x = Some U =⇒Γ′ x = Some U ∨Γ′ x = None.
+Proof. The goal is to show that Γ′ x = Some U ∨Γ′ x = None.
+Γ, Γ′ : string ⇀ty
+x : string
+T, U : ty
+Γ ⊢t ∈T; Γ
+Γ x = Some U
+Γ′ x = Some U ∨Γ′ x = None.
+The proof proceeds by case analysis on Γ′ x; either Γ′ x = Some U ′ or Γ′ x = None. If
+Γ′ x = Some U ′ then it must also be the case that Γ x = Some U ′, meaning that U = U ′,
+which solves goal. If Γ′ x = None, then the goal holds trivially.
+The assumptions that are removed from the context through a typing derivation are exactly
+those that concern the free variables of the term. This is expressed by the following
+lemma:
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+31
+==PAGE:40==
+Lemma 20 (well_typed_consumption). If a term t is well-typed, then a variable x appears
+free in t if and only if the input context has an assumption about x, and the output context
+does not.
+∀Γ t T Γ′, Γ ⊢t ∈T; Γ′ =⇒∀x, x ∈t ⇐⇒(∃U, (x 7→U) ∈Γ) ∧x /∈Γ′.
+The proof is split in two, each stated as a separate lemma:
+Lemma 21 (well_typed_consumption_1). If a term t is well-typed, and a variable x ap-
+pears free in it, then an assumption about x must be present in the input context and
+absent in the output context.
+∀Γ t T Γ′, Γ ⊢t ∈T; Γ′ =⇒∀x, appears_free_in x t =⇒(∃U, Γ x = Some U)∧Γ′ x = None.
+Proof. The proof is by induction on Γ ⊢t ∈T; Γ′.
+AT_V ar. In this case, t = y and Γ′ = Γ \ y. The goal is to show (∃U, Γ x = SomeU) ∧
+(Γ \ y) x = None.
+Γ : string ⇀ty
+x, y : string
+T : ty
+Γ y = Some T
+appears_free_in x y
+(∃U, Gamma x = SomeU) ∧(Γ \ y) x = None.
+Since x appears free in y, it must be the case that x = y. Then (Γ \ y) x = None, and
+setting U = T solves the goal.
+AT_Abs. In this case, t = (λy : T2. t1) and Γ′ = (y 7→Γ1 y; Γ2). The goal is to show
+(∃U, Γ1 x = SomeU) ∧(Γ \ y) x = None.
+Γ1, Γ2 : string ⇀ty
+x, y : string
+T1, T2 : ty
+t1 : tm
+(y 7→T2; Γ1) ⊢t1 ∈T1Γ2
+Γ y = None
+appears_free_in x (λy : T2. t1)
+appears_free_in x t1 =⇒(∃U, (y 7→T2; Γ1) x = Some U) ∧Γ2 x = None.
+(∃U, Γ1 x = Some U) ∧(y 7→Γ1 y; Γ2) x = None.
+Since x appears free in the abstraction, it must hold that x ̸= y and x appears free in t1.
+With x ̸= y, the goal reduces to (∃U, Gamma x = Some U) ∧Γ2 x = None., and the
+conclusion of the induction hypothesis reduces to the same, solving the goal.
+AT_App, AT_Add. The cases proceed identically. The case AT_App is elaborated here.
+32
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:41==
+Γ1, Γ2, Γ3 : string ⇀ty
+x : string
+T1, T2 : ty
+t1, t2 : tm
+Γ1 ⊢t1 ∈(T2 ⊸T1)Γ2
+Γ2 ⊢t2 ∈T2Γ3
+appears_free_in x (t1 t2)
+appears_free_in x t1 =⇒(∃U, Γ1 x = Some U) ∧Γ2 x = None.
+appears_free_in x t2 =⇒(∃U, Γ2 x = Some U) ∧Γ3 x = None.
+(∃U, Γ1 x = Some U) ∧Γ3 x = None.
+The case proceeds by case analysis on appears_free_in x (t1 t2); x appears free in either
+t1 or t2. If x appears free in t1, then the first induction hypothesis provides a U such that
+Γ1 x = Some U and Γ2 x = None. Since Γ2 x = None, it must also be the case that
+Γ3 x = None; it is not in the input context of the typing derivation, so it also cannot be
+in the output context. Setting U = U solves the goal. If x appears free in t2, then the
+second induction hypothesis provides a U such that Γ2 x = Some U and Γ3 = None.
+Since Γ2 x = Some U, it must also be the case that Γ1 x = Some U; it is in the output
+context of the typing derivation, so it must also be in the input. Setting U = U solves the
+goal.
+AT_Nat. Here, t = n and Γ′ = Γ. The assumption appears_free_in x n directly poses a
+contradiction; a variable x cannot appear free in a constant.
+The other direction:
+Lemma 22 (well_typed_consumption_2). If a term t is well-typed, and the input context
+contains an assumption about x, but the output context does not, then x must appear free
+in t.
+∀Γ t T Γ′, Γ ⊢t ∈T; Γ′ =⇒
+∀x U, Γ x = Some U =⇒
+Γ′ x = None =⇒
+appears_free_in x t.
+Proof. The proof is again by induction on Γ ⊢t ∈T; Γ′.
+AT_V ar. The goal is to show appears_free_in x y.
+Γ : string ⇀ty
+x, y : string
+T, U : ty
+Γ x = Some T.
+(Γ \ y) x = None.
+appears_free_in x y.
+Since Γ x = Some T and (Γ\y) x = None, it must be the case that x = y. Then the result
+is by definition; x appears free in exactly x.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+33
+==PAGE:42==
+AT_Abs. The goal is to show appears_free_in x (λy : T2. t1).
+Γ1, Γ2 : string ⇀ty
+x, y : string
+T1, T2, U : ty
+t1 : tm
+(y 7→T2; Γ1) ⊢t1 ∈T1Γ2
+Γ2 y = None
+Γ1 x = Some U
+(y 7→Γ1 y; Γ2) x = None.
+(y 7→T2; Γ1) x = Some U =⇒Γ2 x = None =⇒appears_free_in x t1.
+appears_free_in x (λy : T2. t1).
+Since Γ1 x = Some U and (y 7→Γ1 y; Γ2) x = None, it must be the case that y ̸= x.
+Then (y 7→Γ1 y; Γ2) x = None reduces to Γ2 x = None, and the premise of the induction
+hypothesis reduces to Γ1 x = Some U. Thus both premises to the induction hypothesis
+are given by assumption, providing appears_free_in x t1. Together with y ̸= x, this solves
+the goal.
+AT_App, AT_Add. The cases proceed identically. AT_App is elaborated. The goal is to
+show appears_free_in x (t1 t2).
+Γ1, Γ2, Γ3 : string ⇀ty
+x : string
+T1, T2, U : ty
+Γ1 x = Some U.
+Γ3 x = None.
+Γ1 x = Some U =⇒Γ2 x = None =⇒appears_free_in x t1.
+Γ2 x = Some U =⇒Γ3 x = None =⇒appears_free_in x t2.
+appears_free_in x (t1 t2).
+Since the typing relation is monotonically decreasing with regard to the input context, it
+must be the case that either Γ2 x = Some U or Γ2 x = None. If Γ2x = Some U, then
+the second induction hypothesis provides appears_free_in x t2, which solves the goal.
+If Γ2 x = None, then the first induction hypothesis provides appears_free_in x t1, which
+solves the goal.
+AT_Nat. The goal is to show appears_free_in x n.
+Γ1 : string ⇀ty
+n : N
+x : string
+U : ty
+Γ1 x = Some T.
+Γ1 x = None.
+appears_free_in x n.
+The two assumptions Γ1 x = Some T and Γ1 x = None directly pose a contradiction.
+34
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:43==
+A simple corollary of this result is that terms that are well-typed in the empty input context
+are closed:
+Lemma 23 (well_typed_empty_closed). If a term t is well-typed in the empty input context,
+then t is closed.
+∀t T Γ, ⊢t ∈T; Γ =⇒closed t.
+Proof. The goal is to show that any variable x cannot appear free in t. The proof is by
+contradiction. Assuming a variable x does appear free in t, then by algorithmic consump-
+tion the input context must ascribe some type U to the variable x. The input context is the
+empty context, so this is a contradiction.
+Mirroring the consumption lemma, the conservation lemma concerns non-free variables:
+Lemma 24 (well_typed_conservation). If a term t is well-typed, then for all variables x,
+the input and output contexts agree on x iff x does not appear free in t.
+∀Γ t T Γ′, Γ ⊢t ∈T; Γ′ =⇒∀x, Γ x = Γ′ x ⇐⇒¬appears_free_in x t.
+This is again split in two, one for each direction:
+Lemma 25 (well_typed_conservation_1). If a term t is well-typed, and the input and output
+contexts agree in their assumptions about x, then x does not appear free in t.
+∀Γ t T Γ′, Γ ⊢t ∈T; Γ′ =⇒∀x, Γ x = Γ′ x =⇒¬appears_free_in x t.
+Proof. The proof is by induction on Γ ⊢t ∈T; Γ′; all cases are shown by contradiction.
+AT_V ar. The goal is to show ¬appears_free_in x y.
+Γ : string ⇀ty
+x, y : string
+T : ty
+Γ y = Some T.
+Γ x = (Γ \ y) x.
+¬appears_free_in x y.
+Assuming appears_free_in x y, it then must be that x = y. Then (Γ \ y) x reduces to
+None, and with this, the two assumptions contradict eachother.
+AT_Abs. The goal is to show ¬appears_free_in x (λy : T2. t1).
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+35
+==PAGE:44==
+Γ1, Γ2 : string ⇀ty
+x, y : string
+T1, T2 : ty
+t1 : tm
+(y 7→T2; Γ1) ⊢t1 ∈T1; Γ2
+Γ2 y = None
+Γ1 x = (y 7→Γ1 y; Γ2) x.
+(y 7→T2; Γ1) x = Γ2 x =⇒¬appears_free_in x t1.
+¬appears_free_in x (λy : T2. t1).
+Assuming that x appears free in (λy : T2. t1), it must then be that y ̸= x and that x appears
+free in t1. Then the assumption Γ1 x = (y 7→Γ1 y; Γ2) x reduces to Γ1 x = Γ2 x, and the
+premise to the induction hypothesis reduces to the same, thus yielding that x does not
+appear free in t1, contradicting the initial assumption.
+AT_App, AT_Add. The cases proceed identically; AT_App is elaborated. The goal is to
+show ¬appears_free_in x (t1 t2)..
+Γ1, Γ2, Γ3 : string ⇀ty
+x : string
+T1, T2 : ty
+t1, t2 : tm
+Γ1 x = Γ3 x.
+Γ1 x = Γ2 x =⇒¬appears_free_in x t1.
+Γ2 x = Γ3 x =⇒¬appears_free_in x t2.
+¬appears_free_in x (t1 t2).
+Since Γ1 and Γ3 agree with regard to x, Γ1 and Γ2 also agree with regard to x
+(algorithmic_monotonicity_some, algorithmic_monotonicity_none).
+Similarly, Γ2 and
+Γ3 also agree with regard to x by equality. Assuming x appears free in (t1 t2), it must
+then appear free in either t1 or t2; in both cases, an induction hypothesis provides a direct
+contradiction.
+AT_Nat. The goal is to show ¬appears_free_in x n.
+Γ : string ⇀ty
+n : N
+x : string
+Γ1 x = Γ1 x.
+¬appears_free_in x n.
+Assuming that x appears free in n yields a direct contradiction.
+The result in the other direction is simpler:
+Lemma 26 (well_typed_conservation_2). If a term t is well-typed, and a variable x does
+not appear free in t, then the input and output contexts agree on x.
+∀Γ t T Γ′, Γ ⊢t ∈T; Γ′ =⇒∀x, ¬appears_free_in x t =⇒Γ x = Γ′ x.
+36
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:45==
+Proof. The proof is by case analysis on Γ x; either there is some U such that Γ x = Some U
+or Γ x = None. If Γ x = Some U, then by algorithmic monotonicity, either Γ′ x = Some U
+or Γ′ x = None. If Γ′ x = Some U, then the goal is shown directly. If Γ′ x = None, then by
+algorithmic consumption, x must appear free in t; this contradicts the assumption that it
+does not. Finally, if Γ x = None, then by algorithmic monotonicity, also Γ′ x = None.
+A corollary of well_typed_conservation is that closed terms do not affect the input context:
+Lemma 27 (well_typed_closed_eq). if a term t is well-typed and closed, then the input
+and output contexts must be the same.
+∀Γ t T Γ′, Γ ⊢t ∈T; Γ′ =⇒closed t =⇒Γ′ = Γ.
+Proof. The goal is to show that Γ and Γ′ agree on every possible variable. Since t is well-
+typed with Γ and Γ′ as input and output contexts, respectively, well_typed_conservation
+states that they must agree on every variable x if x does not appear free in t. Since t is
+closed, it is trivially impossible for any x to appear free in t.
+A further corollary of this, in conjunction with well_typed_empty_closed, is that if something
+is well-typed in the empty input context, then the output context must also be the empty
+context:
+Lemma 28 (well_typed_empty). If a term t is well-typed in the empty input context, then
+the output context is also empty.
+∀t T Γ, ⊢t ∈T; Γ =⇒Γ = ε.
+Proof. Since t is well-typed in the empty context, it must be closed (well_typed_empty_closed).
+Since t is well-typed and closed, the input and output contexts in the typing derivation must
+be the same (well_typed_closed_eq). Since the input context is the empty context, then
+the output context is also the empty context.
+The proposition appears_free_once_in describes the notion that a variable appears ex-
+actly once in a term, shown in figure 6.3.
+The consumption and conservation results together imply that free variables appear ex-
+actly once in a well-typed term:
+Theorem 29 (well_typed_appears_free_once). If a term t is well-typed, then all variables
+that appear free in t appear exactly once.
+∀Γ t T Γ′, Γ ⊢t ∈T; Γ′ =⇒∀x, appears_free_in x t =⇒appears_free_once_in x t.
+Proof. The proof is by induction on Γ ⊢t ∈T; Γ′.
+AT_V ar. The goal is to show that x appears free once in y.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+37
+==PAGE:46==
+afoi_var
+appears_free_once_in x x
+y ̸= x
+appears_free_once_in x t afoi_abs
+appears_free_once_in x (λy : T, t)
+appears_free_once_in x t1
+¬appears_free_in x t2 afoi_app1
+appears_free_once_in x (t1 t2)
+¬appears_free_in x t1
+appears_free_once_in x t2 afoi_app2
+appears_free_once_in x (t1 t2)
+appears_free_once_in x t1
+¬appears_free_in x t2 afoi_add1
+appears_free_once_in x(t1 + t2)
+¬appears_free_in x t1
+appears_free_once_in x t2 afoi_add2
+appears_free_once_in x (t1 + t2)
+Figure 6.3: The inference rules of the appears_free_once_in proposition.
+Γ : string ⇀ty
+x, y : string
+T : ty
+Γ y = Some T.
+appears_free_in x y.
+appears_free_once_in x y.
+Since appears_free_in x y, it must be that x = y, and x appears free once in x by
+definition, so this solves the goal.
+AT_Abs. The goal is to show that x appears free once in (λy : T2. t1).
+Γ1, Γ2 : string ⇀ty
+x, y : string
+T1, T2 : ty
+t1 : tm
+(y 7→T2; Gamma1) ⊢t1 ∈T1; Γ2.
+Γ2 y = None.
+appears_free_in x (λy : T2. t1).
+appears_free_in x t1 =⇒appears_free_once_in x t1
+appears_free_once_in x (λy : T2. t1).
+Since x appears free in (λy : T2. t1), it must be that x ̸= y and x appears free in t1. This
+provides the premise of the induction hypothesis, which in turn solves the goal.
+AT_App. The goal is to show that x appears free once in (t1 t2).
+38
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:47==
+Γ1, Γ2, Γ3 : string ⇀ty
+x : string
+T1, T2 : ty
+t1, t2 : tm
+Γ1 ⊢t1 ∈(T2 ⊸T1); Γ2
+Γ2 ⊢t2 ∈T2; Γ3
+appears_free_in x (t1 t2).
+appears_free_in x t1 =⇒appears_free_once_in x t1.
+appears_free_in x t2 =⇒appears_free_once_in x t2.
+appears_free_once_in x (t1 t2).
+By case analysis on appears_free_in x (t1 t2), x appears free either in t1 or in t2.
+If x appears free in t1, then it appears exactly once via the induction hypothesis. In ad-
+dition, any assumption about it is consumed in its corresponding typing derivation, so
+Γ2 x = None (well_typed_consumption). Then it must also be that Γ3 x = None, since
+it cannot be introduced in the other typing derivation (algorithmic_monotonicity_none).
+Then Γ2 x = Γ3 x, and then x cannot appear free in t2 (well_typed_conservation). In
+summary, x appears free once in t1, and it does not appear free in t2, so the goal is
+solved.
+If x appears free in t2, then it appears free exactly once via the induction hypothesis. In
+addition, Γ2 must ascribe some type U to x, since x appears free in t2 and t2 is well-
+typed with Γ2 as its input context (well_typed_consumption). Moreover, this assumption
+about x must come from Γ1, since Γ2 is the output context of the typing derivation where
+Γ1 is the input context (algorithmic_monotonicity_some). Since Γ1 x = Some U and
+Γ2 x = Some U, and t1 is well-typed with these two contexts as input and output contexts
+respectively, then x cannot appear free in t1 (well_typed_conservation). In summary, x
+appears free once in t2, and it does not appear free in t1, so the goal is solved.
+AT_Nat. The goal is to show that x appears free in n.
+Γ1 : string ⇀ty
+x : string
+n : N
+appears_free_in x n.
+appears_free_once_in x n.
+The assumption that x appears free in n is an inherent contradiction.
+AT_Add. This case proceeds identically to the case AT_App.
+For an unrestricted type system, a classical result is that of context invariance: given a
+typing derivation for some term, the typing context can be replaced by any other context
+that ascribes the same types to the free variables of the term. For a declarative linear typ-
+ing relation, this is not possible to express; the typing context must cover exactly the free
+variables, so there is only one possible choice. For the algorithmic linear typing relation, it
+can be expressed, with the effect that the output context also changes accordingly. This
+is shown in algorithmic_context_invariance:
+Lemma 30 (algorithmic_context_invariance). If a term t is well-typed with some input
+context Γ1 and an output context Γ2, and there is an input context Γ′
+1 that assigns the
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+39
+==PAGE:48==
+same types to the free variables in t as Γ1, then there exists an output context Γ′
+2 such
+that the term t is well-typed with Γ′
+1 and Γ′
+2 as its input and output contexts respectively.
+∀Γ1 t T Γ2, Γ1 ⊢t ∈T; Γ2 =⇒
+∀Γ′
+1, (∀x, appears_free_in x t =⇒Γ1 x = Γ′
+1 x) =⇒
+∃Γ′
+2, Γ′
+1 ⊢t ∈T; Γ′
+2.
+Proof. The proof is by induction on Γ1 ⊢t ∈T; Γ2.
+AT_V ar. The goal is to show that there exists a context Γ′
+2 such that Γ′
+1 ⊢x ∈T; Γ′
+2.
+Γ, Γ′
+1 : string ⇀ty
+x : string
+T : ty
+Γ x = Some T.
+∀y, appears_free_inyx =⇒Γ y = Γ′
+1 y.
+∃Γ′
+2, Γ′
+1 ⊢x ∈T; Γ′
+2.
+In this case, Γ′
+2 must be the context Γ′
+1 \ x. Since Γ x = Some T, and Γ and Γ′
+1 agree,
+then Γ′
+1 = Some T. This suffices to show that Γ′
+1 ⊢x ∈T; (Γ′
+1 \ x), which solves the goal.
+AT_Abs. The goal is to show that there exists a context Γ′
+2 such that Γ′
+1 ⊢(λx : T1. t1) ∈
+(T2 ⊸T1); Γ′
+2.
+Γ1, Γ2, Γ′
+1 : string ⇀ty
+x : string
+T1, T2 : ty
+t1 : tm
+(x 7→T2; Gamma1) ⊢t1 ∈T1; Γ2.
+Γ2 x = None.
+∀y, appears_free_in y (λx : T2. t1) =⇒Γ y = Γ′
+1 y.
+∀Γ′
+1, (∀y, appears_free_in y (λx : T2. t1) =⇒Γ1 x = Γ′
+1 x) =⇒∃Γ′
+2, Γ′
+1 ⊢t1 ∈T1; Γ′
+2.
+∃Γ′
+2, Γ′
+1 ⊢(λx : T2. t1) ∈(T2 ⊸T1); Γ′
+2.
+The contexts (x 7→T2; Γ1) and (x 7→T2; Γ′
+1) agree about all variables that appear
+free in (λx : T2. t1) because for x in particular they trivially agree, and for all other
+free variables they agree by assumption. From the induction hypothesis, this provides
+a Γ′
+2 such that (x 7→T2; Gamma′
+1) ⊢t1 ∈T1; Γ′
+2.. Then the context (x 7→Γ′
+1 x; Γ′
+2)
+is the solution to the goal if Γ′
+2 x = None.
+This is the case if x appears free in t1
+(well_typed_consumption), which it does, because the assumption about x is consumed
+in the typing for t1 (well_typed_consumption). Thus the goal is solved.
+AT_App. The goal is to show that there exists a context Γ′
+3 such that Γ′
+1 ⊢(t1 t2) ∈T1; Γ′
+3.
+40
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:49==
+Γ1, Γ2, Γ3, Γ′
+1 : string ⇀ty
+T1, T2 : ty
+t1, t2 : tm
+Γ1 ⊢t1 ∈(T2 ⊸T1); Γ2.
+Γ2 ⊢t2 ∈T2; Γ3.
+∀x, appears_free_in x (t1 t2) =⇒Γ1 x = Γ′
+1 x.
+∀Γ′
+1, (∀x, appears_free_in x t1 =⇒Γ1 x = Γ′
+1 x) =⇒∃Γ′
+2, Γ′
+1 ⊢t1 ∈(T2 ⊸T1); Γ′
+2.
+∀Γ′
+2, (∀x, appears_free_in x t2 =⇒Γ2 x = Γ′
+2 x) =⇒∃Γ′
+3, Γ′
+2 ⊢t2 ∈T2; Γ′
+3.
+∃Γ′
+3, Γ′
+1 ⊢(t1 t2) ∈T1; Γ′
+3.
+First, since Γ1 and Γ′
+1 agree about all free variables in t1 by assumption, the first induction
+hypothesis states that there is some Γ′
+2 such that Γ′
+1 ⊢t1 ∈(T2 ⊸
+T1); Γ′
+2. Then
+the remaining challenge is to derive a Γ′
+3 such that Γ′
+2 ⊢t2 ∈T2; Γ′
+3 from the second
+induction hypothesis. In order to do this, it must be shown that the contexts Γ2 and Γ′
+2
+agree about all free variables in t2. Assuming a variable x appears free in (t2), it must then
+be the case that it appears free exactly once (well_typed_appears_free_once); and since
+it appears free in t2, it must not appear free in t1. That means any assumptions about x
+are conserved in the typing derivations about x, meaning that Γ2 x = Γ1 x and Γ′
+2 x = Γ′
+1 x
+(well_typed_conservation). Then, since Γ1 and Γ′
+1 agree about x, the contexts Γ2 and Γ′
+2
+must also agree about x by equality. This provides the context Γ′
+3 that solves the goal.
+AT_Nat. The goal is to show that there exists a Γ′
+2 such that Γ′
+1 ⊢n ∈Nat; Γ′
+2.
+Γ1, Γ′
+1 : string ⇀ty
+n : N
+∀x, appears_free_in x n =⇒Γ1 x = Γ′
+1 x.
+∃Γ′
+2, Γ′
+1 ⊢n ∈Nat; Γ′
+2.
+This case is trivial, since setting Γ′
+2 = Γ′
+1 solves the goal.
+AT_Add. This case proceeds identically to the case AT_App.
+The context invariance result is versatile, and implies both a weakening result, stating
+that things can be added to the context, and a strengthening result, stating that irrelevant
+things can be removed from the context. Both results are necessary in the following.
+The weakening result is shown specifically for the empty context here:
+Lemma 31 (well_typed_weakening_empty). If a term t is well-typed in the empty context,
+then it is well-typed with any context in both the input and output positions.
+∀t T, ⊢t ∈T; ε =⇒∀Γ, Γ ⊢t ∈T; Γ.
+Proof. This is a special case of context invariance. First, since t is well-typed in the
+empty context, it must be closed (well_typed_empty_closed). Then, since there are no
+free variables in t, Γ trivially agrees with the empty context, and there must be some Γ′
+such that Γ ⊢t ∈T; Γ′ (algorithmic_context_invariance). Finally, it must be the case
+that Γ′ = Γ since t is closed (well_typed_closed_eq). Thus the goal is solved.
+The corresponding strengthening result is also shown:
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+41
+==PAGE:50==
+Lemma 32 (well_typed_strengthening). If a term t is well-typed in a context Γ, and a
+variable x does not appear free in t, then t is also well-typed with any assumption about
+x removed from Γ.
+∀Γ t T Γ′, Γ ⊢t ∈T; Γ′ =⇒∀x, ¬appears_free_in x t =⇒(Γ \ x) ⊢t ∈T; (Γ′ \ x).
+Proof. This is also a special case of context invariance. First, since x does not appear
+free in t, the contexts Γ and Γ \ x agree about all the free variables in t, so there must
+be some Γ′′ such that (Γ \ x) ⊢t ∈T; Γ′′ (algorithmic_context_invariance). Then the
+remaining challenge is to show that Γ′′ must be exactly Γ′ \x. This is done by determining
+if for all variables x′, the two contexts agree. In order to determine whether the contexts
+agree about a variable x′, there are two cases to consider: either x′ appears free in t, or
+it does not.
+If x′ appears free in t, it must be different to x since x does not appear free in t. Then
+(Γ′ \ x) x′ reduces to Γ′ x′, and the goal is to show that Γ′ x′ = Γ′′ x′. This is indeed the
+case because any assumption about x′ is consumed in both typing derivations about t,
+so Γ′ x′ = None and Γ′′ x′ = None (well_typed_consumption).
+If x′ does not appear free in t, then there are again two cases: either x is the same as x,
+or they are different. In both cases, any assumptions about x′ must be conserved in both
+typing derivations, so Γ′ x′ = Γ x′ and Γ′′ x′ = (Γ \ x) x′. Then, if x′ = x, both (Γ′ \ x) x′
+and (Γ \ x) x′ are None, which solves the goal. If x′ ̸= x, then (Γ′ \ x) x′ = Γ′ x′ and
+(Γ \ x) x′ = Γ x′, and this also solves the goal.
+With the weakening and strengthening results, the last prerequisite lemma for progress
+and preservation, stating that substitution preserves typing, can be obtained:
+Lemma 33 (substitution_preserves_typing). If a term t is well-typed, and the input context
+ascribes the type U to the variable x, and the substitute v is well-typed with type U in the
+empty context, then the result of substitution is well-typed without an assumption about x
+in the context.
+∀Γ t T Γ′, Γ ⊢t ∈T; Γ′ =⇒
+∀x U, Γ x = Some U =⇒
+Γ′ x = None =⇒
+∀v, ⊢t ∈T; =⇒
+(Γ \ x) ⊢[x := v] t ∈T; Γ′
+Proof. The proof is by induction on Γ ⊢t ∈T; Γ′.
+AT_V ar. In this case, t = x and the goal is to show that (Γ \ x′) ⊢[x′ := v] x ∈T; Γ \ x.
+The assumptions are that Γ x = Some T, Γ x′ = Some U, and (Γ \ x) x′ = None.
+Since x is well-typed with x′ in its input context, and x′ is removed from the output context,
+it must be the case that x′ appears free in x, so x′ = x and T = U. Then substitution
+occurs, and the goal becomes (Γ \ x) ⊢v ∈U; Γ \ x. The value v is well-typed in the
+empty context by assumption, which suffices to show the goal by algorithmic weakening.
+42
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:51==
+AT_Abs. In this case, t = (λx : T2. t1), and the goal is to show that (Γ1\x′) ⊢[x′ := v] (λx :
+T2. t1) ∈T2 ⊸T1; x 7→Γ1 x; Γ2. The assumptions are that (x 7→T2; Γ1) ⊢t1 ∈T1; Γ2,
+Γ2 x = None, as well as Γ1 x′ = Some U and (x 7→Γ1 x; Γ2) x′ = None.
+Since x′ appears free in (λx : T2. t1), because the abstraction is well-typed in a typing
+derivation where x′ is consumed, it must be the case that x′ ̸= x and that x′ appears free
+in t1. Thus substitution continues into the abstraction, yielding the goal (Γ1 \ x′) ⊢(λx :
+T2. [x′ := v]t1) ∈T2 ⊸T1; x 7→Γ1 x; Γ2. The induction hypothesis, in conjunction with
+some trivial rewriting steps, provides the goal.
+AT_App. In this case t = (t1 t2) and the goal is (Γ1 \ x′) ⊢[x′ := v] (t1 t2) ∈T1; Γ3. The
+assumptions are Γ1 ⊢t1 ∈(T2 ⊸T1); Γ2 and Γ2 ⊢t2 ∈T2; Γ3, and Γ1 x′ = Some U as
+well as Γ3 x′ = None.
+The term (t1 t2) is well-typed in a typing derivation where x′ is consumed, so x′ must
+appear free once in the term. Thus either x′ appears free once in t1, and not at all in
+t2, or vice versa. In the former case, the term [v′ := v]t1 is well-typed via the induction
+hypothesis, and the substitution in t2 is vacuous, so it is well-typed by assumption. In
+the latter case, the substitution in t1 is vacuous, and by algorithmic strengthening, t1 is
+also well-typed with Γ1 \ x′ as its input context. The term t2 is well-typed by the induction
+hypothesis.
+AT_Nat. In this case, t = n and the goal is (Γ1 \ x′) ⊢n ∈Nat; Γ1. The assumptions
+are Γ1 x′ = Some U and Γ1 x′ = None, which directly contradict eachother.
+AT_Add. This case proceeds similarly to AT_App.
+Finally, progress and preservation can be shown.
+Theorem 34 (progress). If a term t is well-typed with with type T in an empty input context,
+then it is either a value, or it steps to some other term.
+∀t T
+⊢t ∈T; ε =⇒value t ∨∃t′, t −→t′.
+The proof of progress is, in principle, unaffected by linearity, making the procedure iden-
+tical to that of the same proof for the simply typed lambda calculus. Such a proof can be
+found in many texts, and will not be elaborated here.
+In practice, there are some differences, however. The mechanisation is based on [15].
+The definition of progress given above causes some technical issues related to the shape
+of the induction principle. A first attempt might start like this:
+1
+Theorem progress : forall t T,
+2
+well_typed empty t T empty →
+3
+value t ∨exists t’, t −→t’.
+4
+Proof.
+5
+intros t T Hwt.
+6
+induction Hwt.
+In the cases AT_Abs and AT_Nat, the proof is trivial; they are inherently values. The
+case AT_V ar entails the following proof context:
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+43
+==PAGE:52==
+Γ : ty
+T : ty
+x : string
+Γ x = Some T
+value x ∨∃t′, x −→t′.
+Any knowledge about the input (and output) contexts being empty has been lost, and the
+assumption Γ x = Some T is not contradictory, so the case cannot be solved. The remedy
+suggested in [15] for an unrestricted type system is to use the remember tactic to save that
+knowledge:
+1
+Theorem progress : forall t T,
+2
+well_typed empty t T empty →
+3
+value t ∨exists t’, t −→t’.
+4
+Proof.
+5
+intros t T Hwt.
+6
+remember empty as Gamma.
+7
+induction Hwt.
+With this setup, the entailing context is:
+Γ : ty
+T : ty
+x : string
+Γ x = Some T
+Γ \ x = ε
+value x ∨∃t′, x −→t′.
+It is unclear why the assumption Γ x = Some T still does not involve the empty context,
+but since it does not, the assumptions are still not contradictory. However, the following
+definition of progress fixes the issue:
+∀t T Γ′, ⊢t ∈T; Γ′ =⇒value t ∨∃t′, t −→t′.
+This definition is clearly equivalent; via well_typed_empty the context Γ can only be the
+empty context. Indeed, this is how the mechanisation proceeds, but not before setting up
+the induction properly:
+1
+Theorem progress : forall t T Gamma’,
+2
+well_typed empty t T Gamma’ →
+3
+value t ∨exists t’, t −→t’.
+4
+Proof.
+5
+intros t T Gamma’ Hwt.
+6
+remember empty as Gamma.
+7
+induction Hwt; auto.
+This yields the following context for AT_V ar:
+44
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:53==
+Γ : ty
+T : ty
+x : string
+Γ x = Some T
+Γ = ε
+value x ∨∃t′, x −→t′.
+The contradiction is clear here, and the proof can continue. In the cases AT_App and
+AT_Add, where the typing derivation of one term depends on the typing derivation of the
+other, well_typed_empty is used to recover the information that all contexts are empty
+since the input context to the first typing derivation is empty.
+Preservation is likewise stated in terms of the empty context in both input and output
+positions:
+Theorem 35 (preservation). If a term t is well-typed with type T in the empty input context,
+and it steps to some other term t′, then t′ is also well-typed with type T in the empty input
+context.
+∀t T
+⊢t ∈T; ε =⇒∀t′, t −→t′ =⇒⊢t′ ∈T; ε.
+The proof of preservation is, like that of progress, very similar to the same proof for the
+simply typed lambda calculus, so the proof is omitted here as well. The mechanisation is
+also due to [15], and it suffers from the same problem as the mechanisation of progress.
+The solution is the same - preservation is instead defined as:
+∀t t′ T Γ′, ⊢t ∈T; Γ′ =⇒∀t′, t −→t′ =⇒⊢t′ ∈T; Γ′.
+With progress and preservation in place, soundness entails:
+Theorem 36 (well_typed_sound). If a term t is well-typed with type T in the empty context,
+then it is safe.
+∀t T, ⊢t ∈T; ε =⇒safe t.
+Proof. The assumptions are that the term t is well-typed with an empty input context, has
+type t, and multisteps to the term t′. The goal is to show that t′ is either a value, or steps
+to some term t′′. The proof is by induction on t −→∗t′.
+Base case.
+t : tm
+T : ty
+Γ : context
+⊢t ∈T; Γ
+value t ∨∃t′, t −→t′.
+Via progress, since t is well-typed with an empty input context, it must either be a value
+or step to some term t′. This solves the goal.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+45
+==PAGE:54==
+Inductive case.
+t, t′, t′′ : tm
+T : ty
+Γ : context
+⊢t ∈T; Γ
+t −→t′
+t′ −→∗t′′
+⊢t ∈T; Γ =⇒value t′′ ∨∃t′′′, t′′ −→t′′′.
+value t′′ ∨∃t′′′, t′′ −→t′′′.
+Via preservation, t′ is also well-typed with the empty input context and type T. Via the
+induction hypothesis, this suffices to solve the goal.
+6.0.2
+Typechecking
+With the type system in place, a typechecker can be implemented. As a result of using an
+algorithmic typing derivation, the typechecker is simple to implement, although somewhat
+verbose. The implementation is due to [15], modified for the linear type system. An
+excerpt is shown below, covering the cases for variables and abstractions.
+1
+Fixpoint typecheck (Gamma : context) (t: tm): option (ty * context) :=
+2
+match t with
+3
+| Var x ⇒
+4
+match Gamma x with
+5
+| Some T ⇒Some (T, Gamma \ x)
+6
+| None ⇒None
+7
+end
+8
+| Abs x T t ⇒
+9
+match typecheck (x |→T; Gamma) t with
+10
+| Some (T1, Gamma2) ⇒
+11
+match Gamma2 x with
+12
+| Some _ ⇒None
+13
+| None ⇒Some ((Ty_Arrow T T1), (x !→Gamma x; Gamma2))
+14
+end
+15
+| None ⇒None
+16
+end
+17
+(* [omitted for brevity] *)
+18
+end.
+The function takes a context and a term, and produces an option: if typechecking suc-
+ceeds, it returns Some (T, Γ), where T is the type that t was determined to have, and Γ is
+the output context; if typechecking fails, it returns None. The general pattern is that the
+typechecker recurses through the substructure of the given term in accordance with the
+rules of the typing relation.
+6.0.3
+Soundness of the Typechecker
+Similarly to the implementation, the soundness proof is simple, but somewhat verbose in
+practice.
+Lemma 37 (typecheck_sound). If typechecking of a term t in an input context Γ succeeds,
+producing a type T and an output context Γ′, then the term t′ is well-typed with type T in
+the input context Γ and the output context Γ′.
+46
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:55==
+∀Γ t T Γ′, typecheck Γ t = Some (T, Γ′) =⇒Γ ⊢t ∈T; Γ′.
+Proof. The proof proceeds by induction on the term t. In all cases, the verbosity stems
+from deriving the necessary premises from the fact that typechecking succeeded.
+In the V ar case, the assumption typecheck Γ x = Some (T, Γ′) reduces to a match on
+the result of Γ x. If Γ x is Some T, then the assumption becomes Some (T, Γ \ x) =
+Some (T, Γ′), and thus Γ \ x = Γ′, which is the necessary premise for the AT_V ar
+rule. If Γ x = None, then the assumption becomes None = Some (T, Γ′), which is a
+contradiction, thus discharging the case. The remaining cases are similar, though some
+cases additionally require application of the induction hypothesis.
+The mechanisation uses two tactics to break down the assumptions: destruct_ty and
+destruct_typecheck. The destruct_ty tactic performs case analysis whenever an as-
+sumption contains a match directly on a type, or on the equality of two types, or on a
+context lookup for a type, and automatically discharges the contradictory cases. The
+destruct_typecheck tactic is similar, unpacking destructuring let-assignments in any
+assumptions as well as performing case analysis on any match on an application of
+typecheck to some arguments, discharging the contradictory cases.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+47
+==PAGE:56==
+7
+The DeBruijn Language
+The first intermediate language is an untyped lambda calculus with de Bruijn-indices.
+The use of de Bruijn-indices simplify binders by making references unique by convention.
+When viewing binders as a stack in the order they are introduced, de Brujin-indices index
+from the top of the stack. This makes it an especially convenient intermediate represen-
+tation before transitioning to a stack-based semantics. The syntax is shown in figure 7.1,
+and the semantics is shown in figure 7.2. The substitution function is modified accordingly
+to increment the index upon entering an abstraction. Besides its use of de Bruijn-indices,
+the syntax and semantics is similar to that of the source language.
+Like the source language, the semantics makes use of a value proposition to denote valid
+non-reducible terms, and makes use of that proposition to enforce a left-to-right evaluation
+order to make the semantics deterministic. Both proofs proceed almost exactly as for the
+source language, and thus will not be elaborated here.
+Lemma 38 (value_is_nf). Values are normal forms.
+∀t, value t =⇒normal_form t.
+Theorem 39 (step_deterministic). The −→relation is deterministic.
+∀t t′ t′′, t −→t′ =⇒t −→t′′ =⇒t′ = t′′.
+7.0.1
+Lowering
+The only challenge in lowering a LinLambda term to a DeBruijn term resides in the trans-
+lation of name-based binders to index-based binders. In order to do this, a list is used to
+keep track of the names of binders in the order of their introduction, emulating a stack. To
+produce the equivalent index for a named variable in the source term, a function pos_of
+determines the position of the name in this list:
+1
+Fixpoint pos_of_acc {T: Type} (f: T →T →bool) (v: T) (l: list T) (i: nat): option nat :=
+2
+match l with
+3
+| nil ⇒None
+4
+| x :: l’ ⇒if f v x
+5
+then Some i
+6
+else pos_of_acc f v l’ (i + 1)
+<term> ::= $i
+[V ar]
+| (λ. <term>)
+[Abs]
+| <term> <term>
+[App]
+| n
+[Const]
+| <term> + <term>
+[Add]
+Figure 7.1: The syntax of the DeBruijn language.
+48
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:57==
+v_abs
+value(λ. t)
+v_const
+value n
+value t2
+ST_AppAbs
+(λ. t1) t2 −→[0 := t2] t1
+t1 −→t′
+1
+ST_App1
+t1 t2 −→t′
+1 t2
+value t1
+t2 −→t′
+2 ST_App2
+t1 t2 −→t1 t′
+2
+n = n1 + n2
+ST_AddConsts
+n1 + n2 −→n
+t1 −→t′
+1
+ST_Add1
+t1 + t2 −→t′
+1 + t2
+value t1
+t2 −→t′
+2 ST_Add2
+t1 + t2 −→t1 + t′
+2
+Figure 7.2: The inference rules of the DeBruijn semantics.
+7
+end.
+8
+9
+Definition pos_of (k: string) (l: list string): option nat :=
+10
+pos_of_acc String.eqb k l 0.
+The function traverses the list, keeping an accumulator that is the current index of the
+node. If the node is the one that is being searched for, that index is returned. If it is not
+that node, then the accumulator is incremented, and the function recursively searches the
+remainder of the list.
+A number of helpful properties are shown for this function. The proofs are omitted here
+for brevity, but are available in the mechanisation.
+Lemma 40 (pos_of_neq). For any two strings x and x′, if they are not equal, then their
+positions in a list of strings is also not equal.
+∀x x′ xs i i′, pos_of x xs = Some i =⇒pos_of x′ xs = Some i′ =⇒x ̸= x′ =⇒i ̸= i′.
+Lemma 41 (pos_of_eq_inv). If in the same list of things the positions of two strings are
+the same, then the two strings must also be the same.
+∀x x′ xs i, pos_of x xs = Some i =⇒pos_of x′ xs = Some i =⇒x = x′.
+Lemma 42 (pos_of_cons). If y ̸= x, then prepending x to the list xs causes the position
+of y to increase by one.
+∀y x xs i, y ̸= x =⇒pos_of y xs = Some i =⇒pos_of y (x :: xs) = Some (i + 1).
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+49
+==PAGE:58==
+Lemma 43 (pos_of_cons_inv). If y ̸= x, then removing x from the list xs causes the
+position of y to decrease by one.
+∀y x xs i, y ̸= x =⇒pos_of y (x :: xs) = Some (i + 1) =⇒pos_of y xs = Some i.
+The function lower implements the lowering step from LinLambda to DeBruijn. It takes a
+LinLambda term and a list of strings as input, and produces a result, which is either an
+Ok containing the translated DeBruijn term, or an Err containing an error represented as
+a string.
+1
+Fixpoint lower (t: tm) (env: list string): result :=
+2
+match t with
+3
+| Var x ⇒
+4
+match pos_of x env with
+5
+| Some i ⇒Ok (DeBruijn.Var i)
+6
+| None ⇒Err "undefined variable"%string
+7
+end
+8
+| Abs x T t ⇒
+9
+match lower t (x :: env) with
+10
+| Ok t’ ⇒Ok (DeBruijn.Abs t’)
+11
+| Err err ⇒Err err
+12
+end
+13
+(* [omitted for brevity] *)
+14
+end.
+Listing 7.1: An excerpt from the lower function
+In the mechanisation, an inductive proposition representing the lowering of terms is con-
+structed; this makes reasoning about lowering easier by enabling induction on the lower-
+ing. It is shown once that if lower s env = Ok t, then is_lowering_of env s t holds, and
+then that proposition is used in all subsequent proofs. The rules of the proposition are
+shown in 7.3.
+pos_of x env = Some i lower_var
+is_lowering_of env x $i
+is_lowering_of (x :: env) s t
+lower_abs
+is_lowering_of env (λx : T. s) (λ. t)
+is_lowering_of env s1 t1
+is_lowering_of env s2 t2 lower_app
+is_lowering_of env (s1 s2) (t1 t2)
+lower_const
+is_lowering_of env n n
+is_lowering_of env s1 t1
+is_lowering_of env s2 t2 lower_add
+is_lowering_of env (s1 + s2) (t1 + t2)
+Figure 7.3: The inference rules of the is_lowering_of proposition.
+50
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:59==
+Lemma 44 (lower_is_lowering_of). If lowering of a term s with a list of binders env suc-
+ceeds, producing a term t, then t is the lowering of s with the list of binders env.
+∀s t env, lower s env = Ok t =⇒is_lowering_of env s t.
+Proof. The proof is by induction on s, and in all cases, derives the necessary premises
+from the assumption that lowering succeeds.
+Lastly, the function compile combines the two functions typecheck and lower. It first
+typechecks the term with the empty context, and if typechecking succeeds, lowers the
+term:
+1
+Definition compile (t: tm): result :=
+2
+match typecheck empty t with
+3
+| Some p ⇒lower t nil
+4
+| None ⇒Err "typecheck failed"%string
+5
+end
+6
+.
+Listing 7.2: The compile function.
+7.0.2
+Semantic Preservation
+In order to prove semantic preservation of the translation from LinLambda to DeBruijn, a
+forward simulation is constructed. First, a suitable correspondence between LinLambda
+terms and DeBruijn terms must be defined, describing terms that reduce similarly.
+In abstract terms, a LinLambda term s and a DeBruijn term t correspond if they are struc-
+turally identical and the variables occurring in the LinLambda term correspond to the in-
+dices occurring in the same places in the DeBruijn term. Two terms correspond with
+regard to a name x and an index i if neither appear free in their respective terms, or if
+they appear free in the same positions in their respective terms. The ∼(correspond) and
+correspond_wrt relations capture these criteria concretely, and are shown in figure 7.4
+and 7.5, respectively.
+co_var
+x ∼$i
+x ∈s ∼0 ∈t
+s ∼t co_abs
+(λx : T, s) ∼(λ. t)
+s1 ∼t1
+s2 ∼t2 co_app
+(s1 s2) ∼(t1 t2)
+co_const
+n ∼n
+s1 ∼t1
+s2 ∼t2
+co_add
+(s1 + s2) ∼(t1 + t2)
+Figure 7.4: The inference rules of the correspond relation.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+51
+==PAGE:60==
+co_wrt_var
+x ∈x ∼$i ∈$i
+x ∈s0 ∼(i + 1) ∈t0
+x ̸= y co_wrt_abs
+(λy : T, s0) ∼(λ. t0)
+x ∈s1 ∼i ∈t1
+x ∈s2 ∼i ∈t2 co_wrt_app
+x ∈(s1 s2) ∼i ∈(t1 t2)
+s1 ∼t1
+s2 ∼t2 co_wrt_add
+s1 + s2 ∼t1 + t2
+¬appears_free_in x s
+¬appears_free_in i t co_wrt_not_free
+x ∈s ∼i ∈t
+Figure 7.5: The inference rules of the correspond_wrt proposition.
+The rules of the correspond relation can be briefly summarised as follows:
+• co_var. Any variable corresponds to any index.
+• co_abs. A LinLambda abstraction and a DeBruijn abstraction correspond if the
+abstraction bodies correspond, and if the abstraction bodies correspond with regard
+to the bound name in the LinLambda abstraction and the index 0 in the DeBruijn
+term.
+• co_app. A pair of application terms correspond if their components correspond.
+• co_const. The constant n in a LinLambda term corresponds to the same constant
+n in a DeBruijn term.
+• co_add. A pair of addition terms correspond if their components correspond.
+Similarly, the correspond_wrt rules can be summarised as follows:
+• co_wrt_var. A pair of variables correspond with regard to the name x and the index
+i if those variables are exactly x and i.
+• co_wrt_abs. A pair of abstractions correspond with regard to x and i if the bound
+variable in the LinLambda abstraction is different to x, and the abstraction bodies
+correspond with regard to x and i + 1.
+• co_wrt_app. A pair of applications correspond with regard to x and i if their com-
+ponent terms correspond with regard to x and i.
+• co_wrt_add. A pair of additions correspond with regard to x and i if their component
+terms correspond with regard to x and i.
+• co_wrt_not_free. Any pair of terms correspond with regard to x and i if neither
+term has that variable appearing free in it.
+The proposition correspond_wrt is designed specifically to be sufficient to ensure that
+correspond is preserved over substitution. In doing so, there are two distinct cases to be
+52
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:61==
+considered:
+1. The variable being substituted, x, does not appear free in the LinLambda term s,
+thus the substitution is vacuous. In this case the index i must not appear free in the
+DeBruijn term t, such that this substitution is also vacuous.
+2. The variable being substituted does appear free in the LinLambda term, in which
+case it must appear free in the same position in the DeBruijn term.
+This definition of correspondence is very strict. For example, a different definition might
+determine that a LinLambda term (λx : Nat. x + 1) and a DeBruijn term
+(1 + $0) correspond, since for any arguments to the abstractions that correspond, they
+would evaluate to the same thing (though this would not be the case for a call-by-name
+evaluation strategy). However, the strictness of the definition given here is desirable; it
+both matches the translation of the programs, and its strictness makes semantic preser-
+vation more apparent.
+In order to arrive at the result of semantic preservation, the high-level procedure of the
+remainder of this section is to first show the forward simulation, irrespective of lowering,
+and then show that lowering indeed produces terms that fit into the forward simulation.
+In order to show the forward simulation, the following properties of corresponding terms
+s and t are shown:
+1. When the LinLambda term is a value, then so is the DeBruijn term.
+2. When the terms correspond with regard to variables x and i, and y and j, respec-
+tively, then they continue to correspond with regard to variables x and i after the
+substitution of y and j for closed substitutes a and b.
+3. When the terms correspond with regard to variables x and i, then they continue to
+correspond after the substitution of x and i for closed substitutes a and b.
+4. When both terms are closed, and the LinLambda term steps to a term s′, then the
+DeBruijn term also steps to a term t′ such that s′ and t′ correspond.
+The first result is simple:
+Lemma 45 (correspond_value). If s ∼t, and s is a value, then so is t.
+∀s t, s ∼t =⇒value s =⇒value t.
+Proof. The proof proceeds by induction on s ∼t. In the cases co_abs and co_const, the
+DeBruijn term is a value by definition. In the remaining cases, the assumption that the
+LinLambda term is a value poses a contradiction; for example, a variable x cannot be a
+value.
+The next result is that substitution preserves correspond_wrt:
+Lemma 46 (correspond_wrt_subst). If s ∼t, and the terms correspond with regard to
+variables x and i, and y and j, respectively, then they continue to correspond with regard
+to x and i after the substitution of y and j for closed substitutes a and b.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+53
+==PAGE:62==
+∀s t, s ∼t =⇒
+∀a, closed a =⇒
+∀b, closed b =⇒
+∀x i, x ∈s ∼i ∈t =⇒
+∀y j, y ∈s ∼j ∈t =⇒
+x ∈([y := a] s) ∼i ∈([j := b] t).
+Proof. The proof is by induction on s ∼t.
+AT_V ar. In this case s = x and t = $i, and the goal is to show that x′ ∈[y := a] x ∼
+i′ ∈[j := b] $i. By assumption y ∈x ∼j ∈$i, so either y = x ∧j = i, or y ̸=
+x ∧j ̸= i, meaning they do not appear free in their respective terms. In the former case,
+both variables are substituted, and since the substitutes are closed, they correspond with
+regard to all variables. In the latter case, the substitution is vacuous, so the goal is given
+by assumption.
+AT_Abs. In this case s = (λx : T. s0) and t = (λ. t0), and the goal is to show that
+x′ ∈[y := a] (λx : T. s0) ∼i′ ∈(λ. t0). Again by case analysis on y ∈(λx : T. s0) ∼j ∈
+(λ. t0), either y ̸= x and y ∈s0 ∼j + 1 ∈t0, or the variables do not appear free in their
+respective terms. In the latter case the substitution is again vacuous, and thus given by
+assumption. In the former case, a further case analysis on x′ ∈(λx : T. s0) ∼i′ ∈(λ. t0)
+provides either x′ ∈s0 ∼i′ + 1 ∈t0 or that x′ and i′ do not appear free in the respective
+abstractions. If x′ ∈s0 ∼i′ + 1 ∈t0, then the result is given by the induction hypothesis
+since substitution continues into the substitution body. If x′ and i′ do not appear free in
+the respective abstractions, then the terms correspond with regard to x′ and i′ regardless
+of substitution.
+AT_App. This case proceeds similarly to the case AT_Abs.
+AT_Nat. In this case s = n and t = n. The goal is to show that x′ ∈n ∼i′ ∈n. This
+holds trivially since the variables cannot appear free in their respective terms.
+ATAdd. This case proceeds similarly to the case AT_Abs.
+Building upon this result, substitution preserves correspond:
+Lemma 47 (correspond_subst). If s and t are two corresponding terms, and x in s corre-
+sponds to i in t, and two substitutes a and b correspond and are closed, then the substi-
+tution of x for a in s, and the substitution of i for b in t correspond.
+∀s t, s ∼t =⇒
+∀x i, x ∈s ∼i ∈t =⇒
+∀a, closed a =⇒
+∀b, closed b =⇒
+a ∼b =⇒
+([x := a] s) ∼([i := b] t).
+Proof. The proof is by induction on s ∼t.
+54
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:63==
+co_var. In this case s = x and t = i, and the goal is [x′ := a] x ∼[i′ := b] $i. By assumption
+x′ ∈x ∼i′ ∈i, so either x′ = x ∧i′ = i or x′ ̸= x ∧i′ ̸= i. In the former case the variables
+in the goal are substituted, and the substitutes correspond by assumption. In the latter
+case, the substitution is vacuous, and arbitrary variables correspond by definition.
+co_abs. In this case s = (λx : T. s0) and t = (λ. t0), and the goal is [x′ := a] (λx : T. s0) ∼
+[i′ := b] (λ. t0). Case analysis on x′ ∈(λx : T. s0) ∼i′ ∈(λ. t0) yields either x′ ̸= x and
+x′ ∈s0 ∼i′ + 1 ∈t0 or they do not appear in their respective terms. In the latter case the
+substitution is vacuous, and the result is trivial. In the former case substitution continues
+into the abstraction bodies, so the goal becomes (λx : T. [x′ := a]s0) ∼(λ. [i′ + 1 := b]t0).
+Since a and b are both closed, x ∈([x′ := a]s0) ∼0 ∈([i′+1 := b]t0), and via the induction
+hypothesis [x′ := a]s0 ∼[i′ + 1 := b]t0.
+co_app. In this case s = (s1 s2) and t = (t1 t2), and the goal is [x′ := a](s1 s2) ∼[i′ :=
+b](t1 t2). Either x′ ∈s1 ∼i′ ∈t1 and similarly for s2 and t2, or x′ and i′ do not appear in
+those terms. In the former case the result is given by the two induction hypotheses, and
+in the latter case the substitution is vacuous, so the result is trivial.
+co_const. In this case s = n and t = n, so substitution does nothing and the result is
+trivial.
+co_add. This case proceeds similarly to co_app.
+The preceding results are sufficient to show forward simulation of stepping states. Since
+the LinLambda and DeBruijn semantics are so similar, this is a lockstep simulation:
+Lemma 48 (forward_simulation_lockstep). If s −→s′, and s ∼t, then there exists a t′
+such that t −→t′ and s′ ∼t′.
+∀s, closed s =⇒∀s′, s −→s′ =⇒∀t, closed t =⇒s ∼t =⇒∃t′, t −→t′ ∧s′ ∼t′.
+Proof. The proof is by induction on s −→s′.
+ST_AppAbs. In this case s = (λx : T. s1) s2 and t = (λ. t1) t2, and the goal is ∃t′, (λ. t1) t2 −→
+t′ ∧[x := s2] s1 ∼[0 := t2] t1. The term s2 is a value. The only possibility is that
+(λ. t1) t2 −→[0 := t2] t1, becausethe s2 is a value so t2 must also be a value. This
+corresponds to [x := s2] s1 because substitution preserves correspondence.
+ST_App1. In this case s = (s1 s2) where s1 −→s′
+1 and t = (t1 t2), and the goal is
+∃t′, (t1 t2) −→t′ ∧(s′
+1 s2) ∼t′. The induction hypothesis provides t1 −→t′
+1, and thus t′
+must be (t′
+1 t2).
+ST_App2. This case proceeds similarly to ST_App1, except that t1 must be a value
+because s1 is, so the induction hypothesis provides t2 −→t′
+2.
+ST_AddConsts. In this case s = (n1 + n2) where (n1 + n2) −→n, and t = (n1 + n2), and
+the goal is ∃t′, (n1 + n2) −→t′ ∧n ∼t′. The result trivial.
+ST_Add1. This case proceeds similarly to ST_App1.
+ST_Add2. This case proceeds similarly to ST_App2.
+With the forward simulation of stepping states concluded, the remaining task is to show
+that compilation indeed provides the necessary premises for the forward simulation - the
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+55
+==PAGE:64==
+terms correspond and are closed. In order to show that lowering produces a correspond-
+ing term, some intermediate results are necessary. While most cases are obvious, the
+challenge is when lowering abstractions, as that is where the transformation from name-
+based variables to index-based variables occur.
+In order to show that lowering an abstraction produces a corresponding abstraction, it
+must be shown that those two abstractions correspond with regard to the variables that
+are introduced by the bindings. This is where the exact behavior of the lsit of names is
+important, and that is what the following results are about. The first is that if an index i
+appears free in the resulting term t, then it must have come from the original term:
+Lemma 49 (lowering_free_inv). When lowering a term s to t, and i appears free in t, then
+there exists an x such that the position of x in env is i, and x appears free in s.
+∀env s t, is_lowering_of env s t =⇒
+∀i, appears_free_in i t =⇒
+∃x, pos_of x env = Some i ∧appears_free_in x s.
+Proof. The proof is by induction on is_lowering_of env s t. In all cases except lower_abs,
+the result is shown simply by case analysis on the fact that i appears free in t, and in the
+cases lower_app and lower_add, subsequently using any relevant induction hypothesis
+to show the result. The case lower_const is contradicory.
+lower_abs. In this case s = (λx : T. s0) and t = (λ. t0), and t0 is the lowering of s0 with the
+stack of binders x :: env. The goal is ∃x′, pos_of x′ env = Some i′∧appears_free_in x′ (λx :
+T. s0). Since i′ appears free in (λ. t0), it must be that i′ + 1 appears free in t0. Then the
+induction hypothesis provides an x′ such that pos_of x′ (x :: env) = Some (i′ + 1) and
+appears_free_in x′ s0. Then either x′ = x or x′ ̸= x. The former case is a contradiction,
+since then pos_of x′ (x :: env) = Some (i′ + 1) = Some 0, which is impossible. In the
+latter case, pos_of x′ (x :: env) = pos_of x′ env = Some i′, so x′ solves the goal.
+Next, variables are mutually non-occurring:
+Lemma 50 (lowering_not_free). When lowering a term s to t, and the position of x′ in env
+is i′, and if x′ does not appear free in s, then i′ does not appear free in t.
+∀env s t, is_lowering_of env s t =⇒
+∀x′ i′, pos_of x′ env = Some i′ =⇒
+¬ appears_free_in x′ s =⇒
+¬ appears_free_in i′ t.
+Proof. The proof is again by induction on is_lowering_of env s t.
+lower_var. In this case s = x and t = $i, and the goal is to show ¬appears_free_in i′ $i.
+Either i′ appears free in $i or it does not; the latter case is trivial, so assume that i′ appears
+free in $i, so i′ = i. Then since pos_of x env = Some i and pos_of x′ env = Some i, it
+must be the case that x′ = x. Then the assumption that x′ does not appear free in x is a
+contradiction.
+56
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:65==
+lower_abs. In this case s = (λx : T. s0) and t = (λ. t0). Again the procedure is to derive a
+contradiction by assuming that i′ appears free in (λ. t0), so i′ +1 appears free in t0. Since
+x′ does not appear free in (λx : T. s0), either x′ = x or x′ ̸= x and x′ does not appear free
+in s0. If x′ = x, then since i′ + 1 appears free in t0, there must be some other x′′ such
+that pos_of x′′ (x :: env) = Some (i′ + 1) and x′′ appears free in s0. Then either x′′ = x
+so pos_of x′′ (x :: env) = Some0 = Some (i′ + 1) is a contradiction, or x′′ ̸= x, but then
+pos_of x′′ env = Some i′ = pos_of x env means that x′′ = x while x′′ ̸= x. If x′ ̸= x and x′
+does not appear free in s0, then pos_of x′ (x :: env) = Some (i′ + 1). Then the induction
+hypothesis states that i′ + 1 does not appear free in t0 contradicts the initial assumption.
+lower_app. In this case s = (s1 s2) and t = (t1 t2), and the goal is to show that
+¬appears_free_in i′ (t1 t2). Since x′ does not appear free in (s1 s2), it does not appear
+free in either term. Via both induction hypotheses, this provides that i′ does not appear
+free in either of t1 and t2, which is sufficient to show the goal.
+lower_const. In this case s = n and t = n. The result is trivial.
+lower_add. This case proceeds similarly to the case lower_app.
+These results combine to show that the list of names indeed guarantees that variables
+are translated properly:
+Lemma 51 (lowering_correspond_wrt). When lowering a term s to t, and the position of
+x′ in env is i′, then x′ in s corresponds to i′ in t.
+∀env s t, is_lowering_of env s t =⇒∀x i, pos_of x′ env = Some i′ =⇒x′ ∈s ∼i′ ∈t.
+Proof. The proof is again by induction on is_lowering_of env s t.
+lower_var. In this case s = x and t = $i, and the goal is x′ ∈x ∼i′ ∈$i. The assumptions
+are that pos_of x env = Some i and pos_of x′ env = Some i′. If x′ = x, then also i′ = i,
+making the goal trivial. If x′ ̸= x, then also i′ ̸= i, likewise making the goal trivial.
+lower_abs. In this case s = (λx : T. s0) and t = (λ. t0), and the goal is x′ ∈(λx :
+T. s0) ∼i′ ∈(λ. t0). By assumption, pos_of x env = Some i′. If x′ = x, then x′ cannot
+appear free in (λx : T. s0), so then i′ also does not appear free in (λ. t0), which makes
+the goal trivial. If x′ ̸= x, then x′ ∈s0 ∼i′ + 1 ∈t0 via the induction hypothesis, and thus
+x′ ∈(λx : T. s0) ∼i′ ∈(λ. t0).
+lower_app. This case is immediate by the two induction hypotheses.
+lower_const. This case is immediate by definition since x′ and i′ cannot appear free in
+their respective terms.
+lower_add. This case is also immediate by the two induction hypotheses.
+Finally, with this lemma, the fact that lowering produces a corresponding term is fortunately
+quite simple:
+Lemma 52 (lowering_correspond). When lowering a term s to t, then the two terms cor-
+respond.
+∀env s t, is_lowering_of env s t =⇒s ∼t.
+Proof. The proof is again by induction on is_lowering_of env s t. All cases are immediate
+(either by definition or by the induction hypothesis) except lower_abs.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+57
+==PAGE:66==
+lower_abs. The goal is (λx : T. s0) ∼(λ. t0). Since s0 ∼t0 is immediate by the induction
+hypothesis, it only remains to show that x ∈s0 ∼0 ∈t0. This is the case if pos_of x (x ::
+env) = Some 0 per lowering_correspond_wrt, which is trivial.
+This is then extended to compile:
+Lemma 53 (compile_correspond). Compilation produces a corresponding term.
+∀s t, compile s = Ok t =⇒s ∼t.
+With the correspond relation covered, two premises to the simulation are still missing:
+closed s and closed t. The fact that s is closed is already covered - typechecking in the
+empty context provides that. With that in mind, the following lemma is sufficient to obtain
+that t is closed:
+Lemma 54 (lowering_preserves_closed). When lowering a term s to t, if s is closed, then
+t is also closed.
+∀env s t, is_lowering_of env s t =⇒closed s =⇒closed t.
+Proof. The proof is by contradiction. The goal is to show that t must be closed; the as-
+sumptions are that t is the result of lowering s with some initial list of names env, and that
+s is closed.
+Assuming that a variable i appears free in t, there must then be some x such that x
+appears free in s and pos_of x env = Some i (lowering_free_inv). However, s is closed
+by assumption, so it cannot be the case that x appears free in s; this is a contradiction.
+Like with lower_correspond, this is likewise extended to compile:
+Lemma 55 (compile_closed). If compilation of a term s succeeds, producing a term t,
+then both terms are closed.
+∀s t, compile s = Ok t =⇒closed s ∧closed t.
+Proof. The function compile comprises both typechecking in the empty context and low-
+ering. Since typechecking is sound, the term s is well-typed in the empty context, and
+so it must be closed (well_typed_empty_closed). Since s is closed, and t is the result of
+lowering s, t is then also closed (lowering_preserves_closed).
+In summary, the following points have been established:
+• When typechecking a LinLambda term succeeds in a given typing context, then the
+term is well-typed in that context.
+• When a LinLambda term is well-typed in the empty context, then it is closed.
+• Lowering a LinLambda term produces a corresponding DeBruijn term.
+• If the lowered LinLambda term is closed, then so is the DeBruijn term.
+• When a closed LinLambda steps, then a corresponding, closed DeBruijn term can
+step, and the results correspond.
+58
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:67==
+• When a LinLambda term is a value, then a corresponding DeBruijn term is also a
+value.
+The final task is to tie this together in the framework of semantic preservation.
+The forward simulation result relies on both the correspond relation, as well as both terms
+being closed. For the purpose of the semantic preservation framework, the true corre-
+spondence is then the combination of the three:
+s ≃t ≡s ∼t ∧closed s ∧closed t.
+With this definition, and in concert with the results from section 4, semantic preservation
+is achieved:
+Theorem 56 (compile_semantic_preservation).
+∀s t, compile s = Ok t =⇒semantic_preservation co s t.
+Proof. In order to show semantic preservation, it is sufficient to show that compilation pro-
+duces a corresponding term, that both languages are deterministic, and that a forward sim-
+ulation of corresponding terms can be constructed (forward_simulation_semantic_preservation).
+Since compile s = Ok t, it follows that s ∼t (compile_correspond) and closed s ∧closed t
+(compile_closed). Thus s ≃t.
+In order to show a forward simulation, a simulation of stepping states and final states must
+be shown.
+In order to show a forward simulation of stepping states, it suffices to show a lockstep for-
+ward simulation of stepping states (forward_simulation_lockstep_correct). If a closed
+LinLambda term can step, then a corresponding, closed DeBruijn term can also step, and
+the results correspond (forward_simulation_lockstep). Moreover, since the simulating
+terms s and t were closed by assumption, the terms that they step to are also closed
+(step_preserves_closed for both semantics). This provides the forward simulation of step-
+ping states.
+Since values are final states, correspond_value directly provides a forward simulation of
+final states.
+Finally, both languages are deterministic (step_deterministic for both semantics).
+In conclusion, the compile function preserves the semantics of the program.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+59
+==PAGE:68==
+8
+The StackVM Language
+A substitution-based semantics, such as LinLambda and DeBruijn, is very convenient
+from a theoretical standpoint. It facilitates a very concise, yet powerful semantics that
+elegantly deals with variables and application of abstractions all at once. However, it is
+incompatible with usual abstractions of hardware, where values are stored into memory,
+and loaded when required for some operation.
+The goal of the StackVM intermediate representation is to eliminate substitution in favor
+of a load-store evaluation strategy. With this strategy, values are stored into an explicit
+environment, which maps variables to values, rather than substituted upon application of
+an abstraction. Variables can then later be evaluated by loading the corresponding value
+from an environment.
+A load-store semantics poses some challenges. In the LinLambda and DeBruijn seman-
+tics, a non-capture-avoiding substitution strategy works correctly only when closed values
+are substituted into terms (which, as shown previously, is always the case when reduc-
+ing an initially-closed term). If such substitutes are open, then variables inside it may be
+captured, changing their meaning.
+In a naïve load-store semantics, values might simply be stored into an environment, and
+when variables are encountered, the corresponding value would then be loaded from this
+environment. This is problematic in the same way as applying an abstraction to an open
+term in a substitution-based semantics; variables may be captured.
+Instead, the StackVM semantics takes the common route of using closures and stack
+frames to correctly handle this. A closure is an abstraction that closes over the free vari-
+able that occur within it; that is, it bundles the environment in which it occurs together
+with the abstraction, so that the closure becomes self-contained, and can be stored and
+loaded freely without risk of subsequent capture of those variables. When a closure is
+applied to some value, the value is inserted into the closure’s environment, and that en-
+vironment - not the enclosing environment - is then used to reduce the abstraction term.
+This is modelled with stack frames, which encapsulate a term in an environment, causing
+reduction of that term to happen in that environment. The StackVM semantics is shown in
+figure 8.2.
+The rules ST_App1, ST_App2, ST_AddConsts, ST_Add1, and ST_Add2 are similar to
+those of the DeBruijn semantics, with the addition of an environment; composite terms
+can step if either one of their subterms can step, and two numbers can be summed to-
+gether to form a single number. The difference is in the remaining rules, which can be
+summarised as follows:
+• ST_Load. A variable i can be loaded from the environment env, producing the value
+v, if v occurs at the i’th index of env.
+• ST_AppClosure. A closure, bundling some environment env′ with an abstraction
+body t1, can be applied to a value t2, producing a stack frame containing the envi-
+ronment (t2 :: env) and the abstraction body t1.
+• ST_Capture. An abstraction (λ. t) can capture its enclosing environment env, pro-
+ducing a closure that bundles env and t.
+60
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:69==
+<term> ::= $i
+[V ar]
+| (λ. <term>)
+[Abs]
+| <term> <term>
+[App]
+| n
+[Const]
+| <term> + <term>
+[Add]
+| (<env>, λ. <term>)
+[Closure]
+| [<env> |= <term>]
+[Frame]
+<env> ::= ε
+[Nil]
+| <term> :: <env>
+[Cons]
+Figure 8.1: The syntax of the StackVM language.
+• ST_Frame. A stack frame associating an environment env′ to a term t can step if
+the term t can step enclosed in the environment env′.
+• ST_Return. A stack frame can be removed if the encapsulated t is a value.
+Like the LinLambda and DeBruijn semantics, the StackVM semantics makes use of a value
+predicate to direct the evaluation order. Values are normal forms regardless of enclosing
+environment:
+Lemma 57 (value_is_nf). Values are normal forms.
+∀env t, value t =⇒normal_form (env, t).
+The proof is similar to those for the previous semantics, and is omitted here for brevity.
+A final state is defined as any environment paired with a value:
+Definition 8.0.1 (final_state).
+final_state (env, t) ≡value t.
+Following directly from value_is_nf, a final state is indeed a normal form:
+Lemma 58 (final_state_is_nf).
+final_state s =⇒normal_form s.
+Similarly to the previous semantics, StackVM is deterministic:
+Theorem 59 (step_deterministic). The −→relation is deterministic.
+∀s s′ s′′, s −→s′ =⇒s −→s′′ =⇒s′ = s′′.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+61
+==PAGE:70==
+get_nth env i = Some v ST_Load
+env |= $i −→env |= v
+value t2
+ST_AppClosure
+env |= (env′, λ. t1) t2 −→env |= [t2 :: env′ |= t1]
+ST_Capture
+env |= (λ. t) −→env |= (env, λ. t)
+env′ |= t −→env′ |= t′
+ST_Frame
+env |= [env′ |= t] −→env |= [env′ |= t′]
+value t
+ST_Return
+env |= [env′ |= t] −→env |= t
+env |= t1 −→env |= t′
+1
+ST_App1
+env |= (t1 t2) −→env |= (t′
+1 t2)
+value t1
+env |= t2 −→env |= t′
+2 ST_App2
+env |= (t1 t2) −→env |= (t1 t′
+2)
+n = n1 + n2
+ST_AddConsts
+env |= (n1 + n2) −→env |= n
+env |= t1 −→env |= t′
+1
+ST_Add1
+env |= (t1 + t2) −→env |= (t′
+1 + t2)
+value t1
+env |= t2 −→env |= t′
+2 ST_Add2
+env |= (t1 + t2) −→env |= (t1 + t′
+2)
+Figure 8.2: The inference rules of the StackVM semantics.
+62
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:71==
+8.0.1
+Lowering
+Lowering a DeBruijn term to a StackVM term is entirely trivial, since every DeBruijn term
+has an corresponding representation in the StackVM language. Closures and stack frames
+are evaluation-specific concepts. The implementation of lower is defined as:
+1
+Fixpoint lower (t: tm): StackVM.tm :=
+2
+match t with
+3
+| Var i ⇒StackVM.Var i
+4
+| Abs t ⇒StackVM.Abs (lower t)
+5
+| App t1 t2 ⇒StackVM.App (lower t1) (lower t2)
+6
+| Const n ⇒StackVM.Const n
+7
+| Add t1 t2 ⇒StackVM.Add (lower t1) (lower t2)
+8
+end.
+8.0.2
+Semantic Preservation
+Due to time constraints, the proof of semantic preservation could not be finished. Instead,
+in the following, a precursory analysis is carried out, developing notions that seek to inform
+a hypothetical future proof of semantic preservation.
+Suppose there is some hypothetical definition of correspondence ∼between DeBruijn
+terms and StackVM states.
+When lowering a DeBruijn term, the resulting StackVM term is structurally identical. Sup-
+pose this is a top-level term, then the DeBruijn term should correspond to the StackVM
+state (ε, t), so that the initial part of the semantic preservation goal can be established.
+Additionally, the DeBruijn term must have been the result of lowering some top-level
+LinLambda term; then both the LinLambda and DeBruijn terms are closed, and then the
+resulting StackVM term is also closed. Suppose such a closed DeBruijn term s takes one
+step s −→s′. What does the - initially structurally identical - StackVM term t in the state
+ε |= t do?
+Suppose the DeBruijn term’s first step is ST_AddConsts, then s must have been on the
+form n1 + n2. In this case, since the StackVM term is structurally identical, the term t must
+also have been on the form n1 + n2, so ε |= t takes a similar step. The result is again
+structurally identical, so the hypothetical correspondence s′ ∼ε |= t′ should still hold.
+Suppose instead the first step is ST_App1, so s must have been on the form (s1 s2), and
+then s1 takes one step s1 −→s′
+1 . Then t must be on the similar form (t1, t2). In this case,
+it seems reasonable to tentatively assume that t1 also takes (at least) one step t1 −→t′
+1,
+although it is as yet unclear what these might be. Similarly, the rules ST_App2, ST_Add1,
+and ST_Add2 provide limited insight at this point.
+Suppose the first step is ST_AppAbs, so s must have been on the form (λ. s1) s2, where
+s2 is some value, so the resulting term s′ must be [0 := s2] s1. Then, since t was a top-
+level term, it must have similarly been on the form (λ. t1) t2. However, in the StackVM
+semantics, the abstraction (λ. t1) is not a value; it needs to be converted to a closure by
+capturing the enclosing environment. Since, in this case, the enclosing environment is the
+empty environment ε, the closure becomes (ε, λ. t1); the overall step is ε |= (λ. t1) −→
+ε |= (ε, λ. t1). Next, there must be some further step to be taken for the StackVM state,
+which depends on the form of t2. Since s2 is a value, it must be either some number n or
+another abstraction (λ. s3).
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+63
+==PAGE:72==
+Suppose s2 is a number n, so t2 is also exactly n. In this case, the next step must be
+ST_AppClosure, since the left-hand side is a closure and the right-hand side is a value.
+The resulting state is then a frame, with the frame’s environment containing just n: ε |=
+[n |= t1]. Clearly, the terms [0 := n] s1 and [n |= t1] are no longer struturally identical.
+In the DeBruijn term, the variable represented by index 0 has been substituted, leaving
+n, i.e. n, in its place. In the StackVM term, the variable is still syntactically present, but
+the enclosing stack frame stores the value for it. Intuitively, these two terms are in some
+sense still consistent; the StackVM state can associate the same value n to the variable.
+At some point, after some number of intermediate reduction steps, that variable might
+be loaded via ST_Load, in which case that particular term is again structurally identical
+to the DeBruijn term. Alternatively, if for instance the variable appears free inside an
+abstraction or closure that is never applied, the step ST_Load might never apply; the
+terms stay mutually consistent, but not structurally identical.
+If t2 had instead been an abstraction, the step ST_AppClosure would not yet apply, since
+t2 would first have to be converted to a closure. Given the notion of consistent terms
+and states, converting an abstraction to a closure is effectively a method of ensuring that
+it remains consistent with a matching DeBruijn abstraction regardless of the enclosing
+environment. As a result, the StackVM state remains consistent with the DeBruijn term.
+If the state ε |= [t2 |= t1] reduces to a state ε |= [t2 |= t′
+1] such that t′
+1 is a value, then the
+ST_Return rule applies, producing ε |= t′
+1, and that state will be a final state. This state,
+and the matching DeBruijn term s′, where s −→∗s′ and s′ is a value (and thus a final
+state), should correspond.
+The notions above can be generalized to the following points:
+• When lowering a DeBruijn term to a StackVM term, the terms will be structurally
+identical, and these terms should correspond.
+• When comparing the reduction of a DeBruijn term and a StackVM state, the StackVM
+state might require more initial steps to be taken in order to convert the abstraction
+to a closure, and produce a stack frame containing the value that the closure was
+applied to. In addition, it might require more intermediate steps to be taken in order
+to load variables. Lastly, it will need to take more steps at the end to remove any
+remaining stack frames.
+• A StackVM state is consistent with a DeBruijn term if they are similar, except where
+a value has been substituted for a variable i in the DeBruijn term, in which case the
+StackVM state should assign a similar value to the variable.
+• The application of a closure to some value t in a StackVM state should be consis-
+tent with the substitution of the 0’th index for some value s, if s and t are mutually
+consistent, and the closure is mutually consistent with the abstraction.
+• When a DeBruijn term and a StackVM are mutually consistent, then the StackVM
+state that is the result of loading some variable i should still be consistent with the
+DeBruijn term.
+A hypothetical next step would be to define the simulation concretely by identifying the
+simulation kind and the correspondence.
+The simulation is not a lockstep simulation as was the case for the LinLambda to DeBruijn
+step, since there are clearly cases where the StackVM state has to take more steps than
+the corresponding DeBruijn term. However, in the analysis above, there were no cases
+64
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:73==
+discovered where the DeBruijn term would have to take more steps than the StackVM
+state, suggesting that it would be a “plus” simulation, where the target semantics takes
+one or more steps for every step taken by the source semantics.
+The correspondence would have to incorporate the informal definition of consistency be-
+tween terms and states given above, since variables are never loaded if they appear
+inside a closure that is never applied to a value.
+A key component of the simulation is then to show that ST_AppAbs in DeBruijn is compa-
+rable to ST_AppClosure in StackVM in the sense that the step preserves the correspon-
+dence. This is similar to the semantic preservation result for the LinLambda to DeBruijn
+lowering, where it was shown that substitution of a name-based variable x is similar to
+the substitution of an index-based variable i, given some further premises. A similar set
+of premises would have to be identified for this case. For example, the index 0 should
+occur in the same places in the DeBruijn and StackVM terms before stepping, so that
+the effect is the same. Moreover, the value in the DeBruijn term and the value in the
+StackVM term would have to correspond, so that if the variable were to be loaded, it would
+still correspond.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+65
+==PAGE:74==
+9
+The LinVM Language
+The StackVM language, with its load-store strategy, has no restrictions on its use of vari-
+ables. The linearity restrictions enforced by the source language have, in some sense,
+been lost in translation. Additionally, closure conversion captures the entire enclosing
+environment, possibly producing unnecesary copies of (or references to) values that are
+not be used in the abstraction.
+The LinVM language is a refinement of the StackVM language, recapturing some of the
+guarantees provided by the linear type system. The LinVM semantics makes two key
+changes to the StackVM semantics to achieve this:
+• Variable access is destructive; loading a variable from the environment renders that
+variable inaccessible afterwards.
+• Closure conversion splits the environment in two, producing one environment for
+the closure and a residual environment that replaces the original environment.
+In order to accomodate these changes, the environment of a state is modelled as a list
+of options of values, rather than just a list of values. With this representation, a Some v
+indicates that the value has not yet been used, while a None indicates that whatever value
+was once there has been used. In addition to this, the semantics uses two operators:
+take_nth. The take_nth operator takes an index i and an environment env. If there is
+something at index i in env, that is if the environment binds something to i, then take_nth
+returns a Some containing a pair, consisting of what was at the index, and an updated
+list env′ that is the result of setting the i’th index to None. Formally, the specification of
+take_nth is:
+∀xs xs′ i v, take_nth i env = Some (v, xs′) =⇒
+xsi = v ∧xs′
+i = None ∧∀j u, j ̸= i =⇒xsj = u =⇒xs′
+j = u.
+Here, xsi = v means at index i in the list xs, there is a value v.
+split. The split operator takes an environment env and a list of indices is. If for all
+indices i in is, there is something in the environment env, then split produces a Some
+containing a pair of environments env′ and env′′. The environment env′ is like env, except
+all indices in is have been set to None. The environment env′′ is like env, except all
+indices not in is have been set to None. Formally, the specification of split is:
+∀src ls rs is, split src is = Some (ls, rs) =⇒NoDup is =⇒
+(∀i, i ∈is =⇒i < |src|) =⇒
+(∀i, i ∈is =⇒lsi = None ∧∀v, srci = v =⇒rsi = v) ∧
+(∀i, i¬ ∈is =⇒srci = v =⇒lsi = v ∧rsi = None).
+In this specification, there are two extra premises necessary in order to guarantee the de-
+sired properties. The first is NoDup is, which states that the list is cannot have duplicates;
+66
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:75==
+if it did, some entries would be moved twice. The second is ∀i, i ∈is
+=⇒
+i < |src|,
+which states that any index i in is must be less than the length of the list src, so that lookup
+at such indices is valid.
+In the mechanisation, both the take_nth and split operators have explicit implementa-
+tions, and these implementations have been shown to satisfy the specification.
+With these operators, the rules ST_Load and ST_Capture are defined as shown in figure
+9.1.
+take_nth i env = Some (Some v, env′) ST_Load
+env |= $i −→env′ |= v
+split env fvs = Some (env′, env′′)
+ST_Capture
+env |= (λ{fvs}. t) −→env′ |= (env′′, λ. t)
+Figure 9.1: The ST_Load and ST_Capture inference rules for the LinVM semantics.
+Except for the ST_Load and ST_Capture rules, the resulting semantics is similar to the
+StackVM semantics, and is omitted here for brevity. The only consistent change is that
+where the StackVM semantics steps to a new state containing the same environment, in
+the LinVM semantics, this resulting state’s environment is possibly different as a result
+of variable loading or closure conversion. For example, in the ST_App1 rule (shown in
+figure 9.2), if the state (env, t1) steps to another state (env′, t′
+1), then the environment in
+the overall state is similarly affected, producing the state (env′, t′
+1 t2).
+env |= t1 −→env′ |= t′
+1
+ST_App1
+env |= (t1 t2) −→env′ |= (t′
+1 t2)
+Figure 9.2: The ST_App1 inference rule for the LinVM semantics.
+9.0.1
+Lowering
+The LinVM syntax is similar to that of StackVM, with only one modification. In order to facil-
+itate splitting the environment in two upon closure conversion, abstractions embed a list of
+the free variables that occur within them. In order to lower an abstraction from the StackVM
+language to the LinVM language, it is therefore necessary to determine this list. The func-
+tion free_variables does this, using a recursive helper function free_variables_rec to
+do so:
+1
+Fixpoint free_variables_rec (t: tm) (d: index): list index :=
+2
+match t with
+3
+| Var i ⇒if d <=? i then [i −d] else []
+4
+| Abs t ⇒free_variables_rec t (d + 1)
+5
+| App t1 t2 ⇒List.app (free_variables_rec t1 d) (free_variables_rec t2 d)
+6
+| Const n ⇒[]
+7
+| Add t1 t2 ⇒List.app (free_variables_rec t1 d) (free_variables_rec t2 d)
+8
+| Closure env t ⇒free_variables_rec t (d + 1)
+9
+| Frame env t ⇒free_variables_rec t (d + 1)
+10
+end.
+11
+12
+Definition free_variables (t: tm) :=
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+67
+==PAGE:76==
+13
+free_variables_rec t 0.
+The function free_variables_rec uses an additional argument d to determine if a vari-
+able is free. The value of d is equivalent to the current depth in the term, relative to the
+top-level term that the function was applied to, meaning that any variable with an index
+i such that i > d must refer to a binder outside of that term, thus making it free. The
+following two lemmas state the relationship between indices in the resulting list, and the
+value of d:
+Lemma 60 (free_variables_rec_depth).
+∀t i d, d > 0 =⇒i ∈(free_variables_rec t d) =⇒(i+1) ∈(free_variables_rec t (d−1))
+Proof. The proof is by induction on t, and is shown via a combination of simple arithmetical
+rewriting and induction hypotheses.
+Lemma 61 (free_variables_rec_depth_inv).
+∀t i d, d > 0 =⇒(i+1) ∈(free_variables_rec t (d−1)) =⇒i ∈(free_variables_rec t d).
+Proof. The proof is again by induction on t, and the procedure is similar to that of
+free_variables_rec_depth.
+With these two lemmas, the free_variables function is shown to exactly determine the
+free variables of a term:
+Theorem 62 (free_variables_appear_free_in).
+∀t, i ∈(free_variables t) ⇐⇒appears_free_in i t.
+The theorem is split into two lemmas, one for each direction of the implication:
+Lemma 63 (free_variables_sound).
+∀t i, i ∈(free_variables t) =⇒appears_free_in i t.
+Proof. The proof is by induction on t, and relies on the lemma free_variables_rec_depth
+in combination with the induction hypotheses.
+Lemma 64 (free_variables_complete).
+∀t i, i ∈appears_free_in i t =⇒(free_variables t).
+Proof. The proof is by induction on t, and mirroring free_variables_sound, it relies on the
+lemma free_variables_rec_depth_inv in combination with the induction hypotheses.
+As for the lowering functions for the previous two steps, an inductive proposition is created
+in the mechanisation for subsequent use in proofs about lowered terms. The inductive
+proposition incorporates the fact that the list of indices embedded in an abstraction is
+exactly the free variables of the abstraction. The rules lower_closure and lower_frame
+are redundant in theory, but are technically necessary in the mechanisation to make the
+lowering proof go through, since the lower function has similarly redundant cases in its
+match expression.
+68
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:77==
+lower_var
+is_lowering_of $i $i
+is_lowering_of s t
+∀i, In i fvs ⇔appears_free_in i (λ. s) lower_abs
+is_lowering_of (λ. s) (λ{fvs}. t)
+is_lowering_of s1 t1
+is_lowering_of s2 t2 lower_app
+is_lowering_of (s1 s2) (t1 t2)
+lower_const
+is_lowering_of n n
+is_lowering_of s1 t1
+is_lowering_of s2 t2 lower_add
+is_lowering_of (s1 + s2) (t1 + t2)
+is_lowering_of s t
+lower_closure
+is_lowering_of (env, λ. s) (ε, λ. t)
+is_lowering_of s t
+lower_frame
+is_lowering_of [env |= s] [ε |= t]
+Figure 9.3: The inference rules of the is_lowering_of proposition.
+Lemma 65 (lower_is_lowering_of). The expression lower t is a lowering of t.
+∀t, is_lowering_of t (lower t).
+Proof. The proof is by induction on t. All cases except lower_abs are either given di-
+rectly by definition, or via the induction hypotheses. In the case lower_abs, the theorem
+free_variables_appear_free_in provides the premise that the list of indices covers ex-
+actly the free variables of the abstraction, and the induction hypothesis provides that the
+resulting abstraction body t is the lowering of the original abstraction body s.
+9.0.2
+Semantic Preservation
+Due to time constraints, the proof of semantic preservation could not be finished. Instead,
+in the following, the preliminary work that has been done in an effort to reach this goal is
+presented, and it is discussed what subsequent steps might be taken in order to complete
+the work.
+The primary challenge in showing semantic preservation in the lowering from StackVM
+term to LinLambda term is to show that the stricter premises, especially those in ST_Load
+and ST_Capture, but also those in the other rules, where the environment is continuously
+mutated.
+Starting with ST_Load, the premise take_nth i env = Some (Some v, env′) implies that
+at index i in the environment env, there must be a Some v, which in turn implies that the
+variable must not have been used before. For the other rules, the residual environment
+env′ must be sufficient when used in a premise. For the rule ST_Capture, the premise
+split env fvs = Some (env′, env′′), with env′′ being provided to the closure and env′ being
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+69
+==PAGE:78==
+the residual environment, implies that env′′ must be sufficient for the entire reduction of
+the closure, while env′ must be sufficient for the reduction of any term that comes after the
+closure in the evaluation order. In summary, the premises state that variables can occur
+at most once.
+In section 6, the inductive proposition appears_free_once_in was introduced, and it was
+shown to hold for any variables that appear free in a well-typed Linlambda term. Intuitively,
+if a similar proposition were to hold for the LinVM term, then this would imply that, at every
+step of reduction, the environments involved in the reduction rules do indeed hold exactly
+the values that they need. In order for this argument to be valid, it must first be shown
+that this proposition is indeed preserved through lowering (across all lowering steps).
+The first of this chain of lemmas is for the lowering from LinLambda to DeBruijn. It uses
+the correspond_wrt proposition to ensure that the carried over correctly from name-based
+variables to index-based variables:
+Lemma 66 (lin_lambda_lowering_preserves_once). If the DeBruijn term t is the result
+of lowering a LinLambda term s, and if the name-based variable x appears free once in s,
+and if s and t correspond with regard to x and i, then i appears free once in t.
+∀s t env, is_lowering_of env s t
+=⇒
+∀x i, correspond_wrt x i s t =⇒
+appears_free_once_in x s =⇒appears_free_once_in i t.
+Proof. The proof is by induction on is_lowering_of env s t.
+lower_var. The assumptions are that a variable x′ appears free once in the LinLambda
+term x, and that x′ in the LinLambda term x corresponds to i′ in the DeBruijn term $i. The
+goal is to show that i′ appears free once in the DeBruijn term $i.
+Since x′ appears free in x, it must be the case that x′ = x. Then, since x′ in x corresponds
+to i′ in i, and x′ = x, then it must be that i′ = i.
+lower_abs. The assumptions are that x′ appears free once in the LinLambda term (λx :
+T, s), and that x′ in (λx : T, s) corresponds to i′ in (λ. t). The induction hypothesis states
+that for all x and i such that x in s corresponds to i in t, if x appears free once in s, then i
+appears free once in t. The goal is to show that i′ appears free once in (λ. t).
+Since x′ appears free once in the LinLambda term (λx : T, s), it must be the case that
+x′ ̸= x and that x′ appears free once in s. Then, since x′ in (λx : T, s) corresponds to
+i′ in (λ. t), it must either be the case that neither of them appear free in their respective
+terms, or that x′ in s corresponds to i′ + 1 in t; and since x′ appears free in (λx : T, s),
+it appears free in s by extension, so it can only be the latter case that holds. From that,
+the induction hypothesis provides that i′ +1 appears free once in t, which in turn provides
+that i′ appears free once in (λ. t).
+lower_app. The assumptions are that x′ appears free once in the LinLambda term (s1 s2),
+and that x′ in (s1 s2) corresponds to i′ in the DeBruijn term (t1 t2). The goal is to show
+that i′ appears free in (t1 t2).
+Since x′ appears free once in (s1 s2), it either appears free once in s1 and does not appear
+free in s2, or vice versa. In the first case, it follows that x′ in s1 corresponds to i′ in t1,
+and the same for s2 and t2, since in the alternative, x′ would not appear free in neither s1
+70
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:79==
+nor s2. Then, in order to show that i′ appears free once in (t1 t2), it only remains to show
+that i′ does not appear free in t2 since the induction hypothesis provides that i′ appears
+free once in t1. Since x′ in s2 corresponds to i′ in t2, they either both appear free in their
+respective terms, or they both do not appear free. Since it is already known that x′ does
+not appear free in s2, it must be the latter.
+lower_const. The assumption that a variable x′ appears free (once) in the LinLambda
+term n is inherently contradictory.
+lower_add. This case proceeds similarly to the case lower_app.
+The same result for the lowering from DeBruijn to StackVM is considerably easier, but
+requires one auxiliary lemma:
+Lemma 67 (de_bruijn_lowering_free_inv). If the StackVM term t is the result of lowering
+the DeBruijn term s, then for all variables i that appear free in t, a variable i must also
+appear free in s.
+∀s t, is_lowering_of s t−> ∀i, appears_free_in i t−> appears_free_in i s.
+Proof. The proof is by induction on is_lowering_of s t. The case lower_add proceeds
+very similarly to lower_app, so it is omitted for brevity.
+lower_var. The assumption is that some variable i′ appears free in the StackVM term $i,
+and the goal is to show that i′ appears free in the DeBruijn term $i.
+Since i′ appears free in i, it must be the case that i′ = i.
+lower_abs. The assumptions are that the StackVM term t is the result of lowering the
+DeBruijn term s, and that the variable i′ appears free in the StackVM term (λ. t). The
+induction hypothesis states that if some i appears free in t, then it must also appear free
+in s. The goal is to show that i′ appears free in the DeBruijn term (λ. s).
+Since i′ appears free in (λ. t), then i′+1 appears free in t, and via the induction hypothesis,
+i′ + 1 appears free in s, and thus i′ appears free in s.
+lower_app. The assumptions are that the StackVM terms t1 and t2 are the results of low-
+ering the DeBruijn terms s1 and s2, respectively, and that the variable i′ appears free in
+the StackVM term (t1 t2). There are two induction hypotheses, one for each of t1 and t2.
+The goal is to show that i′ appears free in the DeBruijn term (s1 s2).
+Since i′ appears free in (t1 t2), it must appear free in either t1 or t2. In both cases, this
+provides the premise to an induction hypothesis.
+lower_const. The assumption is that the variable i′ appears free in the StackVM term n,
+which is an intrinsic contradiction.
+With this lemma, the result for the lowering from DeBruijn to StackVM is easy:
+Lemma 68 (de_brujin_lowering_preserves_once). If a StackVM term t is the result of low-
+ering a DeBruijn term s, and if a variable i appears free once in s, then i also appears
+free once in t.
+∀s t, is_lowering_of s t =⇒∀i, appears_free_once_in i s =⇒appears_free_once_in i t.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+71
+==PAGE:80==
+Proof. The proof is by induction on is_lowering_of s t. The cases lower_var, lower_abs,
+and lower_const proceed exactly like those same cases in de_bruijn_lowering_free_inv,
+so they are omitted here for brevity.
+The case lower_add proceeds very similarly to
+lower_app, so it is also omitted.
+lower_app. The assumptions are that the StackVM terms t1 and t2 are the results of lower-
+ing the DeBruijn terms s1 and s2, respectively, and that the variable i′ appears free once
+in the DeBruijn term (s1 s2). There are two induction hypotheses, one for each of s1 and
+s2. The goal is to show that i′ appears free once in the StackVM term (t1 t2).
+Since i′ appears free once in (s1 s2), it must either appear free once in s1and not appear
+free in s2, or vice versa. Both cases proceed similarly, the first is elaborated here. If i′ ap-
+pears free once in s1, then the first induction hypothesis provides that i′ also appears free
+once in t1. In order to show that i′ does not appear free in t2, it is shown that the contradic-
+tory proposition that i′ must then appear free in s2 follows from it (de_bruijn_lowering_free_inv).
+Similarly, this also holds for the last lowering step, although the result is omitted here since
+the procedure is very similar.
+The hypothetical next step would be to define the simulation by identifying the simulation
+kind and the correspondence.
+Since the StackVM and LinVM languages are very similar, it would be a lockstep simulation;
+whenever the StackVM state takes one step, the LinVM state should also be able to take
+one step.
+The correspondence between StackVM and LinVM should be strict, since the states are
+bound to be very similar. For example, the terms should be identical at every point during
+reduction. The environments will differ, but the LinLambda environment should be a subset
+of the StackVM environment: for any Some v in a LinLambda environment, there should
+be a corresponding term v′ at the same index in the matching StackVM environment.
+A crucial part of the proof is showing that, at any point, the environments in the LinVM state
+are able to resolve the variables that they cover. This requirement could be expressed as
+a set of rules, one for each kind of LinLambda term, modelled in the mechanisation by an
+inductive proposition. The goal would then be to show that this is preserved across steps
+in LinVM, given the assumption that if a variable appears in a term, then it appears only
+once. Two particular challenges here are for the ST_Load and ST_Capture rules. In the
+ST_Load case, the assumptions should be sufficient to show that take_nth produces a
+Some, so the remaining challenge would be to show that the residual environment is suf-
+ficient for all other cases. Intuitively, this should be the case, because only that particular
+variable was removed, and since variables appear only once, it cannot appear anywhere
+else, so wherever the residual environment is used, it should never be the case that this
+particular entry is accessed again. In the ST_Capture case, the challenge is similar.
+When the environment env is split into env′ and env′′, it must be shown that env′′ covers
+only those variables that are present in the closure body, while the environment env′ must
+be sufficient for all other cases. The environments are split based on the list fvs, so a first
+step is to show that this list covers exactly the free variables of the abstraction, which is
+exactly given by the results shown for the lowering function. Together with the split op-
+erator specification, it then follows that env′′ covers exactly what it needs. The remaining
+challenge is then to show that env′ is sufficient for all other cases. The arguments here
+are similar as for ST_Load; the environment env′ contains all the entries of env except
+72
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:81==
+those where the variable appears in the abstraction. Since variables appear once, those
+variables then cannot appear anywhere else, so env′ should be sufficient.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+73
+==PAGE:82==
+10
+Evaluation
+This work constitutes a proof of concept of a mechanically verified compiler for a functional
+programming language with linear types. In the following, it is discussed to what extent
+the goals were met, how some technical aspects of the work might be improved, and
+lastly, some potential additions to the work are hypothesized.
+10.1
+Results
+The results of this work, in accordance with the goals stated in chapter 1, are enumerated
+and discussed here.
+A framework for compiler correctness.
+The CompCert framework of semantic preser-
+vation was adapted for use in this project. In this adaptation, some modifications were
+made to the definitions within. Arguments were provided in favor of the validity of these
+modifications, giving confidence that they are well-founded. Some key results were reestab-
+lished, and the framework was successfully used to establish semantic preservation of the
+first lowering step. Overall, this goal was met.
+A linear type system.
+A linear type system was designed based on an algorithmic typ-
+ing relation, inspired by existing texts. A full proof of soundness of the type system was
+shown. Overall, this goal was also met.
+A typechecker.
+A typechecker for the algorithmic typing relation was implemented, and
+a full proof of soundness was shown. Overall, this goal was also met.
+The programming languages.
+Four languages were modelled for use in the compiler.
+The semantics of the source language, LinLambda, is a derivative of existing work, and
+as such is not to be considered a product of this work, and the DeBruijn is a close deriva-
+tive of the LinLambda language. The semantics of the stack-based StackVM language
+was modelled based on common notions of closures and stack frames, enabling a shift
+from substitution-based evaluation to stack-based load-store evaluation. The LinVM lan-
+guage refines the semantics of StackVM, making it resource-aware, exploiting some of
+the guarantees provided by the linear type system. Overall, this goal was also met.
+The translation steps.
+The three translations steps, covering the complete translation
+of LinLambda programs into LinVM programs, were designed and implemented, and im-
+portant results for these translations were established for use in proofs of semantic preser-
+vation. Overall, this goal was also met.
+Verification.
+The full proof of semantic preservation was split into multiple parts, one for
+each of the lowering steps of the compiler. Supported by the framework for establishing
+semantic preservation, these individual proofs are divided into subgoals, which includes
+showing that the source and target languages are deterministic, as well as showing a for-
+ward simulation of the source semantics by the target semantics. Such a simulation was
+shown in full for the LinLambda to DeBruijn lowering step. Due to time constraints, for
+the DeBruijn to StackVM and StackVM to LinVM lowering steps, analyses and subsequent
+sketches of such simulations were given instead. The languages were both shown to
+74
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:83==
+be deterministic, so in conjunction with the framework of semantic preservation, substan-
+tial progress towards a full proof of semantic preservation was made. Still, completing
+these forward simulations would be a significant improvement to the work, making it more
+convincing as a proof of concept. Overall, this goal was partially met.
+10.2
+Technical Improvements
+During the development of this project, some minor technical challenges were encoun-
+tered. While solutions were found to avoid or otherwise reduce these challenges, there
+are potentially other, more suitable solutions. In the following, three technical challenges
+are elaborated, each followed by a discussion on how this might have been solved in a
+better way.
+Separation of syntactical and runtime structure.
+When lowering a StackVM term to
+a LinVM term, the lowering function is required to handle terms that include stack frames
+and closures, even though such terms are never produced when lowering a DeBruijn
+term to a StackVM term - they are concepts specific to evaluation. It would be beneficial to
+find a way of separating these concepts in such a way that it is clear which ones pertain to
+the structure of programs, and which ones are relevant only for states of programs. The
+challenge in moving these concepts to be part of the states, rather than terms, is that a
+program is a tree-structure, and any term can contain a closure or a frame and vice versa.
+One possible solution is to duplicate the definition of terms in the definition of states, only
+then adding the definitions of closures and stack frames. Terms would then have to be
+translated to states in order to be evaluated.
+Iterative semantics.
+The languages StackVM and LinVM are almost entirely syntacti-
+cally identical, with the only difference between the languages being their semantics; the
+LinVM semantics is a refinement of the StackVM semantics. This refinement exists pri-
+marily in order to divide the semantic preservation proof in two. This tactic seems more
+generally useful, so it would be interesting to explore if this notion of “iterative” semantics
+could be better integrated into the generic framework of semantic preservation in such
+a way that the the semantics could be defined for the same language, making such a
+lowering step entirely unnecessary in cases where there are no syntactical changes.
+Descriptive semantics.
+The LinVM semantics makes use of two operators take_nth
+and split. In the mechanisation, these operators have an explicit implementation, and
+this implementation is shown to satisfy a specification. This makes the semantics prescrip-
+tive in the sense that it prescribes how to perform these actions. For the proof of semantic
+preservation, however, it is only the specification that is relevant; its implementation and
+performance characteristics are irrelevant. From this point of view, the implementation
+is purely in the way of establishing those facts. More generally, it might be beneficial to
+design semantics to be descriptive rather than prescriptive, so that the focus is on the
+logical effects of operations. For example, an implementation of a semantics might prior-
+itize memory efficiency over speed, or vice versa, and a different implementation of such
+operations might be more appropriate for such priorities.
+10.3
+Extensions
+The compiler is implemented and verified in Coq, but it is not equipped with a practical
+interface or a parser. Coq features an extraction mechanism that enables the implemen-
+tation to be translated to an OCaml program. This mechanism could be used to provide
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+75
+==PAGE:84==
+a practical way of using the compiler. The parser could be implemented in OCaml, and
+integrate with the extracted implementation of the rest of the compiler. In addition to en-
+abling the general practical use of the compiler, this OCaml-based parser and extracted
+implementation would also allow for automated tests to be implemented, providing even
+greater confidence in the correctness of the compiler as a whole.
+The source language, LinLambda, features a linear type system, which enforces both “at
+most once” and “at least once” usage of variables, or more generally, resources. The
+target language, LinVM, is designed to make use of the “at most once” guarantees with
+its take_nth and split operators, but does not make use of the “at least once” guar-
+antees. One possible extension to the compiler could be to either incorporate this into
+LinVM, or add another language that refines the LinVM semantics to incorporate this. For
+example, the ST_Return rule of the LinVM semantics could require as a premise that the
+environment env′ in the stack frame is empty before being able to remove it.
+The target language LinVM is intended to model a low level, stack-based virtual machine.
+However, its program and runtime structure is tree-like, which makes for a less obvious
+connection to the usual low-level program representations such as Assembly language.
+One possible extension would be to add another, lower level representation that uses a
+linear program representation. In [16], Leroy et al. show how to structure a proof of seman-
+tic preservation for the compilation of programs in the prototypical imperative language
+IMP to a linearized format intended for a virtual machine.
+76
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:85==
+11
+Conclusion
+A proof of concept of a compiler for a functional programming language with linear types
+has been designed and implemented. The target language models a stack-based resource-
+aware virtual machine, making use of some of the guarantees established by the linear
+type system. The type system and associated type checker have been proven to be
+sound, and the first of three translation steps has been shown to preserve the semantics
+of the input program, demonstrating the successful use of an adaptation of a well-known
+framework for semantic preservation from the CompCert project. Although the remaining
+two translation steps were not fully verified, substantial progress was made towards the
+proofs of semantic preservation, and together with the successful result of the first step,
+this establishes high confidence that it is possible. It has been hypothesized what kind
+of improvements might be made to the compiler, including solutions to existing technical
+challenges as well as possible general extensions, such as extracting the compiler imple-
+mentation to OCaml, and adding a parser to facilitate practical use. Overall, many of the
+stated goals were met, and in the cases were goals were not met in full, it was discussed
+how they might be met.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+77
+==PAGE:86==
+78
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:87==
+Bibliography
+[1]
+Arthur Azevedo de Amorim, Catalin Hritcu, and Benjamin C. Pierce. “The Meaning
+of Memory Safety”. In: CoRR abs/1705.07354 (2017). arXiv: 1705.07354. URL: http:
+//arxiv.org/abs/1705.07354.
+[2]
+Jeffrey Vander Stoep. Memory Safe Languages in Android 13. URL: %5Curl%7Bhttps:
+//security.googleblog.com/2022/12/memory-safe-languages-in-android-13.html%7D.
+(accessed: 16-01-2023).
+[3]
+Dana Jansens. Supporting the Use of Rust in the Chromium Project. URL: %5Curl%
+7Bhttps://security.googleblog.com/2023/01/supporting-use-of-rust-in-chromium.
+html%7D. (accessed: 16-01-2023).
+[4]
+MSRC Team. A proactive approach to more secure code. URL: %5Curl%7Bhttps:
+//msrc- blog.microsoft.com/2019/07/16/a- proactive- approach- to- more- secure-
+code/%7D. (accessed: 16-01-2023).
+[5]
+comexk. Bug 87609 - [7 Regression] miscompilation with restrict and loop. URL:
+%5Curl%7Bhttps://gcc.gnu.org/bugzilla/show_bug.cgi?id=87609%7D. (accessed:
+16-01-2023).
+[6]
+Nikita Popov. Bug 39282 - Loop unrolling incorrectly duplicates noalias metadata.
+URL: %5Curl%7Bhttps://bugs.llvm.org/show_bug.cgi?id=39282%7D. (accessed:
+16-01-2023).
+[7]
+Hadrien G. Incorrect code generation for nalgebra’s Matrix::swap_rows(). URL: %5Curl%
+7Bhttps://github.com/rust-lang/rust/issues/54462%7D. (accessed: 16-01-2023).
+[8]
+Xavier Leroy. “Formal Verification of a Realistic Compiler”. In: Commun. ACM 52.7
+(July 2009), pp. 107–115. ISSN: 0001-0782. DOI: 10.1145/1538788.1538814. URL:
+https://doi.org/10.1145/1538788.1538814.
+[9]
+AbsInt Angewandte Informatik GmbH. The CompCert formally-verified C compiler.
+URL: %5Curl%7Bhttps://github.com/AbsInt/CompCert/%7D. (accessed: 16-01-
+2023).
+[10]
+Xavier Leroy. “A Formally Verified Compiler Back-end”. In: Journal of Automated
+Reasoning 43.4 (Nov. 2009), pp. 363–446. DOI: 10.1007/s10817-009-9155-4. URL:
+https://doi.org/10.1007/s10817-009-9155-4.
+[11]
+Flemming Nielson Hanne Riis Nielson. Semantics with Applications. Springer, 2007.
+[12]
+The Coq Team. The Coq Proof Assistant. 2023. URL: %5Curl%7Bhttps://coq.inria.
+fr/%7D. (accessed: 16-01-2023).
+[13]
+Benjamin C. Pierce et al. In: Programming Language Foundations. https://softwarefoundations.
+cis.upenn.edu/plf-current/index.html (Accessed December 2022). 2022. Chap. Prop-
+erties of STLC.
+[14]
+David Walker. In: Advanced Topics in Types and Programming Languages. Ed. by
+Benjamin C. Pierce. The MIT Press, 2004. Chap. Substructural Type Systems.
+[15]
+Benjamin C. Pierce et al. Programming Language Foundations. https://softwarefoundations.
+cis.upenn.edu/plf-current/index.html (Accessed December 2022). 2022.
+[16]
+Xavier Leroy. “Mechanized semantics”. In: CoRR abs/1010.5582 (2010). arXiv: 1010.
+5582. URL: http://arxiv.org/abs/1010.5582.
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+79
+==PAGE:88==
+80
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+==PAGE:89==
+Building a Formally Verified Compiler for a Linearly Typed Programming Language
+81
+==PAGE:90==
+Technical
+University of
+Denmark
+Building 324
+2800 Kgs. Lyngby
+Tlf. 4525 1700
+www.compute.dtu.dk

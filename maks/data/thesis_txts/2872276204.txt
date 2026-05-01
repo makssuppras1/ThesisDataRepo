@@ -1,0 +1,5486 @@
+==PAGE:1==
+Stylized Terrain Mesh Generation for Low-End
+Graphics Hardware
+Julian Dominik Sempruch-Szachowicz
+Master Thesis
+DTU Compute
+Department of Applied Mathematics and Computer Science
+==PAGE:2==
+==PAGE:3==
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+Julian Dominik Sempruch-Szachowicz
+Master Thesis
+June, 2025
+By
+Julian Dominik Sempruch-Szachowicz
+Copyright:
+Reproduction of this publication in whole or in part must include the cus-
+tomary bibliographic citation, including author attribution, report title, etc.
+Cover photo:
+Julian Dominik Sempruch-Szachowicz
+Published by:
+DTU, Department of Applied Mathematics and Computer Science,
+Richard Petersens Plads, Building 324, 2800 Kgs. Lyngby Denmark
+www.compute.dtu.dk
+==PAGE:4==
+Approval
+This thesis has been prepared over a period of five months at the Institute of Applied
+Mathematics and Computer Science of Technical University of Denmark, DTU in partial
+fulfillment for the degree Master of Science in Engineering, MSc Eng in Computer Science
+and Engineering. It was supervised by J. Andreas Bærentzen, Professor, Institute of
+Applied Mathematics and Computer Science.
+It is assumed that the reader has a basic knowledge in the areas of Computer Science
+and Computer Graphics.
+Julian Dominik Sempruch-Szachowicz - s230211
+Signature
+Date
+ii
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+12/06/25
+==PAGE:5==
+Abstract
+This project involves the research of CPU optimizations of a proprietary terrain mesh
+grid generation pipeline, as well as a comparison with an alternative mesh-less approach
+based on height maps. To evaluate optimizations, the output of frame-by-frame mesh
+generation in runtime for low-end market devices using different approaches are com-
+pared quantitatively in terms of performance (processing ticks) and memory utilization
+(bytes).
+The baseline is a proprietary algorithm (based on Marching Triangles) which accepts two-
+dimensional height field input (a mask created by painting on a 2D plane), and generates
+a single-object output mesh. In runtime, the mesh is generated every frame which can
+lead to performance and memory issues closer to the upper bounds of terrain sizes. The
+final mesh is used both for terrain visual and physics engine interactions.
+Optimizations are proposed to the proprietary algorithm which include data parallelization,
+thread parallelization or subdivision of tasks (mesh chunking) to achieve better work dis-
+tribution on low-end devices. Further research is made with attention to solutions offered
+by the proprietary game engine Unity, within which the baseline algorithm was initially im-
+plemented. Alternatives are proposed in the form of ray marching rendering techniques
+which offload the creation of the terrain to graphics processing.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+iii
+==PAGE:6==
+Acknowledgments
+Andreas, for his guidance and direct feedback.
+Arendse, for the warm Triband welcome.
+Karolina, for being my rock and keeping me sharp.
+Krecik, for reminding me to go for a walk (with him).
+iv
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:7==
+Contents
+Preface . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ii
+Abstract . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iii
+Acknowledgements
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iv
+1
+Introduction
+1
+1.1
+Origin and goals
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+1
+1.2
+Structure of the thesis . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+1.3
+Theory background . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2
+Related work
+7
+2.1
+Survey into adjacent topics
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+2.2
+Existing solution
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+3
+Method
+15
+3.1
+Optimizations to CPU-based algorithms . . . . . . . . . . . . . . . . . . . . 15
+3.2
+Creating terrain with GPU shader programs . . . . . . . . . . . . . . . . . . 20
+4
+Implementation & results
+27
+4.1
+Project details . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27
+4.2
+CPU optimizations . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+4.3
+GPU-based alternatives . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 45
+5
+Discussion
+63
+5.1
+Summary of the two methodologies
+. . . . . . . . . . . . . . . . . . . . . . 63
+5.2
+Considerations on the determining the correct tool for a given task . . . . . 64
+5.3
+Final verdict . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 66
+5.4
+Future work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 66
+Bibliography
+69
+A Appendix
+73
+A.1 Results
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 73
+A.2 Implementations . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 81
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+v
+==PAGE:8==
+vi
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:9==
+1
+Introduction
+In recent years the industry for video games and interactive media has seen a continual
+rise in the investment into Live Service Games (also known as Games-as-a-Service) [1].
+These are products which offer a continuous stream of content, often in the format of
+a subscription, therein deriving profit over time rather than through retail transactions.
+A frequent feature of such games is User Generated Content (UGC), identified as an
+essential part of the evolving video game industry [2]. UGC can drive game longevity
+and player engagement at little cost to the game’s ongoing maintenance and content
+creation. This format often takes the form of custom-made game levels, modes or variants
+of game world objects [2] which in effect boils down to two key elements of implementation:
+efficient data management and robust algorithms for transforming that data back into the
+game world. Data management is usually the more clearly defined of the two, whereas
+user-facing algorithms which can take a large range of non-moderated input through an
+equally large range of possible user devices require care, attention to quality and fool-
+proofing. Such algorithms are in-game editor tools or generators which are used by the
+player to create content. Often games are made to run on a variety of devices ranging
+from low-end (smartphones or hand-held consoles) to high-end (desktop computers with
+dedicated graphics cards), therefore the implementations of these algorithms must be
+versatile enough to support the performance capabilities of whatever target platform they
+are deployed to. In a more general sense, the implementation of user generated content
+incurs an additional development cost of making dynamically generated content function
+in the challenging context that is runtime. This means that not only the domain of resource
+usage is broad, but so is the complexity of user expectation.
+1.1
+Origin and goals
+This thesis will focus on terrain mesh generation for the use of player-created game lev-
+els. Terrain generation has long been a staple in game world design via various methods.
+These methods can be classified into two categories - those that are computed in the
+computer’s main processing unit (synchronously on a single thread or asynchronously on
+multiple threads) and those that are computed - rendered - in the graphics processing
+unit at the final step of the game’s current frame. Hereafter, these classifications will be
+referred to as CPU-based and GPU-based. Specifically, CPU-based refers to polygoniza-
+tion algorithms such as Marching Cubes, whereas GPU-based refers to grid-mesh vertex
+displacement with graphics programs or mesh-less ray-marching/rendering.
+The commonality between these methods is the input data which can be defined as a
+scalar height field (height map). Users will use editors to paint onto terrain with brushes
+which can lower or raise terrain, thus modifying the terrain’s height map texture for later
+terrain re-generation.
+The thesis has been prepared on the basis of an industry use case in collaboration with
+Triband [3], a Copenhagen-based games studio which is primarily invested in making
+live ops games. One of their projects is What The Car? [4], a comedy game which
+employs a significant amount of User Generated Content in the form of player-made levels
+which can be shared amongst the player community. The game has been created with
+technological simplicity as a core principle which is in line with the game’s accessibility
+distribution strategy of deploying to as many platforms as possible. The game is presently
+deployed to low-end target platforms, and the project actively investigates opportunities
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+1
+==PAGE:10==
+for distribution expansion which includes other least-performant platforms. At the moment,
+the low-end platforms on which the game is available (and further referred to in this thesis)
+are Apple smartphones, starting at the iPhone X.
+The inclusion of low-end platforms brings the need to re-evaluate current implementations
+of algorithms and improve performance bottlenecks to increase quality of the user expe-
+rience on all available platforms. One such bottleneck was identified in the user-facing
+level editor used by players to generate content in What The Car?. More specifically, the
+pipeline for terrain mesh generation which players use to draw terrain in runtime with the
+use of a brush. The root-cause of the investigation is quite simply we have noticed a sig-
+nificant drop in frame rate while creating terrain in the level editor. An additional difficulty
+of the terrain editor source code is the substantial investment required before research
+into optimization can begin. An obstacle created by circumstance that is the source code
+having been ported from an earlier project, created by persons no longer associated and
+implemented with little regard for future handling (meaning obfuscated and difficult to un-
+derstand). A trifecta of properties which is commonly referred to as Technical Debt (and
+more precisely Code Debt [5]) in engineering lingo.
+Figure 1.1: The view inside the game engine with wireframe overlay (Left). A player’s view in the
+What The Car? level editor as they paint one of the available terrain layers (Right).
+While the performance concerns of this specific feature in the game have been on the
+development team’s radar for some time, it remains tolerably functional. Paired together
+with the high level of entry due to its complexity, the upgrade or refactoring of the current
+system has routinely been delayed to the far end of the project backlog. On the other
+hand, this makes it a good opportunity for robust investigation into not only optimizations
+in the current framework (CPU-based algorithms), but to also observe possible GPU-
+based alternatives and how they compare against a staple implementation of terrain in
+game worlds. With this, the goal of this thesis is to present the results of experiments
+in methodologies of generating terrain for games, while abstracting the specific example
+of the What The Car? project to answer a common dilemma in game development (and
+software engineering for that matter) that is what is the value of investigating alternative
+solutions to status quo implementations, with tangents into discussions about how Code
+Debt can affect the decision-making process in software development strategies.
+2
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:11==
+Triband’s What The Car? is a project made in the Unity game engine [6], therefore the
+implementation investigation done as part of this thesis will also be done inside the Unity
+ecosystem. Where relevant, practices unique to the Unity framework will be discussed to
+provide additional context for broader understanding.
+1.2
+Structure of the thesis
+The thesis will generally follow a parallel structure for most of the chapters. Investiga-
+tion into CPU-based optimizations and GPU-based alternatives will remain in their own
+sections until Discussion will be used to examine the differences between the two method-
+ologies directly. The list below outlines the content of each following chapter:
+2. Related work
+This chapter is dedicated to a discussion about the existing solution for the terrain
+mesh generation pipeline in the What The Car? project as well as a survey of related
+research and topics utilized in the preparation of this thesis.
+3. Method
+This chapter describes the concepts behind the introduced optimization and GPU-
+based alternatives. These two categories of terrain implementations will remain in
+separate sections.
+4. Implementation & results
+This chapter illustrates the technical configuration of the investigation project, imple-
+mentation of algorithms and results. The results are divided into quantitative results
+(primarily for CPU-based results) and qualitative (primarily for GPU-based results).
+Results are presented together with implementation details to keep the subject mat-
+ter closely coupled.
+5. Discussion
+This final chapter summarizes the results in a discussion which attempts to address
+the goal of the thesis, that is the feasibility of alternative solutions to terrain genera-
+tion via polygonization. Future work is also discussed which presents possible next
+steps out of scope for this thesis.
+1.3
+Theory background
+This section is provided at the reader’s discretion as a short refresher for the primary
+concepts this thesis is based on. These are more general concepts in the domain of
+Computer Graphics which do not warrant further discussion in Related work.
+1.3.1
+Family of Marching Cubes algorithms
+Marching Cubes [7] is an algorithm which transforms a defined iso-surface into a triangle-
+based mesh (polygonization). Commonly used for generating terrains or stylized algo-
+rithmic structures in games.
+The algorithm is well suited for creating meshes where
+gaps, tunnels or empty spaces inside the mesh are required. Discrete scalar fields are
+used as input in the Marching Cubes algorithm. The algorithm will iterate through the
+grid (march cubes), possibly parallelized, and check the configuration of each cube as it
+passes through the field. The cube grid cells are also referred to as voxels (volumetric
+elements). The vertices of a grid cell determine the configuration - a vertex can either be
+inside or outside of the terrain surface.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+3
+==PAGE:12==
+Figure 1.2: Possible unique configurations of a grid cell. In total there are 256 configurations which
+are rotations or symmetries of the 15 unique cases [8].
+Marching Cubes can be generalized for any dimension or uniform grid. In two-dimensional
+space the algorithm takes the form of Marching Squares and in the case of a uniform trian-
+gle grid Marching Triangles (also referred to as contouring). Together these are referred
+to as the family of Marching Cubes algorithms.
+While Marching Cubes is a powerful tool used to this day for polygonization in various use
+cases, the algorithm remains constrained by the limitations of mesh grids - which primarily
+is the impact of grid resolution. Higher resolutions create smoother polygons which can
+be a desirable effect, but come at a cost of memory and processing. On the other hand,
+lower resolutions result in a stylized low-poly effect which may be beneficial for specific
+artistic use cases.
+Figure 1.3: Various formations of the same iso-surface across a range of different grid sizes [9].
+1.3.2
+Data locality - making use of caching
+Targeting memory efficiency and implementing optimizations for data locality bring great
+performance improvements due to the widening gap between modern processors and
+memory speeds. A substantial part of memory efficiency is data caching, where memory
+blocks are stored in the processor cache. Designing implementations around the con-
+cept of storing and using data in local memory blocks avoids bottlenecks on data bussing
+between the processor and memory. Programs which display good use of memory man-
+agement are referred to as exhibiting good locality.
+1.3.3
+Scalar distance fields
+Scalar fields are an association of scalar numbers to an 𝑛-dimensional space. A common
+usage of scalar distance fields in the domain of Computer Graphics is the definition of
+surfaces in two- or three-dimensional space. Within the domain they may be referred to
+4
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:13==
+as signed distance fields, and the sign of the distance indicates the relative direction to the
+surface, that is inside or outside. Typically such fields are constrained to be continuous
+which allows the reliable computation of the gradient at any given point. To make use
+of such fields in rasterization and rendering pipelines, polygonization algorithms may be
+used to transform the field at a given granularity into a mesh grid, or ray-based rendering
+techniques could be used to directly render a surface. Ray marched distance fields are
+better suited to representing miniscule details, as each ray is responsible for intersecting
+with terrain no matter how detailed or unusual the shape may be.
+An important distinction should be made for the differences between two-dimensional
+distance fields and three-dimensional distance fields. Both dimensional variants of a field
+may be used for a three-dimensional surface. A three-dimensional field will provide the
+absolute distance to the nearest point of the surface, whereas a two-dimensional field will
+only provide the distance to the surface in a plane. This introduces constraints on the
+complexity of algorithms for rendering these fields, as two-dimensional distance fields are
+agnostic to the true terrain distance in three-dimensional space.
+1.3.4
+Height maps
+Another format for storing surface information are height maps, which are commonly two-
+dimensional textures. Instead of distances, height maps record heights in the form of
+orthogonal offsets from a surface. This is done in texture space and can be applied to
+any topological shape, the offset is always in the direction of the surface normal.
+Height maps are scalar fields, but conversely to a two-dimensional distance field, they
+provides an offset to a known surface in the vertical dimension (surface normal), rather
+than providing a distance to an implicit line in a plane which can be a slice of a three-
+dimensional surface. In this thesis the terms height field and height map are used inter-
+changeably.
+1.3.5
+Ray marching
+Ray marching is a rendering technique used to generate an output render frame often
+used in conjunction with data-based signed distance fields. A ray for each fragment of
+the frame is marched along a line until the distance to the object is within a valid threshold.
+The distance is measured via comparisons with the input distance field. The scalar field
+can also be used to generate normals of the surface for lighting calculations.
+Using a constant uniform step is inefficient. Some optimizations can be introduced to
+decrease the workload, such as using Lipschitz continuity in the case of implicit surfaces.
+This way the ray reaches the surface more quickly but does not overshoot. An alternative
+option, when ray marching height fields instead of a distance field, is the use of binary
+search for exact intersections with a surface at lower cost (less ray steps), also referred
+to as bisection.
+Instead of using the fullscreen viewport of a camera for the ray creation, a simplified
+bounding polygon can be created and rendered with the rasterization pipeline to constrain
+the ray creation to a smaller part of the screen, closer to the ray intersection points. These
+can be cubes, spheres, or any other shape which can be easily created to contain the
+surface inside of it. Additionally, ray renders may write to the frame z-buffer which would
+allow the mixing of renders together with the output of the rasterization pipeline [10].
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+5
+==PAGE:14==
+6
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:15==
+2
+Related work
+The chapter starts with the results of a survey into adjacent subjects to lay the groundwork
+for the proposed methodologies. As this thesis project has a concrete and defined start-
+ing point, the following section provides a thorough explanation of the existing solution
+implemented in the What The Car? terrain mesh editor. This is to provide context as well
+as present the baseline methodologies currently used in the industry project.
+2.1
+Survey into adjacent topics
+2.1.1
+Optimizations for polygonization algorithms
+The domain of polygonization and optimization of the related algorithms is a domain of
+interest in Computer Graphics and especially for its use in runtime settings. To make im-
+plementation simpler for polygonization implementations, engineers may generate mesh
+geometry data without inter-connectivity, opting for a triangle soups format of data instead.
+This relaxation allows the polygonization problem to be embarrassingly parallel which in
+turn permits the application of parallelization for performance upgrade. This pertains to
+the family of Marching Cubes algorithms.
+The Marching Cubes family is particularly well suited for data parallelization and use
+with Single instruction, multiple data (SIMD) concepts such as loop vectorization. An
+implementation of data-parallelized Marching Cubes utilizing GPU Compute buffers in a
+browser environment (WebGPU) [11] uses exclusive scanning and stream compaction to
+produce good results. These two methods are used to support parallelized writing to a
+shared voxel output data structure for unknown (at the time of execution) output sizes.
+In higher-level threaded frameworks this would be replaced with the availability of paral-
+lelized list or vector data structures with dynamic sizes.
+Implementations of thread parallelization can be nuanced in terms of thread counts, as
+shown by the authors of Parallelized Generation and Smoothing of 2D Contour Lines [12].
+At larger numbers of threads the performance boost decreases compared to a lower num-
+ber of threads used for parallelization with a comfortable peak at 16 threads for 16 hyper-
+threaded cores, having noted a decrease due to context-switching costs at 32 threads.
+2.1.2
+Optimizations in the context of game engines
+Unity’s scripting language is C# paired with the Roslyn compiler (part of Mono) [13, 14].
+Substantial benefits in performance are driven by applying generic knowledge of behind-
+the-scenes behavior and functioning of the tools used in the implementations of algorithms
+(backed by anecdotal investigations such as Exploring performance issues and patterns
+in C# by analyzing open-source projects [15]). This subsection will survey improvements
+introduced by usage of modern technology and avoiding common performance pitfalls in
+source code hot spots.
+The careful use of performance-friendly data structures whenever possible in high traffic
+functions can greatly increase the efficiency of the algorithm implementations. Memory
+management can take up to a third of the processing time in algorithms [16] which is a
+direct result of a frequently forgotten aspect of data structures in high-level programming
+frameworks in the cost of convenience, that is the cost of memory management overhead.
+The additional work expended on conversion can bring positive effects to the net execu-
+tion time. Such an improvement is noted in Performance Analysis of Span Data Type in
+C# Programming Language [17], where the use of the unmanaged Span array-like data
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+7
+==PAGE:16==
+structure over the managed List data structure. In this context management refers to
+the responsibility over memory management where unmanaged memory has less safe-
+guards and no automated garbage collection, but its lifetime must be controlled by the
+programmer.
+Investments in the development of memory efficient implementations has been a fruitful
+endeavour for Unity Technologies with the introduction of the Unity Burst compiler [18].
+The compiler based on SIMD concepts is an optional module for the game engine which
+introduces impressive performance increases at the cost of abandoning the modern con-
+veniences of the C# programming language, for a high performance subset referred to as
+High Performance C# - HPC# [19, 20]. While the Unity game engine makes this available
+as a convenient plug-and-play module, the behind-the-scenes is possible to replicate in
+other frameworks. At its core the Burst compiler uses memory aliasing and loop vector-
+ization to optimize data-heavy code compilation into native code. These two properties of
+the compilation process target large loops which are simplified to vectorized data trans-
+formations from a source to destination memory block. Loops can be vectorized which
+transforms loops into chunks executed at once. Additionally, the use of unmanaged data
+structures improves execution times due to data locality and avoiding the overuse of un-
+necessary memory reads. Internally, the Burst compiler itself uses the LLVM compiler
+[21] which is a modern and efficient code optimizer.
+The benefits of data locality are thoroughly described in the chapter Memory and data
+locality [22] of Programming Massively Parallel Processors as well as successful cases
+of data locality improvements described in Refactoring for data locality [23] and Improving
+data locality with loop transformations [24].
+2.1.3
+Ray marching methods for height map terrain rendering
+Parallax mapping [25] is an alternative to normal mapping used in texture mapping to gen-
+erate more detail in flat surface geometry by recreating the parallax motion effect based
+on a height map. The technique uses ray marching in GPU fragment shaders to step
+into the scalar field created by the height map. The rays originate at the actual geometry
+surface and march in the outward direction from the viewer’s position. Intersections occur
+with the scalar field that is suspended inside of the geometry. As the output is dependent
+on the angle between the surface and the viewer, the surface appears to have far more
+details than just the two triangles it is made of. Similar techniques exist which utilize the
+same concept such as Relief mapping [26] which supports shadowing.
+Polygon-assisted ray marching [27] introduces the use of bounding meshes to improve
+the performance of ray marching by constraining the area of interest. Both the start and
+end of the geometry are stored into reference textures which are ultimately used in the
+ray marching implementation to determine the ray origin and limit. The primary strength
+of polygon-assisted ray marching is avoiding full screen renders which are costly due to
+the employment of all available screen fragments and a potentially distant viewer position
+used as the ray origin. Polygon-assisted ray marching brings the benefits of both the
+rasterization pipeline and the rendering workflow, wherein meshes are transformed to
+their screen positions and then used for ray-marching in that constrained space. A pre-
+render of the same mesh can be used to write the positions of the backface fragments to
+a shared texture which become ray marching terminal positions.
+Due to the nature of these ray marching techniques there is a large domain for optimiza-
+tions and improvements which can be introduced to implementations for the sake of per-
+formance. Maximum mipmaps [28] introduces the use of mipmaps on height maps as a
+means of organizing ray marching into a tree-like structure. Each mipmap stores the max-
+8
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:17==
+imum height value for its level of detail, which can be beneficially used to quickly march
+over larger sections of the height map by computing only a single comparison. This tech-
+nique is also introduced in Quadtree Displacement Mapping with Height Blending [29].
+A common staple in game engines is to provide physics and collision modules which
+are based on mesh data for calculating intersections. The use of ray marching rendered
+terrains requires the use of custom collision logic to determine intersections in runtime.
+A common solution is to read the height map at a texture position corresponding to the
+given position in world space, which is aptly implemented in VoxelSpace [30] for terrains
+rendered using CPU-based voxel space. More complex physics interactions can be sim-
+ulated using multiple effectors on a single object which track the height of the terrain at
+specific relative offsets, and are used to apply gravity at those offsets thereby providing
+motion to the object without direct mesh-to-mesh interactions. An example of this method
+is provided in the implementation of buoyancy effectors for water waves with vertex off-
+setting in Stylized Water Shader [31].
+2.2
+Existing solution
+The terrain mesh generation pipeline is part of the level editor ecosystem referred to as
+GolfTerrain - which immediately demonstrates the existence of Code Debt and remnant
+nature of this module, as it was ported directly from a previous Triband project that is
+What The Golf?. Parts of the ecosystem have been modified over the development and
+maintenance phases of the What The Car? project, but the implementation at the core of
+the pipeline remains as it was created over five years ago.
+The GolfTerrain ecosystem is responsible for the generation of terrain via engine editor
+tools or user-generated content. Terrain generation mainly concerns the visible terrain
+mesh, but is invariably connected to other systems including physics (meshes) or shader
+properties (materials).
+While the terrain generator suffices for start-time generation, the pipeline reaches a perfor-
+mance ceiling in the context of runtime level creation, that is frame-by-frame regeneration
+and hydration of the terrain mesh (and terrain dependents/down-streams). The flow of a
+single frame of terrain update is presented in Figure 2.1.
+TerrainCar (Player controller)
+RemixerTerrain (Level editor controller)
+GolfTerrain (Game object instance of terrain)
+MeshUtil (Library for mesh generation)
+Player input: draw terrain
+Trigger refresh of terrain
+Generate a new mesh
+Provide prepared mesh with post-processing
+Trigger baking of physics mesh
+Figure 2.1: Script flow chart for a single game frame of updating terrain via the level editor in What
+The Car?.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+9
+==PAGE:18==
+The entry point to dynamic runtime terrain generation class is the player controller. The
+player uses the terrain car to mark where terrain should be added or removed from a
+given terrain layer. When the player is actively painting terrain, the system updates every
+terrain layer as drawing one layer also removes any other terrain layer for the same brush
+position.
+The focus for the analysis of this thesis is the MeshUtil library, which the GolfTerrain
+script refers to for the actual mesh generation.
+2.2.1
+Mesh generation library
+The mesh generation is less a library and more a factory of a single entry point, and
+can be cleanly divided into three steps which are explained in the list below. Their sub-
+components are further depicted in Figure 2.2. The essential inputs for this pipeline are
+a two-dimensional scalar field (height map) and the dimensions of the desired mesh grid.
+1. Contour creation - transforming the height map data into surface geometry data via
+an atypical implementation of the Marching Triangles algorithm.
+2. Post-processing - transformations and additions to the surface data to create the
+desired terrain geometry.
+3. Mesh creation - stitching all the geometry data together using Unity’s Mesh API.
+Marching Triangles
+Computes surface geometry
+Post-processing
+Redistribute topology of the surface
+Append a bevel and skirt geometry to the surface mesh
+Create mesh
+Generate output mesh data for use with the Unity game engine
+Surface geometry (vertices, triangles and edges)
+Final terrain geometry data
+Height map data, terrain parameters
+Unity mesh object
+Figure 2.2: Script flow for generating the terrain mesh object.
+2.2.2
+Marching Triangles with Reference Rotation
+The central component behind the contour of the terrain mesh is the implementation of
+the Marching Triangles algorithm, which opts to use a shifting pivot instead of the more
+common case-lookup approach, referred to as Reference Rotation in this thesis. With
+Reference Rotation, the lookup table is forgone and replaced with nested loops which dy-
+namically build the cell triangle case by rotating a pivot around the cell corners. Triangles
+are constructed from the perspective of that corner. The output of this part of the pipeline
+is flat surface geometry data in an arbitrary two-dimensional plane.
+10
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:19==
+Initially, the square grid is transformed into a uniform triangle grid by offsetting vertices
+horizontally in opposite directions on odd and even rows. Using triangle grids is beneficial
+as ambiguous saddle cases do not exist and the creation of triangles is streamlined. The
+four corners are stored in memory and if needed, the references are cycled so that the
+pivot (at index zero) starts in the obtuse angle of the parallelogram formed by the two
+triangles. If none of the corners of the current cell meet the iso-value threshold criteria, the
+cell is skipped and the next cell is considered. A pivot shift is the swapping of references
+in a cycle between the four corners of the cell.
+(1, 1)
+(2, 1)
+(3, 1)
+(1, 2)
+(2, 2)
+(3, 2)
+(1, 3)
+(2, 3)
+(3, 3)
+(0.75, 1)
+(1.75, 1)
+(2.75, 1)
+(1.25, 2)
+(2.25, 2)
+(3.25, 2)
+(0.75, 3)
+(1.75, 3)
+(2.75, 3)
+Figure 2.3: Uniform square to uniform triangle grid transformation by horizontally offsetting ver-
+tices. Gray dashed line represents the division of the marching square cell into the two triangles.
+Note skew direction for odd and even rows.
+1 to 0
+2 to 1
+0 to 3
+3 to 2
+Figure 2.4: Example of a pivot shift around the marching cell.
+Once the pivot is in the position of first triangle, the pivot will shift around the vertices of
+that triangle (reference rotation on three vertices instead of four) until the pivot returns to
+the starting point. Then, the pivot is shifted by two positions around the cell, to the oppo-
+site corner, to repeat the process for the second triangle of the cell. If all three vertices
+of the triangle meet the threshold criteria, the entire triangle is appended to the surface
+geometry data. Similarly, if no vertices apply, then the triangle is skipped entirely - a pos-
+sible scenario if only the other triangle’s outer most vertex fulfills the threshold condition.
+While shifting inside a triangle, the other two possible cases are evaluated. These are
+based on the number of vertices inside the triangle which meet the threshold criteria.
+1. One vertex - once the pivot shifts to that vertex, a triangle is appended to the surface
+geometry data. The triangle is created from that vertex and two interpolated vertices
+along the edges from that vertex.
+2. Two vertices - once the pivot shifts to the vertex which does not fulfill the threshold
+condition, two triangles are appended to the surface geometry data. The triangles
+are initially in superposition, formed from the polygon of the two opposite vertices
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+11
+==PAGE:20==
+and two interpolated vertices along the edges to the pivot vertex. The triangles are
+resolved in such a way that maximizes surface distribution amongst them. Triangle
+superposition is revisited in Method, where a resolution strategy is proposed.
+In both of the cases above, the indices of edge vertices are also recorded to maintain a list
+of the actual contour - these are always the edges formed from the interpolated vertices.
+Interpolated vertices
+⃗𝑣𝑖are created by finding the interpolation factor from the inverse
+mapping of the two iso-values ℎ𝑖at the corner vertices, shown below in Equation 2.1.
+⃗𝑣𝑎𝑏= 𝑡⃗𝑣𝑎+ (1 −𝑡) ⃗𝑣𝑏,
+where 𝑡= theshold −ℎ𝑎
+ℎ𝑏−ℎ𝑎
+(2.1)
+pivot
+midpoint 1
+midpoint 2
+interpolated 1
+interpolated 2
+Figure 2.5: Example of interpolated vertices
+calculation and triangle creation (red) in the
+case of the pivot vertex being the only vertex
+satisfying the threshold criteria.
+The mid-
+point vertices are used to look up the indices
+for the interpolated vertices via a map.
+A standard approach to creating mesh data
+with any variant of the Marching Cubes algo-
+rithm is to create triangle soup meshes, which
+offer convenient implementation in the form of
+append-only geometry. In effect, vertices are
+duplicated up to six times for inner triangles.
+Inter-connected mesh data offers memory lev-
+ity, which is often expected by runtime raster-
+ization pipelines such as Unity’s graphics en-
+gine. This comes at the cost of increased gen-
+eration complexity due to book-keeping for ver-
+tex index lookup.
+In the implementation de-
+scribed above this is handled by using a dy-
+namic map of a vertex to its index. To avoid
+issues with floating point number calculations,
+interpolated vertex indices are keyed by mid-
+point vertices.
+bitmask 0111
+Odd row
+b0010
+b0100
+b0001
+b1000
+Even row
+b0010
+b0100
+b0001
+b1000
+bitmask 0101
+b0010
+b0100
+b0001
+b1000
+b0010
+b0100
+b0001
+b1000
+Figure 2.6: Examples of generated triangles (red) for specific configurations of threshold condi-
+tions (green where satisfied). Note the dashed lines which represent superposition which is then
+resolved into two triangles with best distribution of surface area.
+12
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:21==
+Figure 2.7: Outputs of the topology distribution algorithm (from left to right, no smoothing, one
+iteration, and two iterations). Note that most of the visual effect is achieved by the first iteration.
+Figure 2.8: In-game example of bevel (highlighted) and skirt (brown material) geometry.
+Post-processing
+Surface geometry creation with Marching Triangles in the terrain generation pipeline ef-
+fectively transforms terrain data into surface mesh representation, whereas the post-
+processing of that geometry data further transforms it into the final terrain mesh used
+in-game. While not critical for the use case of the thesis, the post-processing steps will
+be explained to provide context for the constrains on the proposed methodologies.
+The first step after creating the surface geometry data is topology redistribution. The
+algorithm moves vertices towards the center of the shapes that they belong to. In order of
+precedence these shapes are (1) vertices of edges towards the center of the edges they
+are a part of, and (2) vertices of triangles towards the center of triangles they are a part of.
+These two operations are exclusive. The result is a smoothing effect on the contour and
+better distribution of surface geometry across triangles, creating more uniform topology.
+The redistribution is applied twice, the results of which can be seen below in Figure 2.7.
+The final step is appending wall cliff geometry around the edges of the terrain in the form of
+a bevel and a skirt. These are one-quad outlines extruding from the edges of the surface
+geometry, shown in Figure 2.8.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+13
+==PAGE:22==
+14
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:23==
+3
+Method
+This chapter is separated into two sections. The first describes proposed changes to
+the baseline implementation of the Marching Triangles algorithm used in What The Car?,
+while the second will discuss the possible alternatives using shader programs to emulate
+terrain without the use of complex polygonization and mesh generation techniques.
+3.1
+Optimizations to CPU-based algorithms
+Before generalizing and applying optimizations it is beneficial to refactor the baseline al-
+gorithm into the more recognizable variant of Marching Triangles, that is with the use of
+lookup tables. The use of lookups replaces pivot shifting with a direct resolution of the
+triangle case.
+3.1.1
+Introducing memory efficiency
+A considerable part of the execution run time is automated memory management and
+the garbage collection which comes with it, therefore engineers have incentive to intro-
+duce lower level data structures and manual memory management in performance-critical
+code.
+A common pitfall is the overuse of managed hashmap data structures (also known as
+dictionaries) which have large overhead on data fetching and memory pointer resolutions.
+To make use of data locality, maps should be converted to one-dimensional arrays which
+enables data caching blocks of memory. This makes data accessing considerably faster
+as parts of the lookup array is available in the processor’s local cache register. In the case
+of the Marching Triangles algorithm where mesh inter-connectivity may be of interest, a
+map is used to cache the index of a vertex by that keyed by its hash value.
+Instead of using costly hash computations, vertex indices can instead be stored in a one-
+dimensional array by transforming their two-dimensional grid indices. Marching Triangles
+benefits from densely packed data as each iteration of a marched cell uses local data
+and looking up existing vertices for neighboring cells entails reading from spatially local
+data. This maximizes the chance of copying an entire relevant block of memory into the
+processor’s registers. Given width of the grid, the index conversion is defined as
+𝑖1D = 𝑥+ 𝑦⋅width
+𝑥= mod(𝑖1D, width)
+𝑦= ⌊𝑖1D/width⌋
+Map
+vertex
+index
+hash([1, 2])
+37
+hash([2, 2])
+42
+...
+Array
+vertex
+index
+1 + 2 ⋅width
+37
+2 + 2 ⋅width
+42
+...
+Figure 3.1: Example transformation of a map keyed by vectors to an array of integers.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+15
+==PAGE:24==
+In Marching Triangles, tracking of the interpolated vertices is crucial to construct intercon-
+nected mesh geometry. To fit this into the array paradigm, it is simply enough to double
+the resolution of the grid and to store the midpoint vertices on odd grid indices. The lookup
+indices must be unscaled and without the addition of row offsetting. The indices take the
+form of
+𝑖1D-lookup = 𝑥lookup + 2width ∗(𝑦lookup);
+𝑥lookup = 2𝑥from + {𝑥to −𝑥from
+case index is odd
+0
+otherwise
+𝑦lookup = 2𝑦from + {𝑦to −𝑦from
+case index is odd
+0
+otherwise
+(2, 2)
+242
+(4, 2)
+244
+(6, 2)
+246
+(2, 4)
+482
+(4, 4)
+484
+(6, 4)
+486
+(2, 6)
+722
+(4, 6)
+724
+(6, 6)
+726
+(3, 2)
+243
+(5, 2)
+245
+(3, 4)
+483
+(5, 4)
+485
+(3, 6)
+723
+(5, 6)
+725
+(2, 3)
+362
+(2, 5)
+602
+(4, 3)
+364
+(4, 5)
+604
+(6, 3)
+366
+(6, 5)
+606
+(3, 3)
+363
+(5, 5)
+605
+(3, 5)
+603
+(5, 3)
+365
+(0.75, 1)
+(1.75, 1)
+(2.75, 1)
+(1.25, 2)
+(2.25, 2)
+(3.25, 2)
+(0.75, 3)
+(1.75, 3)
+(2.75, 3)
+Figure 3.2: Example of triangle grid (left) point transformations to lookup index space (right) along
+with their 𝑖1D index (width = 60).
+Case index refers to the array of possible triangle cases which are stored in a static ar-
+ray to also avoid using maps for this implementation. An odd index in the triangle case
+represents a midpoint vertex.
+Triangle cases
+Bitmask index
+Triangle indices
+b000
+null
+b001
+5, 0, 1
+b010
+1, 2, 3
+b011
+5, 0, 2, 3
+b100
+3, 4, 5
+b101
+3, 4, 0, 1
+b110
+1, 2, 4, 5
+b111
+0, 2, 4
+b010
+2
+b001
+0
+b100
+4
+1
+3
+5
+Table 3.1: Possible triangle case indices (left). Illustration of indices distribution (right). Green
+indices are normal grid indices, whereas blue indices are midpoint indices.
+The cases with four indices are quads with two triangles in superposition. The exact
+resolution depends on the topology of the two triangles. Superposition resolutions can
+also be stored in a lookup array similarly to the triangles cases, as shown in Figure 3.2.
+16
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:25==
+Superposition resolution
+Condition
+Case indices as triangles
+Example resolution
+No superposition
+tri 1
+0, 1, 2
+0
+1
+2
+Pair of even vertices are closer
+tri 1
+0, 1, 2,
+tri 2
+0, 2, 3
+1
+2
+0
+3
+Pair of odd vertices are closer
+tri 1
+3, 1, 2,
+tri 2
+0, 1, 3
+1
+0
+3
+2
+Table 3.2: Triangle superposition resolution cases.
+The final remaining problem to solve, is that the default values of a zero-initialized array
+are also valid index values (zero). This can be solved by offsetting indices by one in the
+lookup table, and then reverting their value after a retrieval. With this, a value of zero in
+the array effectively means empty (no vertex), which is equivalent to a checking if a hash
+key is absent in a map.
+Capacity heuristics
+While the use of dynamically sized collections (such as lists or vectors) is convenient for
+the implementation of Marching Triangles where the size of the mesh cannot be checked
+beforehand, dynamic resizing of collections can be a costly operation which requires ad-
+ditional processing cycles. A resize may entail a full copy of the collection to another
+section of memory.
+The alternative is to preallocate a block of memory based on assumptions of the size
+requirements of the algorithm. Most programming languages support setting the capacity
+of these dynamic collections which immediately allocates the expected memory. The
+maximum heuristics for the capacities of the collections is the following (for Marching
+Triangles):
+max(vertices) = 2width ⋅2height
+(3.1)
+max(triangles) ≤width
+2
+⋅height
+2
+⋅(12 + 2) ⋅3
+(3.2)
+max(edges) ≤2(width
+2
+⋅height
+2
+⋅6 + 2width + 2height)
+(3.3)
+The vertices heuristic max(vertices) is twice the grid resolution as it includes midpoint ver-
+tices. The triangles heuristic max(triangles) is derived from a checkerboard of alternating
+height values. This creates a geometry with the maximum number of single-vertex gaps
+that are surrounded by double triangle case resolutions, as shown in Figure 3.3. In this
+case, the exact number of triangles depends on the parity of each of the terrain bound di-
+mensions, but is always bounded from above by the product of the gap count and the sum
+of gap triangles (12) and the filler padding triangles (2). The edges heuristic max(edges)
+is also derived from the maximum-gap configuration, that is the sum of edges per gap (6)
+and perimeter edges.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+17
+==PAGE:26==
+Figure 3.3: Marching Triangles configuration for the largest output geometry data in terms of tri-
+angles and contour edges, generated by a checkerboard height field.
+The use of maximum heuristics is excessive in most cases, as height fields will rarely uti-
+lize all of the allocated memory in cases other than specific configurations. A reasonable
+approach is to set the capacity of the collections to half of the maximum heuristics. In
+common implementations of dynamic data structures, the collection’s buffer is doubled
+when its capacity is breached. Thus, with when using half of the maximum, reaching the
+capacity would results reallocation to the maximum heuristic capacity, at the cost of one
+block copy operation. A smarter approach would be to store the count of the specific ge-
+ometry property and, on the next execution of the modification algorithm, use a relative
+heuristic based on the maximum expected change size, for example
+h(triangles) = 𝑛triangles ⋅factor
+(3.4)
+or
+h(triangles) = 𝑛triangles + max increase
+(3.5)
+3.1.2
+Thread parallelization
+There are two approaches to thread parallelization for the Marching Cubes family. The
+first is to maintain a single terrain mesh, but have the mesh data be generated in threaded
+chunks into a common output buffer. The second option is to redesign the pipeline, so
+that the chunks become separate objects entirely. This enables rehydration of only the
+necessary chunks which are modified in runtime, thus cutting the cost of a holistic mesh
+update.
+The Marching Triangles algorithm inherently supports chunking without the need for ad-
+ditional changes - the difference between contour edges and internal edges is clearly
+defined, therefore neighboring chunks will align without the need for additional restructur-
+ing, as long as the edges of those chunks are placed at the same positions.
+18
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:27==
+Generating geometry in parallel
+As Marching Triangles is classified as embarrassingly parallel, the algorithm can be easily
+parallelized with the use of threads. Using threads, the output can be relaxed to create
+triangle soup geometry data with no triangle inter-connectivity. This comes at the cost
+of duplicated vertices at every triangle. Batches can be executed for these chunks in
+appropriate thread sizes. Batch sizes depend on the hardware available on the device.
+In theory, the number of threads should match the number of available cores, both physical
+and logical.
+Mesh inter-connectivity could be supported internally for a thread’s triangles, but would
+require additional processing after the threads have finished to stitch these chunks to-
+gether.
+Generating separare objects in parallel
+Treating chunks as separate objects has large ramifications on the runtime performance
+of terrain modification at the cost of a slightly larger execution time during initialization due
+to the overhead of creating new logical objects for each separate chunk. During runtime,
+only the specific chunks which correspond to the indices of the height field modification
+must be rehydrated, thus avoiding unnecessary processing for unmodified parts of the
+terrain. This is equivalent to the concepts behind chunked level of detail mesh regener-
+ation. An additional benefit to maintaining multiple chunks as separate game objects are
+their integration with performance-friendly features provided by game engines such as
+occlusion culling.
+Given a set of grid indices 𝑥, 𝑦for which the height field had been modified, a chunk (of
+size chunksize) index is found by
+𝑥chunk = ⌊
+𝑥
+chunksize⌋
+𝑦chunk = ⌊
+𝑦
+chunksize⌋
+𝑖chunk = 𝑥chunk + ⌊𝑦chunk ⋅
+width
+chunksize⌋
+(3.6)
+The chunk size should be selected according to the use case of the terrain, and it should
+be larger than the maximum possible area size of a modification made by the user. For
+simplification chunks are square, but their dimensions could also be scaled to the terrain
+bounds aspect ratio.
+An array of terrain chunks is created which can be indexed by the one-dimensional chunk
+index 𝑖chunk from Equation 3.6. While iterating the set of modified indices, another set
+is used to check if the chunk had already been rehydrated. This is presented in Algo-
+rithm 3.1.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+19
+==PAGE:28==
+Algorithm 3.1 Rehydrating chunks.
+1: function UPDATECHUNKS(indices)
+2:
+rehydrated ←{ }
+3:
+for (𝑥, 𝑦) ∈indices do
+4:
+𝑥chunk ←⌊
+𝑥
+chunksize⌋
+5:
+𝑦chunk ←⌊
+𝑦
+chunksize⌋
+6:
+𝑖chunk ←𝑥chunk + ⌊𝑦chunk ⋅
+width
+chunksize⌋
+7:
+if 𝑖chunk ∉rehydrated then
+8:
+rehydrated ←rehydrated ∪{𝑖chunk}
+9:
+REHYDRATECHUNK(𝑖chunk)
+10:
+end if
+11:
+end for
+12: end function
+3.1.3
+Data parallelization
+The Marching Triangles algorithm is data-centric. The transformation is from one collec-
+tion of data into another of relative size. For each data point (or fixed slice of data points)
+in the height field array, the same operation is performed to generate an output. This is
+a data parallelization problem particularly well-suited for Single instruction, multiple data
+architecture.
+The cell marching loops can be vectorized to perform transformations of the height field
+data into geometry data in batches without the overhead of managing multiple threads
+for parallelization. Additionally, implementations of memory overlapping and overriding
+memory aliasing checks for read and writes to memory blocks which are near each other
+can provide a substantial increase to data transformation performance as the overhead
+of memory bussing is minimized. At the core of this concept is the use of the processor’s
+caches to store data locally and to perform data transformations before returning it to
+memory.
+3.2
+Creating terrain with GPU shader programs
+The terrain data is provided as a byte array of the two-dimensional height field sampled
+at some grid granularity. The same data can be transformed into a height map texture
+with the same dimensions as the grid. The added benefit is that the transformation into a
+texture also pre-computes the in-between values of the sampled grid points with bilinear
+interpolation. The next subsections propose methodologies for rendering terrain from a
+height map with stylistic constrains.
+The main constraint is that the terrain follows a binary masking rule - at a given position
+there either is terrain, or there is no terrain (see Figure 3.4). This introduces difficulties
+with the further capabilities of common terrain processing which depend on the use of
+surface derivatives, because stepped (discontinuous) surfaces have undefined gradients
+at the discontinuity, which limits the ability to generate surface normals. This will be further
+discussed in Customization of ray-marched terrains.
+3.2.1
+Vertex displacement
+A simple and highly performant approach to rendering height maps is the use of the vertex
+shader program to displace vertices according to a height map. Assume a uniform mesh
+grid that lays on a plane with the texture coordinates (uv) uniformly distributed over the
+surface of the grid. The transformation of a vertex follows the rule
+20
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:29==
+Figure 3.4: Comparison of height maps. Left: byte field as a texture. Right: the same texture,
+stepped at the threshold value.
+⃗𝑣out =
+⃗𝑣in + texture(uvin) ⋅⃗𝑛,
+where
+⃗𝑛is the normal to the plane.
+The transformation is executed for every vertex in the rasterization pipeline, therefore the
+output is highly dependent on the granularity of the mesh grid used for this operation. In
+other words, the height map is only sampled as the positions of the mesh grid vertices.
+3.2.2
+Parallax mapping
+Parallax mapping is more nuanced than vertex displacement. The entire operation occurs
+inside of the fragment shader program, thus only a single quad (of two triangles) in a
+mesh is enough to create the desired effect. This ray marching technique depends on the
+transformation of the camera-fragment direction into tangent space, wherein the marching
+takes place. The ray’s plane position (𝑥𝑦) are equivalent to the height map texture space,
+therefore the height of the ray’s position can be directly compared to the height map value.
+The ray marches until a threshold is encountered. The ray march of a ray ⃗𝑟𝑖is defined by
+⃗𝑑tangent = TBN ⋅
+⃗𝑑from camera
+⃗𝑟0 = [𝑢
+1
+𝑣]
+⃗𝑟𝑖= ⃗𝑟𝑖−1 + step ⋅−⃗𝑑tangent ⋅aspect
+(3.7)
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+21
+==PAGE:30==
+TBN is the tangent-bitangent-normal matrix which can be computed from the matrix prod-
+uct of the world view direction and the world tangent
+⃗𝑡, normal
+⃗𝑛and bitangent
+⃗𝑏, like
+so
+TBN =
+⎡⎢⎢
+⎣
+𝑡𝑥
+𝑏𝑥
+𝑛𝑥
+𝑡𝑦
+𝑏𝑦
+𝑛𝑦
+𝑡𝑧
+𝑏𝑧
+𝑛𝑧
+⎤⎥⎥
+⎦
+The variables aspect and step control the ray itself. The former is used to scale the step
+to match the dimensional scaling of the texture, whereas the latter is used to control the
+granularity render. Larger steps will be more performant at the cost of detail at the edges
+of the terrain. Both of these can be pre-applied to
+⃗𝑑tangent to avoid the computation of two
+unnecessary products for every step. The ray is marched up to a given amount of steps
+upon which it is treated as having missed the terrain, or the ray is stopped earlier if the
+ray’s height passes the terrain’s threshold. Additionally, the ray can be stopped at the
+edges of the texture space (0 ≤𝑟𝑥≤1 ∧0 ≤𝑟𝑧≤1).
+The effect is dependent on the angle of viewing incident to the quad surface. Rays which
+start at a direction almost parallel to the surface of the quad will travel miniscule vertical
+distances, which in turn will squash the rendered visual. This can be alleviated by nor-
+malizing the direction vector to its vertical component
+⃗𝑑−1
+𝑦
+⋅
+⃗𝑑, effectively ensuring that a
+single step travels the same vertical distance regardless of the viewing angle.
+Since this technique is still embedded inside of the rasterization pipeline, the rays begin
+at the surface of the quad. Therefore, the rendered terrain is suspended inside of the
+geometry - visible from above the quad, but the illusion is dispersed when viewed from
+the side or when entering the geometry.
+3.2.3
+Polygon-assisted ray marching for terrain rendering
+The best of both Vertex displacement and Parallax mapping can be combined in the form
+of polygon-assisted ray marching. The vertex shader program is utilized to create the
+constraining polygon by displacing vertices to the heights of the terrain and the fragment
+shader program utilizes ray marching similar to Parallax mapping, but in world- or model-
+space since the bounding polygon contextualizes the start position for each ray. The
+rendered terrain is still suspended inside of the geometry, but as the geometry is more
+relevant to the actual shape of the terrain, the observer may view the cliff walls from the
+side at a minimum distance away from the rendered terrain.
+In the vertex program the vertices are offset similarly as before, but must allow more space
+between the rendered terrain and the bounding mesh as a tight bound could result in clip-
+ping of the rendered terrain. This can be achieved by setting a lower threshold for vertex
+displacement condition, but this approach may result in uneven and unpredictable bound
+padding due to differences in the gradient of the height map or due to the sample sizing.
+Another approach is to generalize the condition of the vertex displacement - instead of
+checking only at the position of the vertex, also check the threshold condition at the posi-
+tions of its neighbors within a unit texel distance (t𝑢, t𝑣in the two texture space dimensions
+respectively). This effectively ensures that the boundary at the terrain’s height will always
+be further outwards than the rendered terrain within the distance of one texel. The vertex
+transformation is defined by
+22
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:31==
+C =
+⎡⎢⎢
+⎣
+texture(𝑢−t𝑢, 𝑣−t𝑣)
+texture(t𝑢, 𝑣−t𝑣)
+texture(𝑢+ t𝑢, 𝑣−t𝑣)
+texture(𝑢−t𝑢, t𝑣)
+texture(t𝑢, t𝑣)
+texture(𝑢+ t𝑢, t𝑣)
+texture(𝑢−t𝑢, 𝑣+ t𝑣)
+texture(t𝑢, 𝑣+ t𝑣)
+texture(𝑢+ t𝑢, 𝑣+ t𝑣)
+⎤⎥⎥
+⎦
+⃗𝑣out =
+⃗𝑣in + {
+⃗
+up
+if ∑C𝑖𝑗≥1
+⃗0
+otherwise
+,
+where t𝑖is the texel distance in texture dimension 𝑖.
+Within the fragment shader program the ray is marched in model space. Other than this,
+the algorithm is similar to Equation 3.7 described in Parallax mapping. This space proves
+to be the easiest to handle due to the ease of model-to-texture space conversion, that
+is uv = [ ⃗𝑟𝑥
+⃗𝑟𝑧]
+𝑇
+⋅[resolution−1
+𝑢
+resolution−1
+𝑣]
+𝑇
+. The world position and world direction
+(from the camera) of the fragment are transformed to model space with the use of a world
+to model matrix.
+As previously, the ray marches on until it either reaches the maximum number of steps,
+the ray position’s vertical component is below the floor or it is above the terrain at that
+position. In this method there are two variables, the step size and the step count. The
+number of ray steps as well as the step size have a large effect on the output of the
+algorithm. Small step sizes provide better details on edges, but require a larger number
+of iterations (steps) which incur larger execution costs.
+The halting conditions for ray marched terrain are described below, together with that
+fragment’s output.
+1. Return transparent, if the ray is outside of terrain map (bounding box)
+hchorizontal ←¬( ⃗0 < ⃗𝑟< [𝑢max, 𝑦terrain, 𝑣max]).
+2. Discard, if the ray has reached the maximum number of steps hcsteps ←𝑖>= steps.
+3. Return color, if the ray has intersected with the terrain hcterrain ←texture(uv) > 0.
+The difference between a discard and transparency is that when discarding, the shader
+program will be repeated for any fragments behind the discarded fragment of the same
+mesh. Transparency will result in accepting that the fragment is invisible, and only render
+any other mesh’s fragments behind the transparent one.
+3.2.4
+Optimizations of ray-marched terrain
+Two immediate solutions are available for the optimization of ray-marching techniques,
+both of which aim to decrease the maximum number of ray steps reached by any given
+warp in the GPU execution cycle. These are Bisection and Backface bounding, discussed
+in the following sections.
+Another facet of ray marching optimization concern is the use of fragment discarding (also
+known as clipping). Discarding is a costly operation as the processing unit has to repeat
+the program for the previously discarded fragment for fragments which were assumed to
+be obstructed. The use of the discard instruction also disables optimizations in shader
+compilation based on the assumption that obstructed fragments will never be observed
+(for opaque materials). Therefore, performance-friendly implementations using the dis-
+card instruction should favour early discards for layered fragments.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+23
+==PAGE:32==
+Bisection
+Bisection refers to applying the principles behind binary search to quickly converge to the
+terrain intersection point. This method grants the benefits of both having a large step size
+and small step count. There is an upper bound on the step size that is smallest possible
+width of terrain which is best set manually for a specific use case.
+An additional variable thresholdbisection is included to control the convergence of the rays
+and thus the detail of the render. This defines the step size at which the ray is determined
+to have intersected adequately. The rays now step over initially large steps and should the
+threshold condition change over a step, the ray direction is negated and step size halved.
+The ray will converge to the edge of the terrain and the fragment color rendered once
+the step size is diminished to a value lower than or equal to the bisection step threshold.
+Transforming the linear step ray march from Equation 3.7, the bisection march iterator is
+defined in Equation 3.8.
+Δ𝑖+1 = ℎ𝑖−ℎ𝑖−1
+step𝑖+1 = {−1
+2step𝑖
+if Δ𝑖+1 ≠0
+step𝑖
+otherwise
+⃗𝑟𝑖+1 = ⃗𝑟𝑖+ step𝑖+1 ⋅
+⃗𝑑
+(3.8)
+halting condition: hcbisection ←step𝑖≤thresholdbisection
+The terrain halting condition hcterrain (described in Polygon-assisted ray marching for ter-
+rain rendering halting conditions point 3) is replaced by the bisection halting condition
+hcbisection.
+Backface bounding
+Polygon-assisted ray marching not only provides the benefit of constraining a ray’s origin
+close to the terrain, but can also provide information about where a ray should be ter-
+minated, that are the fragment positions of the back faces of the bounding polygon. A
+pre-render can be configured to render the distances of the backface fragments positions
+to an intermediate texture, which is then used in the terrain rendering shader program to
+establish the terminal points of marched rays. It is sufficient to use the camera-fragment
+distance, as this value can be reasonably normalized to a single output channel of the
+intermediate texture.
+Care should be taken to decide the render order (z-write) of the back faces. While both
+the greater than and less than comparison operations are valid, they provide different re-
+sults in the optimization process. When the rendering order uses the less than operation
+(fragments closer to the viewer) rays will likely be terminated much sooner (locally), but
+should any new rays be marched behind the discarded fragment they will no longer be
+backface-bounded. On the other hand, using the greater than operation provides glob-
+alized bounding where the initial ray will be marched until it is terminated at the final
+backface, which may already be near the end of the ray marching bounding box.
+An additional halting condition is added, dependent on the backface bounding strategy.
+localized:
+hclocalized backface ←𝑑⃗𝑟0 < 𝑑backface ∧𝑑⃗𝑟𝑖≥𝑑backface
+globalized:
+hcglobalized backface ←𝑑⃗𝑟𝑖≥𝑑backface
+24
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:33==
+3.2.5
+Customization of ray-marched terrains
+A desirable parameter of the rendered terrain is more detailed control of the generation
+of the terrain cliff walls. Instead of simply generating vertical walls, stylistic design could
+call for the use of a defined mathematical function over the wall’s height. Ray marching
+can be customized to generate interesting structures based on the height and distance to
+the wall. The difficulty is finding that distance in a height map, which would otherwise be
+trivial in the case of a three-dimensional distance field.
+Instead of using a stepped height map (Figure 3.5 (left)), the texture’s values may be
+clamped and normalized to the threshold value, thus creating a gradual descent outwards
+from the edges of the terrain. Taking the additive inverse of this map provides a substitute
+for a distance field in two-dimensional space. Any position in the texture that is not within
+that gradual section is considered to be infinitely far away (value of 1), and any position
+inside the terrain is considered immediately close (value of 0). Equation 3.9 generates
+the field depicted in Figure 3.5 (right).
+field(uv) = 1 −max(0, min(texture(uv)
+threshold , 1))
+(3.9)
+Figure 3.5: Stepped height map with threshold
+25
+255 (left). Substitute distance field with threshold
+45
+255 (right).
+A displacement function 𝑓displace(ℎ) may define the variable wall at height ℎ. This function
+computes the distance of the variable wall extrusion from the terrain edge. The previous
+halting condition hcterrain is replaced by hcvariable, defined in Equation 3.10. The displace-
+ment function may include other variables such as the frame number for the purposes of
+animation.
+ℎ𝑖=
+⃗𝑟𝑖𝑦
+ℎterrain
+hcvariable ←field(uv) ≤𝑓displace(ℎ𝑖)
+(3.10)
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+25
+==PAGE:34==
+Variable walls are suspended inside of the rendered terrain, just as the terrain is sus-
+pended inside the mesh geometry. The magnitude of the variable wall (depth of its ef-
+fects) may be controlled by increasing the difference in thresholds used for (1) stepping
+the height map and (2) creating the clamped substitute distance field. A larger gap defines
+the displacement function over a larger section of the terrain, and thus the constant flat
+portion of the terrain is smaller. The variable wall operation is visualized in Figure 3.6.
+Bounding polygon
+𝑓displace(ℎ) = 0.5(sin ℎ+ 1)
+field(uv) = 1
+field(uv) = 0
+Threshold gap
+⃗𝑟
+field(uv) ≤𝑓displace(
+⃗𝑟𝑖𝑦
+ℎterrain)
+Figure 3.6: Side view of a ray intersection with a variable wall.
+26
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:35==
+4
+Implementation & results
+This chapter is dedicated to implementation and comparison of results within each cate-
+gory of terrain generation method.
+4.1
+Project details
+The project is broken down into two phases, these are (1) implementing and testing opti-
+mizations in a sandbox environment with focus on depth of the tests, and (2) porting the
+best solutions to the What The Car? project and observing the final effect they have in an
+industry-scale project setting.
+4.1.1
+Sandbox
+The project sandbox uses the same Unity version as the What The Car? project which is
+2022.3.42f1 released on the 13th of August, 2024 [32]. Included in the sandbox installa-
+tion of Unity, are modules which are vital to the research process, these are
+Jobs The Jobs built-in module provides an interface to the threaded workflow embedded
+in the game engine ecosystem.
+This module is used to set up thread parallelization for Marching Triangles.
+Burst 1.8.18 [18] An alternative compiler based on Single instruction, multiple data con-
+cepts for Unity which only compiles a high performance subset of C# code into highly
+performant native code by utilizing auto-vectorization and assumptions on memory
+aliasing. Source code targeting Burst must be written in the Jobs framework, but
+does not necessarily have to be threaded.
+This module is used to implement data parallelization for Marching Triangles.
+Collections 2.5.3 [33] Introduces a library of wrappers (referred to as Native*) for un-
+managed memory data structures which replace common collections used in C#
+such as Array with ArrayArray and List with NativeList. Used by the Burst com-
+piler, as managed memory collections are not allowed in the high performance C#
+subset.
+This module is used in conjunction with Burst and Jobs.
+Performance Testing API 3.0.3 [34] The performance testing library introduces a toolkit
+for the user to measure the performance of a given function with control over iteration
+count and warmup.
+This module is used to set up a uniform performance testing environment for the
+optimization implementations.
+The sandbox project focuses on two domains. The first is performance optimizations for
+the Marching Triangles step of the What The Car? terrain generation pipeline illustrated in
+Figure 2.2. The post-processing of the terrain is a secondary concern, discussed in detail
+in phase two of the research process. The second is implementations of GPU-rendered
+terrain in Unity’s shader framework. Shader programs are written in High-Level Shader
+Language (HLSL) [35] which are wrapped by Unity’s custom ShaderLab [36] programming
+language used to configure the behavior of the shader (for example front-face culling
+setting).
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+27
+==PAGE:36==
+Figure 4.1: Two views from the game engine editor window after executing each implementation,
+each of which output a terrain mesh. In the right view, tags are used to display the implementation
+identifier along with the execution time for that specific instance.
+Algorithms
+Each implementation of a variant of the Marching Triangles algorithm or the GPU-rendered
+terrain is a standalone class which implements the ITestable interface, which provides
+three methods for interfacing with an algorithm, these are
+SetupTest() Initializes the implementation. These are any operations that are deemed
+outside of the performance critical scope of the algorithm or operations which can
+be performed once at program initialization, such as
+• Unmanaged memory allocation
+• Management of Unity specific logic (GameObjects, Transforms, etc.)
+• Setup of chunk management
+• Generating a a height map texture from the height field array
+Teardown() Used for cleaning up after a test is run. Primarily used to free allocated
+unmanaged memory.
+RunTest() The method which executes the appropriate algorithm implementation and is
+used for execution time calculation. In the case of GPU-rendered terrain, the exe-
+cution is in shader programs therefore this method is used to simulate data bussing
+between the CPU and the GPU by creating a new texture and transferring it.
+The algorithms are either run once and their outputs displayed in the game engine’s editor
+window together with their execution time in processor ticks, or they are all run through the
+performance testing framework (without visual outputs). An example of the visual output
+is shown in Figure 4.1.
+A separate workflow is created for measuring render performance of the GPU-based im-
+plementations. A single implementation of rendered terrain is selected and instanced 625
+times in a 25×25 grid as unique instances (to disable Unity’s automated material instanc-
+ing). A camera is then moved around the scene to variate the number of visible instances
+of the terrain at once. The use of 625 instances is enough to judge the performance of
+the shader programs. An example of this workflow is provided in Figure 4.2.
+28
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:37==
+Figure 4.2: Example of a rendering performance test.
+Test cases
+Test cases are a collection of properties which define an environment for the algorithm to
+be executed in. The relevant properties are
+useBurst A flag for whether relevant code should be compiled with the Burst compiler.
+When false, code is compiled by the standard Unity compiler Mono, a Just-In-Time
+compiler with limited optimization features.
+heightFieldIdentifier An identifier used to look up a struct containing the byte array
+of the height field values and the terrain width and depth dimensions.
+testIterationCount Number of iterations to run the performance test for.
+modifiedIndicesCount If this value is larger than zero, the height field will be modified
+with this many random writes. In this case, the computed flag IsPartial is set to
+true, which is used to toggle the partial modification workflow for the algorithms
+which support it (implementations with chunking), instead of regenerating the entire
+terrain across iterations. If an algorithm does not support partial modifications, the
+terrain will be regenerated fully.
+Two height fields have been extracted from the What The Car? ecosystem to use as
+references in the test executions, these are Small Field (grid dimensions 30 × 65) and
+Large Field (70 × 220) shown in Figure 4.3. Other manufactured terrains were used such
+as Inverted Islets (51 × 51) generated with gaps on odd rows and columns.
+A test is referred to by the sum of its properties using the following pattern
+burst|no-burst −partial-𝑛|full −field-name −iterations
+Performance testing
+The performance testing framework allows easier access to quantitative performance
+metrics. One of the key differences between visual and performance testing methods
+is the use of warmup iterations. The algorithm is run that many times before the perfor-
+mance is measured in the following iterations. This is to exclude the costs of memory
+bussing between memory and the CPU, as it is likely for the required memory blocks to
+have already been loaded in the processor cache. Tests are run sequentially, so that
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+29
+==PAGE:38==
+Figure 4.3: Comparison of commonly used terrains in testing (top row: Inverted Islets, Full Field
+50 × 50 (for reference) and Small Field; bottom: Large Field).
+parallelized tests are not hindered by other tests and have access to a larger number of
+cores. The test runner reports the following metrics of the algorithm execution time in mil-
+liseconds: min, max, median, and mean. An example of the test runner output is shown
+in Figure 4.4. The test runner script is shown in Listing 4.1, where
+instance.RunTest(modifiedIndices) is used in the case of partial modifications to the
+height field, for algorithms which support partial updates (chunking).
+PartialSetup() A method which is used to reset the object instance properties which
+should not carry over between iterations.
+.WarmupCount(10) Set the warmup iterations count to ten.
+.GC() Configures the test runner to also record the number of garbage collection alloca-
+tions.
+1
+foreach (var instance in ITestable.Algorithms)
+2
+{
+3
+if (!instance.IncludeInTests) continue;
+4
+5
+instance.Setup(testCase , setting);
+6
+7
+Measure.Method(() =>
+8
+{
+9
+try
+10
+{
+11
+if (setting.performanceData.IsPartial)
+12
+instance.RunTest(modifiedIndices);
+13
+else
+14
+instance.RunTest();
+15
+}
+16
+catch (Exception e)
+17
+{
+18
+Debug.Log($"{instance.GetType().Name} failed.");
+19
+}
+20
+})
+21
+.WarmupCount(10)
+22
+.MeasurementCount(setting.performanceData.testIterationCount)
+30
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:39==
+23
+.GC()
+24
+.SampleGroup($"{setting.GeneratePrefix()}|{instance.GetType().FullName
+}")
+25
+.SetUp(() => { instance.PartialSetup(); })
+26
+.CleanUp(instance.Teardown)
+27
+.Run();
+28
+}
+Listing 4.1: Test runner for performance testing (C#).
+Figure 4.4: Output of the performance testing framework. The results can also be exported to csv
+for detailed analysis.
+4.1.2
+On porting to production
+While performance testing does provide a heuristic for the absolute performance differ-
+ence between two implementations, often the context in which the implementations are
+impacts their performance, especially taking into consideration that production code does
+not offer warmup executions or directly sequential iterations of the same code. The What
+The Car? project is mature, therefore the addition and refactoring of code comes at the
+cost of thorough testing and careful considerations for future use.
+To minimize development time spent on overhauling large chunks of the game’s code,
+only the most promising performance-wise and least impactful implementation-wise op-
+timizations were selected for implementation in the game, based on the results of the
+research sandbox. Additionally, limited testing tools are available in the game project
+which provides less in-depth analysis. The results are used for reference in the context
+of the sandbox project.
+4.1.3
+Devices
+Various devices were used for testing the results. Due to limitations, detailed performance
+measurements are not available for the iPhone and can be provided only on a frame-by-
+frame sample of run time using Unity’s Performance Markers (equivalent to a stopwatch).
+Mid-range blocky Desktop computer with Nvidia Geforce GTX 1080 GPU, 4-core Intel
+Core i7-4790k (8-core with Hyper-threading), and 16GB RAM.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+31
+==PAGE:40==
+High-end proart Desktop computer with Nvidia Geforce RTX 4070 GPU, 16-core AMD
+Ryzen 9 9950X CPU, and 64GB RAM.
+Low-end iPhone iPhone X with 3-core Apple GPU, 6-core Apple A11 Bionic CPU, and
+3GB unified RAM [37]. Released in 2017, this model is currently at the bottom of
+Apple’s actively supported devices.
+Directly relevant results are presented in this chapter. Results for the other devices (where
+available) are appended to the Appendix under section A.1.
+4.2
+CPU optimizations
+A limitation of CPU optimizations implementations is a restriction on changing the inputs
+and outputs of the terrain mesh generation pipeline. Graphics-wise there is nothing of
+note as the output is considered to be working if it is virtually identical to the baseline,
+including maintaining mesh inter-connectivity and generating a list of ordered triangles.
+Triangle connectivity is important in the domain of the project, as post-processing done
+on the terrain requires a list of triangles to perform surface topology redistribution.
+The metrics of interest are specifically execution times of the algorithms measured in
+milliseconds or processor ticks. The structure of this section will follow the order of imple-
+mentation of optimizations. In the case of implementations with variants based on param-
+eters, the best will be selected before a final comparison of all implementations. Appendix
+tables A.1 to A.2 present the median run times of all the implementations discussed and
+plotted in the following sections.
+4.2.1
+Refactoring & memory efficiency
+The experimentation begins with refactoring the Reference Rotation variant into Lookup
+with the use of arrays based on the methodology presented in Introducing memory effi-
+ciency. Lookup is split into two versions. Lookup refactors pivot shifting into triangle case
+lookups and implements an array instead of a dictionary in all uses (for tracking previously
+created vertices and for triangle case lookups). Lookup w/ memory heuristics additionally
+implements the use of (maximum) memory heuristics for all dynamic collections. Another
+variant is created for the pivot shifting Reference Rotation no map where the vertex index
+map is transformed into an array. The execution metrics for these implementations are
+presented in Figure 4.5.
+The generalized implementations for Reference Rotation and Lookup are presented in
+Listing A.1 and Listing A.2 respectively, in the Appendix. The implementation changes
+required to transform Reference Rotation to use an array for vertex indices is presented
+in Listing A.3.
+For the variants where an array is implemented in place of the vertex index dynamic map,
+the execution time is significantly decreased for both implementations of the Marching
+Triangles algorithm. Lookup performs slightly better than Reference Rotation no map,
+which indicates better performance is gained from using static data rather than dynami-
+cally building triangle cases.
+Increasing the number of test iterations provides a similar mean, but demonstrably intro-
+duces larger variation between the minimum and maximum execution times. This occurs
+as certain singular executions are outliers which spike up in execution time as evidenced
+by the similarity in the mean and the median for that test. This is likely due to an internal
+processing stall or higher generation garbage collection call. Most of the test iterations
+provide a stable and deterministic execution run time within a small range of variability.
+32
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:41==
+n-f-sm-10
+n-f-lg-10
+n-f-ii-10
+n-f-lg-100
+n-f-sm-100
+Test
+0
+10
+20
+Mean execution time [ms]
+n-f-sm-10
+no-burst-full-SmallField-iters-10
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-f-ii-10
+no-burst-full-InvertedIslets51X51-iters-10
+n-f-lg-100
+no-burst-full-LargeField-iters-100
+n-f-sm-100
+no-burst-full-SmallField-iters-100
+Median
+Min-Max
+Reference
+Rotation
+Reference
+Rotation no map
+Lookup
+Lookup w/
+heuristics
+Figure 4.5: Comparison of execution time for Reference Rotation (baseline), Reference Rotation
+no map, Lookup and Lookup w/ heuristics Marching Triangles implementations (blocky).
+Interestingly, the use of memory heuristics is not always a clear boost, which could be due
+to the initial large overhead of allocating a large buffer. This case is more clear in Small-
+Field, where the actual geometry size is a smaller percentage of the heuristic than in other
+fields. In the case of InvertedIslets51X51 the performance appears to be more stable, as
+the capacity is almost fully consumed. Otherwise, the result is uniform for the three fields
+LargeField, SmallField and InvertedIslets51X51 which indicates the algorithm’s large tol-
+erance for scale of the problem domain.
+It is also worth considering the actual byte size of preallocated memory to understand
+the amount of memory used by Marching Triangles in the worst case (full geometry, In-
+vertedIslets 𝑛× 𝑛). Assuming dimensions of 70 × 220, which are the standard large size
+bounds of terrain for modification in player-created levels, the geometry data can take up
+to 10.8mB of memory. This is broken down into the following
+ℬvertex index lookup = 61, 600 ×
+4B
+uint = 246, 400B = 246.4kB
+ℬ
+vertices
+𝑝𝑜𝑠𝑖𝑡𝑖𝑜𝑛,𝑛𝑜𝑟𝑚𝑎𝑙,𝑐𝑜𝑙𝑜𝑟= 200, 200 ×
+12+12+4B
+TerrainVertex = 5, 605, 600B = 5, 605.6kB
+ℬtriangles = 600, 600 ×
+4B
+int = 2, 402, 400B = 2, 402.4kB
+ℬedges = 46, 200 ×
+4B
+int = 184, 800B = 184.8kB
+ℬedge normals = 200, 200 ×
+12B
+Vector3 = 184, 800B = 184.8kB
+ℬmarching triangles = ℬvertex index lookup + ℬvertices + ℬtriangles = 8, 254.4kB
+ℬpost processing = ℬedges + ℬedge normals = 2, 587.2kB
+Σℬ= ℬmarching triangles + ℬpost processing = 10, 841.6kB ∼10.8mB
+ℬpost processing refers to memory allocated for edge data which is later used in post pro-
+cessing such as smoothing of the contour and addition of wall structure.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+33
+==PAGE:42==
+4.2.2
+Data parallelization
+To make use of Unity’s Burst module, the implementation must be restructured to use Unity
+Jobs. Use of Burst does not allow data structures other than static readonly managed data
+or manually allocated memory. Uses of Array<T> or List<T> type structures must be
+replaced with a memory-allocated alternative, such as Unity’s Native* implementations.
+Static readonly data structures are known at compile time, and cannot be modified during
+the program’s runtime (C# keywords static readonly).
+This condition is already fulfilled for the vertex index map which had been transformed into
+an array type and thus requires minimal refactoring (from Dictionary<Vector2, int> →
+int[] →NativeArray<int>). The triangle case lookup table and the superposition res-
+olution table are implemented as static readonly arrays. The geometry data lists can be
+converted to NativeList<T> which replicate the behaviors of the managed class List<T>.
+Unity highly recommends setting generous capacity for these memory allocators, as re-
+sizing is more costly than a standard List<T> - in this case the maximum heuristics can
+be safely used. All memory allocations must be manually disposed after use.
+Lookup (Job) and Reference Rotation (Job) are implemented with these principles, for
+which the test results are presented in Figure 4.6. Reference Rotation (Job) has been
+excluded from the results, as the average execution time for the implementation reaches
+up to 300 ms (proart) and 600 ms (blocky) which would not fit comfortably in the chart. An
+example for this execution is provided in Figure A.1. The difference in performance comes
+from implementation, as in Reference Rotation (Job) Unity’s NativeHashMap<Vector2,
+int> is used in place of the original Dictionary<Vector2, int> as a naive replacement.
+The use of this data structure is unfit for performance-critical contexts. An alternative
+Reference Rotation (Job) no map is implemented for which an array is used instead.
+n-f-lg-10
+n-f-sm-10
+b-f-lg-10
+b-f-sm-10
+Test
+0
+5
+10
+15
+20
+25
+Mean execution time [ms]
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-f-sm-10
+no-burst-full-SmallField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+b-f-sm-10
+burst-full-SmallField-iters-10
+Median
+Min-Max
+Reference
+Rotation
+Reference
+Rotation no map
+Lookup
+Reference
+Rotation (Job)
+no map
+Lookup (Job)
+Figure 4.6: Use of Unity Burst for data parallelization for the Reference Rotation and Lookup
+implementations (blocky).
+As interesting observation is the increased execution time (up to 150%) for the Job imple-
+mentations when Burst compilation is not enabled. The added workload for execution in
+a Jobified workflow does increase run time, but the use of Burst outweighs that negative
+offset, or Burst compiler code is optimized better ( 10% baseline performance) than the
+standard Mono compiler ( 150% of baseline performance) for this workflow.
+Use of data parallelization for Reference Rotation no map and Lookup significantly in-
+creases the performance of these implementations by cutting down execution time to
+34
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:43==
+around 10% of the baseline implementation. A similar relative decrease in time is ob-
+served for both variants. Between the two, Reference Rotation no map produces slightly
+better results which may be a consequence of the nature of the algorithm - loop vectoriza-
+tion is more effective for operations which do not involve additional memory references
+such as the case table references in Lookup.
+4.2.3
+Threaded mesh creation
+Threaded mesh creation, which is thread parallelization of the generation of a single trian-
+gle soup mesh, is implemented for both Reference Rotation RR threaded 𝑛(Figure 4.7)
+and Lookup Lk threaded 𝑛(Figure 4.8), where 𝑛∈{1, 8, 16, 32, 64} is the batch size. One
+batch is handled by one thread. An additional case (RR/Lk threaded fit) is also tested,
+where the batch size is determined by the number of available threads. This is the ratio
+of cells to the thread count, therefore the execution uses each thread exactly once.
+Unity’s Job system is used to schedule threads. A special type of Job is used, based on
+the IJobParallelFor interface, which is the parallelization of a for loop. The implemen-
+tation must define one iteration of the loop which in the case of Marching Triangles is one
+cell, that is the flattened two-dimensional loop over the grid dimensions. This entails trans-
+formation from a one-dimensional index into the grid coordinates. Thread parallelization
+can be compounded with data parallelization on the same principles as in Data paral-
+lelization. Unity’s Jobs will only run on any of the worker threads that are not the main
+thread, therefore the available thread count is threads −1.
+The implementation changes to Reference Rotation and Lookup for threading support are
+displayed in Listing A.4.
+A NativeList<Vector3> is shared between all threads to generate the output mesh ver-
+tices list. To allow cross-thread writing, a special write-only accessor of the list is used,
+that is NativeList<Vector3>.ParallelWriter. This allows appending elements to the
+list for parallel threads, but capacity cannot be increased after it had been set and opera-
+tions which would append beyond the capacity of the parallel list will fail.
+n-f-lg-10
+n-f-sm-10
+b-f-lg-10
+b-f-sm-10
+Test
+0
+5
+10
+15
+20
+25
+Mean execution time [ms]
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-f-sm-10
+no-burst-full-SmallField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+b-f-sm-10
+burst-full-SmallField-iters-10
+Median
+Min-Max
+RR threaded 1
+RR threaded 8
+RR threaded 16
+RR threaded 32
+RR threaded 64
+RR threaded fit
+Figure 4.7: Threaded triangle soup mesh generation with Reference Rotation (blocky).
+Within both classes of threaded implementations, the batch size appears to have little
+impact on the variation of the algorithm run time, with a visible hitch for batch sizes derived
+from the available thread count. In blocky (seven worker threads, excluding the main
+thread), the fit batch size is row cells×column cells
+available threads
+= 265 for SmallField and 2158 for LargeField.
+In general, the batch sizes 32 and 64 display the best stable performance in their classes.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+35
+==PAGE:44==
+n-f-lg-10
+n-f-sm-10
+b-f-lg-10
+b-f-sm-10
+Test
+0
+10
+20
+30
+40
+Mean execution time [ms]
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-f-sm-10
+no-burst-full-SmallField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+b-f-sm-10
+burst-full-SmallField-iters-10
+Median
+Min-Max
+Lk threaded 1
+Lk threaded 8
+Lk threaded 16
+Lk threaded 32
+Lk threaded 64
+Lk threaded fit
+Figure 4.8: Threaded triangle soup mesh generation with Lookup (blocky).
+The difference is small in the execution time between a batch size of 1 and 64, and further
+becomes insignificant when data parallelization (Burst) is enabled, an interesting behavior
+as it appears the overhead of scheduling and waiting for available threads is not large.
+A batch size of 64 implies the total use of 29 threads for SmallField and 34 threads for
+LargeField.
+Figure 4.9 presents a comparison in execution time for the previously best implemen-
+tations against the threaded implementations with batch size 64. Standard thread par-
+allelization without data parallelization implemented with Unity Jobs struggles to perform
+compared to the single-threaded implementations. Between Reference Rotation threaded
+and Lookup threaded the better performer is Reference Rotation. This may be a conse-
+quence of the algorithm’s strength in local single iterations due to (1) no memory reads for
+triangle case lookups, which in the case of Lookup is less beneficial as each core has its
+own cache, and (2) no dependency on a vertex index lookup data structure, as the target
+geometry structure is the use of duplicated vertices instead of ordered triangles.
+n-f-lg-10
+n-f-sm-10
+b-f-lg-10
+b-f-sm-10
+Test
+0
+10
+20
+30
+Mean execution time [ms]
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-f-sm-10
+no-burst-full-SmallField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+b-f-sm-10
+burst-full-SmallField-iters-10
+Median
+Min-Max
+Reference
+Rotation
+Lookup
+Reference
+Rotation (Job)
+no map
+Lookup (Job)
+RR threaded 64
+Lk threaded 64
+Figure 4.9: Comparison of previously best implementations with best stable threaded implemen-
+tations (blocky).
+Furthermore, compounding both thread parallelization and data parallelization benefits
+the threaded implementations, bringing down their run times to around 1/3 of their stan-
+36
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:45==
+dard implementations which is particularly beneficial for Reference Rotation, but remains
+uncompetitive in the case of Lookup. Implemented with data parallelization on a single
+thread, Lookup (Job) and Reference Rotation (Job) no map remain the most performant
+implementations showcasing that Marching Triangles is better fit in this design than in a
+threaded context.
+4.2.4
+Terrain chunking
+Terrain can be chunked into multiple smaller logical game objects, each of which are
+responsible for their own mesh. This can be further parallelized to process each chunk in
+parallel, especially at initialization of the entire terrain. The Lookup variant was selected
+for the implementation of chunking, as this variant is easier to refactor to support chunks.
+The Reference Rotation variant does not support geometry which shares internal edges
+with the edges of the grid.
+The implementation changes to Lookup for chunking support are displayed in Listing A.5.
+The results of this implementation are shown in Figure 4.10 for the two variants Lk chunk
+𝑥× 𝑥and Lk (Job) chunk 𝑥× 𝑥, where 𝑥∈{10, 25, 50}. The chunk sizes were selected
+to provide distributed samples of scale. The (Job) variants support thread parallelization
+and data parallelization, similarly to the previously discussed sections.
+n-f-lg-10
+n-1-lg-10
+b-f-lg-10
+b-1-lg-10
+Test
+0
+5
+10
+15
+20
+Mean execution time [ms]
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-1-lg-10
+no-burst-partial-1-LargeField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+b-1-lg-10
+burst-partial-1-LargeField-iters-10
+Median
+Min-Max
+Lookup
+Lk chunk 10x10
+Lk chunk 25x25
+Lk chunk 50x50
+Lk (Job) chunk
+10x10
+Lk (Job) chunk
+25x25
+Lk (Job) chunk
+50x50
+Figure 4.10: Comparison of chunked terrain creation in runtime (blocky).
+The initial execution time for the chunked implementations is slightly larger (in tests with no
+partial modification, i.e. -full-), especially for chunk sizes of 10. For the largest terrain, the
+initialization of the terrain remains more performant in the single-threaded single-object
+Lookup variant. The performance boost comes into play when partial modifications are
+enabled, which minimizes the execution time to a miniscule fraction of the baseline run
+time. Figure 4.11 compares the execution times of only chunked implementations to better
+visualize the difference between implementations when partial modifications are used.
+When only a single chunk must be rehydrated (tests with the -partial- tag), the execution
+time is better for single-threaded chunks generation logic, with run time increasing sig-
+nificantly for a larger number of affected chunks. Chunked implementation compounded
+with threading and data parallelization results in a slightly higher run time cost for rehydrat-
+ing a single chunk, but the time remains relatively uniform across the number of affected
+chunks. The size of the field does not appear to impact the execution times.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+37
+==PAGE:46==
+n-1-lg-10
+b-1-lg-10
+b-10-lg-10
+b-10-sm-10
+Test
+0
+1
+2
+3
+4
+5
+Mean execution time [ms]
+n-1-lg-10
+no-burst-partial-1-LargeField-iters-10
+b-1-lg-10
+burst-partial-1-LargeField-iters-10
+b-10-lg-10
+burst-partial-10-LargeField-iters-10
+b-10-sm-10
+burst-partial-10-SmallField-iters-10
+Median
+Min-Max
+Lk chunk 10x10
+Lk chunk 25x25
+Lk chunk 50x50
+Lk (Job) chunk
+10x10
+Lk (Job) chunk
+25x25
+Lk (Job) chunk
+50x50
+Figure 4.11: Comparison of chunked terrain creation in runtime with only partial modifications
+(blocky).
+4.2.5
+Optimizations overview
+Figure 4.12 showcases the most performant implementations across all experiments. By
+far the most impactful implementation is data parallelization at the lowest cost of changes
+to the holistic mesh pipeline.
+n-1-lg-10
+b-1-lg-10
+n-f-lg-10
+b-f-lg-10
+Test
+0
+5
+10
+15
+20
+Mean execution time [ms]
+n-1-lg-10
+no-burst-partial-1-LargeField-iters-10
+b-1-lg-10
+burst-partial-1-LargeField-iters-10
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+Median
+Min-Max
+Reference
+Rotation
+Lookup
+Reference
+Rotation (Job)
+no map
+Lookup (Job)
+RR threaded 64
+Lk (Job) chunk
+10x10
+Figure 4.12: Comparison of most performant Marching Triangles implementations (blocky).
+The use of managed memory and dynamic data structures may be exchanged for lower-
+level manually allocated memory in dense blocks which avoids the use of automated
+garbage collection and memory reallocation mechanisms. This is especially true for map
+data types which additionally incur heavy costs on hashing operations to refer to the ap-
+propriate position in memory. The removal and replacement of a lookup dictionary, the
+keys of which can be easily numerically computed, produces a median run time decrease
+of 25% to 50% of the baseline map-implementation (Lookup and Reference Rotation no
+map vs Reference Rotation, across all devices).
+The use of memory heuristics for preallocating an appropriately sized block of memory
+does not appear to provide tangible improvements in performance for use with dynamically
+sized data structures, with a marginal improvement of only 1% difference in specific cases
+(Lookup w/ heuristics and Lookup for proart). When used with smaller target geometry
+38
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:47==
+data, where most of the preallocated memory is not utilized, the net performance change
+may even be negative by 2% (Lookup w/ heuristics and Lookup for blocky).
+When using low level memory, where use of dynamically resizable convenience mecha-
+nisms is not available, maximum heuristics are vital to ensure bounds are never breached
+for the created geometry data. It is therefore worth considering using persistently allocated
+data for performance critical contexts which sequentially occur over a number of frames,
+instead of allocating and freeing those memory blocks every frame. To understand the
+weight of allocating persistent memory on the execution of the program, the diligent engi-
+neer is motivated to measure the actual memory sizes of the maximally allocated memory
+blocks.
+In the vein of memory and data-centric optimizations, the use of SIMD principles and creat-
+ing data-centric implementations, where assumptions on data formats can be made, may
+bring a massive increase in performance metrics for modern hardware. Implementations
+built for using Unity’s Burst compiler (and Job system) produce a 70% to 97% decrease
+in run time at a relatively low effort cost of converting to low-level memory (Lookup (Job)
+and Reference Rotation (Job) no map when tested with Burst, across all devices). While
+Unity’s Burst compiler provides this workflow in a handy module which does not require
+additional work to implement the data parallelization paradigm, a motivated engineer can
+reproduce this behavior by implementing loop vectorization and smarter offloading of data
+validation to compilation time (such as memory aliasing).
+Thread parallelization on its own may not be the best solution as the overhead cost of
+scheduling and managing parallelized data structures can bring a negative net perfor-
+mance change. When thread parallelization is compounded together with data paral-
+lelization, performance is better, but still not good enough to compete with pure data
+parallelization. These are differences of an increase to over 200% of the baseline run
+time and a decrease to 26-64%, without and with Burst respectively (Lk threaded and RR
+threaded with and without Burst). More importantly, the concept of the use of a dedicated
+thread is a crucial consideration for heavy computation in the context of game engines,
+as the bulk of the game loop runs on a single main thread.
+Moreover, selecting a batch size for a thread’s workload is not the most obvious task,
+as this depends on the complexity of a single iteration of the algorithm loop. Heaver
+algorithms benefit from smaller batch sizes to make sure a single thread is not stalled
+long on a single task. Then the problem is that a large number of jobs must be scheduled
+and they wait for the next available thread leading to scheduling overhead.
+Chunking is substantially more performant when partial modification is implemented as the
+workload is local to at most four chunks at a time. This comes at the cost of a considerable
+amount of source code restructuring. The use of chunking in implementations is enough
+on its own, decreasing run time to 1-5% of the baseline implementation. Compounded
+with data parallelization this is further decreased to a new minimum of less than 1% (Lk
+chunk 𝑛× 𝑛and Lk (Job) chunk 𝑛× 𝑛for partial modification tests). Chunking is further
+beneficial for upscaling as the cost of updating a single chunk remains constant. This
+enables the use of far larger terrains.
+Algorithms can be implemented with different approaches such as Marching Triangles
+with Lookup or with Reference Rotation no map which have differences in execution, but
+more importantly both variants may outperform the other under specific conditions such
+as platforms or implementation details. The best example of a shift of championing per-
+formance is between Lookup and Reference Rotation no map. Used with a standard JIT
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+39
+==PAGE:48==
+compiler, Lookup performs faster by around 25% - 30%. When data parallelization is in-
+volved, Reference Rotation (Job) no map is the more performant option by 4% (relative
+to baseline, devices proart and blocky). This change is driven by the strengths of the par-
+ticular design paradigm of SIMD, which is parallelizing simple operations, that are the key
+difference in the Reference Rotation implementation. Whereas under a standard com-
+piler sequentially computed loops are slower and cannot be locally optimized compared
+to the performance boost of directly reading a triangle case from a table, as in the Lookup
+implementation.
+All of the implementations are generally stable with low variance on execution times as
+the averages, medians and minimums are close if not equal to each other. There is the
+exception of odd spikes which generate large maximums on execution time. These are
+likely due to reasons other than the algorithm itself, such as internal processing stalls.
+The tables 4.1 to 4.10 summarize the presented implementations. The median execution
+times for all implementations are presented together under the Appendix in tables A.1
+and A.2, where they are compared against the baseline. Previous performance compari-
+son figures are also provided for the proart device in figs. A.2 to A.10.
+Reference Rotation
+Description
+An implementation of Marching Triangles which uses pivot shifting to
+build triangle cases on the fly.
+Advantages
+Generates interconnected mesh data.
+Pitfalls
+Uses a costly map structure for looking up vertex indices.
+Verdict
+Unsuitable for performance-critical contexts due to overhead generated
+by use of managed memory, especially the hash map.
+Table 4.1: Summary of the Reference Rotation implementation.
+Reference Rotation no map
+Description
+Refactors Reference Rotation to use an array instead of a hash map.
+Advantages
+Generates interconnected mesh data, uses an array for vertex index
+lookup.
+Verdict
+Acceptable for performance-critical contexts.
+Table 4.2: Summary of the Reference Rotation no map implementation.
+Lookup
+Description
+An implementation of Marching Triangles, where static arrays are used
+to look up a triangle case and to resolve triangle superpositions.
+Advantages
+Generates interconnected mesh data, uses an array for vertex index
+lookup, simple to understand.
+Verdict
+Acceptable for performance-critical contexts.
+Table 4.3: Summary of the Lookup implementation.
+40
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:49==
+Lookup w/ heuristics
+Description
+Extends Lookup by providing capacities to dynamic data structures
+based on Marching Triangles size heuristics.
+Advantages
+Generates interconnected mesh data, uses an array for vertex index
+lookup, avoids repeating buffer copies for resizing.
+Pitfalls
+Preallocates large buffers.
+Verdict
+Acceptable for performance-critical contexts (close to no difference to
+using no heuristics).
+Table 4.4: Summary of the Lookup w/ heuristics implementation.
+Reference Rotation (Job)
+Description
+Refactor of Reference Rotation for data parallelization and low level
+memory. Naive implementation using a low level hash map instead of
+array for vertex indices mapping.
+Advantages
+Generates interconnected mesh data, uses data parallelization.
+Pitfalls
+Preallocates large buffers, uses a costly map structure for looking up
+vertex indices.
+Verdict
+Unsuitable for performance-critical contexts due to use of inefficient low
+level hash map.
+Table 4.5: Summary of the Reference Rotation (Job) implementation.
+Reference Rotation (Job) no map
+Description
+Refactor of Reference Rotation for data parallelization and low level
+memory. Uses arrays for index lookups.
+Advantages
+Generates interconnected mesh data, uses an array for vertex index
+lookup, uses data parallelization.
+Pitfalls
+Preallocates large buffers.
+Verdict
+Highly effective for performance-critical contexts.
+Table 4.6: Summary of the Reference Rotation (Job) no map implementation.
+Lookup (Job)
+Description
+Refactor of Lookup for data parallelization and low level memory.
+Advantages
+Generates interconnected mesh data, uses an array for vertex index
+lookup, uses data parallelization.
+Pitfalls
+Preallocates large buffers.
+Verdict
+Highly effective for performance-critical contexts.
+Table 4.7: Summary of the Lookup (Job) implementation.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+41
+==PAGE:50==
+Reference Rotation threaded and Lookup threaded
+Description
+Refactors of Reference Rotation and Lookup respectively for thread
+parallelization. Threaded implementation supports batches of size 𝑛.
+Advantages
+Spreads the work for geometry computation over available threads
+(freeing up game main thread), may be compounded with data paral-
+lelization.
+Pitfalls
+Generates triangle soup mesh output, batch sizes must be fit to use
+case and hardware.
+Verdict
+Effective for performance-critical contexts only when compounded with
+data parallelization.
+Table 4.8: Summary of the Reference Rotation threaded and Lookup threaded implementations.
+Lookup chunked
+Description
+Extension of Lookup to support creating logical chunks.
+Advantages
+Generates interconnected mesh data (per chunk), uses an array for
+vertex index lookup (per chunk), supports efficient partial modification
+for rehydrating only modified chunks.
+Pitfalls
+Higher initialization cost, requires (logical) bookkeeping, no mesh con-
+nectivity between chunks, uses an array for vertex index lookup.
+Verdict
+Extremely effective for performance-critical contexts where partial mod-
+ification is supported and mesh connectivity between chunks is not re-
+quired.
+Table 4.9: Summary of the Lookup chunked implementation.
+Lookup chunked (Job)
+Description
+Refactor of Lookup chunked for data parallelization and low level mem-
+ory.
+Advantages
+Generates interconnected mesh data (per chunk), uses an array for ver-
+tex index lookup (per chunk), supports efficient partial modification for
+rehydrating only modified chunks, uses data parallelization for greater
+performance effect, uses an array for vertex index lookup.
+Pitfalls
+Requires (logical) bookkeeping, no mesh connectivity between chunks.
+Verdict
+Extremely effective for performance-critical contexts where partial mod-
+ification is supported and mesh connectivity between chunks is not re-
+quired.
+Table 4.10: Summary of the Lookup chunked (Job) implementation.
+42
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:51==
+4.2.6
+Porting to production
+Selected implementations have been refactored and employed in the What The Car?
+project to observe their impact in a production environment. While the sandbox project
+provided an isolated environment to directly test the execution of these methods, the
+tested execution time is not entirely truthful as to the performance of the implementations.
+The testing kit uses warm up iterations which helps with preparing a beneficial testing
+space by caching much of the referenced data in the processor’s cache. In production,
+such luxuries are not afforded as the implementations are executed once per frame with
+ample work done by other systems between executions, which likely results in the cache
+registers having long overwritten relevant data.
+Based on the advantages and disadvantages discussed in the previous section, the se-
+lected implementations are Lookup Job and Reference Rotation Job no map. Threaded
+variants are not considered as there is a constraint on the inter-connectivity of the mesh
+data. Chunking is not considered as the mesh post-processing phase depends on the
+output of the terrain mesh generation, and is implemented with the assumption of single
+output mesh. This would be in conflict with the following step of terrain generation that
+is topology redistribution (smoothing), as updating a single chunk would require updating
+neighboring chunks, and their neighboring chunks in a chain reaction. In the end, this
+would result in the rehydration of all chunks equivalent to full mesh generation, but with
+additional overhead.
+All three devices are used for this test. For blocky and proart, a windows build is generated
+(Unity StandaloneWindows64, compiled with Mono), whereas for iPhone, the build is for
+iOS (compiled with IL2CPP). A random window of ten frames is selected and the execution
+time for each implementation extracted. The samples are presented in Figure 4.13 along
+a logarithmic axis to accentuate the performance differences for the data-parallelized im-
+plementations. LargeField is used for this test. Table 4.11 presents the median execution
+times of these samples.
+0.25
+0.5
+0.75
+1
+5
+10
+log( Execution time sample ) [ms]
+blocky
+proart
+iphone
+Reference
+Rotation
+Reference
+Rotation (Job)
+no map
+Lookup
+Lookup (Job)
+Figure 4.13: Execution time samples for the Lookup/Job nad Reference Rotation/Job implemen-
+tations in a production environment. There are 10 samples per implementation per device.
+Across all devices, use of data parallelization remains a significant performance booster
+with Reference Rotation (Job) as the most performant option, although with higher vari-
+ability of execution times. The differences between testing in a sandbox and in production
+are made clear by the difference in median execution time, where in production these
+timings are higher than their sandbox counterparts for non-parallelized implementations.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+43
+==PAGE:52==
+Device
+blocky
+iphone
+proart
+Implementation
+Reference Rotation
+13.56ms (100%)
+1.64ms (100%)
+4.50ms (100%)
+Reference
+Rotation
+(Job) no map
+0.41ms (3%)
+0.49ms (30%)
+0.33ms (7%)
+Lookup
+6.23ms (46%)
+0.99ms (61%)
+2.22ms (49%)
+Lookup (Job)
+0.61ms (5%)
+0.67ms (41%)
+0.34ms (8%)
+Table 4.11: Median execution times for samples extracted in production builds across all devices.
+Comparing between the sandbox results (Table A.1) and Table 4.11, it is noted that median
+test times are between 1.5 and 2 times longer in production (Reference Rotation 13.56ms
+vs 7.88ms, and Lookup 6.23ms vs 4.14ms). On the other hand, data-parallelized imple-
+mentations are faster in production with timings Reference Rotation (Job) no map 0.41ms
+vs 0.58ms and Lookup (Job) 0.61ms vs 0.88ms (with reference to blocky).
+By far, the greatest revelation is the difference in performance across different platform
+builds, especially how the iOS build outperforms Windows builds for the non-parallelized
+implementations Reference Rotation and Lookup, given that iPhone device has the worst
+hardware of the three. Even more so, the non-parallelized Lookup performs almost as
+well as the data-parallelized implementations. These results can be summarized with two
+observations.
+Firstly, the use of a specific compiler has apparent impact on the performance of target
+code. There are three compilers at play for these tests. The non-parallelized implementa-
+tions are compiled by Mono for Windows and IL2CPP for iOS, whereas data parallelization
+goes through the Burst compiler. Mono is a Just-In-Time compiler which does not make
+high-level assumptions on the code it compiles and is therefore unable to make major
+optimizations. This is further marred by Unity using an older version of the Mono com-
+piler, which does not include modern advancements in compilation techniques. IL2CPP is
+an Ahead-Of-Time compiler which transpiles C# bytecode (Intermediate Language) into
+C++, which is then compiled into native code. While the compiler is allowed to make
+high-level assumptions and major optimizations (thanks to the C++ compiler behind the
+scenes), the compiler has been configured to produce output native code as similar to the
+output of Mono, which impacts the amount of assumptions and decisions the compiler
+can make. As Burst uses its own compilation technique (supported by LLVM) geared for
+data parallelization and is constrained by stricter assumptions on the features used in the
+source code, this compiler is enabled to make major optimizations during the compila-
+tion process. As visible, IL2CPP can be almost as good as Burst with the appropriate
+implementation (Lookup vs Lookup (Job) for iPhone). Data parallelization for the iPhone
+introduces a decrease of 70% in run time (from median 1.64ms to 0.49ms), whereas
+for the Windows-based platforms a decrease of 93-97% (from median 4.5ms to 0.33ms,
+proart). It is either way a considerable boost in performance, but the optimization result
+differs dependent on the platform.
+Secondly, observer bias plays a role in the collection of results. For both Windows players,
+the device was also the performance observer which impacts data collection as process-
+ing is split between both programs. For iPhone, an external device is used to record
+performance and therefore the device is able to utilize more processing power for the
+implementations.
+44
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:53==
+4.3
+GPU-based alternatives
+GPU rendered-terrain steps away from CPU processing of a height field into mesh geome-
+try data and instead opts for a render of the terrain inside of provided geometry. Generally,
+the terrain can be anything inside geometry, but the limitation is that the render does not
+extrude outwards. In other words, the render of a terrain is constrained within the mesh
+geometry and modification of the bounding volume would require asking the processor to
+regenerate the mesh - precisely what is being avoided by these techniques. This chap-
+ter will observe the graphical results of rendering terrain with ray marching techniques,
+as well as their performance measured in ray step counts and frame time performance.
+Tests are done on the blocky device.
+The height field in byte array format, used in CPU optimization implementations, is con-
+verted to a height map texture of the same dimensions. The texture is set to clamped
+wrap mode and uses bilinear filtering.
+The total number of frames to observe time frame for is 4,500. This is an arbitrary number,
+derived from the calculation of 150fps × 30s. As the camera moves around the render
+performance scene, the number of visible triangles changes. This variability is displayed
+in Figure 4.14 for the LargeField test. The camera movement is deterministic, therefore a
+clear separation is identified at frame number 2,000 between a period of higher intensity
+(frames 1-2,000) and lower intensity (frames 2,000-4,500) which is common between all
+render performance tests. This point of separation is provided as context for a break in
+the performance trend. The exact number of visible triangles will vary, but they will appear
+in the same ratio. Parallax mapped terrain is specifically unique, as a single instance is
+comprised of only two triangles. Thus, there are only 1,250 triangles in the scene at once,
+a fraction of which are visible for any given frame, yet at a similar ratio as for the mesh-grid
+implementations.
+0
+1000
+2000
+3000
+4000
+Frame number
+15.0%
+17.5%
+20.0%
+22.5%
+25.0%
+27.5%
+30.0%
+Visible geometry
+(Percentage of scene tri count)
+more tris (>24%)
+less tris (<24%)
+Figure 4.14: Magnitude of visible geometry in the render performance scene over frame number
+(captured from Vertex shader terrain, total triangle count is 18.9M).
+To provide a relevant frame of reference, the same test is performed for the CPU-based
+Reference Rotation implementation. In this case, the terrain is generated once during
+initialization and duplicated to 625 instances. The frame time for this render performance
+test is shown in Figure 4.15. These terrains use Unity’s default Standard material [38] for
+rendering. The camera render target dimensions are 960 × 600.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+45
+==PAGE:54==
+0
+1000
+2000
+3000
+4000
+Frame number
+100
+200
+300
+400
+Frame rate [1
+𝑠]
+337
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.15: Frame rate samples for meshes generated with Reference Rotation at 960 × 600.
+4.3.1
+Vertex shader & parallax mapped terrain
+The process begins with the simplest implementation, that is the use of the vertex shader
+program to displace vertices based on the height map. A render of the terrain with this
+method is presented in Figure 4.17. The mesh grid is a plane, generated once during
+initialization. A uniform triangle grid is selected, as it provides a better distribution of
+the surface topology (see comparison in Figure 4.18). A clear problem arises with the
+silhouette of the terrain as it is entirely dependent on the granularity of the grid, depicted
+in Figure 4.19.
+Vertex shader terrain is performant (Figure 4.16) displaying an average frame rate similar
+to the standard mesh graphics pipeline.
+0
+1000
+2000
+3000
+4000
+Frame number
+100
+200
+300
+400
+Frame rate [1
+𝑠]
+336
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.16: Frame rate samples for vertex shader terrain.
+46
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:55==
+Figure 4.17: Terrain generated by offsetting vertices with a vertex shader program.
+Figure 4.18: Comparison of a vertex shader terrain with square grid and triangle grid.
+Figure 4.19: Three levels of mesh grid granularity. From left to right, scaled texture dimensions:
+2
+3, 1, 2.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+47
+==PAGE:56==
+Parallax mapping provides an answer to clunky silhouettes by rendering the exact shape
+of the height map terrain, displayed in Figure 4.20. The two main issues with parallax
+mapped terrain is (1) the rendered terrain is suspended inside of the geometry (of only
+two triangles) which makes it easy to break the illusion when observing the terrain from its
+side, and (2) there always exists a view angle at which the vertical steps of the rendering
+rays are visible (Figure 4.21). While the first property is simply the nature of the technique,
+the second may be alleviated by decreasing the ray step size.
+Performance for 50 steps and 500 steps parallax mapped terrain is displayed in Fig-
+ure 4.22 and Figure 4.23. Surprisingly, performance does not suffer after an increase of
+the number of steps taken by a ray. Compared to vertex shader terrain parallax mapped
+terrain is more performant, part of which is be due to the much smaller triangle count.
+Figure 4.20: Views of parallax mapped terrain. The right image depicts the breaking of illusion
+when viewing the terrain from an angle without geometry support.
+Figure 4.21: Difference in render disturbances at an extreme view angle for 50 steps (left) and
+500 steps (right).
+48
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:57==
+0
+1000
+2000
+3000
+4000
+Frame number
+100
+200
+300
+400
+Frame rate [1
+𝑠]
+332
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.22: Frame rate samples for parallax mapped terrain (50 steps) at 960 × 600.
+0
+1000
+2000
+3000
+4000
+Frame number
+100
+200
+300
+400
+Frame rate [1
+𝑠]
+335
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.23: Frame rate samples for parallax mapped terrain (500 steps) at 960 × 600.
+4.3.2
+Polygon-assisted ray marching
+Polygon-assisted ray marching (PA terrain) generates the results of parallax mapping
+terrain with the additional benefit of allowing the viewer to observe the cliffs of the terrain
+from the side. In this technique, runaway rays are problematic as they end up being
+discarded at a terminal distance or render terrain further away which would have been
+more quickly rendered by a ray originating in covered geometry. Figure 4.24 displays the
+output of PA terrain (which is almost identical to Parallax mapped terrain before it), as well
+as presents a wireframe view. The polygon constraining volume of Polygon-assisted is
+clearly visible, as well as the slice of long-range rays which originate in geometry closed
+to the viewer, but render terrain in geometry further from the viewer. Figure 4.25 depicts
+the frame rate for linear PA terrain. Linear refers to rays with a fixed step size.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+49
+==PAGE:58==
+Figure 4.24: Polygon-assisted ray marching rendered (left). Render with wireframe showcasing
+the constraining polygon together with longer distance rays in overlapping geometry (terrain color
+by number of steps).
+0
+1000
+2000
+3000
+4000
+Frame number
+100
+200
+300
+400
+Frame rate [1
+𝑠]
+306
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.25: Frame rate samples for linear PA terrain (1,000 steps) at 960 × 600.
+4.3.3
+Optimizations
+Setting the correct ray step size and count is highly dependent on the use case and nature
+of the terrain. If rays do not travel far enough, they risk terminating before reaching terrain.
+If the rays travel too far, they risk creating performance bottlenecks, especially in the case
+of rays which would have never intersected with terrain. Therefore, the incentive is to
+either minimize the number of steps (bisection) or to more quickly terminate rays (backface
+bounding).
+Bisection
+The ray step count is minimized by rays taking larger steps and should a change in the ter-
+rain mask occur, reversing the step direction and decreasing the step size until a threshold
+is reached. Compared to linear PA terrain, a step count of 50 is a significant decrease
+(Figure 4.26) for an acceptable increase in average frames per second. When testing at
+4K resolution, the argument for the use of bisection is far more grounded. While linear PA
+terrain dips to an average 62 frames per second, bisection remains stable at above 300,
+as shown in figs. 4.28 and 4.29.
+50
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:59==
+Figure 4.26: Comparison of step count between bisection PA terrain with 50 steps, initial step size
+0.5, step size threshold 0.051 (left) and linear PA terrain with 500 steps and step size 0.05 (right).
+Darker indicates higher number of steps.
+0
+1000
+2000
+3000
+4000
+Frame number
+100
+200
+300
+400
+Frame rate [1
+𝑠]
+356
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.27: Frame rate samples for bisection PA terrain (50 steps, initial step size 0.5, step size
+threshold 0.051).
+Backface bounding
+Backface bounding involves the use of two cameras in the scene. The backface camera
+first renders the back faces of the geometry that is the output of the vertex shader to a
+render texture of the same dimensions as the screen. Since a render texture can only
+support normalized color values, the R channel is used to store the distance from the
+camera to the fragment scaled by a normalizing factor, the inverse of which is used to later
+retrieve the distance value. This camera culls any object that does not have a backface
+shader program to avoid unnecessary rendering.
+When using the greater ordering operation a quad must be placed in the camera’s near
+plane, otherwise Unity’s graphics pipeline will not render any geometry (there must be
+geometry in front of the terrain mesh, in order to render the back face terrain behind it
+using the greater z-write operation).
+The second camera is the actual viewer of the scene. The shader program for Backface
+PA terrain is much like normal Linear PA terrain, except an additional check against the
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+51
+==PAGE:60==
+0
+1000
+2000
+3000
+4000
+Frame number
+50
+60
+70
+80
+90
+100
+Frame rate [1
+𝑠]
+65
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.28: Frame rate samples for linear PA terrain (1,000 steps) at 4K resolution.
+0
+1000
+2000
+3000
+4000
+Frame number
+100
+200
+300
+400
+Frame rate [1
+𝑠]
+322
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.29: Frame rate samples for bisection PA terrain (50 steps, initial step size 0.5, step size
+threshold 0.051) at 4K resolution.
+render of back face distances is made to potentially discard the ray.
+Figure 4.30 and Figure 4.31 showcase the areas of the constraining volume which are
+early discards (magenta) due to the back face comparison, for the greater and less oper-
+ation respectively.
+The performance is substantially negatively impacted for both variants of Backface PA
+terrain (Figure 4.32 and Figure 4.33). The overhead of configuring this system in the Unity
+engine is the likely culprit, where an entire additional logical Unity camera is required.
+Without access to lower level API for the graphics pipeline, this is an unsuitable method
+to employ in the Unity game engine environment. Between the two variants there does
+not appear to be a difference in performance.
+A further consideration when using backface renders ordered by the greater z-write op-
+eration is deterioration of effect when multiple unique instances of the shader are used.
+Terrain further away will overwrite any back face distances closer to the camera, which
+would result in the writing of distances outside of the possible terrain bounds in effect
+providing no positive value to the optimization effort.
+52
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:61==
+Figure 4.30: Backface PA terrain with back faces sorted by greater order of precedence. Magenta
+represents the rays which were discarded due to the back face check. Right image is the back
+face render.
+Figure 4.31: Backface PA terrain with back faces sorted by lesser order of precedence. Magenta
+represents the rays which were discarded due to the back face check. Right image is the back
+face render.
+0
+1000
+2000
+3000
+4000
+Frame number
+100
+200
+300
+400
+Frame rate [1
+𝑠]
+253
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.32: Frame rate samples for Backface PA terrain using the greater ordering operation at
+960 × 600.
+4.3.4
+Customizations
+Variable walls for terrain are defined as functions on the height of the normalized ray
+position. For illustration purposes, four arbitrary functions have been defined based on
+visual results. These are
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+53
+==PAGE:62==
+0
+1000
+2000
+3000
+4000
+Frame number
+100
+200
+300
+400
+Frame rate [1
+𝑠]
+256
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.33: Frame rate samples for Backface PA terrain using the lesser ordering operation at
+960 × 600.
+𝑓displace =
+⎧
+{
+{
+⎨
+{
+{
+⎩
+𝑓constant(ℎ) = 0.75
+𝑓linear(ℎ) = 0.9ℎ
+𝑓sin(ℎ) = 0.2(sin(13.35ℎ) + 1)
+𝑓anim cos(ℎ) = 0.5(0.5(cos(60ℎ+ 10𝑡) + 1))2
+These are displayed in Figure 4.34. The frame rate averages are charted in figs. 4.35
+to 4.38.
+An interesting result arises where the Variable PA terrain implementation provides the best
+performance (above 320fps) while also fulfilling arbitrary stylistic requirements. Three of
+the four displacement functions used for testing perform at a higher average frame rate
+than both Linear PA terrain ( 300fps) and the slightly more performant Bisection PA terrain
+( 320fps). The slowest of the four is 𝑓anim cos ( 295fps) which involves the use of two costly
+operations: squaring and a cos lookup.
+The most performant are 𝑓linear and 𝑓const. This phenomenon is a result of earlier ter-
+rain intersections from the extruding terrain at the bottom of the terrain walls. The ad-
+ditional terrain volume captures many runaway rays which would have been traveling
+parallel to terrain walls, thus cutting down on additional computation. Trailing behind is
+𝑓sin, which partially extrudes volume at the crests of the sine wave, but also computes a
+costly trigonometry function.
+This technique has two limitations. Firstly, the input height field must have somewhat good
+smoothness, otherwise the displacement function will compute with high variability along
+the edges of the terrain. Secondly, the terrain cannot extrude further than the constraining
+polygon, which would otherwise break the illusion. These two cases are showcased in
+Figure 4.39.
+54
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:63==
+(a) 𝑓constant(ℎ) = 0.75
+(b) 𝑓linear(ℎ) = 0.9ℎ
+(c) 𝑓sin(ℎ) = 0.2(sin(13.35ℎ) + 1)
+(d) 𝑓anim cos(ℎ) = 0.5(0.5(cos(60ℎ+ 10𝑡) + 1))2
+Figure 4.34: Different displacement functions applied to Variable PA terrain.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+55
+==PAGE:64==
+0
+1000
+2000
+3000
+4000
+Frame number
+100
+200
+300
+400
+Frame rate [1
+𝑠]
+329
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.35: Frame rate samples for Variable PA terrain with 𝑓constant at 960 × 600.
+0
+1000
+2000
+3000
+4000
+Frame number
+100
+200
+300
+400
+Frame rate [1
+𝑠]
+328
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.36: Frame rate samples for Variable PA terrain with 𝑓linear at 960 × 600.
+0
+1000
+2000
+3000
+4000
+Frame number
+100
+200
+300
+400
+Frame rate [1
+𝑠]
+324
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.37: Frame rate samples for Variable PA terrain with 𝑓sin at 960 × 600.
+56
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:65==
+0
+1000
+2000
+3000
+4000
+Frame number
+100
+200
+300
+400
+Frame rate [1
+𝑠]
+319
+more tris (>24%)
+less tris (<24%)
+Sample
+Cumulative average
+Average
+Figure 4.38: Frame rate samples for Variable PA terrain with 𝑓anim cos at 960 × 600.
+(a) 𝑓too much constant(ℎ) = 0.96
+(b) 𝑓linear(ℎ) = 0.9ℎ
+Figure 4.39: Two cases where Variable PA terrain struggles - terrain extrudes too far out (left),
+and uneven distribution in the height map, visible at the edge with orange dotted line (right).
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+57
+==PAGE:66==
+4.3.5
+Overview of GPU methods
+Within this section three shader-program methods for rendering terrain have been pre-
+sented, along with options for optimizations and customization. These are summarized in
+tables 4.12 to 4.17. There are two key issues with render-based implementations, shared
+across all the presented techniques, which warrants further explanation. These are (1)
+texture interpolation artifacts, and (2) computation of surface normals.
+The difficulties with shader program terrains mostly stem from the quality of the height
+map texture. Details (or lack thereof) in the height map have massive effect on the render
+result. As the texture has a small resolution, bilinear interpolation has greater impact on
+the details of the height map. Sharp changes over a short distance in the field will be
+misrepresented, as interpolation will merge or smoothen the height map texture, in effect
+removing important details. This can be alleviated by scaling the dimensions of the height
+map and performing bilinear interpolation manually before writing the color values to the
+texture. This is not only a costly preprocessing step in execution, but also requires manual
+oversight to ensure all edge cases are handled adequately for the selected parameters.
+Examples of this effect can be seen in Figure 4.40. As a result, small gaps in terrain are
+often omitted entirely in rendering due to texture filtering overriding details in the height
+map. Careful preparation and processing of the height map is crucial, otherwise the ren-
+dering output may contain incorrect calculations, which cannot be addressed within the
+fragment shader (the input is faulty).
+Furthermore, using stepped terrain height maps introduces difficulties with the compu-
+tation of surface normals. In the majority of real use cases, surface normals are used
+to further customize and apply shading to rendered terrains and are considered crucial
+elements in the visual design of computer graphics media. Surface gradients can be de-
+rived from central differences if none are available beforehand, but this method requires
+that the surface is continuous. In the case of a stepped height map, retrieving normals
+is difficult and is a crude approximation which can be used for light customizations, but
+otherwise unfit for detailed shading computations.
+At its core, this is about finding the normals of the terrain cliffs, as the surfaces are simply
+flat. Figure 4.41 presents the use of the vertex shader and fragment shader programs
+respectively to compute surface normals to varying effects. Vertex normals are somewhat
+interpolated across the surface of the walls, but depend on the shape of bounding volume.
+Fragment normals are based on samples from the stepped height map which results in
+the normals themselves being snapped to specific constant values. Fragment normals
+can be defined over the surface of the wall by manipulating the distance of the samples
+used to compute the surface derivative.
+58
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:67==
+Figure 4.40: Effect of texture filtering on height map (top left), the stepped height map (bottom left)
+and the result in rendered terrain (bottom right). Mesh generated for the same field (top right) for
+reference. Shown for two cases, standard height map dimensions (left image), and twice scaled
+dimensions with manual bilinear interpolation preprocessing (right image).
+Figure 4.41: Comparison of rendered terrain surface normals computed in the vertex shader (left
+image) and the fragment shader (right image).
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+59
+==PAGE:68==
+Vertex shader terrain
+Description
+Use of the shader vertex program and height map to offset the vertices
+of a flat uniform mesh grid.
+Advantages
+Simple and performant solution.
+Silhouette visible from any angle.
+Works well with LOD mechanisms.
+Pitfalls
+Output highly depends on the granularity of the mesh grid. Detailed
+terrain requires large amount of triangles.
+Verdict
+Using vertex shader programs for offsetting vertices based on the ter-
+rain height map is a tried and true technique, but it is heavily constrained
+by the resolution of the grid impacting the amount of detail in the ren-
+dered terrain. Suitable for cases where terrain detail is not crucial and
+is viewed from a larger distance, or where low-poly style is acceptable.
+Table 4.12: Summary of the Vertex shader terrain implementation.
+Parallax terrain
+Description
+Use of the parallax mapping technique to create an illusion of terrain
+within flat geometry.
+Advantages
+Rendered terrain is detailed. Performant, may be implemented in ge-
+ometry of just two triangles.
+Pitfalls
+Terrain silhouette is not visible from side view, as the terrain is sus-
+pended inside of flat geometry.
+Verdict
+Parallax mapping for terrains is a relatively lightweight solution which
+can be suspended in very limited geometry. A strong benefit of using
+limited geometry is minimizing the memory footprint, but comes at a cost
+of constraining the illusion of the parallax relative to a primitive surface.
+This makes it unfit for cases where the terrain silhouette must be visible
+from various angles including the sides of the terrain. Suitable for cases
+where the terrain is only visible from above and viewing the terrain from
+the side is not allowed.
+Table 4.13: Summary of the Parallax terrain implementation.
+60
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:69==
+Linear polygon-assisted terrain
+Description
+Use of the vertex shader program to generate a bounding volume close
+to the terrain with subsequent fragment shader ray marching in world
+space inside of that volume. Polygon-assisted ray marching is a conve-
+nient marriage of vertex shader offsetting and parallax mapping which
+produces performant, constrained rendering together with the ability to
+maintain terrain silhouettes at any angle.
+Advantages
+Rendered terrain is detailed. Rendering in world space allows easy
+writing to z-buffer for compatibility with the rasterization pipeline.
+Pitfalls
+At higher resolutions, optimization techniques become necessary as
+the performance of linearly stepped rays becomes unmanageable. The
+difference in mean frames per second for resolutions 900 × 600 and 4K
+is around 280, tested with blocky. Approach uses fragment discarding
+for runaway rays which incurs additional processing costs.
+Verdict
+Suitable for detailed terrain rendering in low resolutions.
+Table 4.14: Summary of the Linear polygon-assisted terrain implementation.
+Bisection polygon-assisted terrain
+Description
+Extension to Linear polygon-assisted terrain which uses bisection
+(based on binary search) for ray intersections.
+Advantages
+Rendered terrain is detailed. Rendering in world space allows easy
+writing to z-buffer for compatibility with the rasterization pipeline. Per-
+formant for higher resolutions (4K).
+Pitfalls
+Approach uses fragment discarding for runaway rays which incurs ad-
+ditional processing costs.
+Verdict
+Using bisection is highly effective and maintains strong performance
+as resolution scales upwards. This is a relatively trivial implementation
+which provides effective results and should be utilized in any ray march-
+ing context. Suitable for detailed terrain rendering in higher resolutions.
+Table 4.15: Summary of the Bisection polygon-assisted terrain implementation.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+61
+==PAGE:70==
+Backface polygon-assisted terrain
+Description
+Extension to Linear polygon-assisted terrain which uses backface ren-
+ders to establish ray terminal points.
+Advantages
+Rendered terrain is detailed. Rendering in world space allows easy writ-
+ing to z-buffer for compatibility with the rasterization pipeline. Runaway
+rays are terminated when exiting the bounding volume.
+Pitfalls
+Implementation is dependent on the accessibility to low level rendering
+in the framework, cost of generating a pre-render may outweigh the
+performance boost. Approach uses fragment discarding for runaway
+rays which incurs additional processing costs.
+Verdict
+Suitable for detail terrain rendering given that a pre-render may be gen-
+erated at a low level without incurring high processing costs. Use of
+this technique in Unity is not recommended, as the logical processing
+for additional scene cameras required to generate the pre-render are
+high.
+Table 4.16: Summary of the Backface polygon-assisted terrain implementation.
+Variable polygon-assisted terrain
+Description
+Extension to Linear polygon-assisted terrain which includes support for
+the use of mathematical functions to define the shape of the terrain’s
+cliff walls.
+Advantages
+Rendered terrain is detailed and supports arbitrary stylized cliff wall
+shapes. Rendering in world space allows easy writing to z-buffer for
+compatibility with the rasterization pipeline. May easily be extended
+with bisection for additional performance.
+Pitfalls
+Approach uses fragment discarding for runaway rays which incurs ad-
+ditional processing costs.
+Verdict
+Suitable for detailed terrain rendering in higher resolutions, with addi-
+tional support for structure post-processing options. The customiza-
+tion of terrain cliff walls is easier done in ray marching contexts than
+mesh geometry manipulation as fragment shader programs are easier
+to script for mathematical relations. Each ray is responsible for finding
+its own terminal point, displacement functions which are used to cre-
+ate variable cliff walls are easy to plug and play for technical artists to
+fiddle with. The use of variable wall displacement functions may even
+have an optimization effect, as more rays are terminated in the space
+between the the static wall and the bounding volume. With the use of
+performance extensions of ray marching techniques, rendered terrain
+in modern engineering contexts is no longer a concern of performance,
+but rather of integration with other game systems and maintainability.
+Table 4.17: Summary of the Variable polygon-assisted terrain implementation.
+62
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:71==
+5
+Discussion
+This chapter is dedicated to summarizing the results of the CPU optimizations and the
+GPU-based implementations as well as a discussion of the comparison, advantages and
+use cases of both approaches. Furthermore, future work and ideas for extensions are
+proposed which complement the methodology presented in this thesis.
+To summarize and compare the two avenues for generating stylized terrains in game de-
+velopment contexts, first the question from Origin and goals is revisited: what is the value
+of investigating alternative solutions to status quo implementations?, and more specif-
+ically, is it worth changing the terrain graphics pipeline strategy?. Value certainly is a
+subjective word in the context of software engineering, therefore it may be helpful to un-
+derstand what the values of the two approaches are in terms of advantages, pitfalls and
+requirements (cost of implementation).
+5.1
+Summary of the two methodologies
+Both the use of the processor and the graphics pipeline to generate terrain are mature
+workflows which have been deployed in many successful products and use causes, but
+come with vastly different requirements and expectations. Both methodologies are de-
+scribed in depth in their respective sections under Implementation & results, Optimizations
+overview and Overview of GPU methods, and briefly summarized here.
+As the computational powers of modern processors steadily increases and complexity is
+a lesser concern, the present-day engineer is compelled to rather optimize for memory
+management. Significant performance can be gained from utilizing data locality and other
+data-centric design principles which minimize the costs of bussing data from memory to
+the processor register. This is evident via the results of the data-parallelized Marching
+Triangle variants presented in the project.
+It is important to allow the reconsideration of assumptions and constraints in a production
+environment. As an example from the context of this project, the use of inter-connected
+meshes in lieu of triangle soups is a fair question. The threaded implementations were
+not considered for use in production as their output was not aligned with the assumptions
+made by the What The Car? project. Their rejection does raise an important question
+on whether the additional complexity of generating inter-connected meshes is important
+enough to discard other potentially more efficient solutions, such as compute shaders
+which are becoming a staple of the game development toolkit. This is not an unreasonable
+thought, as the terrain meshes generated in the project domain are not large by modern
+standards, and therefore would likely not incur major render performance reductions when
+formatted as a triangle soup. A further beneficial design overhaul should include the use
+of chunking where possible.
+On the processor side, rendered terrains are much easier to handle compared to poly-
+gonization techniques, as these are simply uniform mesh grids of a given size, for which
+the generation process is trivial and performant. They are insubstantial in the big picture
+of the game’s lifecycle as these grids are generated once during initialization. The main
+processing cost on the side of the CPU lies in manipulating height map textures and ac-
+cepting the costs of transferring their data to the GPU. The bulk of the work is offloaded
+to the graphics card which by modern standards is an acceptable approach given the
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+63
+==PAGE:72==
+accessibility to performant hardware. It is therefore reasonable to use rendering tech-
+niques where possible to replace processing done on the processor. These techniques
+are mainly based in the domain of ray marching. Terrains rendered with polygon-assisted
+ray marching provide highly detailed, performant and customizable terrains which can be
+used directly in production environments. The bulk of the cost of their implementation is
+rather in the integration of these terrains with other game engine systems.
+The two methodologies are compared side-by-side in Figure 5.1, recreated in the What
+The Car? project environment.
+Figure 5.1: Side by side comparison of baseline graphics style and proof of concept rendered
+terrain (shaded with fragment shader normals).
+5.2
+Considerations on the determining the correct tool for a
+given task
+At its core, the difference between the two methodologies (CPU algorithms vs GPU ren-
+dering) can be simplified and abstracted to a discussion of implementing algorithms for
+transformations of data into tangible intermediate products which can be later used in mul-
+tiple systems, or otherwise directly rendering the data to screen at end of a single game
+frame’s lifecycle.
+The use and processing of mesh data objects is a key feature of mature game engines
+where many systems are connected via a common mesh interface. At a minimum these
+are the graphics and shadows pipeline, the physics system (collision mesh baking) and the
+culling/optimization system. Therefore, the advantage is a single entry point to accessing
+crucial game systems. Modern game engines are built with the assumption of using this
+approach as the standard rendering workflow (for any mesh), and often provide many
+conveniences to enhance this workflow. Using and generating meshes comes at the cost
+of increased algorithm complexity and memory usage which have to be rationed from the
+unified resource pool shared by the remaining logical objects processing.
+On the other hand, the use of rendering techniques offloads the mesh work result to
+the graphics processor which removes most of the heavy work previously done in the
+processor, as well as minimizing the memory footprint of the program. Textures stored
+in memory can be removed once transferred to VRAM if they are no longer required in
+the processor to further reduce allocation. The use of shader programs also constrains
+the workflow to the very end of the frame’s lifecycle which eases the development of
+64
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:73==
+terrain by removing the necessity to prepare and pass forward the processed terrain data.
+There is nothing left to do in a frame, except for rendering objects including the terrain.
+The pitfall is the disengagement of this workflow from the other game systems. Most
+critically, the impediment of the physics system is a reasonable deal-breaker, especially
+for terrain which is often the core of a game world’s collision logic. While replacements
+and workarounds can be made for the physics interactions with height map terrain, these
+fixtures are dependent on game engine code which is often inaccessible to engineers
+for deeper understanding and better integration. Ultimately, these are approximations
+which will forever be one step behind implementations embedded in the engine’s designed
+workflow. The same applies to other game engine systems.
+With regards to the visual differences between the two approaches, it can be said that a
+limitation of polygonization methods are in fact polygons. While triangle meshes can be
+made to appear smooth with the use of larger mesh grid resolutions or effective use of
+normals for shading, the limitation to creating more detailed meshes is a tangible maxi-
+mum geometry size supported by the target platform. The benefit of ray rendered terrains
+are the granular detail they provide from each singular ray’s output. The terrain cannot
+be more detailed as each ray computes the miniscule detail of the point it eventually in-
+tersects with.
+Stepping away from game engines, it is also prudent to recognize the skillsets of teams
+working on the game’s terrain implementation. More often than not, game developer/-
+software engineers are more proficient at working with sequentially designed thread code
+targeting processors, specializing in algorithms implementation. The knowledge required
+for creating and maintaining mathematically oriented and highly parallelized shader pro-
+gram code is usually found with technical artists, who are a rather uncommon member
+of game development teams. That is to say, in the majority of the industry it is easier
+for production strategy to dedicate programming roles to creating algorithmic processor
+code, than it is to find technical artists and other engineers with the skillset to work on
+shader-heavy rendered terrain implementations.
+When working with implementations running on processing units, the well-equipped en-
+gineer is not troubled by the inability to locate potential optimizations and trade-offs to
+minimize the total run time by a significant margin. Even more so when they are profi-
+cient in the programming language at hand. In the process of working in the environment
+of What The Car?, other possible enhancements had been identified which further bring
+down the total frame time. These are changes which can be quickly identified by the mo-
+tivated engineer and often require minimal updates or, more commonly, the removal of
+unnecessary processing. Among others, these are skipping mesh physics calculations
+(baking) until the final frame of mesh modifications, or skipping an iteration of topology
+redistribution in the terrain post-processing pipeline as roughly 80% of the visual effect is
+achieved by the first iteration.
+Both strategies can also be evaluated for their ease of maintainability. Commonly used
+scripting languages for game engines (C#, C++, Python and similar) are modern high-
+level interfaces which have matured to the point of providing abundant implementation
+conveniences as well as design-centric tools for technical teams to communicate their
+intentions. Moreover, these development environments provide debugging tools for en-
+gineers to understand the precise behaviors of a given implementation. On the other
+hand, the low-level graphics scripting languages (HLSL, GLSL) provide little infrastruc-
+ture or direction for creating understandable, maintainable source code for future use by
+the unexperienced, with little to none support for debugging.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+65
+==PAGE:74==
+As it is with all tools, their efficiency depends on the artisan. It is certainly possible for
+the hurried engineer to produce illegible source code written in high-level languages, as
+much as it is for the diligent engineer to produce clear and concise source code in low-level
+languages. The technical personnel of any budding software endeavour, games industry
+included, should strive to go beyond creating functional software by also creating legible
+code supplemented with documentation where necessary, lest they create the necessity
+of leasing a dedicated research project for the means of analysis.
+5.3
+Final verdict
+In a final attempt to answer the posted question, the answer is yes, there is value in inves-
+tigating alternative solutions to status quo implementations. The process of investigation
+guided by knowledge of a specific team’s skillset and the project constraints, technical
+and otherwise, is valuable in that the alternative solution may prove to better fit the stylis-
+tic and technical wants and haves of the creation process. Through this process, the team
+is able to then answer is it worth changing the terrain graphics pipeline strategy? for their
+own benefit. Although, latest trends point to graphics card processing becoming powerful
+processing units in their own right (among others: compute shaders, optimizations for ray
+tracing), there is no overwhelming reason to disengage from integrated systems designed
+for mesh geometry data if that should add friction to the development cycle.
+It is the opinion of the author that game development endeavors based in modern game
+engines should remain in the recommended workflow for that engine. In the case of Unity
+that is fully utilizing the rasterization pipeline based on mesh geometry data, therefore
+utilizing the maximal capabilities of CPU implementations such as data parallelization,
+threading and chunking. This choice over the use of rendered terrain is not a concern
+of performance, but of implementation cost due to inexistent conveniences and integra-
+tions with other game systems, that is especially the physics engine. The investment
+into custom integrations is better spent on progressing the game project as there are al-
+ways options and trade-offs which can be made with regards to optimization when using
+CPU-based algorithms.
+Conversely, game engine developers should plan for the inclusion of features and inte-
+grations which target rendered terrain and other scalar field surface rendering in order to
+make this workflow friction-less for their users. Physics engine source code is often inac-
+cessible to clients, therefore integrations must be offered from the engine vendor. Current
+engines, Unity included, offer terrain modules which are based on vertex shader displace-
+ment with chunking and LOD strategies, but these are often archaic systems which still
+depend on high-triangle count meshes. Rendered terrain with the use of polygon-assisted
+ray marching allows for a performant and customizable workflow which also aligns with
+future trends for graphics cards support for ray tracing.
+5.4
+Future work
+Throughout the process of research and experimentation in the domain of this thesis,
+multiple options had been identified as interesting directions which did not fit in the scope
+of this project.
+A large constraint of this project is the immutability of the input data format, which itself is
+problematic for the goals of GPU rendered terrain. Ray marching techniques in three-
+dimensional space operate much better with three-dimensional signed distance fields
+compared to the use of a height map. Therefore, it is of interest to create a process for
+generating three-dimensional signed distance fields in runtime with accessible graphical
+66
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:75==
+user interfaces. Common solutions implement this in the form of a workflow for creating
+three-dimensional constructive solid geometry (CSG). Editors provide tools for creating
+mathematically defined shapes (cubes, spheres, tori, etc.) which can then be transformed
+or blended with other shapes and their unions and intersections. While many detailed ob-
+jects can be created in this process, the workflow is often cumbersome and unintuitive,
+which requires artists to be meticulous. An alternative based on paintbrush strokes and
+sculpting movements would make this process easier for artists to create detailed ter-
+rains, which also work well with ray marching techniques. A naive algorithm could involve
+flood-filling or parallelized writes to the distance field grid with distance to the newly modi-
+fied position (conditionally, compared to the previous distance). Another approach which
+would be a compromise between the two systems could be the use of point-to-spline
+distances. Approximations to point-spline distances can be found with a combination of
+Newton’s Method and Quadratic Minimization [39].
+Another limitation of the project domain is the requirement of inter-connectivity in the mesh
+geometry data. The reason for this requirement is for the triangle information to be later
+used in the terrain post-processing for surface topology redistribution. This effectively
+disallows the use of terrain mesh chunking, as each chunk would have to be included in
+the surface smoothing process anyway. Instead of using grid-based chunking, another
+approach could be to identify separate disjointed islands of the terrain created in the pro-
+cess, which would be treated as separate chunks. The basic strategy could be to use an
+auxiliary mask on the grid which would be used to categorize chunks as the geometry data
+is created. Back propagation by flood-filling would be utilized to merge two chunks should
+they collide. At the end of the polygonization process the mask can be queried by graph
+traversal to filter vertices and triangles into separate meshes. This process would result
+in the creation of separated (chunked) meshes from a single polygonization process. An
+additional benefit is the reuse of the mask in the next modification, as it may validate how
+many chunks require an update (or to handle merging).
+In terrain rendering where the computation of a normal is difficult and the dependence on
+input height maps for surface distance information is unreliable, an input-agnostic method
+for finding the distance (and direction to the terrain wall) may prove beneficial to further
+the independence of the implementation from its inputs and other preprocessing. Two
+approaches are considered, the use of blurring to create a uniformly distributed scalar
+field around the terrain’s edges which can be used for distance-to-wall or surface normals
+computation.
+The second approach is the use of a set of branching rays which march in directions
+orthogonal to the ray, both of which lay in the terrain’s horizontal plane. The branching
+rays are used to poll the height map for terrain, and should they intersect, the distance
+information can be used to generate uniform distances to the terrain’s edge. The branch
+directions can be computed via the Gram Schmidt procedure, using the camera’s world
+right-direction as a seed. This process can be further optimized with bisection to minimize
+the cost of additional ray steps.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+67
+==PAGE:76==
+68
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:77==
+Bibliography
+[1]
+Atul Bagga. Emerging Trends In Games-as-a-Service. Gdcvault.com, 2025. URL:
+https://www.gdcvault.com/play/1015035/Emerging-Trends-In-Games-as (visited on
+05/12/2025).
+[2]
+Yuyue Liu, Haihan Duan, and Wei Cai. User-Generated Content and Editors in
+Games: A Comprehensive Survey. 2024. arXiv: 2412.13743 [cs.MM]. URL: https:
+//arxiv.org/abs/2412.13743.
+[3]
+Triband makes comedy games — triband.net. [Accessed 12-05-2025]. URL: https:
+//triband.net/.
+[4]
+WHAT THE CAR? — whatthegames.com. https://whatthegames.com/car. [Ac-
+cessed 12-05-2025].
+[5]
+Edith Tom, Aybüke Aurum, and Richard Vidgen. “An exploration of technical debt”.
+In: Journal of Systems and Software 86.6 (2013), pp. 1498–1516. ISSN: 0164-1212.
+DOI: https://doi.org/10.1016/j.jss.2012.12.052. URL: https://www.sciencedirect.com/
+science/article/pii/S0164121213000022.
+[6]
+Unity Real-Time Development Platform | 3D, 2D, VR & AR Engine — unity.com.
+[Accessed 13-05-2025]. URL: https://unity.com/.
+[7]
+William E. Lorensen and Harvey E. Cline. “Marching cubes: A high resolution 3D
+surface construction algorithm”. In: SIGGRAPH Comput. Graph. 21.4 (Aug. 1987),
+pp. 163–169. ISSN: 0097-8930. DOI: 10.1145/37402.37422. URL: https://doi.org/10.
+1145/37402.37422.
+[8]
+Ryoshoru. Marching cubes cases. 2023. URL: https://commons.wikimedia.org/wiki/
+File:MarchingCubesEdit.svg.
+[9]
+Paul Bourke. Polygonising a scalar field. 1994. URL: https://paulbourke.net/geometry/
+polygonise/.
+[10]
+Inigo Quilez. rays and polygons - 2010. https://iquilezles.org/articles/raypolys/.
+[Accessed 13-05-2025]. 2010.
+[11]
+Will Usher. GPU compute in the browser at the speed of native: WebGPU Marching
+cubes. 2024. URL: https://www.willusher.io/graphics/2024/04/22/webgpu-marching-
+cubes/.
+[12]
+Dan Mahr and Justin Wang. Parallelized generation and smoothing of 2D contour
+lines. URL: https://dmahr1.github.io/618-final/report.html.
+[13]
+The Roslyn .NET compiler provides C# and Visual Basic languages with rich code
+analysis APIs. URL: https://github.com/dotnet/roslyn.
+[14]
+Unity Manual: C# compiler. URL: https://docs.unity3d.com/6000.2/Documentation/
+Manual/csharp-compiler.html.
+[15]
+Anna Pawlukiewicz and Nedko Nedkov. Exploring performance issues and patterns
+in C# by analyzing open-source projects. 2024. URL: https://www.diva-portal.org/
+smash/record.jsf?pid=diva2%3A1870029&dswid=-8794.
+[16]
+Luis Henriques and Jorge Bernardino. “Performance of Memory Deallocation in
+C++, C# and Java”. In: 2018. URL: https : / / api . semanticscholar . org / CorpusID :
+132474050.
+[17]
+Hakan Akdoğan et al. “Performance Analysis of Span Data Type in C# Programming
+Language”. In: Doğa, Türk and Dergisi, Fen 1 (2024), pp. 29–36. DOI: 10.46810/tdfd.
+1425662.
+[18]
+Burst compiler | Burst | 1.8.21. https://docs.unity3d.com/Packages/com.unity.burst@
+1.8/manual/index.html. [Accessed 26-05-2025].
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+69
+==PAGE:78==
+[19]
+HPC# overview. URL: https://docs.unity3d.com/Packages/com.unity.burst@1.8/
+manual/csharp-hpc-overview.html.
+[20]
+Sergio Pedri. Introduction to the high performance package - community toolkits for
+.NET. 2024. URL: https://learn.microsoft.com/en-us/dotnet/communitytoolkit/high-
+performance/introduction.
+[21]
+The LLVM Compiler Infrastructure Project. https://llvm.org/. [Accessed 26-05-
+2025].
+[22]
+David B. Kirk and Wen-mei W. Hwu. Memory and data locality. Cited by: 1. 2017,
+pp. 71 –101. DOI: 10.1016/B978-0-12-811986-0.00004-2. URL: https://www.scopus.
+com/inward/record.uri?eid=2-s2.0-85083936014&doi=10.1016%2fB978-0-12-811986-
+0.00004-2&partnerID=40&md5=27e8c15938e0a8a0b39147084ffd55a1.
+[23]
+Kristof Beyls and Erik H. D’Hollander. “Refactoring for data locality”. In: Computer
+42.2 (2009). Cited by: 51, pp. 62 –71. DOI: 10.1109/MC.2009.57. URL: https://www.
+scopus.com/inward/record.uri?eid=2-s2.0-61449142683&doi=10.1109%2fMC.2009.
+57&partnerID=40&md5=969cf0ae49d172a8cd840dcec9ac0f9f.
+[24]
+Kathryn S. McKinley, Steve Carr, and Chau-Wen Tseng. “Improving data locality
+with loop transformations”. In: ACM Trans. Program. Lang. Syst. 18.4 (July 1996),
+pp. 424–453. ISSN: 0164-0925. DOI: 10.1145/233561.233564. URL: https://doi.org/
+10.1145/233561.233564.
+[25]
+Tomomichi Kaneko et al. “Detailed shape representation with parallax mapping”. In:
+In Proceedings of the ICAT 2001 (Jan. 2001).
+[26]
+Fábio Policarpo, Manuel M. Oliveira, and João L. D. Comba. “Real-time relief map-
+ping on arbitrary polygonal surfaces”. In: Proceedings of the 2005 Symposium on
+Interactive 3D Graphics and Games. I3D ’05. Washington, District of Columbia: As-
+sociation for Computing Machinery, 2005, pp. 155–162. ISBN: 1595930132. DOI:
+10.1145/1053427.1053453. URL: https://doi.org/10.1145/1053427.1053453.
+[27]
+Mike Wakid, Can Kirmizibayrak, and James K. Hahn. “Texture mapping volumes
+using GPU-based polygon-assisted raycasting”. In: 2011 16th International Confer-
+ence on Computer Games (CGAMES). 2011, pp. 162–166. DOI: 10.1109/CGAMES.
+2011.6000333.
+[28]
+Art Tevs, Ivo Ihrke, and Hans-Peter Seidel. “Maximum mipmaps for fast, accurate,
+and scalable dynamic height field rendering”. In: Proceedings of the 2008 Sympo-
+sium on Interactive 3D Graphics and Games. I3D ’08. Redwood City, California:
+Association for Computing Machinery, 2008, pp. 183–190. ISBN: 9781595939838.
+DOI: 10.1145/1342250.1342279. URL: https://doi.org/10.1145/1342250.1342279.
+[29]
+Michal Drobot. Quadtree Displacement Mapping with Height Blending. https://www.
+gamedevs.org/uploads/quadtree- displacement- mapping- with- height- blending.pdf.
+[Accessed 17-05-2025].
+[30]
+Sebastian Macke. Terrain Rendering algorithm in less than 20 lines of code. URL:
+https://github.com/s-macke/VoxelSpace.
+[31]
+Alexander Ameye. Stylized water shader. URL: https://ameye.dev/notes/stylized-
+water-shader/.
+[32]
+Unity 2022.3.42. https://unity.com/releases/editor/whats-new/2022.3.42. [Accessed
+26-05-2025].
+[33]
+Collections package | Collections | 2.5.7. https://docs.unity3d.com/Packages/com.
+unity.collections@2.5/manual/index.html. [Accessed 26-05-2025].
+[34]
+Performance Testing Package for Unity Test Framework | Performance testing API
+| 3.0.3. https://docs.unity3d.com/Packages/com.unity.test-framework.performance@
+3.0/manual/index.html. [Accessed 26-05-2025].
+70
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:79==
+[35]
+High-level shader language (HLSL) - Win32 apps — learn.microsoft.com. https:
+//learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl. [Accessed
+26-05-2025].
+[36]
+Unity - Manual: Writing shaders overview. https : / / docs . unity3d . com / 2022 . 3 /
+Documentation/Manual/SL-ShadingLanguage.html. [Accessed 26-05-2025].
+[37]
+Apple iPhone X - Specifications. https://www.devicespecifications.com/en/model/
+36ea45ae. [Accessed 26-05-2025].
+[38]
+Unity - Manual: Standard Shader Material Inspector window reference for the Built-
+In Render Pipeline. https://docs.unity3d.com/6000.1/Documentation/Manual/
+StandardShaderMaterialParameters.html. [Accessed 02-06-2025].
+[39]
+Tom Lyche, Marie-Laurence Mazure, and Larry L Schumaker. Curve and surface
+design: Saint-Malo 2002. en. Nashboro PressInc, 2003.
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+71
+==PAGE:80==
+72
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:81==
+A
+Appendix
+A.1
+Results
+n-f-lg-10
+n-f-sm-10
+b-f-lg-10
+b-f-sm-10
+Test
+0
+100
+200
+300
+400
+500
+Mean execution time [ms]
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-f-sm-10
+no-burst-full-SmallField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+b-f-sm-10
+burst-full-SmallField-iters-10
+Median
+Min-Max
+Reference
+Rotation
+Lookup
+Reference
+Rotation (Job)
+Reference
+Rotation (Job)
+no map
+Lookup (Job)
+Figure A.1: Comparison of execution time for Reference Rotation (baseline), Lookup, Reference
+Rotation (Job), Reference Rotation (Job) no map, and Lookup (Job) (blocky).
+n-f-sm-10
+n-f-lg-10
+n-f-ii-10
+n-f-lg-100
+n-f-sm-100
+Test
+0
+5
+10
+Mean execution time [ms]
+n-f-sm-10
+no-burst-full-SmallField-iters-10
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-f-ii-10
+no-burst-full-InvertedIslets51X51-iters-10
+n-f-lg-100
+no-burst-full-LargeField-iters-100
+n-f-sm-100
+no-burst-full-SmallField-iters-100
+Median
+Min-Max
+Reference
+Rotation
+Reference
+Rotation no map
+Lookup
+Lookup w/
+heuristics
+Figure A.2: Comparison of execution time for Reference Rotation (baseline), Reference Rotation
+array lookup, Lookup and Lookup w/ heuristics Marching Triangles implementations (proart).
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+73
+==PAGE:82==
+n-f-lg-10
+n-f-sm-10
+b-f-lg-10
+b-f-sm-10
+Test
+0
+100
+200
+300
+Mean execution time [ms]
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-f-sm-10
+no-burst-full-SmallField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+b-f-sm-10
+burst-full-SmallField-iters-10
+Median
+Min-Max
+Reference
+Rotation
+Lookup
+Reference
+Rotation (Job)
+Reference
+Rotation (Job)
+no map
+Lookup (Job)
+Figure A.3: Comparison of execution time for Reference Rotation (baseline), Lookup, Reference
+Rotation (Job), Reference Rotation (Job) no map, and Lookup (Job) (proart).
+n-f-lg-10
+n-f-sm-10
+b-f-lg-10
+b-f-sm-10
+Test
+0
+2
+4
+6
+Mean execution time [ms]
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-f-sm-10
+no-burst-full-SmallField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+b-f-sm-10
+burst-full-SmallField-iters-10
+Median
+Min-Max
+Reference
+Rotation
+Reference
+Rotation no map
+Lookup
+Reference
+Rotation (Job)
+no map
+Lookup (Job)
+Figure A.4: Use of Unity Burst for data parallelization for the Reference Rotation and Lookup
+implementations (proart).
+n-f-lg-10
+n-f-sm-10
+b-f-lg-10
+b-f-sm-10
+Test
+0
+1
+2
+3
+Mean execution time [ms]
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-f-sm-10
+no-burst-full-SmallField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+b-f-sm-10
+burst-full-SmallField-iters-10
+Median
+Min-Max
+RR threaded 1
+RR threaded 8
+RR threaded 16
+RR threaded 32
+RR threaded 64
+RR threaded fit
+Figure A.5: Threaded triangle soup mesh generation with Reference Rotation (proart).
+74
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:83==
+n-f-lg-10
+n-f-sm-10
+b-f-lg-10
+b-f-sm-10
+Test
+0.0
+2.5
+5.0
+7.5
+10.0
+12.5
+Mean execution time [ms]
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-f-sm-10
+no-burst-full-SmallField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+b-f-sm-10
+burst-full-SmallField-iters-10
+Median
+Min-Max
+Lk threaded 1
+Lk threaded 8
+Lk threaded 16
+Lk threaded 32
+Lk threaded 64
+Lk threaded fit
+Figure A.6: Threaded triangle soup mesh generation with Lookup (proart).
+n-f-lg-10
+n-f-sm-10
+b-f-lg-10
+b-f-sm-10
+Test
+0
+2
+4
+6
+Mean execution time [ms]
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-f-sm-10
+no-burst-full-SmallField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+b-f-sm-10
+burst-full-SmallField-iters-10
+Median
+Min-Max
+Reference
+Rotation
+Lookup
+Reference
+Rotation (Job)
+no map
+Lookup (Job)
+RR threaded 64
+Lk threaded 64
+Figure A.7: Comparison of previously best implementations with best stable threaded implemen-
+tations (proart).
+n-f-lg-10
+n-1-lg-10
+b-f-lg-10
+b-1-lg-10
+Test
+0
+2
+4
+6
+8
+10
+Mean execution time [ms]
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+n-1-lg-10
+no-burst-partial-1-LargeField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+b-1-lg-10
+burst-partial-1-LargeField-iters-10
+Median
+Min-Max
+Lookup
+Lk chunk 10x10
+Lk chunk 25x25
+Lk chunk 50x50
+Lk (Job) chunk
+10x10
+Lk (Job) chunk
+25x25
+Lk (Job) chunk
+50x50
+Figure A.8: Comparison of chunked terrain creation in runtime (proart).
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+75
+==PAGE:84==
+n-1-lg-10
+b-1-lg-10
+b-10-lg-10
+b-10-sm-10
+Test
+0
+1
+2
+3
+4
+Mean execution time [ms]
+n-1-lg-10
+no-burst-partial-1-LargeField-iters-10
+b-1-lg-10
+burst-partial-1-LargeField-iters-10
+b-10-lg-10
+burst-partial-10-LargeField-iters-10
+b-10-sm-10
+burst-partial-10-SmallField-iters-10
+Median
+Min-Max
+Lk chunk 10x10
+Lk chunk 25x25
+Lk chunk 50x50
+Lk (Job) chunk
+10x10
+Lk (Job) chunk
+25x25
+Lk (Job) chunk
+50x50
+Figure A.9: Comparison of chunked terrain creation in runtime with only partial modifications
+(proart).
+n-1-lg-10
+b-1-lg-10
+n-f-lg-10
+b-f-lg-10
+Test
+0
+2
+4
+6
+Mean execution time [ms]
+n-1-lg-10
+no-burst-partial-1-LargeField-iters-10
+b-1-lg-10
+burst-partial-1-LargeField-iters-10
+n-f-lg-10
+no-burst-full-LargeField-iters-10
+b-f-lg-10
+burst-full-LargeField-iters-10
+Median
+Min-Max
+Reference
+Rotation
+Lookup
+Reference
+Rotation (Job)
+no map
+Lookup (Job)
+RR threaded 64
+Lk (Job) chunk
+10x10
+Figure A.10: Comparison of most performant Marching Triangles implementations (proart).
+76
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:85==
+A.1.1
+Tables
+Test
+n-f-lg-10
+n-f-sm-10
+b-f-lg-10
+b-f-sm-10
+Algorithm
+Reference Rotation
+7.77ms (100%)
+7.71ms (100%)
+7.88ms (100%)
+8.07ms (100%)
+Reference Rotation no
+map
+5.66ms (73%)
+5.68ms (74%)
+5.73ms (73%)
+6.17ms (76%)
+Lookup
+4.48ms (58%)
+4.19ms (54%)
+4.14ms (53%)
+4.21ms (52%)
+Lookup w/ heuristics
+4.24ms (55%)
+4.32ms (56%)
+4.15ms (53%)
+4.21ms (52%)
+Reference
+Rotation
+(Job)
+559.53ms
+(7203%)
+558.71ms
+(7248%)
+41.43ms
+(526%)
+41.53ms
+(514%)
+Reference
+Rotation
+(Job) no map
+11.55ms
+(149%)
+11.50ms
+(149%)
+0.58ms (7%)
+0.59ms (7%)
+Lookup (Job)
+12.12ms
+(156%)
+12.06ms
+(156%)
+0.88ms (11%)
+0.83ms (10%)
+RR threaded 1
+17.15ms
+(221%)
+17.20ms
+(223%)
+2.21ms (28%)
+2.19ms (27%)
+RR threaded 8
+17.19ms
+(221%)
+17.32ms
+(225%)
+2.06ms (26%)
+2.07ms (26%)
+RR threaded 16
+16.76ms
+(216%)
+17.85ms
+(232%)
+2.03ms (26%)
+2.04ms (25%)
+RR threaded 32
+16.45ms
+(212%)
+19.09ms
+(248%)
+2.06ms (26%)
+2.05ms (25%)
+RR threaded 64
+16.69ms
+(215%)
+17.40ms
+(226%)
+2.06ms (26%)
+2.07ms (26%)
+RR threaded fit
+19.83ms
+(255%)
+19.56ms
+(254%)
+3.45ms (44%)
+3.46ms (43%)
+Lk threaded 1
+22.13ms
+(285%)
+22.05ms
+(286%)
+5.92ms (75%)
+5.28ms (65%)
+Lk threaded 8
+21.47ms
+(276%)
+21.45ms
+(278%)
+5.71ms (72%)
+5.26ms (65%)
+Lk threaded 16
+35.04ms
+(451%)
+21.41ms
+(278%)
+6.45ms (82%)
+5.25ms (65%)
+Lk threaded 32
+33.59ms
+(432%)
+21.46ms
+(278%)
+8.50ms (108%)
+5.23ms (65%)
+Lk threaded 64
+22.54ms
+(290%)
+21.58ms
+(280%)
+7.59ms (96%)
+5.21ms (64%)
+Lk threaded fit
+24.89ms
+(320%)
+27.11ms
+(352%)
+7.21ms (92%)
+6.70ms (83%)
+Lk chunk 10x10
+7.03ms (90%)
+6.97ms (90%)
+6.76ms (86%)
+6.92ms (86%)
+Lk chunk 25x25
+4.97ms (64%)
+4.89ms (63%)
+4.73ms (60%)
+4.71ms (58%)
+Lk chunk 50x50
+4.99ms (64%)
+16.90ms
+(219%)
+4.50ms (57%)
+4.42ms (55%)
+Lk (Job) chunk 10x10
+6.26ms (81%)
+5.61ms (73%)
+2.17ms (28%)
+2.16ms (27%)
+Lk (Job) chunk 25x25
+4.57ms (59%)
+3.92ms (51%)
+0.68ms (9%)
+0.66ms (8%)
+Lk (Job) chunk 50x50
+6.22ms (80%)
+4.78ms (62%)
+0.62ms (8%)
+0.64ms (8%)
+Table A.1: Median execution time for all implementations, across full execution tests (blocky).
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+77
+==PAGE:86==
+Test
+n-1-lg-10
+b-1-lg-10
+b-10-lg-10
+b-10-sm-10
+Algorithm
+Reference Rotation
+7.60ms (100%)
+7.67ms (100%)
+8.02ms (100%)
+8.20ms (100%)
+Reference Rotation no
+map
+5.70ms (75%)
+5.76ms (75%)
+5.72ms (71%)
+5.62ms (69%)
+Lookup
+4.16ms (55%)
+4.21ms (55%)
+4.14ms (52%)
+4.27ms (52%)
+Lookup w/ heuristics
+4.16ms (55%)
+4.23ms (55%)
+4.30ms (54%)
+4.90ms (60%)
+Reference
+Rotation
+(Job)
+559.93ms
+(7366%)
+41.00ms
+(535%)
+41.67ms
+(520%)
+41.42ms
+(505%)
+Reference
+Rotation
+(Job) no map
+11.56ms
+(152%)
+0.57ms (7%)
+0.61ms (8%)
+0.58ms (7%)
+Lookup (Job)
+11.92ms
+(157%)
+0.84ms (11%)
+0.82ms (10%)
+0.83ms (10%)
+RR threaded 1
+19.69ms
+(259%)
+2.16ms (28%)
+2.38ms (30%)
+2.85ms (35%)
+RR threaded 8
+19.25ms
+(253%)
+2.13ms (28%)
+2.08ms (26%)
+2.72ms (33%)
+RR threaded 16
+17.72ms
+(233%)
+2.05ms (27%)
+2.07ms (26%)
+2.56ms (31%)
+RR threaded 32
+18.95ms
+(249%)
+2.08ms (27%)
+2.07ms (26%)
+2.58ms (32%)
+RR threaded 64
+16.58ms
+(218%)
+2.03ms (26%)
+2.06ms (26%)
+2.33ms (28%)
+RR threaded fit
+20.82ms
+(274%)
+3.48ms (45%)
+3.55ms (44%)
+3.62ms (44%)
+Lk threaded 1
+21.98ms
+(289%)
+6.63ms (86%)
+5.31ms (66%)
+5.38ms (66%)
+Lk threaded 8
+21.64ms
+(285%)
+5.44ms (71%)
+5.29ms (66%)
+5.30ms (65%)
+Lk threaded 16
+21.52ms
+(283%)
+5.63ms (73%)
+5.23ms (65%)
+16.54ms
+(202%)
+Lk threaded 32
+21.48ms
+(283%)
+5.40ms (70%)
+5.30ms (66%)
+5.42ms (66%)
+Lk threaded 64
+21.77ms
+(286%)
+5.23ms (68%)
+5.26ms (66%)
+5.19ms (63%)
+Lk threaded fit
+27.34ms
+(360%)
+6.99ms (91%)
+6.78ms (85%)
+6.86ms (84%)
+Lk chunk 10x10
+0.05ms (1%)
+0.01ms (0%)
+0.34ms (4%)
+0.49ms (6%)
+Lk chunk 25x25
+0.10ms (1%)
+0.02ms (0%)
+1.60ms (20%)
+1.82ms (22%)
+Lk chunk 50x50
+0.21ms (3%)
+0.20ms (3%)
+3.91ms (49%)
+3.94ms (48%)
+Lk (Job) chunk 10x10
+0.18ms (2%)
+0.07ms (1%)
+0.23ms (3%)
+0.27ms (3%)
+Lk (Job) chunk 25x25
+0.35ms (5%)
+0.09ms (1%)
+0.34ms (4%)
+0.35ms (4%)
+Lk (Job) chunk 50x50
+0.73ms (10%)
+0.11ms (1%)
+0.61ms (8%)
+0.69ms (8%)
+Table A.2:
+Median execution time for all implementations, across partial modification tests
+(blocky).
+78
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:87==
+Test
+n-f-lg-10
+n-f-sm-10
+b-f-lg-10
+b-f-sm-10
+Algorithm
+Reference Rotation
+3.61ms (100%)
+3.78ms (100%)
+3.60ms (100%)
+3.59ms (100%)
+Reference Rotation no
+map
+2.98ms (82%)
+3.11ms (82%)
+2.94ms (82%)
+2.96ms (83%)
+Lookup
+1.85ms (51%)
+1.92ms (51%)
+1.84ms (51%)
+1.84ms (51%)
+Lookup w/ heuristics
+1.82ms (50%)
+1.89ms (50%)
+1.81ms (50%)
+1.80ms (50%)
+Reference
+Rotation
+(Job)
+339.92ms
+(9418%)
+357.63ms
+(9466%)
+28.87ms
+(801%)
+28.73ms
+(800%)
+Reference
+Rotation
+(Job) no map
+5.03ms (139%)
+5.26ms (139%)
+0.24ms (7%)
+0.24ms (7%)
+Lookup (Job)
+4.75ms (132%)
+4.95ms (131%)
+0.37ms (10%)
+0.37ms (10%)
+RR threaded 1
+1.99ms (55%)
+1.98ms (52%)
+0.51ms (14%)
+0.51ms (14%)
+RR threaded 8
+1.99ms (55%)
+1.97ms (52%)
+0.49ms (14%)
+0.50ms (14%)
+RR threaded 16
+2.00ms (56%)
+1.98ms (52%)
+0.50ms (14%)
+0.49ms (14%)
+RR threaded 32
+2.03ms (56%)
+2.00ms (53%)
+0.51ms (14%)
+0.52ms (14%)
+RR threaded 64
+2.09ms (58%)
+1.97ms (52%)
+0.51ms (14%)
+0.50ms (14%)
+RR threaded fit
+2.69ms (74%)
+2.71ms (72%)
+0.85ms (24%)
+0.84ms (24%)
+Lk threaded 1
+3.85ms (107%)
+3.94ms (104%)
+2.01ms (56%)
+1.97ms (55%)
+Lk threaded 8
+3.81ms (106%)
+3.95ms (105%)
+1.98ms (55%)
+1.94ms (54%)
+Lk threaded 16
+3.81ms (105%)
+3.99ms (106%)
+1.92ms (53%)
+1.93ms (54%)
+Lk threaded 32
+3.79ms (105%)
+3.98ms (105%)
+1.92ms (53%)
+1.93ms (54%)
+Lk threaded 64
+4.02ms (111%)
+4.00ms (106%)
+1.99ms (55%)
+1.94ms (54%)
+Lk threaded fit
+4.55ms (126%)
+5.01ms (132%)
+2.33ms (65%)
+2.31ms (64%)
+Lk chunk 10x10
+2.93ms (81%)
+3.03ms (80%)
+2.86ms (79%)
+2.88ms (80%)
+Lk chunk 25x25
+2.13ms (59%)
+2.20ms (58%)
+2.11ms (58%)
+2.10ms (59%)
+Lk chunk 50x50
+1.96ms (54%)
+2.05ms (54%)
+1.98ms (55%)
+1.95ms (54%)
+Lk (Job) chunk 10x10
+1.29ms (36%)
+1.58ms (42%)
+0.95ms (26%)
+1.04ms (29%)
+Lk (Job) chunk 25x25
+0.81ms (23%)
+0.83ms (22%)
+0.22ms (6%)
+0.24ms (7%)
+Lk (Job) chunk 50x50
+1.55ms (43%)
+1.93ms (51%)
+0.24ms (7%)
+0.22ms (6%)
+Table A.3: Median execution time for all implementations, across full execution tests (proart).
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+79
+==PAGE:88==
+Test
+n-1-lg-10
+b-1-lg-10
+b-10-lg-10
+b-10-sm-10
+Algorithm
+Reference Rotation
+3.79ms (100%)
+3.61ms (100%)
+3.63ms (100%)
+3.62ms (100%)
+Reference Rotation no
+map
+3.11ms (82%)
+2.98ms (82%)
+2.98ms (82%)
+2.97ms (82%)
+Lookup
+1.92ms (51%)
+1.85ms (51%)
+1.85ms (51%)
+1.85ms (51%)
+Lookup w/ heuristics
+1.89ms (50%)
+1.80ms (50%)
+1.81ms (50%)
+1.82ms (50%)
+Reference
+Rotation
+(Job)
+358.43ms
+(9463%)
+28.74ms
+(796%)
+29.07ms
+(800%)
+29.00ms
+(801%)
+Reference
+Rotation
+(Job) no map
+5.27ms (139%)
+0.24ms (7%)
+0.24ms (7%)
+0.24ms (7%)
+Lookup (Job)
+5.00ms (132%)
+0.37ms (10%)
+0.37ms (10%)
+0.37ms (10%)
+RR threaded 1
+2.00ms (53%)
+0.52ms (14%)
+0.54ms (15%)
+0.51ms (14%)
+RR threaded 8
+1.98ms (52%)
+0.49ms (13%)
+0.51ms (14%)
+0.49ms (14%)
+RR threaded 16
+1.99ms (53%)
+0.48ms (13%)
+0.49ms (13%)
+0.49ms (13%)
+RR threaded 32
+1.99ms (53%)
+0.49ms (14%)
+0.50ms (14%)
+0.49ms (14%)
+RR threaded 64
+1.97ms (52%)
+0.49ms (14%)
+0.50ms (14%)
+0.50ms (14%)
+RR threaded fit
+2.95ms (78%)
+0.86ms (24%)
+0.86ms (24%)
+0.95ms (26%)
+Lk threaded 1
+3.94ms (104%)
+1.90ms (52%)
+1.91ms (52%)
+1.95ms (54%)
+Lk threaded 8
+3.97ms (105%)
+1.88ms (52%)
+1.88ms (52%)
+1.88ms (52%)
+Lk threaded 16
+3.96ms (105%)
+1.89ms (52%)
+1.90ms (52%)
+1.90ms (52%)
+Lk threaded 32
+3.98ms (105%)
+1.89ms (52%)
+1.87ms (52%)
+1.89ms (52%)
+Lk threaded 64
+3.99ms (105%)
+1.91ms (53%)
+1.89ms (52%)
+1.90ms (53%)
+Lk threaded fit
+4.98ms (131%)
+2.37ms (66%)
+2.29ms (63%)
+2.28ms (63%)
+Lk chunk 10x10
+0.01ms (0%)
+0.00ms (0%)
+0.22ms (6%)
+0.19ms (5%)
+Lk chunk 25x25
+0.05ms (1%)
+0.01ms (0%)
+1.05ms (29%)
+0.71ms (20%)
+Lk chunk 50x50
+0.09ms (2%)
+0.08ms (2%)
+1.45ms (40%)
+1.11ms (31%)
+Lk (Job) chunk 10x10
+0.05ms (1%)
+0.03ms (1%)
+0.10ms (3%)
+0.10ms (3%)
+Lk (Job) chunk 25x25
+0.16ms (4%)
+0.04ms (1%)
+0.14ms (4%)
+0.13ms (4%)
+Lk (Job) chunk 50x50
+0.26ms (7%)
+0.06ms (2%)
+0.20ms (6%)
+0.18ms (5%)
+Table A.4: Median execution time for all implementations, across partial modification tests (proart).
+80
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:89==
+A.2
+Implementations
+A.2.1
+Marching Triangles (Reference Rotation)
+Listing A.1: Marching Triangles (Reference Rotation) implemented in C#.
+1
+public static void ReferenceRotation (
+2
+int densityWidth ,
+3
+int densityHeight
+4
+byte [ ]
+heightFieldData ,
+5
+/ /
+. . .
+Geometry data
+structures
+6
+)
+7
+{
+8
+var indexByVertexLookup = new Dictionary <Vector2 ,
+int >() ;
+9
+10
+for ( var row = 1; row < densityHeight ;
+row++)
+11
+{
+12
+var
+squareStartY = row −1;
+13
+var squareEndY = row ;
+14
+var
+squareStartYFlatIndex = squareStartY * densityWidth ;
+15
+var squareEndYFlatIndex = squareEndY * densityWidth ;
+16
+17
+var isEvenRow = ( row & 1) == 0;
+18
+var
+h o r i z o n t a l O f f s e t = ( isEvenRow ? 1 :
+−1) * 0.25;
+19
+for ( var column = 1; column < densityWidth ;
+column++)
+20
+{
+21
+var
+squareStartX = column −1;
+22
+var squareEndX = column ;
+23
+24
+var
+i0 = squareStartX + squareStartYFlatIndex ;
+/ /
+The pivot
+i s
+at
+reference
+index zero
+25
+var b0 = heightFieldData [ i0 ] ;
+26
+var
+in0 = b0 > HeightThreshold ;
+27
+var p0 = new Vector2 ( squareStartX −horizontalOffset ,
+squareStartY ) ;
+28
+var
+i1 = squareStartX + squareEndYFlatIndex ;
+29
+var b1 = heightFieldData [ i1 ] ;
+30
+var
+in1 = b1 > HeightThreshold ;
+31
+var p1 = new Vector2 ( squareStartX + horizontalOffset ,
+squareEndY ) ;
+32
+var
+i2 = squareEndX + squareEndYFlatIndex ;
+33
+var b2 = heightFieldData [ i2 ] ;
+34
+var
+in2 = b2 > HeightThreshold ;
+35
+var p2 = new Vector2 ( squareEndX + horizontalOffset ,
+squareEndY ) ;
+36
+var
+i3 = squareEndX + squareStartYFlatIndex ;
+37
+var b3 = heightFieldData [ i3 ] ;
+38
+var
+in3 = b3 > HeightThreshold ;
+39
+var p3 = new Vector2 ( squareEndX −horizontalOffset ,
+squareStartY ) ;
+40
+41
+var
+allOut =
+! ( in0
+| |
+in1
+| |
+in2
+| |
+in3 ) ;
+42
+if ( allOut )
+continue ;
+43
+44
+if ( in2 )
+/ /
+The corner
+opposite
+the
+pivot
+w i l l
+be included
+in
+the
+geometry ,
+therefore add
+i t
+to
+the
+vertex
+l i s t
+45
+{
+46
+indexByVertexLookup . Add( p2 ,
+indexByVertexLookup . Count ) ;
+47
+/ /
+Add vertex v2
+48
+}
+49
+50
+if ( isEvenRow )
+/ /
+Rotate the
+pivot
+to
+the obtuse angle
+of
+the
+parallelogram
+51
+{
+/*
+. . .
+Cycle the
+references by one p o s i t i o n
+(2−>1, 3−>2, 0−>3, 1−>0)
+*/
+}
+52
+53
+for ( var
+t r i a n g l e = 0;
+t r i a n g l e < 2;
+t r i a n g l e ++)
+/ /
+Handle both
+t r i a n g l e s
+of
+the
+c e l l
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+81
+==PAGE:90==
+54
+{
+55
+var
+insideCount = 0;
+56
+57
+if ( in0 )
+insideCount ++;
+58
+if ( in1 )
+insideCount ++;
+59
+if ( in2 )
+insideCount ++;
+60
+61
+if ( insideCount == 1)
+/ /
+Equivalent
+to
+t r i a n g l e
+b i t
+masks 001 , 010 and
+100
+62
+{
+63
+for ( var
+triangleIndex = 0;
+triangleIndex < 3;
+triangleIndex ++)
+64
+{
+65
+if ( in0 )
+66
+{
+67
+var index0 = indexByVertexLookup [ p0 ] ;
+68
+var midPoint01 = ( p0 + p1 ) * 0.5 f ;
+69
+70
+if
+( ! indexByVertexLookup . TryGetValue ( midPoint01 ,
+out var index01
+) )
+71
+{
+72
+index01 = indexByVertexLookup . Count ;
+73
+/ /
+Add i n t e r p o l a t e d
+vertex
+74
+indexByVertexLookup . Add( midPoint01 ,
+index01 ) ;
+75
+}
+76
+77
+var midPoint02 = ( p2 + p0 ) * 0.5 f ;
+78
+if
+( ! indexByVertexLookup . TryGetValue ( midPoint02 ,
+out var index02
+) )
+79
+{
+80
+index02 = indexByVertexLookup . Count ;
+81
+/ /
+Add i n t e r p o l a t e d
+vertex
+82
+indexByVertexLookup . Add( midPoint02 ,
+index02 ) ;
+83
+}
+84
+85
+/ /
+Add t r i a n g l e
+index0 ,
+index01 ,
+index02
+86
+/ /
+Add edge index02 ,
+index01
+87
+}
+88
+89
+/ /
+Cycle the
+t r i a n g l e
+references by one p o s i t i o n
+(1−>0, 2−>1,
+0−>2)
+90
+}
+91
+}
+92
+else if ( insideCount == 2)
+/ /
+Equivalent
+to
+t r i a n g l e
+b i t
+masks 011 ,
+110 and 101
+93
+{
+94
+for ( var
+triangleIndex = 0;
+triangleIndex < 3;
+triangleIndex ++)
+95
+{
+96
+if
+( ! in0 )
+97
+{
+98
+Vector2
+interpolatedVector01 ,
+interpolatedVector02 ;
+99
+var index1 = indexByVertexLookup [ p1 ] ;
+100
+var index2 = indexByVertexLookup [ p2 ] ;
+101
+102
+var midPoint01 = ( p0 + p1 ) * 0.5 f ;
+103
+if ( indexByVertexLookup . TryGetValue ( midPoint01 ,
+out var index01 )
+)
+104
+interpolatedVector01 = contourVertices [ index01 ] ;
+105
+else
+106
+{
+107
+index01 = indexByVertexLookup . Count ;
+108
+/ /
+Add i n t e r p o l a t e d
+vertex
+109
+indexByVertexLookup . Add( midPoint01 ,
+index01 ) ;
+82
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:91==
+110
+}
+111
+112
+var midPoint02 = ( p2 + p0 ) * 0.5 f ;
+113
+if ( indexByVertexLookup . TryGetValue ( midPoint02 ,
+out var index02 )
+)
+114
+interpolatedVector02 = contourVertices [ index02 ] ;
+115
+else
+116
+{
+117
+index02 = indexByVertexLookup . Count ;
+118
+/ /
+Add i n t e r p o l a t e d
+vertex
+119
+indexByVertexLookup . Add( midPoint02 ,
+index02 ) ;
+120
+}
+121
+122
+var
+is01DiagonalBetter = ( interpolatedVector01 −p2 ) .
+sqrMagnitude <
+123
+( interpolatedVector02 −p1 ) . sqrMagnitude ;
+124
+if ( is01DiagonalBetter )
+125
+{
+126
+/ /
+Add t r i a n g l e
+index01 ,
+index1 ,
+index2
+127
+/ /
+Add t r i a n g l e
+index2 ,
+index02 ,
+index01
+128
+}
+129
+else
+130
+{
+131
+/ /
+Add t r i a n g l e
+index1 ,
+index2 ,
+index02
+132
+/ /
+Add t r i a n g l e
+index02 ,
+index01 ,
+index1
+133
+}
+134
+135
+/ /
+Add edge index01 ,
+index02
+136
+}
+137
+138
+/ /
+Cycle the
+t r i a n g l e
+references by one p o s i t i o n
+(1−>0, 2−>1,
+0−>2)
+139
+}
+140
+}
+141
+else if ( insideCount == 3)
+/ /
+Equivalent
+to
+t r i a n g l e
+b i t mask 111
+142
+{
+143
+var index0 = indexByVertexLookup [ p0 ] ;
+144
+var index1 = indexByVertexLookup [ p1 ] ;
+145
+var index2 = indexByVertexLookup [ p2 ] ;
+146
+/ /
+Add t r i a n g l e
+index0 ,
+index1 ,
+index2
+147
+}
+148
+149
+/ /
+Cycle references by two
+positions
+to
+t h e i r
+opposite
+corners (2−>0,
+3−>1, 0−>2, 1−>3)
+150
+}
+151
+}
+152
+}
+153
+}
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+83
+==PAGE:92==
+A.2.2
+Marching Triangles (Lookup)
+Listing A.2: Marching Triangles (Lookup) implemented in C#.
+1
+public static void Lookup (
+2
+int densityWidth ,
+3
+int densityHeight
+4
+byte [ ]
+heightFieldData ,
+5
+/ /
+. . .
+Geometry data
+structures
+6
+)
+7
+{
+8
+var
+pointToIndexMatrix = int [ densityWidth * 2 * densityHeight *
+2 ] ;
+9
+10
+Span<int> triangleX = stackalloc int [ 3 ] ;
+11
+Span<int> triangleY = stackalloc int [ 3 ] ;
+12
+Span<int> contourResolver = stackalloc int [ 4 ] ;
+13
+14
+for ( var row = 1; row < densityHeight ;
+row++)
+15
+{
+16
+var
+squareStartY = row −1;
+17
+var squareEndY = row ;
+18
+var
+squareStartYFlatIndex = squareStartY * densityWidth ;
+19
+var squareEndYFlatIndex = squareEndY * densityWidth ;
+20
+21
+var isEvenRow = ( row & 1) == 0;
+22
+for ( var column = 1; column < densityWidth ;
+column++)
+23
+{
+24
+var
+squareStartX = column −1;
+25
+var squareEndX = column ;
+26
+27
+var squareMask = 0;
+28
+if ( heightFieldData [ squareStartX + squareStartYFlatIndex ] >
+HeightThreshold )
+29
+squareMask |= 0b0001 ;
+30
+if ( heightFieldData [ squareStartX + squareEndYFlatIndex ] >
+HeightThreshold )
+31
+squareMask |= 0b0010 ;
+32
+if ( heightFieldData [ squareEndX + squareEndYFlatIndex ] > HeightThreshold )
+33
+squareMask |= 0b0100 ;
+34
+if ( heightFieldData [ squareEndX + squareStartYFlatIndex ] >
+HeightThreshold )
+35
+squareMask |= 0b1000 ;
+36
+if ( squareMask == 0) continue ;
+/ /
+The c e l l
+i s
+e n t i r e l y
+empty
+37
+38
+var
+doesIncludeLeftTriangle = isEvenRow && squareMask != 0b0100
+| |
+!
+isEvenRow && squareMask != 0b1000 ;
+39
+if ( doesIncludeLeftTriangle )
+40
+{
+41
+triangleX [ 0 ] = squareStartX ;
+42
+triangleY [ 0 ] = squareStartY ;
+43
+triangleX [ 1 ] = squareStartX ;
+44
+triangleY [ 1 ] = squareEndY ;
+45
+triangleX [ 2 ] = squareEndX ;
+46
+triangleY [ 2 ] = isEvenRow ? squareStartY
+:
+squareEndY ;
+47
+HandleTriangle ( ref triangleX ,
+ref triangleY ,
+ref contourResolver ) ;
+48
+}
+49
+50
+var
+doesIncludeRightTriangle = isEvenRow && squareMask != 0b0001
+| |
+!
+isEvenRow && squareMask != 0b0010 ;
+51
+if ( doesIncludeRightTriangle )
+52
+{
+53
+triangleX [ 0 ] = squareEndX ;
+54
+triangleY [ 0 ] = squareEndY ;
+84
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:93==
+55
+triangleX [ 1 ] = squareEndX ;
+56
+triangleY [ 1 ] = squareStartY ;
+57
+triangleX [ 2 ] = squareStartX ;
+58
+triangleY [ 2 ] = isEvenRow ? squareEndY
+:
+squareStartY ;
+59
+HandleTriangle ( ref triangleX ,
+ref triangleY ,
+ref contourResolver ) ;
+60
+}
+61
+}
+62
+}
+63
+}
+64
+65
+private static void HandleTriangle ( ref Span<int> triangleX ,
+ref Span<int>
+triangleY ,
+ref Span<int> contourResolver )
+66
+{
+67
+var
+triangleMask = 0;
+68
+if ( heightFieldData [ triangleX [ 0 ] + triangleY [ 0 ] * densityWidth ] >
+HeightThreshold )
+69
+triangleMask
+|= 0b001 ;
+70
+if ( heightFieldData [ triangleX [ 1 ] + triangleY [ 1 ] * densityWidth ] >
+HeightThreshold )
+71
+triangleMask
+|= 0b010 ;
+72
+if ( heightFieldData [ triangleX [ 2 ] + triangleY [ 2 ] * densityWidth ] >
+HeightThreshold )
+73
+triangleMask
+|= 0b100 ;
+74
+var
+triangleCase = TriangleCaseLookup [ triangleMask ] ;
+75
+76
+for ( var caseIndex = 0;
+caseIndex < triangleCase . Length ;
+caseIndex ++)
+77
+{
+78
+var
+s p l i t I n d e x = triangleCase [ caseIndex ] ;
+/ /
+Triangle case indices
+are
+in
+doubled space to
+support mid point
+v e r t i c e s
+79
+var
+triangleIndex = s p l i t I n d e x
+/
+2;
+80
+var
+i s S p l i t I n d e x = ( s p l i t I n d e x & 1) == 1;
+81
+82
+var marchSpaceX = triangleX [ triangleIndex ] ;
+83
+var marchSpaceY = triangleY [ triangleIndex ] ;
+84
+var
+horizontalOffsetApplied = ( marchSpaceY & 1) == 0 ? 0.25
+:
+−0.25;
+85
+var worldSpaceX = marchSpaceX + horizontalOffsetApplied ;
+86
+87
+var
+vertex = new Vector2 ( worldSpaceX , marchSpaceY ) ;
+88
+var lookupSpaceX = marchSpaceX * 2;
+89
+var lookupSpaceY = marchSpaceY * 2;
+90
+var toMarchSpaceX = triangleX [ ( triangleIndex + 1) % 3 ] ;
+91
+var toMarchSpaceY = triangleY [ ( triangleIndex + 1) % 3 ] ;
+92
+93
+if ( i s S p l i t I n d e x )
+94
+{
+95
+lookupSpaceX += toMarchSpaceX −marchSpaceX ;
+96
+lookupSpaceY += toMarchSpaceY −marchSpaceY ;
+97
+}
+98
+var
+flatYIndex = densityWidth * 2 * lookupSpaceY ;
+99
+var
+globalIndex = pointToIndexMatrix [ lookupSpaceX + flatYIndex ] ;
+100
+if ( globalIndex == 0)
+101
+{
+102
+globalIndex =
+103
+pointToIndexMatrix [ lookupSpaceX + flatYIndex ] =
+104
+( contourVertices . Count + 1) ;
+105
+overwrittenIndices . Add( lookupSpaceX + flatYIndex ) ;
+106
+var
+toHorizontalOffsetApplied =
+107
+( toMarchSpaceY & 1) == 0
+108
+? 0.25
+109
+:
+−0.25;
+110
+var toWorldSpaceX = toMarchSpaceX + toHorizontalOffsetApplied ;
+111
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+85
+==PAGE:94==
+112
+vertex =
+113
+i s S p l i t I n d e x
+114
+? Common. I n t e r p o l a t e P o i n t (
+115
+vertex . x ,
+116
+vertex . y ,
+117
+toWorldSpaceX ,
+118
+toMarchSpaceY ,
+119
+heightFieldData [ marchSpaceX + marchSpaceY * densityWidth ] ,
+120
+heightFieldData [
+121
+triangleX [ ( triangleIndex + 1) % 3] +
+122
+triangleY [ ( triangleIndex + 1) % 3] * densityWidth
+123
+]
+124
+)
+125
+:
+vertex
+126
+/ /
+Add vertex
+. . .
+127
+}
+128
+129
+contourResolver [ caseIndex ] = globalIndex −1;
+130
+}
+131
+132
+var
+t r i a n g l e S o l u t i o n = TriangleSolutions [ 0 ] ;
+133
+if ( triangleCase . Length == 4)
+134
+{
+135
+var
+oddPairDistance =
+136
+( contourVertices [ contourResolver [ 0 ] ]
+−contourVertices [ contourResolver
+[ 2 ] ] )
+137
+. sqrMagnitude ;
+138
+var
+evenPairDistance =
+139
+( contourVertices [ contourResolver [ 1 ] ]
+−contourVertices [ contourResolver
+[ 3 ] ] )
+140
+. sqrMagnitude ;
+141
+142
+t r i a n g l e S o l u t i o n =
+143
+Common. TriangleSolutions [ oddPairDistance < evenPairDistance ? 1 :
+2 ] ;
+144
+}
+145
+146
+for ( var
+index = 0;
+index < t r i a n g l e S o l u t i o n . Length ;
+index ++)
+147
+/ /
+Add vertex
+‘ contourResolver [ t r i a n g l e S o l u t i o n [ index ] ] ‘
+148
+149
+if ( triangleMask == 0b111 ) return ;
+/ /
+I n t e r n a l
+t r i a n g l e s
+have no contour
+edges
+150
+/ /
+Add edge contourTriangles [ ^ 3 ] ,
+contourTriangles [ ^ 1 ]
+151
+}
+86
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:95==
+A.2.3
+Marching Triangles (Reference Rotation no map)
+Listing A.3: Marching Triangles (Lookup) implemented in C#.
+1
+/ /
+. . .
+2
+var
+pointToIndexMatrix = int [ densityWidth * 2 * densityHeight *
+2 ] ;
+3
+4
+for ( var row = 1; row < densityHeight ;
+row++)
+5
+{
+6
+/ /
+. . .
+7
+for ( var column = 1; column < densityWidth ;
+column++)
+8
+{
+9
+/ /
+. . .
+10
+var
+lp0 = new Vector2 ( squareStartX ,
+squareStartY ) ;
+/ / New property
+f o r
+each corner which
+i s
+i t s
+grid
+index
+11
+/ /
+Also lp1 ,
+lp2 ,
+lp3
+12
+13
+/ /
+. . .
+14
+15
+/ /
+Writing
+to
+the
+vertex
+index
+array
+16
+pointToIndexMatrix [ lp0 . x * 2 + lp0 . y * 2 * densityWidth * 2] = v e r t i c e s .
+Length + 1;
+17
+18
+/ /
+Reading from the
+vertex
+index
+array
+19
+pointToIndexMatrix [ p . x * 2 + p . y * 2 * densityWidth *
+] = index + 1;
+20
+21
+/ /
+. . .
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+87
+==PAGE:96==
+A.2.4
+Marching Triangles (Lookup/Reference Rotation Threaded)
+Listing A.4: Marching Triangles (Lookup) implemented in C#.
+1
+private struct MarchingTrianglesParallelForJob
+:
+IJobParallelFor
+2
+{
+3
+[ ReadOnly ]
+public NativeArray <byte> sdfValues ;
+4
+[ WriteOnly ]
+public NativeList <Vector3 >. P a r a l l e l W r i t e r
+t r i a n g l e s ;
+5
+6
+/ /
+Implementing the
+ParallelFor
+interface ,
+the parameter
+i s
+the
+loop
+i t e r a t i o n
+index
+7
+public void Execute ( int index )
+8
+{
+9
+var
+squareStartY = index
+/
+i n f o . DensityWidth ;
+10
+var squareEndY = squareStartY + 1;
+11
+12
+var
+squareStartYFlatIndex = squareStartY *
+i n f o . DensityWidth ;
+13
+var squareEndYFlatIndex = squareEndY *
+i n f o . DensityWidth ;
+14
+15
+var
+squareStartX = index % i n f o . DensityWidth ;
+16
+var squareEndX = squareStartX + 1;
+17
+18
+/ /
+. . .
+88
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+==PAGE:97==
+A.2.5
+Marching Triangles (Chunked)
+Listing A.5: Marching Triangles (Lookup) implemented in C#.
+1
+public static void RehydrateChunks ( IEnumerable <int> modifiedIndices )
+2
+{
+3
+var chunksRegenerated = new HashSet <( int x ,
+int y ) >() ;
+4
+5
+foreach ( var
+index in modifiedIndices )
+6
+{
+7
+var x = index % _testCase . Info . DensityWidth ;
+8
+var y = index
+/
+_testCase . Info . DensityWidth ;
+9
+10
+for ( int yOffset = y ;
+yOffset <= y + 1;
+yOffset ++)
+11
+{
+12
+var chunk = ( x :
+x
+/
+ChunkSize ,
+y :
+yOffset
+/
+ChunkSize ) ;
+13
+14
+if ( chunksRegenerated . Add( chunk ) )
+15
+MarchTriangles ( x
+/
+ChunkSize ,
+yOffset
+/
+ChunkSize ,
+/*
+. . . */ ) ;
+16
+}
+17
+}
+18
+}
+19
+20
+21
+private static void MarchTriangles ( int startX ,
+int startY ,
+/*
+. . . */ )
+22
+{
+23
+var chunkExtentY = Math . Min ( startY + ChunkSize + 1 ,
+t e s t I n f o . DensityHeight ) ;
+24
+var chunkExtentX = Math . Min ( startX + ChunkSize + 1 ,
+t e s t I n f o . DensityWidth ) ;
+25
+26
+for ( var row = startY + 1; row < chunkExtentY ;
+row++)
+27
+{
+28
+/ /
+. . .
+29
+30
+for ( var column = startX + 1; column < chunkExtentX ;
+column++)
+31
+{
+32
+/ /
+. . .
+Stylized Terrain Mesh Generation for Low-End Graphics Hardware
+89
+==PAGE:98==
+Technical
+University of
+Denmark
+Richard Petersens Plads, Building 324
+2800 Kgs. Lyngby
+Tlf. 4525 1700
+www.compute.dtu.dk

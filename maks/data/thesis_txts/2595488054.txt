@@ -1,0 +1,3474 @@
+==PAGE:1==
+Master's Thesis  
+Anders Richard Pankoke Holm 
+June 2020 
+ 
+ 
+Supervisors: 
+Allan Aasbjerg Nielsen 
+David Malmgren-Hansen 
+Henning Skriver  
+Convolutional Neural Networks for Sea Ice 
+Mapping  
+==PAGE:2==
+i
+==PAGE:3==
+Abstract
+In this Master’s Thesis we investigate whether it is possible to use deep learning neural
+networks to predict segmentations of various Sea Ice Concentrations (SIC). This is currently
+being done manually by several operators at the Danish Meteorological Institute (DMI),
+where the SIC maps (ice charts) are drawn by hand in a Geographical Information Systems
+(GIS) tool. This is a very time consuming process with varying results from operator to
+operator.
+From the Sentinel-1 satellite we get HH and HV data in the form of larger
+geographical areas (scenes), from which we extract smaller patches (cut-outs) of equal size.
+These cut-outs serve as training, validation and test data for our Convolutional Neural
+Networks (CNN). The project is split into two parts, where we ﬁrst produce a binary
+classiﬁer splitting water and ice at an SIC of 10%. We test several encoder-decoder network
+architectures and ultimately pick the one which performs best. As this classiﬁer produce
+binary segmentations with noise, we use Markov Random Fields (MRF) with Grapth-cut
+optimization to produce a more uniform segmentation. In the second part we produce
+multilabel classiﬁers. We test two diﬀerent multilabel classiﬁcation methods; Root Mean
+Square Error (RMSE) regression and Soft-max classiﬁcation. Each of these methods are
+tested with four diﬀerent networks for a total of eight multilabel classiﬁers. One model
+will do multilabel segmentation using the HH and HV satellite data as with the binary
+predictions. The other three will try involving the binary predictions as a third network
+input. This is tested on three diﬀerent scales, where water and ice are given as 0/1, −1/1
+and 0/100 respectively. We conclude that the RMSE model with binary segmentation given
+on the 0/1 scale overall performs best, as it has a relatively low RMSE value. Additionally,
+when the model predictions are binarized, it either performs the best or is among the best
+performing models. Since training of both binary and multilabel classiﬁers indicates overﬁt
+of training data, we also conclude that more data and further regularization is needed in
+future experiments.
+ii
+==PAGE:4==
+Preface
+This Masters Project is an extension of the ongoing Automated downstream Sea Ice Prod-
+ucts (ASIP) project, working to automate the process of producing ice charts based on
+satellite imagery. For more information on the project, visit https://www.asip.dk/about-
+1.html. We use preexisting data already processed and ready for use, and thus the product
+of this project will be the neural networks used for predicting ice charts along with the code
+used.
+Supervisors
+• Allan Aasbjerg Nielsen
+Department of Applied Mathematics and Computer Science
+• David Malmgren-Hansen
+Department of Applied Mathematics and Computer Science
+• Henning Skriver
+National Space Institute
+Acknowlegdements
+Thanks to Allan Aasbjerg Nielsen, David Malmgren-Hansen and Henning Skriver for
+supervision and helpful inputs for the project and report.
+Thanks to Danish Meteorological Institute for providing the Sea Ice Concentration Maps
+used for training of the Neural Networks.
+Another thanks to David for providing the all Sentinel-1 data along with corresponding
+ice charts. This includes both larger scenes, but also chunks consisting of cut-outs from
+these scenes, arranged such that they are ready for training.
+Thanks to DTU Compute for access to their GPU Cluster, which was used for the heavy
+computations done in association with storing data and training Neural Networks.
+Thanks to Vladimir Kolmogorov for the free implementation of the Min-Cut/Max-Flow
+Graph-cut algorithm used for Markov Random Field optimization.
+iii
+==PAGE:5==
+Contents
+Page
+List of Figures
+vi
+List of Tables
+ix
+1
+Introduction
+1
+2
+The Sentinel Mission and Data
+2
+2.1
+Sentinel-1 Satellite . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+2.2
+Data and Preprocessing . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2.2.1
+Scenes . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4
+2.2.2
+Chunks with Cut-outs . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+3
+Prior Work with Neural Networks for SIC Prediction
+7
+4
+Neural Networks
+8
+4.1
+What is a Neural Network? . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+4.2
+Feedforward Neural Network and Forward Propagation . . . . . . . . . . . .
+9
+4.3
+Loss Function . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+4.4
+Gradient Descent . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+4.5
+Back-propagation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+4.6
+Convolutional Neural Networks . . . . . . . . . . . . . . . . . . . . . . . . .
+16
+4.6.1
+Downsampling
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+4.6.2
+Upsampling . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+4.7
+Regularization and Optimization . . . . . . . . . . . . . . . . . . . . . . . .
+18
+4.7.1
+Learning Parameter
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+19
+4.7.2
+Mini-batches and Batch Normalization . . . . . . . . . . . . . . . . .
+20
+4.7.3
+Dropouts
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+4.7.4
+Loss Function with Total Variation . . . . . . . . . . . . . . . . . . .
+21
+4.8
+Network Architectures for Segmentation Tasks
+. . . . . . . . . . . . . . . .
+23
+4.8.1
+SegNet Architecture . . . . . . . . . . . . . . . . . . . . . . . . . . .
+24
+4.8.2
+U-Net Architecture . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+4.9
+Receptive Field . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+5
+Methodology
+30
+5.1
+Texture Analysis as Data Preprocessing . . . . . . . . . . . . . . . . . . . .
+30
+5.1.1
+Basic Image Features . . . . . . . . . . . . . . . . . . . . . . . . . . .
+30
+5.1.2
+Tests on HH and HV cut-outs . . . . . . . . . . . . . . . . . . . . . .
+33
+5.2
+Binary Classiﬁcation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+34
+5.2.1
+Binary Cross-Entropy (Log Loss) . . . . . . . . . . . . . . . . . . . .
+35
+5.2.2
+Stable BCE Loss Function . . . . . . . . . . . . . . . . . . . . . . . .
+36
+5.3
+Performance Measures for Binary Classiﬁcations
+. . . . . . . . . . . . . . .
+38
+iv
+==PAGE:6==
+5.3.1
+Confusion Matrix . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+38
+5.3.2
+Intersection over Union
+. . . . . . . . . . . . . . . . . . . . . . . . .
+40
+5.3.3
+Sørensen-Dice Coeﬃcient and F1 Score
+. . . . . . . . . . . . . . . .
+40
+5.3.4
+Accuracy and Balanced Accuracy . . . . . . . . . . . . . . . . . . . .
+41
+5.4
+First Generation of Neural Networks . . . . . . . . . . . . . . . . . . . . . .
+42
+5.4.1
+Data for Training . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+42
+5.4.2
+The Neural Networks
+. . . . . . . . . . . . . . . . . . . . . . . . . .
+43
+5.4.3
+Results and Key Points
+. . . . . . . . . . . . . . . . . . . . . . . . .
+43
+5.5
+Second Generation of Neural Networks . . . . . . . . . . . . . . . . . . . . .
+45
+5.5.1
+New Sampling of Training Data . . . . . . . . . . . . . . . . . . . . .
+45
+5.5.2
+The Neural Networks
+. . . . . . . . . . . . . . . . . . . . . . . . . .
+46
+5.5.3
+Results and Key Points
+. . . . . . . . . . . . . . . . . . . . . . . . .
+47
+5.6
+Third Generation of Neural Networks
+. . . . . . . . . . . . . . . . . . . . .
+49
+5.6.1
+Sampling Training Data for Binary and Multilabel Classiﬁcaton
+. .
+49
+5.6.2
+Neural Networks and Results . . . . . . . . . . . . . . . . . . . . . .
+50
+5.6.3
+Before Multilabel Classiﬁcation . . . . . . . . . . . . . . . . . . . . .
+51
+5.7
+Post-processing of Binary Predictions using Markov Random Fields . . . . .
+51
+5.7.1
+Introduction to Markov Random Field . . . . . . . . . . . . . . . . .
+51
+5.7.2
+Example of clique potentials . . . . . . . . . . . . . . . . . . . . . . .
+52
+5.7.3
+Optimization of MRF
+. . . . . . . . . . . . . . . . . . . . . . . . . .
+55
+5.7.4
+MRF with Graph-cut Optimization for Cut-outs . . . . . . . . . . .
+56
+5.7.5
+Conclusion for MRF . . . . . . . . . . . . . . . . . . . . . . . . . . .
+59
+5.8
+Multilabel Classiﬁcation . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+59
+5.8.1
+Regression with RMSE Loss . . . . . . . . . . . . . . . . . . . . . . .
+60
+6
+Results
+62
+6.1
+Binary Classiﬁcation Summarized . . . . . . . . . . . . . . . . . . . . . . . .
+62
+6.2
+Multilabel Classiﬁcation Results
+. . . . . . . . . . . . . . . . . . . . . . . .
+62
+6.3
+Performance on Full Test Set . . . . . . . . . . . . . . . . . . . . . . . . . .
+66
+6.4
+Binariﬁcation of Model Predictions . . . . . . . . . . . . . . . . . . . . . . .
+69
+7
+Discussion
+70
+7.1
+Binary Classiﬁcation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+70
+7.2
+Multilabel Classiﬁcation . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+71
+8
+Conclusion
+73
+References
+75
+Appendices
+79
+v
+==PAGE:7==
+List of Figures
+1
+Sentinel-1 acquisition modes including Strip Map (SM), Interferometric Wide
+Swath (IW), Extra-Wide Swath (EW) and Wave Mode (WM). Image from
+Sentinel Website on Instrument Payload [1] . . . . . . . . . . . . . . . . . .
+2
+2
+HH channel, HV channel and ice chart of all scenes used for testing trained
+models.
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+3
+Example of handwritten digits from the MNIST data set . . . . . . . . . . .
+9
+4
+Example of feedforward neural network for classifying MNIST images. . . .
+10
+5
+Gradient Descent in one dimension. . . . . . . . . . . . . . . . . . . . . . . .
+13
+6
+Process of back-propagation . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+7
+Convolution kernel used across three channels . . . . . . . . . . . . . . . . .
+16
+8
+Example of 3 × 3 convolutional kernel producing one value in a new layer
+.
+17
+9
+Example of max-pooling . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+10
+Upsampling of network . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+11
+Example of computation of gradients. Top row depicts predictions ˆY of the
+300 × 300 cut-outs by one of our neural networks, middle and bottom row
+depicts the gradients in the x- and y-direction respectively. The model used
+for the predictions was trained using the total loss given in Eq. (19). . . . .
+22
+12
+Cut-outs from HH and HV channel respectively, and their corresponding ice
+chart produced by hand in a GIS tool at DMI. We also see the mean SIC of
+the ice chart cut-out displayed in the title as µY = 17.07 %. The goal of the
+classiﬁcation task is to produce the ice chart from the two channels.
+. . . .
+23
+13
+Example of a simple SegNet, which reaches a bottleneck of the size 75 × 75
+24
+14
+Example of a simple U-Net, which reaches a bottleneck of the size 75 × 75 .
+25
+15
+Example of receptive ﬁeld of a 5 × 5 input layer with two convolutions of
+kernel size k = 3, stride s = 1 and padding p = 1. . . . . . . . . . . . . . . .
+27
+16
+Example of receptive ﬁeld of a 6 × 6 input layer with max-pooling of kernel
+size k = 2, stride s = 2 and padding p = 0. . . . . . . . . . . . . . . . . . . .
+28
+vi
+==PAGE:8==
+17
+Example of Gaussian ﬁlters with σ = 2 applied to image of bark from tree.
+Image provided in 02506 Advanced Image Analysis course at DTU. . . . . .
+31
+18
+Feature responses at four diﬀerent scales (σ2 = [1, 2, 4, 8]). 1 - Slope, 2 -
+Dark blob, 3 - Light blob, 4 - Dark line, 5 - Light line, 6 - Saddle. . . . . . .
+32
+19
+Correlation matrix for BIF histograms computed for a batch of 128 HH and
+HV channels. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+33
+20
+Example of DMI ice chart converted to binary ice chart for water (0) and
+ice (1) by splitting the two classes at a threshold of 10% . . . . . . . . . . .
+34
+21
+Sigmoid function (logistic curve)
+. . . . . . . . . . . . . . . . . . . . . . . .
+35
+22
+Log loss for diﬀerent ˆYi probabilities . . . . . . . . . . . . . . . . . . . . . .
+36
+23
+Loss added given the network output ˆYi if the true segmentation is either
+ice = 1 (blue) or water = 0 (orange). Left ﬁgure shows the added loss for
+the unstable BCE function Eq. (26) and right ﬁgure shows the added loss
+for the stable BCE function Eq. (34). . . . . . . . . . . . . . . . . . . . . . .
+37
+24
+Example of comparison between true segmentation and predictions from
+binary classiﬁer.
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+38
+25
+Histogram depicting all of the mean sea ice concentrations of all cut-outs
+from all 40 chunks of data.
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+42
+26
+Predictions from all 10 models on the ﬁrst scene. . . . . . . . . . . . . . . .
+44
+27
+Performance of ﬁrst generation neural networks.
+. . . . . . . . . . . . . . .
+45
+28
+Test data distributed with an equal amount of data in each class. . . . . . .
+46
+29
+Predictions of all 18 models on Scene 1.
+Top row depicts networks with
+one convolution per block, middle row has two convolutions per block and
+bottom row has three. The left models are trained without total variation
+and the models on the right have been trained with. . . . . . . . . . . . . .
+47
+30
+Performance of second generation neural networks. . . . . . . . . . . . . . .
+48
+31
+Test data sampled for binary classiﬁcation with 5,000 data points per class.
+49
+32
+Losses from binary training session over 250 epochs for SegNet50 and SegNet25. 50
+vii
+==PAGE:9==
+33
+SegNet50 and SegNet25 tested on scene 1. Here we also see the sigmoid
+activated network outputs σ( ˆY). These are our probability maps used to
+make the binary ice chart predictions.
+. . . . . . . . . . . . . . . . . . . . .
+50
+34
+CT scan of mouse tibia. Image provided in 02506 Advanced Image Analysis
+course at DTU [2]. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+52
+35
+Histogram of CT scan of mouse tibia seen in Figure 34.
+We can clearly
+see two distinguishable distributions for air/cartilage and bone respectively.
+They are split up at approximately a pixel intensity of 0.6.
+. . . . . . . . .
+53
+36
+Initial segmentation of Figure 34 based only on one-clique potentials. . . . .
+54
+37
+Example of graph-cuts for two diﬀerent values of β. . . . . . . . . . . . . . .
+55
+38
+Graph-cuts applied to CT scan of mouse tibia. β values used are 0.001, 0.01
+and 0.1
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+56
+39
+Probabilities of all pixels in all training cut-outs as well as how these are
+distributed into our two classes. . . . . . . . . . . . . . . . . . . . . . . . . .
+57
+40
+Testing β values for MRF with Graph-cut optimazation on SegNet25 model.
+57
+41
+Left: Ice Charts. Middle: Assigning classes by thresholding probability
+map from network at 0.5. Right: Segmentation using MRF with graph-cuts
+on probability map from network. . . . . . . . . . . . . . . . . . . . . . . . .
+58
+42
+Using HH and HV channel for binary predictions and hereafter MRF for
+improving predictions. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+59
+43
+Using HH and HV channel along with binary prediction, we make a multi-
+class prediction. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+59
+45
+Scene 1: Top row: Three network inputs and ice chart. Middle row:
+Regression models with RMSE loss function. Bottom row: Soft-max clas-
+siﬁcation models
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+63
+46
+Scene 6: RMSE regression vs. Soft-max classiﬁcation . . . . . . . . . . . . .
+64
+47
+Scene 7: RMSE regression vs. Soft-max classiﬁcation . . . . . . . . . . . . .
+64
+48
+Scene 4: RMSE regression vs. Soft-max classiﬁcation . . . . . . . . . . . . .
+65
+49
+Loss during 50 epoch training of our four RMSE models. . . . . . . . . . . .
+66
+viii
+==PAGE:10==
+50
+Loss during 50 epoch training of our four soft-max models.
+. . . . . . . . .
+66
+51
+Prediction errors for all 21 classes for all four RMSE models. Errors are
+given as ERMSE for each respective class. . . . . . . . . . . . . . . . . . . .
+67
+52
+Prediction errors for all 21 classes for all four Soft-max models. Errors are
+given as RMSE for each respective class. . . . . . . . . . . . . . . . . . . . .
+68
+List of Tables
+1
+List of variables saved into chunk ﬁles. . . . . . . . . . . . . . . . . . . . . .
+6
+2
+Comparison of Machine and Deep Learning. . . . . . . . . . . . . . . . . . .
+9
+3
+Feature responses from scale-normalized ﬁlter responses (s, sx, sy, sxx, syy
+and sxy) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+31
+4
+Confusion Matrix where we enter the number of pixels in each category
+(True Negative (TN), False Positive (FP), False Negative (FN) and True
+Positive (TP)) as well as summed up quantities. We can use these to compute
+accuracy, precision, diﬀerent rates etc. . . . . . . . . . . . . . . . . . . . . .
+39
+5
+Maximum receptive ﬁeld after ﬁnal convolution at the end of both SegNet
+and U-Net with respective bottlenecks. . . . . . . . . . . . . . . . . . . . . .
+43
+6
+Maximum receptive ﬁeld achieved at the end of all nine models in second
+generation of neural networks. . . . . . . . . . . . . . . . . . . . . . . . . . .
+46
+7
+Sampling of data for binary and multilabel classiﬁcation . . . . . . . . . . .
+49
+8
+Overall performance of binary segmentation on test set with 10,000 data points 51
+9
+ERMSE of the eight multilabel classiﬁcation models.
+. . . . . . . . . . . . .
+67
+10
+F1 scores of the binarized results from the eight multilabel classiﬁcation
+models.
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+69
+11
+Balanced accuracies of the binarized results from the eight multilabel clas-
+siﬁcation models. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+69
+ix
+==PAGE:11==
+1
+Introduction
+In the colder regions of the world such as Canada and Greenland, the waters are inhabited
+with large amounts of ice in many diﬀerent concentrations. It is dangerous for ships to
+fare in these areas, and therefore they use Sea Ice Concentration (SIC) maps provided by
+the Danish Meteorological Institute (DMI) when they are to pick the best route to steer
+around the large regions of ice. Today these maps are produced manually, where they are
+hand drawn into a Geographical Information Systems (GIS) tool by an operator. This
+process can be really time consuming, which means that the information might no longer
+be relevant by the time maps are drawn and handed oﬀto the ships. Another problem is
+the poor reproducibility of the maps, as the maps would vary from operator to operator.
+We would also see varying results over time from the same operator. Thus we experience
+both inter and intra operator variability. It is therefore diﬃcult to produce consistent SIC
+maps, that can keep up with the demand, resulting in an unnecessary strain put on the
+economy of the involved companies as well as the environment due to longer travel.
+With the project Automated downstream Sea Ice Products (ASIP) the goal is to au-
+tomate the process of producing the ice charts, in hope of achieving standardized maps at
+a higher rate and better coverage. In this Master’s Thesis we will build on the Synthesis
+Project ”Predicting Sea Ice Concentrations with Deep Learning” [3], where Convolutional
+Neural Networks (CNN) were were used to estimate the mean SIC of smaller areas called
+cut-outs, which were extracted from larger scenes. The results of the predictions would
+then be put back in the position from which the cut-out was extracted. In this project we
+will build upon that idea and design new networks with inspiration in preexisting segmen-
+tation network architectures. This means that instead of predicting one mean SIC value
+to represent one cut-out, we will have a feature map of the same size as the cut-out, such
+that every input pixel has a network output counterpart. In the Synthesis project we used
+two data sets, the ﬁrst of them being Synthetic Aperture Radar (SAR) recordings from
+the Sentinel-1 (S1) mission and the second data set coming from the Advanced Microwave
+Scanning Radiometer 2 (AMSR2). We want our predictions to be available as soon as
+the data is retrieved from the satellites, and since AMSR2 data comes with quite a delay
+compared to S1, we only keep the S1 data for this project. From the S1 satellite we get
+HH and HV amplitude measurements, which serve as input data in our neural networks,
+where they are paired with the ice charts produced by DMI. The network will train on this
+data and learn to recognize patterns that are associated with certain levels of SIC. This
+way our CNNs will predict the SIC when given new data, and thus produce larger sea ice
+maps in the fraction of the time it would take for a human to draw them in hand.
+This project is part of the already ongoing ASIP project, where most of the data
+used is already processed and ready for use. We will then take this data and ﬁrst ﬁnd
+a proper network structure for doing binary predictions, which will separate water from
+ice. Afterwards we will take this information and use to do multilabel segmentations using
+diﬀerent methods, which we compare to each other.
+1
+==PAGE:12==
+2
+The Sentinel Mission and Data
+The data used for estimating SIC in this project comes from the S1 mission.
+For this
+project we use data recorded between the 1st of December 2014 and 16th of May 2018.
+Newer data is available, but has not yet been processed for further work (at the time of
+this project). There are currently 6 Sentinel missions, where Sentinel-1 (S1) is the ﬁrst
+launched back in April 2014. Since then Sentinel-2 (S2) and Sentinel-3 (S3) have been
+sent into orbit along with Sentinel-5P (S5P), which works as a precursor for the upcoming
+Sentinel-5 (S5) mission. Other than that, Sentinel-4 (S4) and Sentinel-6 (S6) have been
+conﬁrmed for future launch. The Sentinel Mission is developed by the European Space
+Agency (ESA) to serve as a next-generation of satellites to replace older missions nearing
+their operational life span. Each mission has diﬀerent Earth observation goals within in the
+ﬁelds of atmospheric, oceanic and land monitoring, and will contain two twin satellites to
+provide better coverage. The mission is part of the Copernicus programme, which is a joint
+initiative between ESA and the European Commission (EC) [4]. S1 has been continuing
+the C-band SAR Earth observation heritage of ERS-1 (July 1991 - March 2000), ERS-
+2 (April 1995 - 2011) and ENVISAT (March 2002 - May 2012), all by ESA, as well as
+Canada’s RADARSAT-1 (November 1995 - 2013) and RADARSAT-2 (December 2007 -
+still operating). With the new satellite generation we will see improvements in reliability,
+revisit time, geographical coverage and rapid data dissemination [5].
+2.1
+Sentinel-1 Satellite
+Figure 1: Sentinel-1 acquisition modes including Strip Map (SM), Interferometric Wide
+Swath (IW), Extra-Wide Swath (EW) and Wave Mode (WM). Image from Sentinel Website
+on Instrument Payload [1]
+2
+==PAGE:13==
+The Sentinel missions each mainly consist of two separate satellites in each constellation,
+and S1 is no exception. We have both S1A and S1B, which are polar-orbiting satellites
+with SAR instruments launched approximately two years apart on 3rd of April 2014 and
+25th of April 2016 respectively. The S1 instruments includes C-band (around 5.405 GHz)
+imaging and operates in four acquisition modes.
+• Stripmap (SM)
+• Interferometric Wide Swath (IW)
+• Extra-Wide Swath (EW)
+• Wave Mode (WM)
+The principles of each acquisition method is illustrated on Figure 1. Our data is col-
+lected using the EW mode meant for oceanic, ice and polar areas, where wide coverage
+and short revisit times are essential. In EW mode the data is collected much like with
+the IW mode, where larger subswaths are combined to the full image. For IW we collect
+three subswaths spanning a width of 250 km. It is the default mode for data acquisition
+over land areas. In comparison the EW mode collects ﬁve subswaths spanning 400 km and
+has a lower resolution [1]. The radar collects data using electromagnetic (EM) radiation in
+the microwave range of the electromagnetic spectrum. In this range the radiation will pass
+through clouds, meaning that weather conditions won’t aﬀect the acquisition of data. The
+SAR system has four polarization conﬁgurations. The polarization refers to the orientation
+of the EM waves emitted or received by the radar antenna. The four types are:
+• HH: Signal is sent and received as horizontal EM waves.
+• HV: Signal is sent as horizontal EM wave and received as vertical EM wave.
+• VV: Signal is sent and received as vertical EM waves.
+• VH: Signal is sent as vertical EM wave and received as horizontal EM wave.
+We use the ﬁrst two of these channels, i.e. the HH and HV bands [6][7].
+2.2
+Data and Preprocessing
+Our data consists of large scenes with an approximate size of 400 km × 400 km. Each
+of the scenes will typically be around 10,000 pixels × 10,000 pixels, with a resolution of
+approximately 90 m and a pixel spacing of 40 m × 40 m. Each pixel intensity is represented
+by the backscatter coeﬃcient and given in decibel [dB]. The data has been scaled down
+from a [−30; 10] range to a [−1; 1] range, such that −1 corresponds to -30 dB and 1 to
+10 dB. This will also make the data easier to work with, when we start using it in the
+neural networks. If we collect all the pixel intensities from each scenes, we will see that
+the HV channel mainly has intensities, which lies below the range of [−1; 1]. If we were
+to depict our data in this range, the whole HV scene would not show us a whole lot of
+3
+==PAGE:14==
+useful information. We will therefore extend the limits to −2, such that when we produce
+ﬁgures for the HV channel, it will be displayed in the range [−2; 1], allowing us to still
+see the tendencies of the satellite image. We can’t train on entire scenes as this would be
+too computationally heavy, given that each scene has millions of pixels. Additionally, each
+scene varies slightly in number of pixels per height and width, and thus we would have to
+resize them to ﬁt into the same network. We will thus collect smaller cut-outs from all our
+scenes, and have these work as the input for our networks. We will then be dealing with
+two types of ﬁles; scenes and chunks.
+2.2.1
+Scenes
+A scene is a single local area around the coast of Greenland. These are as already stated
+approximately 10,000 pixels × 10,000 pixels each. The S1 scenes has been recorded from
+both S1A and S1B, and are given as netCDF4 ﬁles with the name format:
+MMM BB TTTR NNPP YYYYMMDDTHHMMSS YYYYMMDDTHHMMSS
+NNNNNN NNNNNN NNNN.SAFE.nc
+where MMM denotes the Sentinel-1 mission (S1A or S1B), BB is the mode/beam (EW for
+Extra-Wide Swath Mode), TTTR is the Product Type, Resolution Class (GRDM, which
+is a medium resolution product), PP gives us the polarization (DH for dual given that our
+data has both HH and HV) and the YYYYMMDDTHHMMSS is the date and time of
+recording (start and stop). The remaining information (N’s and SAFE) is irrelevant to us
+[7]. In each S1 ﬁle we ﬁnd both polarizations, where the sar primary variable is the HH
+polarization and sar secondary is HV. It also contains the SIC maps made by DMI, which
+are given in the variable icechart. The S1 ﬁle also contains latitude, longitude, heights
+etc., which for example can be used for making GeoTiff ﬁles. We can see several examples
+of both the HH and HV channel along with the corresponding ice chart in Figure 2 on
+following page. Figure 2 shows a total of eight scenes, which all have some very interesting
+characteristics.
+They are good examples for test scenes, given that the examples vary
+in diﬃculty when it comes to predicting. We have mixes of scenes with many diﬀerent
+concentrations of ice and some with fewer. In some scenes we clearly see the subswaths
+from the EW data acquisition mode, and in others this isn’t apparent at all. In all our
+scenes we see a lot of white areas, which are registered as invalid values (NaN). They are
+known land areas that have been masked out since computing SIC over land would make
+little sense. The ice concentrations are given in 22 classes between 0% and 100%, which
+are distributed with 5% intervals as 0%, 5%, 10%, . . ., 90%, 95% and 100%. This would of
+course only give us 21 classes, but an additional class of 1% sea ice have also been added.
+This is for areas where we can’t be absolutely certain there is no ice, simply because the
+concentration might be so low, but we also can’t conﬁdently say there is any ice. This 1%
+class occurs so rarely, that we will omit it by rounding it to 0% and have it included in
+that class, thus forward work will be with 21 classes.
+4
+==PAGE:15==
+Figure 2: HH channel, HV channel and ice chart of all scenes used for testing trained
+models.
+5
+==PAGE:16==
+Most of the scenes in Figure 2 shows the eﬀects of the ﬁrst subswath on the far left in
+the HV channel. It is a major issue for our models, especially when we try to predict water
+in these areas. With many neural networks the subswaths over water is often predicted as
+ice, with the ﬁrst subswath being extra diﬃcult.
+2.2.2
+Chunks with Cut-outs
+As larger scenes are not suited as training data for our neural networks, we chop them up
+into smaller cut-outs of dimensions 300 pixels × 300 pixels. Then each of our training,
+validation and test data points will have the same dimensions. With a pixel spacing of 40
+m × 40 m each cut-out represents approximately 12 km × 12 km. Then when we want
+to make predictions of larger scenes, we can likewise chop it up into smaller cut-outs, run
+it through the trained model, and piece it back together again afterwards. For work with
+neural networks, David Malmgren-Hansen has already done the job of collecting cut-outs
+from all available scenes and saved these into ”chunks” of data. This is done both where the
+ﬁrst subswath is included, giving us a total of 40 chunks of cut-outs, and without the ﬁrst
+subswath, providing 29 chunks. The cut-outs collected does not contain any of the masked
+out land areas, and our networks will therefore not encounter any NaN values. Each chunks
+contains approximately 10 GB of data, which is around 7,500 cut-outs typically collected
+from 20-25 scenes. Table 1 shows a full list of variables saved into each chunk.
+Variable
+Description
+x
+HH and HV polarization cut-outs from S1
+y
+Sea Ice Concentration maps
+inc
+Incidence angle
+amsr
+14 AMSR2 channels
+amsr labels
+Name (polarization and frequency) of all 14 AMSR2 channels
+ﬁles
+Filename of scene from which cut-out was extracted
+lats & lons
+Latitude and longitude of scene from which cut-out was extracted
+Table 1: List of variables saved into chunk ﬁles.
+x is the input data given as a 300 × 300 × 2 array for both HH and HV polarization
+and y is the corresponding ice charts from DMI with dimensions 300 × 300. These two will
+be the main variables we collect. amsr and amsr labels refers to the set of data collected
+from the AMSR2 mission, but it will not be used for this project.
+6
+==PAGE:17==
+3
+Prior Work with Neural Networks for SIC Prediction
+This project itself builds on the ASIP Synthesis Project [3], where neural networks were
+used to predict mean ice concentrations of entire cut-outs. Here the HH and HV channel
+from the S1 satellite also served as input data, but data from the AMSR2 mission men-
+tioned was also used. The goal of the mission was to combine the high resolution images of
+the S1 satellite with the lower resolution AMSR2 images, which were better at distinguish-
+ing water from ice. The models used had both elements of CNNs as well as Multi-Layer
+Perceptrons (MLP), where diﬀerent sizes of input data were tested. To estimate the mean
+ice concentration of each cut-out, regression were used with a Root Mean Square Error
+(RMSE) loss function. We don’t use the AMSR2 data for this Master’s Project, since the
+the S1 data is more frequently updated in comparison, and thus we want a model which
+only depends on the S1 data.
+The Synthesis Project was originally inspired by [8], which is therefore the foundation
+of this project. Here HH and HV channels too were used from the RADARSAT-2 mission.
+This data was collected around the Gulf of Saint Lawrence between 16 January 2014 and
+10 February 2014 during the freeze-up. Data is collected from larger scenes in the form
+of 45 × 45 patches. The networks used contains both CNNs as well as Fully Connected
+(FC) layers. An L2 loss is used for the regression problem and is trained both with and
+without incidence angle as input data along with the satellite images. The results hereof
+are compared to a MLP network trained on ten Gray-Level Co-occurance Matrix (GLCM)
+features. Finally they use AMSR2 data in the ARTIST Sea Ice (ASI) algorithm to also
+produce predictions of the entire scenes. The best results (lowest values of RMSE) were
+achieved with the CNN model without incidence angle. The article is further outlined in
+Ph.d. thesis [9] from author Lei Wang.
+In [10] they built upon [8], by using a slightly diﬀerent network structure, but still
+combining CNN and FC. The focus hereof is on the marginal ice zone (MIZ), which is the
+middle sea ice concentrations at 15% to 80% [11]. These are diﬃcult for the AMSR2 sensor
+to recognize, since it is very sensitive to cloud liquid water and water vapour, which are
+found in higher quantities in the MIZ. They train the network using same data set from
+the Gulf of Saint Lawrence as in [8] during freeze-up. They do several tests including data
+from other areas of Canada, only high and low (HL) concentrations of ice (outside the MIZ)
+and sampling more data from the MIZ. The tests indicate that only using the HL data set,
+has a higher error than using all the data. Hence inclusion of data samples in the MIZ is
+important, and the results from sampling even more of these also shows improvement.
+7
+==PAGE:18==
+4
+Neural Networks
+The idea of neural networks goes way back, as it was originally inspired by the study of
+the human brain. Back in 1943 a paper was published by neurophysiologist Warren Mc-
+Culloch and mathematician Walter Pitts on how brain neurons supposedly works, which
+is where the neural networks got their name. In the paper McCulloch and Pitts had tried
+to model a simple neural network using electrical circuits, which would lay the foundation
+of the neural networks as we know them today. Over the years computers became more
+advanced allowing for the modelling of these networks, yet the ﬁrst attempts were rather
+unsuccessful. As neural networks got better over the years, there was also a rising con-
+cern with the capabilities of ”thinking machines” heavily inﬂuenced by popular ﬁlms and
+literature, which often depicted horror scenarios of robots working against mankind. This
+would result in a halt of funding into the research of neural networks. In the beginning of
+the 1980’s, the Americans started to fear that they might fall behind in this ﬁeld, as the
+Japanese had invested a lot of money and put a lot of eﬀort in the neural networks ﬁeld,
+and the funds once more started ﬂowing [12][13].
+Today neural networks have become quite the hot topic, as computers have gotten
+so powerful that even personal computers can start to keep up with the computational
+power needed. As problems get more complex, more neurons are needed to ﬁnd a proper
+solution, and thus more calculations need to be done. Here a Graphics Processing Unit
+(GPU) is an essential tool for doing heavy parallel computations. Since powerful GPUs
+can be quite expensive, many companies like Amazon and NVIDIA oﬀer cloud solutions,
+where users rent GPUs. For this project we use the GPU Cluster oﬀered at DTU Compute.
+By now there exists quite a few diﬀerent packages for working with deep learning in
+diﬀerent coding languages. In Python alone there is a wide range of libraries that can be
+used for building and training neural networks. Some of these include TensorFlow and
+Keras, but for our project we will be using the PyTorch library [14].
+4.1
+What is a Neural Network?
+Neural networks come in many shapes and sizes. They are designed such that they can
+solve a speciﬁc problem, for example classiﬁcation or segmentation. If one is familiar with
+the term neural networks, one might very likely also have heard about machine learning
+and deep learning, which are not exactly the same.
+In machine learning we would for
+example extract features, such as edges or blobs from images, and then train our network
+to recognize these. In deep learning we would feed the images directly into the network,
+and have the network itself ﬁgure out which features would belong to a certain class (if we
+are doing classiﬁcation). This also means that a lot more data is necessary for our network
+to properly identify these features. We would also need our deep learning network to have
+a lot more neurons, since the network does not know what it is looking for. It will just
+recognize patterns as it learns.
+8
+==PAGE:19==
+Machine Learning
+Deep Learning
+Training data set
+Small
+Large
+Choose your own features
+Yes
+No
+Training time
+Short
+Long
+Table 2: Comparison of Machine and Deep Learning.
+With more data and more extensive networks of course follows longer computation time.
+Each method has its advantages, so knowing your problem will be a great help when you
+are to pick an approach. Here Table 2 might prove helpful. Moving forward we will mainly
+discuss deep learning, as this is going to be our approach to solving the SIC map problem
+[15].
+4.2
+Feedforward Neural Network and Forward Propagation
+As mentioned in above section, deep learning can be used for solving many types of prob-
+lems, and thus comes in a variety of shapes. We will have to know our problem to properly
+design our network, and there is no reason to overcomplicate things. To illustrate how a
+neural network works, let us start with a simple classic task: The MNIST classiﬁcation.
+Figure 3: Example of handwritten digits from the MNIST data set
+MNIST is a large data set containing 60,000 images of handwritten digits from 0 to
+9, thus we have 10 classes in which we can sort the images. This has already been done
+manually, such that we have a target value for each input image. The MNIST images have
+the dimensions 28 × 28 pixels, i.e. a total of 784 pixels. We can thus set up a network with
+an input layer with D = 784 neurons for the images and an output layer with K = 10
+neurons for the targets as seen in Figure 4.
+9
+==PAGE:20==
+Figure 4: Example of feedforward neural network for classifying MNIST images.
+Between the input and output layer we see an additional layer called a hidden layer
+with M neurons. We typically have several hidden layers, which each contains any number
+of neurons chosen by the network designer. Though we know the structure of the hidden
+layers, what really happens inside these is hard to account for, which is why the neural
+network is also referred to as a black box, hence ﬁnding the best solution is more of an
+empirical study. But in the sense of the handwritten digits, each digit has some character-
+istics that deﬁne them. For example, the digit 9 has a loop on top and a vertical line on
+the bottom, so the neurons in the hidden layers will be trained to recognize these features
+and associate them with the digit 9, so these neurons will activate when getting an input
+image depicting a 9. However the digit 8 too has a loop on top, so many of the same
+neurons would be activated. Our network will therefore have to be taught to recognize
+certain features and distinguish between others. Whether it actually does this or is simply
+able to ﬁnd the right answer using some seemingly random weights all comes down to what
+the best solution it can ﬁnd is.
+In the Feedforward Neural Network (FNN), also called the MultiLayer Perceptron
+(MLP) or fully connected neural network, each neuron of coinciding layers are connected
+via weights. Since the network is fully connected, the value of one neuron in the hidden
+layers is computed using all the neurons from the previous layer and an associated weight
+for each of them. We also add an extra neuron, called a bias node (seen as x0 and h0 in
+Figure 4), to both input and hidden layers which will also have an associated weight. The
+bias node will always have the value of 1, and is thus not computed and have no connection
+to previous layers. We then compute the values of the units in the ﬁrst hidden layer by
+zj =
+X
+i
+w(1)
+ji xi
+hj = a(zj),
+(1)
+10
+==PAGE:21==
+where a(zj) is called an activation function. We use activation functions in order to add
+non-linearity to our network, which is important for neural networks, since it ensures that
+the output cannot be reproduced from a linear combination of input data. One of the most
+used activation functions is the Rectiﬁed Linear Units (ReLU) function, where every value
+below 0 is set to 0. This is given by
+aReLU(z) = max{z, 0}.
+(2)
+There exist various numbers of activation functions, and we will come back to some of
+these later on, as the ﬁnal activation function before the output layer varies depending on
+the problem we want to solve. Eq. (1) can be set up more eﬃciently to be solved as a matrix
+multiplication problem, with all weights gathered in one matrix W(1) (superscript of (1)
+since this example is the ﬁrst set of weights for computing new neurons) of dimensions
+M ×(D +1), and the input data x, which contains all the pixel intensities of our respective
+MNIST image arranged in a column vector of dimensions (D+1)×1. The activated neurons
+of the hidden layer h is then found by
+z = W(1)x
+h = a(z),
+(3)
+where z is the non-activated column vector also with dimensions M × 1 and h has dimen-
+sions (M + 1) × 1, because we add the bias node with value 1. The reason for adding this
+bias node, is to still be able to work with input data where all values are 0. If this was
+the case every single neuron in the network would be 0 due to the multiplicative nature of
+neural networks.
+As mentioned there are typically more hidden layers in a neural network, so as we go
+deeper we simply use the same approach as presented in Eq. (3), with the previous hidden
+layer replacing the input layer. When we get to the output layer at the end of the network,
+we often use a diﬀerent kind of activation function. This depends entirely on the type of
+problem we would like to solve, but for a classiﬁcation task, where we have several classes,
+the soft-max activation function is often used. Soft-max will take the output z from the
+last hidden layer, which for the MNIST problem is a vector of 10 values, and scale the
+values such that the vector sums to one (P
+j ˆyj = 1) (we write as ˆy instead of h, since
+the output layer contains our predictions of the target values y). Soft-max activation is
+applied as
+ˆyj =
+ezj
+PK
+k=1 ezj .
+(4)
+ˆy now contains a value between 0 and 1 for each class, which is how likely our network
+has deemed the input data to belong to one of the respective classes (or the probability
+hereof). This whole process is called forward propagation, where we compute the neurons
+of the hidden layers using the weight parameters and previous layers to ultimately get our
+output.
+11
+==PAGE:22==
+4.3
+Loss Function
+Forward propagation alone will never give us a proper solution, as the parameters are
+initially drawn at random, typically from a normal distribution. We will therefore have to
+update the weights, such that they will produce the desired output; our targets y. The
+targets are true classiﬁcations of the input data, and just like the predictions ˆy, y is a K ×1
+vector. The target vector has 0 in all of its elements, except for the true class, where it has
+1. Hence if the input data depicts a ”9”, then the last element of y is 1.
+yk =
+1
+if class label is k
+0
+otherwise
+(5)
+We shall use these targets to tell our network what it is supposed to be getting as
+output, when we feed it a certain image. To do this we introduce a ”cost” called a loss
+function. The loss function diﬀers from problem to problem, but common for them all is
+that they compare the network output to the targets. The further from the true class the
+network output is, the larger the cost (or loss L). For classiﬁcation jobs the Cross-Entropy
+(CE) loss is a great measure for how well a network has performed
+LCE = −
+K
+X
+k=1
+yk ln ˆyk.
+(6)
+In the CE loss, the targets are multiplied with the logarithm of their respective predicted
+outputs. Since all targets except the true label are 0, we only get a contribution to the
+loss from how much the prediction deviates from the true label. Taking the logarithm to 1
+would give us 0, meaning that if our neural network were absolutely sure the input image
+it received belonged to a certain class and it got that class right, the soft-max activation
+would set it equal to 1 and thus we would see no added loss. The closer to 0 our prediction
+is, the more loss is added. The logarithm of any number between 0 and 1 will be a negative
+number, hence the minus in Eq. (6).
+4.4
+Gradient Descent
+At this point our network has processed the image once, provided us with its qualiﬁed
+guess of what number the image depicts, and we have a measure of how well the network
+did this; the loss L. Since the weights are randomly initialized, the loss will be very high
+during the ﬁrst round of training. We will therefore have to update the weights such that
+next time we process the same image, we get a result that better resembles the targets.
+The way we do this is using Gradient Descent, where we move closer to a solution of lower
+loss in model space.
+12
+==PAGE:23==
+Figure 5: Gradient Descent in one dimension.
+Let us consider a one-dimensional version of our problem, where we only have one single
+weight w. As illustrated in Figure 5 we have a function L(w), given by the blue curve, which
+represents the loss of the solution given w. Our goal is to minimize this loss, i.e. ﬁnd the
+value of the weight, where the loss would be the smallest, which in Figure 5 is at wmin.
+For a 1D case we would solve this by investigating the monotonic relationships and ﬁnd
+the local minima. We do this by ﬁnding out at what given weight w the derived function
+or gradient of the function is equal to 0.
+dL
+dw(w) = 0
+(7)
+For this simple example, where the function merely resembles a parabola, there is only
+one minimum. Had the function been more complex, like with a polynomial of a higher
+order, there could have been more extrema, both maxima and minima. What we will then
+do is look at the gradient found by taking partial derivatives, and see in which direction
+we would have to move, to get a smaller loss. For our example we would move our w closer
+to wmin by lowering the value of w. Since we could have more than one minimum, with
+gradient descent we move closer to the best local solution in smaller steps determined by
+a learning parameter. For the 1D case, this is easily illustrated on a line in 2D space as
+depicted in Figure 5. If we had two weights to be updated, we would have a 2D case,
+that could be illustrated by a 3D surface, looking like a landscape with hills and valleys.
+Then the valleys would be the local minima and the hills local maxima. But for a neural
+network, we have a lot more than just two weights.
+Let us just assume that the hid-
+den layer in Figure 4 would have M = 20 neurons, then our whole network would have
+((D + 1) × M) + ((M + 1) × K) = (785 × 20) + (21 × 10) = 15, 910 weights. Thus our
+function now has almost 16,000 parameters we can adjust to get a proper solution. At this
+point it is impossible for us to illustrate, as we are dealing with a hyper-surface of high
+order, but the principle is still the same, where we for each weight would take a small step
+in hyper space in the direction that would lead us to a local hyper valley. The process with
+which we update the weights is called back-propagation.
+13
+==PAGE:24==
+When we train our network, we input a lot of training data, compute the loss and use
+Gradient Descent to update our weights. We call it an epoch, when we have trained on all
+our training data once. We repeat the process over several epochs until the weights have
+been adjusted to satisfactorily solve the problem. Since deep learning requires a lot of data,
+we would rarely ever be able to train the network on all the data we have at once, given
+that it would be too computationally heavy. We therefore split up our data into smaller
+chunks of data called mini-batches. The data in a mini-batch should be drawn at random
+from the complete data set, in order to avoid the neurons from recognizing a pattern in the
+order it receives the images, as the total loss of a mini-batch aﬀects the directions Gradient
+Descent will have us move in hyper space. Therefore when choosing a mini-batch size, it
+should include enough data to generally represent the complete data set, but not so many,
+that the memory of the computer or GPU can’t contain it. The weights will update with
+every mini-batch, and since they are drawn at random, the direction towards the minimum
+won’t be as direct as if we were able to process all data at once. On the contrary we would
+see a little wiggle back and forth in the hyper space, much like a random walk towards the
+minimum. This is called Stochastic Gradient Descent (SGD) due to the noisy nature of
+the descent.
+4.5
+Back-propagation
+With forward propagation we computed the neurons of a new layer using the neurons of
+a former layer with a bias node and the weights. With back-propagation we investigate
+which adjustments to our weights is going to cause the highest decrease of the loss. Thus
+we start at the last layer, where we compute the loss at the output layer y. We will then
+use the information from the current layer to update the weights between this layer and the
+preceding layer, moving backwards in the network. We give our layers an index, to denote
+how they are tied to each other. Last layer has the index (L) and the output layer will
+thus be called ˆy(L). (L) is not an exponent or the loss function, but the layer index, and
+the reason we write as such will make more sense with the subscripts introduced shortly.
+The preceding activated layer will be called h(L−1) and the weights between the two layers
+W(L). The non-activated current and preceding layers are then written as z(L) and z(L−1)
+respectively just like in the forward propagation.
+Figure 6: Process of back-propagation
+In Figure 6 we see how the forward propagation works, where the activated neurons of
+the previous layers h(L−1) along with the weights W(L), give us the neurons of the next
+layer z(L). At the end of the chain, the activated neurons of the last layer ˆy(L) and the
+targets y give us the loss L. We use this to propagate backwards. We can think of all the
+joints as simply being numbers (or matrices of numbers), where changing any of the values
+14
+==PAGE:25==
+along the chain aﬀects the loss. For a more general way of writing this problem, we will just
+refer to all activated layers as h including the output layer ˆy. We will then focus on how a
+change of the weights would change the loss (∂L/∂W(L)). Changing the weights by ∂W(L)
+will, according to the chain, cause a change in following neurons by ∂z(L), which will cause
+a change in the activated neurons by ∂h(L), which will ultimately cause the change in the
+loss by ∂L. Using the Chain-Rule we can write this as
+∂L
+∂W (L)
+jk
+=
+∂L
+∂h(L)
+j
+∂h(L)
+j
+∂z(L)
+j
+∂z(L)
+j
+∂W (L)
+jk
+,
+(8)
+where j is the index of the neuron in the current layer (L) and k is the index of the neuron
+in the preceding layer (L −1). Thus W (L)
+jk
+is the weight connecting the two layers. The
+Chain-Rule allows us to multiply the three ratios to get the sensitivity of L w.r.t. changes
+in W (L)
+jk . We can then Compute the derivatives and get these as
+L = yj ln h(L)
+j
+∂L
+∂h(L) =
+yj
+h(L)
+j
+h(L)
+j
+= a(z(L)
+j
+)
+∂h(L)
+j
+∂z(L)
+j
+= a′(z(L)
+j
+)
+z(L)
+j
+= W (L)
+jk h(L−1)
+k
+∂z(L)
+j
+∂W (L)
+jk
+= h(L−1)
+k
+and then we ultimately get
+∂L
+∂W (L)
+jk
+=
+yj
+h(L)
+j
+a′(z(L)
+j
+)h(L−1)
+k
+.
+We then use the chain to propagate backwards and compute all the gradients for the
+loss and get:
+∇L =
+
+
+∂L
+∂W(1)
+∂L
+∂W(2)
+...
+∂L
+∂W(L−1)
+∂L
+∂W(L)
+
+
+,
+which contains the gradients of all weights. We then update the weights by moving the in
+the negative direction of the gradients [16][17].
+15
+==PAGE:26==
+4.6
+Convolutional Neural Networks
+In the example just presented, we saw a fully connected neural network, where the input
+data had 784 neurons, which were all connected to a hidden layer of 20 neurons. Including
+the bias node, it would take 15700 weights to compute the ﬁrst hidden layer of the neural
+network. This is a lot of parameters, which require quite a lot of computational power to
+work with. As images get larger and larger, the number of weights needed would blow up
+if we were to stay fully connected. Not only do the images have more pixels, but we would
+also see images, like RGB, which would have several channels.
+We therefore introduce
+CNNs, which is the idea of using convolutions to compute a new layer of neurons. This
+is done by taking a convolution kernel and apply it to an image and all of its channels,
+which would result in one neuron in a new layer. The kernel will then contain our weights,
+which will be shared throughout the entire image instead of applying a unique weight to
+each neuron. We then update the weights in the convolution kernels using SGD. In Figure
+7 we see how the kernel is applied to produce a single neuron.
+Figure 7: Convolution kernel used across three channels
+Applying a ﬁlter to the image and all of its channels will produce a feature map, and by
+using more than one convolution ﬁlter with diﬀerent weightings, we will get a new layer in
+the network containing several feature maps/channels, one for each ﬁlter kernel. The size
+of the feature map will depend on kernel size, stride (step size of kernel) and whether or
+not we use padding. Let us consider an example where a 3 × 3 kernel is applied to a 4 × 7
+image as seen in Figure 8.
+16
+==PAGE:27==
+Figure 8: Example of 3 × 3 convolutional kernel producing one value in a new layer
+If we use a stride of one in each direction (we only move our kernel one pixel at the
+time), the kernel will produce a new 2 × 5 feature map. Due to the size of the kernel, we
+lose the outer rim of the image, resulting in two less pixels in each direction. If we want to
+avoid this, we could use padding where we add an extra edge of some values, and there are
+a few padding methods to choose from. We could use zero-padding, where the extra edge
+is made up of only zeros, but this could negatively aﬀect the outskirts of the image. We
+could instead pad the layer with the same value as the neighboring pixels. This way the
+local information is better preserved.
+4.6.1
+Downsampling
+There are diﬀerent types of CNNs used for solving diﬀerent problems. If we consider the
+MNIST problem, which could advantageously be solved using a CNN, we would decrease
+the size of the feature maps, such that we ultimately end up with the 10 neurons, one for
+each class. This would be done by either downsampling the layers until we had a 1×1×10
+layer (one single pixel in 10 channels). We would then use this layer as the ˆy mentioned
+in the section on forward propagation. Alternatively we wouldn’t have to downsample the
+layer to 1×1×10, but merely to a point, where there are signiﬁcantly fewer neurons. Then
+we can squeeze all the neurons from all channels into an input vector, which we can use
+for a fully connected network. Either way we need to downsample the image, which can
+be done by not using padding when we perform convolutions (as seen in Figure 8). This
+would however only eliminate a few pixels at a time, so instead we could use pooling, where
+we highlight some of the most dominant local features. If we consider an area of 4 × 4 like
+seen in Figure 9, we can use a method called max-pooling, where we take the largest local
+values and make a new layer out of these. We would thus have a new hidden layer with as
+many channels as the prior, where each channel consists of the highest local values of each
+respective preceding feature map. Other methods include taking the mean of these local
+areas or merely pick one of the local values at random. The max-pooling shown in Figure
+9 would downsample the feature map just like if we had used a convolution with a ﬁlter
+kernel of 2 × 2, a stride of 2 and padding of 0.
+17
+==PAGE:28==
+Figure 9: Example of max-pooling
+4.6.2
+Upsampling
+As we will see in Section 4.8 on network architectures, downsampling is only one part of the
+structure. We will have to upsample the feature maps again to get a segmentation similar
+to the target ice charts. We do this by unpooling the feature map, which happens as an
+extension of the max-pooling. In Figure 9 we see four neighbourhoods of diﬀerent colors,
+from which we save the position where the max-pooled value was taken. Then when we
+feed in a new feature map, the values will be distributed to these positions and we then use
+interpolation to ﬁll in the gaps as seen in Figure 10. The standard interpolation method
+in PyTorch is nearest neighbour [18].
+Figure 10: Upsampling of network
+The principles of the fully connected and the convolutional deep learning neural network
+are very much the same. We start out with an input with a matched output (target), set
+up our network such that it has enough hidden layers and neurons to recognize certain
+features in the input data, and then we train the network on the data and update the
+weight parameters such that the loss is minimized until we reach a satisfying result, when
+we present the network with new test data [19].
+4.7
+Regularization and Optimization
+It is often seen in deep learning that we overﬁt the data.
+This means that our model
+becomes so good at detecting patterns in the training data, which might not be present
+in the test data. When we have set up our network, there are a few alterations we can
+implement in order to improve the performance and meet problems like this.
+Though,
+18
+==PAGE:29==
+within the ﬁeld of deep learning, there are many methods for improving a model, we will
+just go through the ones we use for this project [20].
+4.7.1
+Learning Parameter
+When we compute the gradients for upgrading our weights, we move in the negative direc-
+tion of the gradient in order to descent, which we write as
+W(L)
+new = W(L) −η
+∂L
+∂W(L) ,
+(9)
+where η is the learning parameter. η allows us to adjust how much we update our weights,
+i.e. the step size in the direction towards the best solution. Adjusting this learning pa-
+rameter as we train is a great way of assuring that we do not move too far in a certain
+direction. Initially we would have a high learning parameter such that we quickly move
+towards a valley in the hyperspace. But when we get there, we don’t want to take too big
+steps, as this could take us away from the valley again. Therefore we decrease the learning
+parameter, such that we move closer and closer at a slower rate towards the minimum. This
+process of decreasing the learning parameter is called ”Learning rate annealing”. There are
+diﬀerent types of optimizers which will do this, but they all have their origin in the SGD
+optimizer. First oﬀwe have SGD with momentum, where we include the step size (here
+called velocities v) from previous epoch (t −1). It is given as
+v(L)
+t
+= γv(L)
+t−1 + α
+∂L
+∂W(L)
+W(L)
+new = W(L) + v(L)
+t
+,
+(10)
+where γ typically is 0.9, and α is a chosen learning parameter. Next we have the Root
+Mean Square Propagation (RMSProp), where the learning parameter α is adapted
+for each parameter, such that large steps are taken in ”good” directions and smaller steps
+in ”bad”, making it an extension of SGD with momentum, where good or bad refers to the
+eﬀect the step in the direction will have on the cost.
+v(L)
+t
+= γv(L)
+t−1 + (1 −γ)
+
+∂L
+∂W(L)
+2
+W(L)
+new = W(L) +
+α
+√vt
+∂L
+∂W(L)
+(11)
+Finally we arrive at the Adaptive Moment Estimation (Adam), which is a com-
+bination of the two previous optimizers and given as
+m(L)
+t
+= γ1m(L)
+t−1 + (1 −γ1)
+∂L
+∂W(L)
+v(L)
+t
+= γ2v(L)
+t−1 + (1 −γ2)
+
+∂L
+∂W(L)
+2
+.
+(12)
+19
+==PAGE:30==
+We then perform bias corrections
+ˆm(L)
+t
+=
+m(L)
+t
+1 −γt+1
+1
+, ˆv(L)
+t
+=
+v(L)
+t
+1 −γt+1
+2
+.
+(13)
+At last we update the weights
+W(L)
+new = W(L) + α ˆm(L)
+t
+q
+ˆv(L)
+t
+.
+(14)
+For simpler problems, the ﬁrst methods would usually suﬃce, but through trial and
+error, we have found that the Adam optimizer does the best job for our problem, and
+is thus the one used throughout the training of our respective models (see Section 5 on
+Methodology) [21].
+4.7.2
+Mini-batches and Batch Normalization
+We have already discussed mini-batches as being a helpful tool for dealing with limited
+GPU memory. We discussed how the a mini-batch should be large enough to properly
+represent all the data, but not so large that we see this ”lack of memory” problem. But a
+small batch size could actually have a regularizing eﬀect, due to the noise added during the
+learning process. With very small batch sizes we would need a much lower learning rate,
+resulting in a much longer running time, since the network learns at a slower rate and it
+takes more steps to observe all the data [22].
+The data we load into our networks must have some common scale, which can be
+achieved by normalization or scaling like we saw with the input data, where the range of
+[−30dB; 10dB] was scaled down to [−1; 1]. We can do the same thing for the batches of
+data we load. After we computed and activated a new hidden layer, we normalize the
+whole batch.
+Of course this won’t give us an overall normalization of all the available
+data, but instead only the single batch, so depending on the randomly chosen input data,
+the normalizations can vary, which could alter the intended inﬂuence of the weights in the
+already trained network, which in terms could also add robustness to the network.
+4.7.3
+Dropouts
+Dropouts work by ”eliminating” neurons of the network, which is done by setting their
+output weights to 0. The method called Bagging allows us to combine several models and
+then have them vote for the output. Since it would be very computationally heavy to train
+several fully connected models, dropouts work as a sort of psuedo-bagging, where shutting
+down neurons would work as diﬀerent models. The network architect would pick a certain
+percentage (typically 10% −20%) of the nodes to be dropped, thus each subnetwork would
+resemble the original network, but with closed oﬀpaths. Each network shares the weights
+by inheriting a subset from the original weights. Just like bagging, the diﬀerent models
+then vote on a solution, such that we get an average of each solution.
+20
+==PAGE:31==
+4.7.4
+Loss Function with Total Variation
+We use the Total Variation Denoising (or Regularization), which as the name also suggests,
+should help decrease the noise in the output images (our segmentations). This type of
+regularization can be done by adding extra terms to the loss function, where total variation
+is known to add contiguity to the model. Contiguity relates to borders or the contact of for
+example two segmentations, and by adding this type of regularization, we should be able
+to avoid noisy ”zig-zaggy” transitions between the two classes. Total variation is a method
+used within signal processing, since signals as well as images, often contain details that we
+don’t want to include in our ﬁnal product, as these details could be false and unwanted
+noise. Thus the signal or image is said to have a high level of total variation, which means
+that the integral of the absolute gradient of the image is high. With the contiguity term
+added to the loss function, we would also minimize the total variation of the image by
+removing unwanted details whilst keeping important features such as our edges [23]. We
+can thus write the total variation term as
+TV =
+Z q
+|∇ˆY|2dxdy
+(15)
+where ∇ˆY is the gradient of our predicted segmentation from the model, and thus
+q
+|∇ˆY|2
+is the gradient magnitude. According to the original paper on total variation from 1992
+[24], the gradient can be approximated by means of diﬀerent norms. Their proposed total
+variation norm is isotropic, L2-based and non-diﬀerentiable. Here the gradient of ˆY is given
+∇ˆY = (Dx
+i,j, Dy
+i,j) where
+Dx
+i,j ˆY = fi,j −fi,j−1
+∆x
+Dy
+i,j ˆY = fi,j −fi−1,j
+∆y
+.
+(16)
+If the displacement of x and y are equal to 1 (∆x = ∆y = 1) we can rewrite Eq. (15)
+as
+TV =
+X
+i,j
+q
+| ˆYi+1,j −ˆYi,j|2 +
+q
+| ˆYi,j+1 −ˆYi,j|2
+
+=
+X
+i,j
+h
+| ˆYi+1,j −ˆYi,j| + | ˆYi,j+1 −ˆYi,j|
+i
+.
+(17)
+What the total variation loss term ultimately does is compute the gradient of the
+image, ﬁrst by shifting the image (neural network output) by ∆x = 1 in the x-direction
+and comparing this to the non-shifted image by taking the absolute diﬀerence between
+each pixel and then repeat for the y-direction and ﬁnally sum over all pixels. Then we take
+the mean of the total variation for all pixels by dividing with number of pixels N, which
+would exclude one row or column of pixels due to the image shift, depending on direction
+of gradient, such that N = 300 · (300 −1) = 89.700, and get the total variation loss as
+21
+==PAGE:32==
+LTV = 1
+N
+X
+i,j
+h
+| ˆYi+1,j −ˆYi,j| + | ˆYi,j+1 −ˆYi,j|
+i
+.
+(18)
+This means that loss is added every time two neighboring pixels are diﬀerent from each
+other. Figure 11 shows a visualization of the computed gradients in the x- and y-direction
+respectively. The gradients have been computed using predictions from a trained neural
+network. We will then add this total variation term to a total loss along with the loss
+function L used for comparing targets Y and predictions ˆY, which could for example be
+the CE loss from Eq. (6).
+Ltotal = LCE + λLTV ,
+(19)
+where λ is a regularization hyperparameter. λ controls the amount of regularization added
+by the total variation loss. If λ = 0 we would thus see no regularization at all, and the
+output image would merely be the one achieved by only using binary cross entropy loss.
+However as λ →∞the regularization grows stronger, and we would end up with an image
+very diﬀerent from what we originally intended. Therefore picking a proper value of λ is
+important with regards to obtaining the desired amount of noise reduction. This however
+is very diﬃcult for deep learning models as a ”correct” hyper parameter would diﬀer from
+one network structure to another, and one would have to reach some sort of equilibrium in
+the training for each tested value of λ before being able to access whether the chosen λ is
+ﬁt or not [25][26].
+Figure 11: Example of computation of gradients. Top row depicts predictions ˆY of the
+300 × 300 cut-outs by one of our neural networks, middle and bottom row depicts the
+gradients in the x- and y-direction respectively. The model used for the predictions was
+trained using the total loss given in Eq. (19).
+22
+==PAGE:33==
+4.8
+Network Architectures for Segmentation Tasks
+If we go back and look at the scenes depicted on Figure 2 in Section 2.2.1, for each example
+we see three images; The HH and HV channel and the ice charts provided by DMI. These
+were to be chopped up into smaller cut-outs of the size 300 pixels × 300 pixels (note that
+unless otherwise stated, feature map sizes, kernel sizes, etc. is given in pixels), which would
+be more suitable for the neural networks. An example of these cut-outs can be seen in
+Figure 12. We would want to design a CNN, where the two channels serve as the input
+data X and the ice charts will then be our targets Y. The result will be a segmentation,
+where we do a pixel-wise classiﬁcation. We will be working with both binary classiﬁcation,
+where we have only two classes, and multilabel classiﬁcation with up to 21 classes. We go
+will go into further details on how we set up the network based on the type of classiﬁcation in
+Section 5 on Methodology, but regardless we can use the same architecture of the networks.
+We will look into two individual yet closely connected segmentation network architectures;
+SegNet and U-Net.
+Figure 12: Cut-outs from HH and HV channel respectively, and their corresponding ice
+chart produced by hand in a GIS tool at DMI. We also see the mean SIC of the ice chart
+cut-out displayed in the title as µY = 17.07 %. The goal of the classiﬁcation task is to
+produce the ice chart from the two channels.
+23
+==PAGE:34==
+4.8.1
+SegNet Architecture
+Figure 13: Example of a simple SegNet, which reaches a bottleneck of the size 75 × 75
+The SegNet architecture, which we can see an example of in Figure 13, has both an en-
+coder and a decoder. The encoder part works very much like described in Section 4.6, where
+feature maps are downsampled using either convolutions or max-pooling. Eventually the
+feature maps will be very small, and we would decide to stop downsampling anymore. We
+call this point of the neural network the bottleneck, due to the narrowing shape hereof. In
+the example depicted in Figure 13 we have downsampled till we reached a bottleneck size
+of 75 × 75. When we start doing experiments, we will see diﬀerent bottleneck sizes, and
+thus go deeper in the encoder. With the example of the MNIST data set, we would keep
+downsampling until we only had 10 neurons, one for each class, but for segmentation exer-
+cises we typically want a ﬁnal feature map of the same size as the input data. Therefore we
+will start upsampling the feature maps from the bottleneck in the part we call the encoder.
+We keep upsampling until we once again reach the same feature map dimensions in width
+and height as the true ice charts. At the end of the encoder we will thus have achieved our ˆY.
+Figure 13 shows a layer with N number of channels as the light blue rectangles, which
+are the results of the preceding operation (convolution, max-pooling or upsampling as used
+in the example). The sharp reader would already have noticed that the numbers written
+vertically indicates the width and height of the respective layers. The numbers written on
+top of each layer denote the number N of channels/feature maps in a layer, and thus how
+many convolution ﬁlters used to compute a layer (in the case of convolution). The very ﬁrst
+layer is the input layer containing the HH and HV channels, i.e. two channels. Hereafter
+16 convolutions are used for computing the next layer, one for each channel. Following is
+the max-pooling used to halve both width and height. We continue like this until the last
+24
+==PAGE:35==
+layer, which has X channels given, as this varies based on classiﬁcation and loss method.
+The SegNet structure has a hierarchy of decoder blocks for every encoder block, such that
+every time we downsample in the encoder, we upsample accordingly in the decoder. As we
+go deeper, we double the number of channels in each layer when performing convolutions.
+We reverse this process such that the number of channels is halved in the decoder after
+every upsampling [27].
+4.8.2
+U-Net Architecture
+Figure 14: Example of a simple U-Net, which reaches a bottleneck of the size 75 × 75
+The U-Net structure is very similar to the SegNet structure, where we have encoder and
+decoder. Figure 14 shows a U-Net network with an architecture much like the SegNet
+structure seen in Figure 13. Diﬀerence is the ”U” shape of the network, which is where the
+network gets its name. It is illustrated as such to clearly display the diﬀerence between the
+two network types, which lies in the skip connections. In former section we talked about the
+hierarchy of the encoder and decoder, which is used further in the U-Net architecture. Here
+we save the last layer of an encoder block, and then transfer it to the decoder counterpart
+with same resolution and concatenate the two layers to get a new layer with double the
+channels. This way we will preserve early information from the network and reuse at a
+25
+==PAGE:36==
+later point, since there might be some image context found at the earlier levels before too
+much downsampling had happened [28].
+4.9
+Receptive Field
+Though it can be diﬃcult to interpret what we see in the feature maps of our neural net-
+works, we have other ways of accessing the impact of nodes further down in the neural
+network. We could for example look at the receptive ﬁeld of the feature maps. As we go
+deeper into the network, a node (or pixel) from the original network input will have a larger
+and larger eﬀect further down the layers. Our input cut-outs have dimensions of 300×300,
+and the way we move from layers to layers could be by using convolutions, max-pooling or
+upsampling. In the neural networks we will be working with (see Section 5), ﬁlters will have
+the size 3 × 3 when performing these convolutions. In order not to downsample the feature
+map during these convolutions we use padding of 1. We will also be using a stride of 1,
+which denotes how many pixels we move the kernel every time we perform a convolution.
+With stride 1 we end up performing a convolution on each pixel in the feature map. Thus
+when performing the convolutions on a 300 × 300 feature map, we get a new feature map
+with the same dimensions. Each pixel in the new feature map has been computed using
+a ﬁeld containing 3 × 3 pixels from the previous feature map. We say the receptive ﬁeld
+of the network thus far is 3 × 3. Were we to just stop here, we would have a very poorly
+performing network, so we will continue to go deeper, by having more convolutions as well
+as max-poolings.
+In ﬁgure 15 we see an example of how the receptive ﬁeld grows larger as we go deeper.
+For the the simplicity of the examples we are using square kernels and feature maps (as
+we will for our networks). Initially we have the blue input data seen at the bottom. This
+contains n = 5 input features in each dimension (width and height). The convolutions
+corresponds to the ones we use in our networks with a kernel size of k = 3, stride s = 1
+and padding p = 1, thus preventing shrinkage of the layers. After the ﬁrst convolution, we
+produce the green feature map also with n = 5 output features. Our receptive ﬁeld now
+corresponds to the size the ﬁrst convolutional kernel with the dimensions of r = 3. Going
+further we perform another convolution with the same values in order to produce another
+feature map of size n = 5. Diﬀerent this time is the size of the receptive ﬁeld, which has
+now expanded to be r = 5. This means that when computing the center pixel of the red
+top layer, we actually use all of the pixels in the 5 × 5 blue bottom layer.
+26
+==PAGE:37==
+Figure 15: Example of receptive ﬁeld of a 5 × 5 input layer with two convolutions of kernel
+size k = 3, stride s = 1 and padding p = 1.
+Knowing the dimensions of the input layer, the kernel size, padding and stride of the
+kernel, we can compute the size of the output layer using
+nout =
+nin + 2p −k
+s
+
++ 1.
+(20)
+For now we have only discussed convolutions and not max-pooling, which is also essential
+for our segmentation networks. Computing feature maps and receptive ﬁelds from max-
+pooling is easy. We just have to look at them as strided convolutions, meaning we jump
+a few pixels with every operation. To sum up max-pooling, we choose a kernel size, for
+example 2 × 2 or 3 × 3 depending on how much we would like to downsample the feature
+map, and then we choose the largest value to transfer to the layer in the network. For our
+networks we don’t apply padding during max-pooling and we use a stride corresponding to
+the kernel size of the max-pooling, meaning if our max-pooling area is 2 × 2, we use stride
+a stride of 2. By doing this we halve the width and height of the feature map leaving us
+with a feature map only quarter the size of the preceding one. If we use a 3 × 3 area with
+a stride of 3, width and height would be a third of the original and thus the feature map
+would be nine times smaller. In ﬁgure 16 on the left we see how a max-pooling of kernel
+size k = 2, stride s = 2 and padding p = 0 aﬀects a 6 × 6 input layer. We can’t use the
+5 × 5 layer anymore, as it would technically produce a 2.5 × 2.5 feature map, which is not
+something our networks can work with, and thus we have to design them according to our
+convolutions and max-pooling operations.
+27
+==PAGE:38==
+Figure 16: Example of receptive ﬁeld of a 6 × 6 input layer with max-pooling of kernel size
+k = 2, stride s = 2 and padding p = 0.
+The 6 × 6 input layer is halved along width and height, due to the 2 × 2 max-pooling,
+and the new feature map contains the most highlighted features from the preceding layer
+(as seen on Figure 9 showcasing max-pooling). Though we only see a receptive ﬁeld of
+r = 2 after this one operation, we have just increased what we call the jump, meaning the
+spacing between the pixels as seen in the feature map. This is better illustrated on the
+right ﬁgure. Since we used stride s = 2, the jump has been increased to 2 as well, meaning
+we have to move two pixel spacings to get to the next pixel. Along with this jump and
+the already known variables, we can compute the jump and receptive ﬁeld deeper into the
+network by the following equations:
+jout = jin · s
+rout = rin + (k −1) · jin
+(21)
+So far we have only been discussing the eﬀects of convolutions and max-poolings, which
+are operations we most typically ﬁnd when downsampling our feature maps, which we do
+in the encoder part. But in the segmentation networks presented in Section 4.8 we will
+upsample these again before we can produce our desired segmentation, which all happens
+in the decoder.
+Based on the previous information one might intuitively think that if
+downsampling our feature maps increases the receptive ﬁeld, then upsampling the feature
+maps would decrease the receptive ﬁeld. But as it turns out, our receptive ﬁeld as well as
+jumps remain unchanged during the upsampling of a feature map. Since the jump is also
+preserved, we will see huge increases in the receptive ﬁeld after performing convolutions in
+the decoder blocks despite only using a stride of 1. The reason for the preserved receptive
+ﬁeld is that we are still looking at the same area, but where this area was only one single
+pixel before, if we double the size of our feature maps on both sides, such that it is four
+times bigger, it will now be an area of four pixels. Only thing that has increased is the
+resolution of the feature map [29].
+The receptive ﬁeld is a useful tool for visualising how much earlier layers aﬀect the
+computations of deeper feature maps.
+We can also easily assess to what extend each
+operation expands the receptive ﬁeld, and thus how much information is transferred between
+28
+==PAGE:39==
+layers. In the appendix we ﬁnd the function compute receptive field along with the
+examples shown above. The function will, given the parameters of each operation including
+kernel size k, padding p and stride s as well as operation name (convolution, max-pooling,
+etc.) and input dimensions, compute the receptive ﬁeld for each layer [30][31][32].
+29
+==PAGE:40==
+5
+Methodology
+In former section we introduced most of the deep learning theory, which will be used when
+we start designing our neural networks. Before we go into this, we wanted to see if we
+could do more preprocessing of the satellite data, which would allow us to extract more
+information, that could be used in our neural networks.
+5.1
+Texture Analysis as Data Preprocessing
+The data used in our neural networks is as already mentioned the 300 × 300 cut-outs
+collected from the larger scenes in the HH and HV band from the S1 satellite. We would
+like to investigate whether preprocessing of these channels could result in some new data
+that can be used as well during training. The network itself ﬁgures out via optimization,
+what features in the input data it will be using for solving the given problem, but we could
+introduce more advanced image features, which the network might not be able to derive.
+We will therefore investigate whether a texture analysis of our cut-outs could result in
+new input data that could be used for improved training of our models. The basic idea of
+texture analysis is that diﬀerent items, terrain, surfaces, etc. would have some features at
+diﬀerent scales, which makes them comparable to one another. For our problem, we would
+like to be able to distinguish ice and water, so we will explore if we can tell ice apart from
+water by looking at their respective texture features.
+5.1.1
+Basic Image Features
+From an image we can extract some Basic Image Features (BIF), which are used to represent
+an image of high dimensionality using a lower dimensional vector. To do this we ﬁrst of all
+apply Gaussian ﬁlters with diﬀerent variances σ2. The Gaussian ﬁlter is given as
+g(x, y) =
+1
+2πσ2 e
+−x2 + y2
+2σ2
+.
+(22)
+Convolving with this ﬁlter will give a Gaussian blur and we have a new image s. The
+extend of this blur is determined by σ2. We then compute the ﬁrst order derivative w.r.t.
+both x and y and apply these ﬁlters to the image to get sx = ∂g/∂x and sy = ∂g/∂y.
+Hereafter we repeat for the second order derivatives, where we compute the Hessian matrix
+H from Eq. (23) and get sxx, syy and sxy (for both directions). We only use sxy since the
+Hessian matrix is symmetric and thus sxy = syx.
+H =
+
+
+∂2g
+∂x2
+∂2g
+∂x∂y
+∂2g
+∂y∂x
+∂2g
+∂y2
+
+=
+sxx
+sxy
+syx
+syy
+
+(23)
+30
+==PAGE:41==
+Figure 17: Example of Gaussian ﬁlters with σ = 2 applied to image of bark from tree.
+Image provided in 02506 Advanced Image Analysis course at DTU.
+Figure 17 shows an example of the ﬁlters applied to an image of bark. The variance
+is not so large that we see a clear blur eﬀect, but we do see the eﬀects of the derivatives
+showing the gradients.
+Using the ﬁlter responses we compute λ = sxx + syy and γ =
+q
+(sxx −syy)2 + 4s2xy. They will be used next when we compute the feature responses of
+the image, which includes the features from Table 3.
+Feature
+Formula
+Flat area
+ϵ · s
+Slope
+2
+q
+s2x + s2y
+Dark blob
+−λ
+Light blob
+λ
+Dark line
+2−1/2(γ −λ)
+Light line
+2−1/2(γ + λ)
+Saddle
+γ
+Table 3: Feature responses from scale-normalized ﬁlter responses (s, sx, sy, sxx, syy and sxy)
+ϵ in Table 3 is a parameter chosen by the user, which is often chosen to be ϵ = 0 to
+eliminate the ﬂat area feature response, as this can often dominate an image. We too will
+set ϵ = 0. We compute the feature responses for each pixel and pick the largest response,
+thereby labelling the pixel as either slope, blob, line or saddle in a new label image we call
+L. This is done at diﬀerent scales, i.e. diﬀerent values of σ2, where we chose σ2 = [1, 2, 4, 8]
+as we don’t want to blur our image completely and still be able to see some features. The
+results are depicted in Figure 18.
+31
+==PAGE:42==
+Figure 18: Feature responses at four diﬀerent scales (σ2 = [1, 2, 4, 8]). 1 - Slope, 2 - Dark
+blob, 3 - Light blob, 4 - Dark line, 5 - Light line, 6 - Saddle.
+We can then compute the BIF histograms using all the L’s. We translate this into a
+number between 0 and 1295 for each pixel, that is 64 = 1296 unique combinations, where
+6 is the number of labels and 4 is the number of scales.
+B =
+3
+X
+i=0
+(Li −1) · 6i
+(24)
+B is a new image with all the combinations of pixels across the 4 four chosen scales.
+From B we extract the histogram with 1296 bins to see all occurrences of all unique com-
+binations. We would thus have a vector with 1296 elements, which we can use to compare
+with images with similar textures. Other images depicting bark would thus have similar
+BIF histograms and therefore a high correlation. The images would have to have been
+taken under the same circumstances (orientation, distance to motive, lighting) as these
+plays a role in the scales (values of σ2) that can be used for comparison [33][34].
+32
+==PAGE:43==
+5.1.2
+Tests on HH and HV cut-outs
+We now investigate whether we can take this method of computing BIF histograms and
+see clear diﬀerences between cut-outs at diﬀerent mean SICs.
+We load a batch of 128
+cut-outs and sort them such that low concentrations of ice will be reviewed ﬁrst and high
+concentrations last. We ﬁrst compute the BIF histograms and hereafter the correlation
+matrix of all 128 samples, the results of which can be seen in Figure 19.
+The data is
+randomly sampled and we should therefore have a distribution of mean SICs representing
+the entire data set.
+Figure 19: Correlation matrix for BIF histograms computed for a batch of 128 HH and HV
+channels.
+Figure 19 shows a rather uniform image for both HH and HV channels, where each
+element of the correlation matrices is very close to 1. This tells us that BIF histograms
+extracted from our cut-outs are not good for distinguishing water from ice. There is likely
+no visible structure for the method to detect with the given data. It is the same tendency
+seen with many diﬀerent randomly sampled batches of data, so it can’t be attributed to
+the example shown. Nor is it likely to change using diﬀerent values of σ2 or more of them
+for that matter. We would merely see more blurred out versions of the cut-outs, which
+would simply be harder to tell apart. We must therefore conclude that BIF histograms, as
+texture analysis on the input data, will not provide us any additional useful information to
+be used in our networks, and we will therefore move no further with this method.
+33
+==PAGE:44==
+5.2
+Binary Classiﬁcation
+Before we jump into the multilabel classiﬁcation and try to predict the same ice charts as
+seen on Figure 2 in Section 2.2.1, we will ﬁrst make a binary classiﬁer. Here we only have
+two classes, which we will deﬁne as water and ice. Technically all ice concentrations above
+0% would be deﬁned as ice, but for this project we will set the threshold a little higher, as
+ships could still travel in low SIC levels. We will split the two classes at 10%, such that
+every pixel with an SIC value below 10% would be classiﬁed as water, and every pixel with
+10% or above would be classiﬁed as ice. Figure 20 shows an example of converting from
+multilabel ice charts to binary ice charts with a threshold of 10%.
+Figure 20: Example of DMI ice chart converted to binary ice chart for water (0) and ice
+(1) by splitting the two classes at a threshold of 10%
+As we are dealing with a binary segmentation, we need to adjust our neural networks
+to ﬁt this problem. We could follow the approach of the MNIST classiﬁcation problem,
+and use a channel for every class (two channels for binary problems) in the output layer
+and thereby activate this ﬁnal layer with the soft-max activation function given in Eq. (4).
+But we will be taking a diﬀerent approach widely used for binary classiﬁcation. We will
+instead consider our water class as a negative class with the label 0, and our ice class will
+be a positive class with the label 1. When we try to classify, we can then ask the question;
+”Is the pixel ice?” or ”What is the probability of it being ice?”. Our goal will then be to
+predict the positive class by having the network tell us the probability of a pixel being ice,
+rather than giving us a probability of each class. To do this we will use a sigmoid activation
+function for the output layer of our neural network. The sigmoid function is given in Eq.
+(25), which will take each pixel in the output layer ˆY and, based on the pixel value, return
+a probability of each pixel being ice.
+σ(x) =
+1
+1 + e−x =
+ex
+ex + 1.
+(25)
+34
+==PAGE:45==
+Figure 21: Sigmoid function (logistic curve)
+Figure 21 displays the eﬀect of the sigmoid activation function. It is also called a logistic
+function since each pixel value is transformed into a probability in the range [0; 1], where
+σ( ˆYi) = 1 would mean our network is certain that a respective pixel is ice. Since it is a
+binary problem, 1 −σ( ˆYi) would then be the probability of the i’th pixel being water.
+5.2.1
+Binary Cross-Entropy (Log Loss)
+We now have our sigmoid activated neural network output given as σ( ˆY), which are prob-
+abilities of each individual pixel in the feature map being ice. We now need to compare
+this to the binarized true segmentation Y (ice chart) using the loss function. For binary
+problems, where the network output is sigmoid activated, we use the Binary Cross-Entropy
+(BCE) loss function (also called the Log Loss Function) given by
+LBCE = −1
+N
+N
+X
+i=1
+Yi log(σ( ˆYi)) + (1 −Yi) log(1 −σ( ˆYi))
+(26)
+where Yi is the true label of the i’th pixel (0 or 1), ˆYi is the direct output from our network,
+σ( ˆYi) is the probability of the i’th pixel being ice and N is the total number of pixels, which
+would be all the 90,000 pixels in each cut-out (300 × 300). The sigmoid activation function
+is thus included in the BCE loss. We ultimately get the mean value by summing all the
+data points and dividing by the number of data points N. Eq. (26) consists of two parts.
+The ﬁrst part is Yi log(σ( ˆYi)), which for a ”true ice” pixel with the label Yi = 1 will add
+log(σ( ˆYi)) to the loss, and the second part (1 −Yi) log(1 −σ( ˆYi)) will for a ”true water”
+pixel with the label Yi = 0 add the log of the probability of water log(1 −σ( ˆYi)). In both
+cases we see that if the model manages to predict the exact class as 0 or 1, no loss will be
+added as we would expect. But if we have a pixel with ice (Yi = 1), but the prediction
+comes out as e.g. ˆYi = 0.1, then we want to penalize by adding a huge loss. This is where
+the natural logarithm comes in handy as log(1) = 0.
+35
+==PAGE:46==
+Figure 22: Log loss for diﬀerent ˆYi probabilities
+The closer we get to 0, the larger the penalty, though it is negative with the logarithm,
+which is why we take the negative value of the computed cost in Eq. (26) [35].
+5.2.2
+Stable BCE Loss Function
+As we just discussed, the closer our network gets to predicting the right class the less cost
+is added, and the further away from predicting the right class the higher the cost, which
+is illustrated in Figure 22. Here we also see that if σ( ˆYi) = 0, then log(σ( ˆYi)) = −∞, thus
+the function is actually quite unstable. A solution to this instability problem is to rewrite
+Eq. (26), such that we wont experience log(0). We do this ﬁrst of all by writing out the
+sigmoid function from Eq. (25) as:
+LBCE = 1
+N
+N
+X
+i=1
+"
+Yi · −log
+
+1
+1 + e−ˆYi
+
++ (1 −Yi) · −log
+ 
+e−ˆYi
+1 + e−ˆYi
+!#
+(27)
+LBCE = 1
+N
+N
+X
+i=1
+h
+Yi log
+
+1 + e−ˆYi
+
++ (1 −Yi)
+
+−log
+
+e−ˆYi
+
++ log
+
+1 + e−ˆYi
+i
+(28)
+LBCE = 1
+N
+N
+X
+i=1
+h
+Yi log
+
+1 + e−ˆYi
+
++ (1 −Yi)
+
+ˆYi + log
+
+1 + e−ˆYi
+i
+(29)
+LBCE = 1
+N
+N
+X
+i=1
+h
+(1 −Yi) ˆYi + log
+
+1 + e−ˆYi
+i
+(30)
+LBCE = 1
+N
+N
+X
+i=1
+h
+ˆYi −Yi · ˆYi + log
+
+1 + e−ˆYi
+i
+.
+(31)
+36
+==PAGE:47==
+In order to avoid overﬂow in e−ˆYi for when ˆYi < 0, we reformulate Eq. (31) further:
+LBCE = 1
+N
+N
+X
+i=1
+h
+log
+
+e
+ˆYi
+
+−Yi · ˆYi + log
+
+1 + e−ˆYi
+i
+(32)
+LBCE = 1
+N
+N
+X
+i=1
+h
+−Yi · ˆYi + log
+
+1 + e
+ˆYi
+i′
+(33)
+This could be reformulated as:
+LBCE = 1
+N
+N
+X
+i=1
+h
+max( ˆYi, 0) −Yi · ˆYi + log
+
+1 + e−| ˆYi|i
+.
+(34)
+Figure 23: Loss added given the network output ˆYi if the true segmentation is either
+ice = 1 (blue) or water = 0 (orange). Left ﬁgure shows the added loss for the unstable
+BCE function Eq. (26) and right ﬁgure shows the added loss for the stable BCE function
+Eq. (34).
+In Figure 23 we see what loss is added given a value in the range [−10, 10] for the
+unstable and stable loss function. The results don’t look any diﬀerent in this interval, and
+if we don’t experience any ˆYi values from the network, which are way beyond this range,
+whether we use one or the other makes little diﬀerence. Though it is very unlikely for our
+network to ever conﬁdently misclassify a true 0 class as a numerical 1 or the other way
+around, we could still experience σ( ˆYi) with so many decimal points, that Python would
+simply write it as 0 or 1. Should that be the case, it will not bother us as the stable
+reformulation has been implemented. Therefore when we use BCE loss, which is the case
+for all our binary classiﬁcation neural networks, then we don’t use any activation function
+of the output feature map ˆY, as this activation is already included in the stable BCE loss
+function [36].
+37
+==PAGE:48==
+5.3
+Performance Measures for Binary Classiﬁcations
+When we have designed our neural networks and trained them, we can test them on the
+cut-outs in our test data set, to assess how well the model is performing when presented
+with new data. New data in this case means data that hasn’t been used for training (or
+validation (see Section 5.6.1)). Whether we want to know how good a job our models are
+doing at predicting an entire scene or an entire test set, we will need some measurements
+of the performance of each individual neural network, which will come in handy when we
+try to compare them.
+5.3.1
+Confusion Matrix
+For the binary segmentation there is a variety of useful performance measures, which can
+all easily be computed if we ﬁrst extract the confusion matrix. The confusion matrix is not
+strictly limited for use in binary problems, but when we only have two classes, there is a
+variety of rates we can compute based hereof. We have the two classes; water and ice. In
+section 5.2 we asked ”What is the probability of a pixel being ice?”. This meant that when
+we sigmoid activated our network output, we would get a probability (number between 0
+and 1) of how likely it is that a certain pixel represents ice. Afterwards we discretize the
+output probability feature map such that we would get either zeros or ones. We do this
+by assigning the pixel to the closest upper or lower limit, corresponding to thresholding at
+0.5. In this binary segmentation problem, we say that we want to predict ice, such that
+ice as an outcome is considered positive (1) and water is the negative (0) outcome. When
+our model makes a prediction of the positive class, there are bound to be small deviations,
+which is illustrated in Figure 24. Here we see an example of a true segmentation (yellow),
+which our model tries to predict (orange).
+Figure 24: Example of comparison between true segmentation and predictions from binary
+classiﬁer.
+The mask created by the overlap of the true segmentation and the prediction, shows
+us the points where our model has predicted the location of ice correctly. We therefore say
+that all pixels in this overlap are True Positives (TP). Outside both the predicted and true
+segmentation we see the water, which due to the nature of the problem, is denoted as a
+38
+==PAGE:49==
+negative (water being 0). Both ice chart and model agree on the dark blue mask, and thus
+these are dubbed True Negatives (TN). Hereafter we have the area where the orange circle
+intersects the water. According to the model, this area contains ice, but our ice charts
+tells us that there is only water here, and thus our model has falsely predicted the positive
+class, which we call False Positives (FP). Remaining is the yellow area not intersected
+by the orange prediction. This means our model believes there to be water, i.e. it has
+predicted the negative class, which we can see, by comparing to the true segmentation, is
+false. Thus we ﬁnally have False Negatives (FN). These are the quantities used to make
+up the confusion matrix.
+Predicted
+Water
+Predicted
+Ice
+True
+Water
+TN
+FP
+TN + FP
+True
+Ice
+FN
+TP
+FN + TP
+TN + FN
+FP + TP
+Ntotal =
+TN + FP + FN + TP
+Table 4: Confusion Matrix where we enter the number of pixels in each category (True
+Negative (TN), False Positive (FP), False Negative (FN) and True Positive (TP)) as well
+as summed up quantities. We can use these to compute accuracy, precision, diﬀerent rates
+etc.
+In the confusion matrix illustrated in Table 4, each of the aforementioned quantities
+(TN, FP, FN and TP) are inserted, and summed row- and column-wise. All quantities
+summed up will give the total number of pixels involved in the performance test of the
+model Ntotal. Here we see some of the derivations we can make from the Confusing Matrix:
+• True Positive Rate (also ”Sensitivity” or ”Recall”): How often does our model
+correctly predict the positive class out of the total number in the true positive class.
+recall =
+TP
+TP + FN
+(35)
+• True Negative Rate (also ”Speciﬁcity”): How often does our model correctly
+predict the negative class out of the total number in the true negative class.
+specificity =
+TN
+TN + FP
+(36)
+• Precision: When our model predicts the positive class, how often is it right.
+precision =
+TP
+TP + FP
+(37)
+39
+==PAGE:50==
+There are many more diﬀerent rates that can be computed from the confusion matrix,
+but we will only use recall, speciﬁcity and precision for our performance measurements.
+None of the cut-outs saved in our big data chunks used for training and testing have NaN-
+values, but the larger scenes do, as a mask has been applied to the land areas. Every pixel
+with a NaN-value is of course not included when we compute the confusion matrix [37][38].
+5.3.2
+Intersection over Union
+Figure 24 hints at the ﬁrst performance measure we will look at. The combined area of the
+true and predicted segmentation is called the Union and can be seen in the middle ﬁgure,
+showing how it contains both TPs, FPs and FNs. The area where our predicted positive
+class matches our ice chart is called the intersection and can be seen on the right ﬁgure.
+We can then compute the Intersection over Union (IoU) by
+IoU = Intersection
+Union
+=
+TP
+TP + FP + FN .
+(38)
+IoU is a value given between 0 and 1, as it is a relation between all the pixels that are in
+the positive class and the correctly predicted pixels for the positive class. If every pixel is
+correctly predicted, all the pixels in the union are also in the intersection, thus the relation
+between them is 1, i.e. a perfect segmentation [39].
+5.3.3
+Sørensen-Dice Coeﬃcient and F1 Score
+In former section we computed the IoU for a binary segmentation, but we have an even
+better tool for telling us how close a predicted segmentation is to the truth. This is called
+the Sørensen-Dice Coeﬃcient (or Dice Similarity Coeﬃcient (DSC)) or F1 Score. Both
+scores are same, but the way we compute them diﬀers. The Dice Score is not too diﬀerent
+from IoU, which we get from Eq. (38), and is given by
+DSC =
+2 · Intersection
+Intersection + Union =
+2 · TP
+2 · TP + FP + FN .
+(39)
+Here we count the number of pixels in each set, where our sets are the true positive
+segmentation Yice and the predicted positive segmentation ˆYice. We can denote the number
+of pixels in each set as |Yice| and | ˆYice|. The number of pixels that are in both sets, i.e. our
+intersection, is denoted | ˆYice ∩Yice|. Thus we could also write Eq. (39) as
+DSC = 2 · |Yice ∩ˆYice|
+|Yice| + | ˆYice|
+.
+(40)
+The number of pixels in both sets is thus equal to the union of both sets plus their
+intersection, which is why the intersection is included twice in the Dice Score compared to
+IoU. To see why this is a better measure, we will look at the F1 score. To compute the F1
+score we need the recall from Eq. (35) and the precision from Eq. (37), which we remember
+from the confusion matrix. The F1 Score is the harmonic mean of the precision and recall
+and is given
+40
+==PAGE:51==
+F1 =
+2
+1
+recall +
+1
+precision
+= 2 · precision · recall
+precision + recall.
+(41)
+The harmonic mean will give a value between the precision and recall.
+Unlike the
+arithmic mean, which would give us a value right in the middle of the precision and recall,
+the harmonic mean will be closer to the lower one of the two rates. Therefore when we try
+to maximize the F1 score, the lowest of either the recall or precision will be penalized in
+order to balance out both, making it better for optimization. If we insert Eq. (35) and (37)
+in Eq. (41) we ultimately get the Sørensen-Dice Coeﬃcient given by Eq. (39) [39][40][41].
+5.3.4
+Accuracy and Balanced Accuracy
+When we want to know how many of the individual pixels in a cut-out or scene have been
+correctly predicted, we can use the accuracy computed as
+A = TP + TN
+Ntotal
+.
+(42)
+Accuracy is also given between 0 and 1, with one being being the ideal result. Since
+we are prone to see class imbalance from cut-out to cut-out, simply using accuracy might
+not be such a good tool. If we have a scene mainly consisting of ice and then with a very
+small amount of water, our classiﬁer would still get a high level of accuracy if it were to
+just classify the entire scene as ice. Therefore we will instead use the recall (True Positive
+Rate) from Eq. (35) and the speciﬁcity (True Negative Rate) from Eq. (36) to compute
+the Balanced Accuracy (BA). Here we account for the models ability to both predict the
+positive and the negative class. Balanced accuracy is computed
+BA = recall + specificity
+2
+(43)
+and is thus a mean between the two rates. Instead of having a high accuracy if our
+classiﬁer just labels the whole aforementioned scene as ice, the balanced accuracy would
+drop drastically, as no water has been predicted and it would have a sensitivity of 0 [42].
+41
+==PAGE:52==
+5.4
+First Generation of Neural Networks
+5.4.1
+Data for Training
+We have 40 chunks of cut-outs including all subswaths. In these chunks we have the HH
+and HV channel saved as neural network input, and the DMI ice chart saved for true
+segmentations to be held up against the predictions. Most of the ice chart cut-outs are
+uniform, meaning they have the same SIC value spread out across all pixels. These could
+easily be distributed to one of the 21 classes with the respective SIC. Other cut-outs contains
+more than one concentration of ice and to distribute this as to belong to a class, we take
+the mean of all pixel values, and have this mean SIC represent the class of the cut-out.
+If we collect the mean SIC for all cut-outs and assign them to the 21 classes, we get the
+distribution seen in Figure 25.
+Figure 25: Histogram depicting all of the mean sea ice concentrations of all cut-outs from
+all 40 chunks of data.
+When training neural networks, it is important to separate our data into two sets;
+training and test. The training set is used for training the neural network, as we update
+the weights each epoch using the Adam optimizer, and the test set is used for testing the
+trained model. The scenes seen in Figure 2 will be used to give a better visual of how
+a trained model performs.
+Therefore we will have to make sure that for training data
+we don’t use the chunks, where cut-outs from our test scenes have been saved into. The
+cut-outs from our scenes (see Figure 2) are found in a total of four chunks, so for training
+we will steer around these. For the ﬁrst attempts at making binary classiﬁers we only use
+four chunks of data, which amounts to roughly 30,000 cut-outs for training, which is not
+a large data set, but it should suﬃce for initial tests of the diﬀerent neural networks. The
+PyTorch library has a function named DataLoader for loading the data at random. To
+avoid loading our four chunks every epoch of training, we save each cut-out with HH and
+HV channel input and ice chart in separate .npz-ﬁles, which the data loader can access
+more quickly.
+42
+==PAGE:53==
+5.4.2
+The Neural Networks
+With the ﬁrst generation of neural networks, we will explore the eﬀects of having bottlenecks
+of diﬀerent sizes. We will therefore design relatively simple networks of various depths like
+the one seen in Figure 13. We can look at our network as having blocks in its hierarchy.
+Every time we downsample by max-pooling or upsample by unpooling, prior block will end
+and a new one starts. Thus we can consider the bottleneck a block itself. In every block
+of our ”simpler” networks we only use one convolution. The output feature map would
+have X = 1 channel, which will not be activated as we use the stable BCE loss function.
+All other layers have 64 channels. We try out ﬁve diﬀerent sizes of bottlenecks; 150 × 150,
+100 × 100, 75 × 75, 50 × 50 and 25 × 25. We do this for both SegNet and U-Net to see if
+adding skip connections to our neural networks will make any signiﬁcant diﬀerence in the
+performance. This gives us a total of 10 models for the ﬁrst generation. The receptive ﬁeld
+at the end of each neural network can be seen in Table 5. We can expect both SegNet and
+U-Net to have the same receptive ﬁeld throughout the neural network, as the receptive ﬁeld
+of the skip connections typically merge with and take on the larger receptive ﬁeld from the
+network [31].
+Network bottleneck (width and height)
+150
+100
+75
+50
+25
+Maximum receptive ﬁeld
+12
+17
+34
+50
+128
+Table 5: Maximum receptive ﬁeld after ﬁnal convolution at the end of both SegNet and
+U-Net with respective bottlenecks.
+The largest receptive ﬁeld is achieved at the end of the network after all max-poolings
+and convolutions. All of the neural networks of ﬁrst and coming generations can be seen
+in Appendix B. All convolutions have a kernel size of k = 3, stride of s = 1 and padding
+of p = 1. Max-poolings, which halve the width and height of the feature map, have no
+padding, a kernel size of k = 2 and stride of s = 2. If max-poolings reduce a feature by
+a factor of 3, then k = s = 3 like we see when going from a feature map of 300 × 300
+to 100 × 100.
+Before every convolution (except with the input data) we apply 20% of
+dropouts. After the convolution we ﬁrst do ReLU activation and hereafter we do the batch
+normalization. The convolutions alone doesn’t expand the receptive ﬁeld substantially. It is
+when the max-poolings increase the jump we see huge growth in receptive ﬁelds, and since
+networks with bottlenecks of 150 and 100 only has one max-pooling each, the receptive
+ﬁelds will be smaller. Networks with bottlenecks of 75 and 50 have two max-poolings and
+see a somewhat larger receptive ﬁeld. It is ﬁrst when we have three max-poolings, as seen
+in the network with a bottleneck of 25, that we see a major increase in receptive ﬁelds.
+This results in a receptive ﬁeld, where each of the ﬁnal pixels inherits information from
+almost a ﬁfth of the input data feature map (128 × 128 out of 300 × 300 pixels). We train
+each of the networks for 10 epochs in these initial tests.
+5.4.3
+Results and Key Points
+The features maps from our networks gives a non-activated output, as these were trained
+with a loss function with the sigmoid activation integrated. Therefore when we test the
+43
+==PAGE:54==
+models on our scenes, we will sigmoid activate the output, such that we get a probability
+map with values between 0 and 1. We then assign the pixels to the closest of these upper
+and lower limits, corresponding to thresholding at 0.5. We collect cut-outs from the scenes
+with a size of 300 × 300, feed them through the model and assign them to their position
+again. Sometimes the neural networks don’t perform as well at the edge of a predicted
+cut-out, and thus we overlap by 50 pixels in each direction when we collect the cut-outs
+from the scenes. This means we only use the center 200 × 200 piece of a predicted cut-out
+when piecing a scene back together. As a result, we will have an edge of 50 pixels missing
+from a predicted scene, but that will hardly be a problem considering the original size hereof.
+The tests with the ﬁrst generation of models depicts the scenes with all subswath, such
+that we can see the problems that typically arises in the area of the ﬁrst subswath. In
+Figure 26 we see how each of the models predict the area over water as being ice due to
+the subswaths, with the ﬁrst of them being especially dominant. For models with a small
+receptive ﬁeld this eﬀect is further enhanced, and we even see other subswaths with the same
+eﬀect. Each U-Net does not perform signiﬁcantly better than their SegNet counterparts in
+any of the cases from this particular scene.
+Figure 26: Predictions from all 10 models on the ﬁrst scene.
+44
+==PAGE:55==
+Though we see a more uniform segmentations of the ice class on the models with larger
+bottlenecks, the water class is more heavily aﬀected by the subswath than the deeper
+models. The more uniform ice segmentations can perhaps be attributed to our models
+with bottleneck 150 and 100 using subswath over ice to predict.
+Figure 27: Performance of ﬁrst generation neural networks.
+Figure 27 shows the performance of each model as computed on a test set with 10,000
+cut-outs. Here we that that the deeper models provide us with overall better performance.
+We can also clearly conclude that the U-Nets doesn’t perform any better than their SegNet
+counterparts. Going forward we will leave the U-Net architecture and focus only on SegNet,
+as with this task, we see no improvement by including skip connections. We will also no
+longer be using the models with bottlenecks of 150 and 100. Finally we will be removing
+the ﬁrst subswath as this could give a wrong impression of how well a model performs and
+therefore we will no longer see it in the scenes. We will be using a new data set without
+the ﬁrst subswath.
+5.5
+Second Generation of Neural Networks
+5.5.1
+New Sampling of Training Data
+In the ﬁrst generation of neural networks, we used data from four chunks for a total of
+approximately 30,000 data points in the training set. It was sampled among a full data set
+distributed much like we see in Figure 25. However, we have a very uneven distribution of
+data, as especially the 0% SIC class is overrepresented. So we will instead sample our data
+such that every class is equally represented by oversampling some of the minority classes
+and overundersampling the majority classes. We use a new data set consisting of 29 chunks
+with cut-outs collected from areas outside the ﬁrst subswath, as we will no longer try to
+predict this area. Once again we sort out the chunks containing cut-outs from our eight
+test scenes. From the remaining chunks we randomly sample 2,000 cut-outs per class, such
+that we have data from all chunks. The test data is also sampled this way from the test
+chunks, but with only 500 entries per class. We now have a distribution of data like the
+one seen in Figure 28.
+45
+==PAGE:56==
+Figure 28: Test data distributed with an equal amount of data in each class.
+5.5.2
+The Neural Networks
+In this generation of neural networks, we will investigate whether adding more convolutions
+per block will allow our models to detect more of the complexity in the S1 data, and thus
+give better binary segmentations. By adding more convolutions we get the models seen
+in Appendix B. Besides our simple networks with one convolution per block from ﬁrst
+generation, we now have two more variations with two and three convolutions per block
+respectively. Each convolution still follows the standards outlined in Section 5.4 on ﬁrst
+generation models. This gives us a total of nine SegNets as outlined in Table 6, which also
+shows the receptive ﬁelds of the models. This time we will train for 20 epochs.
+Maximum receptive ﬁeld of second generation models
+Number of convolutions
+per block
+SegNet75
+SegNet50
+SegNet25
+1
+34
+50
+128
+2
+64
+94
+244
+3
+94
+138
+360
+Table 6: Maximum receptive ﬁeld achieved at the end of all nine models in second genera-
+tion of neural networks.
+As the networks go deeper and we include more max-poolings and convolutions, we
+see a huge rise in the size of receptive ﬁelds. For our SegNet25 model with 3 convolutions
+per block we see a receptive ﬁeld, which goes beyond the size of the actual input data.
+It is important for the output pixels to a large enough receptive ﬁeld, that no important
+information from the input is lost, but going beyond the dimensions of the initial input
+data, will not provide any useful information [32]. As a last addition we will investigate the
+eﬀects of using BCE loss with total variation regularization on each of the aforementioned
+models (see Section 4.7.4), which gives us a total of 18 models. For regularization parameter
+we use λ = 0.1.
+46
+==PAGE:57==
+5.5.3
+Results and Key Points
+Figure 29: Predictions of all 18 models on Scene 1. Top row depicts networks with one
+convolution per block, middle row has two convolutions per block and bottom row has
+three. The left models are trained without total variation and the models on the right have
+been trained with.
+47
+==PAGE:58==
+Figure 30: Performance of second generation neural networks.
+We once again look at the F1 score and balanced accuracy of each network, by testing the
+model performances of the entire test set. Figure 30 shows both measures, with the simpler
+networks from ﬁrst generation seen on the left in each curve and then going deeper as we
+move right. Here we see that both with and without total variation, the best performing
+models are still the simpler models with one convolution per block. We can’t really say
+with certainty whether using total variation is an improvement to our networks or not,
+as the performances of the best performing models closely resemble each other. Then it
+comes down to the individual model at the end of the 20 epoch training. As we go deeper,
+each performance between models with and without total variation varies a lot. But as
+the models performs very poorly, we can’t conclude that total variation has any signiﬁcant
+eﬀect on the segmentations. From Figure 29 we can see that the total variation has not had
+the desired eﬀect of smoothing out the segmentation and thereby making it more uniform.
+This is likely due to λ = 0.1 not providing enough regularization, hence the results seen
+in Figure 30 can’t be distinguished. As mentioned in Section 4.7.4, it is diﬃcult to ﬁnd
+the proper regularization parameter for a neural network, and we will therefore move no
+further with the total variation method for our networks. We will also stick to the simpler
+structure of our networks, such that we keep one convolution per block as we progress.
+We unfortunately don’t have the loss curves from training sessions of second generation
+models. Had we had them, we would likely see a rather smooth training loss curve and a
+more unstable test loss, as the model is adapted to the training data. When we pick the
+last model at the end of the 20 epochs trained, it is therefore not certain we have the best
+model for the test data. Going forward we therefore save the loss curves for analysis and
+then we pick the best model from the training session. We do this by introducing validation
+sets. We thus separate our data into three sets when sampling data. Every epoch when we
+are done training our network, we validate it and see if we have achieved a model which
+performs better when presented with new data. If this is the case, we save the model as
+the best model. Thereby we don’t risk ending up with a poorly performing network at the
+last epoch.
+48
+==PAGE:59==
+5.6
+Third Generation of Neural Networks
+5.6.1
+Sampling Training Data for Binary and Multilabel Classiﬁcaton
+For now we have sampled our data into all 21 classes, which could cause class imbalance for
+a binary problem, as all classes at 10% SIC and above are considered ice and thus mainly
+have ice in their segmentations. The result hereof is that only around 10% of our data
+set represents one class. We will instead sample for a binary classiﬁcation, by assigning
+cut-outs to a water class if more than half of the cut-out contains water, and likewise for
+the ice class, distributing the data as seen in Figure 31.
+Figure 31: Test data sampled for binary classiﬁcation with 5,000 data points per class.
+We will continue sampling for 21 classes in the same way we’ve done so far, when
+we start doing multilabel classiﬁcation. We intend to use the binary predictions as input
+data along with the HH and HV channels when we start training multilabel classiﬁers (see
+Section 5.8). Therefore we must ensure that we have six distributions of chunks for training,
+validation and test for both binary and multilabel classiﬁcation. The 29 chunks of cut-outs
+is then distributed as seen in Table 7.
+Classiﬁer
+Data set
+Number of
+chunks
+Cut-outs sampled
+per class
+Number of
+classes
+Total in data set
+Binary
+Training
+8
+25,000
+2
+50,000
+Binary
+Validation
+3
+5,000
+2
+10,000
+Binary
+Test
+3
+5,000
+2
+10,000
+Multilabel
+Training
+9
+2,500
+21
+52,500
+Multilabel
+Validation
+3
+500
+21
+10,500
+Multilabel
+Test
+3
+500
+21
+10,500
+Table 7: Sampling of data for binary and multilabel classiﬁcation
+49
+==PAGE:60==
+5.6.2
+Neural Networks and Results
+Our neural networks has not changed signiﬁcantly.
+We have omitted SegNet75 as our
+networks perform overall better with the smaller bottlenecks.
+This leaves us with two
+networks, SegNet50 and SegNet25 with one convolution per block, where we will now
+double the number of channels per layer as we go deeper (as seen in Figure 13). We have
+also added an extra convolution in the bottleneck, giving us receptive ﬁelds of 62 and 152
+respectively. Each model was trained for 250 epochs, using validation sets to select the
+best model. The losses of both training sessions can be seen in Figure 32.
+Figure 32: Losses from binary training session over 250 epochs for SegNet50 and SegNet25.
+Here we clearly see the eﬀect of using validation sets to save the best model, as the
+test loss doesn’t bounce up and down like the validation loss. The found solution produces
+a probability map when sigmoid activated. This can be seen in Figure 33 as σ( ˆY). The
+probability map is used to produce our binary segmentation, by thresholding at 0.5. We see
+an overall improvement in the performance after introducing the new data. The probability
+map reveals how SegNet50 is still uncertain about the subswath, but not enough for it to
+show up in the binary prediction.
+Figure 33: SegNet50 and SegNet25 tested on scene 1. Here we also see the sigmoid activated
+network outputs σ( ˆY). These are our probability maps used to make the binary ice chart
+predictions.
+50
+==PAGE:61==
+5.6.3
+Before Multilabel Classiﬁcation
+SegNet50
+SegNet25
+F1 Score
+0.909
+0.928
+Balanced Accuracy
+0.912
+0.931
+Table 8: Overall performance of binary segmentation on test set with 10,000 data points
+We have found two well functioning models for binary classiﬁcation. Testing out the models
+performances we overall get that SegNet25 performs better than SegNet50 as seen from
+Table 8. Next we will investigate if we can use a binary classiﬁer to produce a binary
+prediction, which can be used as a third input alongside our HH and HV channel to give a
+better multilabel classiﬁcation. The idea is to have the binary classiﬁer help the multilabel
+classiﬁer distinguish lower levels of ice (below 10%) from higher levels (10% and above).
+Figure 33 shows us that the trained models have gotten better at binary classiﬁcation, but
+we still see noise in the segmentations for both water and ice. Before moving into multilabel
+classiﬁcation, we will try to remove this noise. We will only move forward with this part
+for SegNet25 as it performed best.
+5.7
+Post-processing of Binary Predictions using Markov Random Fields
+5.7.1
+Introduction to Markov Random Field
+Markov Random Fields (MRF) can be used for segmentation of noisy images, where each
+pixel in the image is initially assigned a discrete class based on the pixel intensity, and
+hereafter we remove the noise in the segmentations. To be an MRF it has to follow the
+Markov Property telling us that the probability of classiﬁcation is dependent only on the
+local properties (also called the Markovianity). For images this means that the surroundings
+of a pixel will determine the probability of being in some class. If the majority of this pixel
+neighbourhood belongs to a certain class, chances are that so does the respective pixel. This
+way we smooth out out the initial segmentation, which for noisy images are prone to be
+noisy themselves. Our goal using MRF is to maximize the a posteriori probability, in order
+to get the most probable segmentation from our criteria. This is the same as minimizing
+the posterior energy, which is a cost of applying a class to a pixel. The posterior energy is
+a combination of a likelihood energy, derived from the data itself, and a prior energy used
+for smoothing the segmentation (give it the uniform appearance we seek). We can write
+the posterior energy U(f|d) as
+E(f) = U(f|d) = U(d|f) + U(f)
+(44)
+where U(d|f) is the likelihood energy and U(f) is the prior energy. f is then our classes
+and d the data. This might look familiar as it is related to Bayes Theorem
+P(f|d) = P(d|f) · P(f)
+P(d)
+.
+(45)
+51
+==PAGE:62==
+For our case of MRF the evidence P(d) is constant and will not be used. Here the
+terms are given as probabilities, where P(f|d) is the posterior probability we wanted to
+maximize. To have an MRF, besides following Markovianity, the probability of the local
+conﬁguration must be positive, thus satisfying the positivity criteria (P(f) > 0, ∀f). To
+understand how we get from Eq. (45) to Eq. (44), we need to know following about Gibbs
+Random Fields (GRF):
+• The probability of a conﬁguration is given:
+P(f) ∝e−U(f).
+(46)
+where the energy U is the sum of clique potentials.
+U(f) =
+X
+c∈C
+Uc(f)
+(47)
+With the Hammersley-Cliﬀord Theorem we unite the properties of local appearance
+and global probability [43]. Then from Bayes theorem we have P(f|d) ∝P(d|f) · P(f) and
+from Gibbs we have P(f) ∝e−U(f), which leads to Eq. (44).
+5.7.2
+Example of clique potentials
+We mentioned clique potentials, which are our local modelling tools. Each clique potential
+(energy) can be considered a cost of assigning a label to a pixel, and thus when minimizing
+posterior energy, we want the least expensive (and per deﬁnition most probable) solution.
+We deal with two types of cliques; one-clique and two-clique. To get a better understanding
+of the MRF method and how cliques work, we will look at an example taken from the 02506
+Advanced Image Analysis course at DTU [2]. Here we are given a CT scan image of a mouse
+tibia.
+Figure 34: CT scan of mouse tibia. Image provided in 02506 Advanced Image Analysis
+course at DTU [2].
+52
+==PAGE:63==
+The image mainly has three regions, where bone is very bright (high pixel intensities),
+cartilage is dark (medium pixel intensities) and air is very dark (low pixel intensities). We
+will do a binary segmentation, where air and cartilage will serve as one class (0) and bone
+as another (1). The pixel intensities are given in the range [0; 1] just like our probability
+maps. We will initially compute the one-clique potentials. A one-clique is made up of only
+one pixel di. We compute it using this single pixel and our class means. Preferably we’d
+have some prior knowledge of these class means, which could come from knowing which
+pixel intensities are usually assigned to a certain class. Then we could compute the mean
+of all the pixels in the class and get the class mean. Unfortunately we don’t have that
+information for this example. What we could do instead is collect the histogram of all pixel
+intensities of the respective image. The result can be seen below.
+Figure 35: Histogram of CT scan of mouse tibia seen in Figure 34. We can clearly see two
+distinguishable distributions for air/cartilage and bone respectively. They are split up at
+approximately a pixel intensity of 0.6.
+In Figure 35 we can easily spot two distributions, which we can roughly be split up at
+0.6, thereby separating our two classes, from which we can extract our class means.
+• Class 0 - Pixel intensities below 0.6 are classiﬁed as air/cartilage.
+Class mean: µ(0) = 0.41
+• Class 1 - Pixel intensities equal to or above 0.6 are classiﬁed as bone.
+Class mean: µ(1) = 0.70
+With the class means (also called the a priori information of our classes) we can compute
+the one-clique potentials V1 as
+V1(fi) = (µ(fi) −di)2,
+(48)
+where di is the data point (pixel intensity) and fi is the class of the i’th pixel. µ(fi) is
+then the mean of the class. The sum of all the V1-potentials is what we call the likelihood
+energy from Eq. (44) and is computed
+53
+==PAGE:64==
+U(d|f) =
+X
+i
+V1(fi).
+(49)
+If we want this to be as low as possible, we would assign each pixel to their nearest class
+means, which corresponds to simply thresholding. Figure 36 shows the initial segmentation
+achieved from the one-clique potentials only.
+Figure 36: Initial segmentation of Figure 34 based only on one-clique potentials.
+From Figure 36 we see that after the initial segmentation there is still seemingly some
+noise, but this is to be expected from a noisy image. Therefore we introduce the two-clique
+potential. It contains both the respective pixel as well as a neighbouring pixel, thus two
+pixels in total. With the two-clique potentials we add a cost β if the respective two pixels
+are of diﬀerent classes. Thereby it becomes more expensive to have pixels that are diﬀerent
+from the surroundings. The two-clique potential of two neighbouring pixels would then be
+computed
+V2(fi, fi′) =
+0
+if fi = fi′
+β
+otherwise ,
+(50)
+where fi is the class of the respective pixel and fi′ is the class of the neighbouring pixel. To
+avoid deﬁning the same pairs in an image twice, a pixel will have two neighbours (except
+at the edges of the image). We deﬁne this as the pixels on the right and on the bottom of
+our respective pixel. The total two-clique potential is the prior energy from Eq. (44), and
+is computed as the sum of all V2-potentials
+U(f) =
+X
+i
+V2(fi, fi′).
+(51)
+54
+==PAGE:65==
+The β parameter should reﬂect the data, such that when the pixel intensities are in
+range [0; 1], having β = 1, 000 would mean that it is too expensive to have a segmentation
+where all pixels don’t belong to the same class. This would minimize the prior energy,
+but as mentioned earlier, our goal with MRF is to minimize the posterior energy, which is
+the sum of both energies as seen in Eq. (44). β should therefore serve as a parameter for
+ﬁnding a good balance between minimizing likelihood and prior energy [34][2][44].
+5.7.3
+Optimization of MRF
+We have now modelled our MRF, which is still noisy, and thus we need a way of optimizing
+the MRF. There is a variety of algorithms for MRF optimization, and we will be using a
+method called graph-cuts. It can be rather complex to set up these graphs, but luckily the
+PyMaxflow-package for Python simpliﬁes this optimization process as soon as the problem
+is set up like we did in former section. The package is available online [45]. It is produced
+by one of the authors of the 2004 article on Min-Cut/Max-Flow algorithms and based on
+the graph-cut algorithm outlined here as well [46]. The binary problem can we solved by
+ﬁnding a minimum s-t cut of a graph constructed from the energy functions. Here s denote
+a source (class 0) and t a sink (class 1) of the graphs. We then set up graphs between
+every data point, and the source and sink called the terminal nodes.
+If we cut one of
+these graphs, the cost is determined by the one-clique potentials between the data point
+and the respective class. Between each neighbouring data point (as deﬁned by two-clique
+potentials) we draw a graph both back and forth with the cost of β to cut. These are called
+the called the internal nodes. As an example we set this up for two data points.
+Figure 37: Example of graph-cuts for two diﬀerent values of β.
+Figure 37 shows the principle of graph-cuts. We cut the least expensive graphs (connec-
+tions between points) thus assigning each data point to either source or sink. For β = 10 it
+is cheaper to cross over at the graphs with β costs, thereby giving the two data points dif-
+ferent labels, but at β = 100 it is too expensive to make the same cut, and thus both points
+end up with the same class. This is of course a very simple example, but the principles
+55
+==PAGE:66==
+are the same as we extend the problem. The min-cut/max-ﬂow algorithm thereby cuts at
+the minimal cost creating maximum ﬂow from source to sink. Here we see the graph-cuts
+applied to the CT scan using diﬀerent values of β.
+Figure 38: Graph-cuts applied to CT scan of mouse tibia. β values used are 0.001, 0.01
+and 0.1
+Figure 38 shows that a higher value of β reduces the eﬀects of the one-clique potentials,
+and thereby reduces the noise of the image.
+5.7.4
+MRF with Graph-cut Optimization for Cut-outs
+Now we look into the eﬀects of the graph-cut post-processing on our test data. First we
+collect the class means. We do this by overlaying the true segmentation on the probability
+maps produced by the individual networks, and then use the true segmentation to sort the
+probabilities predicted by the network into our two classes. Hereafter we can compute the
+class means as the mean of all probabilities assigned to one class. Figure 39 shows the
+histogram of all probabilities for all pixels, and the orange and blue curve shows how these
+probabilities are distributed to the water and ice class respectively. Using the SegNet25
+model on the training set with a total of approximately 50,000 cut-outs, we can derive the
+two class means µ(0) = 0.049 and µ(1) = 0.919.
+56
+==PAGE:67==
+Figure 39: Probabilities of all pixels in all training cut-outs as well as how these are
+distributed into our two classes.
+We use these class means when computing the one-clique potentials, and then we have
+to ﬁnd a proper value of β for optimization. We test values of β from 1 to 50 on SegNet25
+with one convolution per block, and ﬁnd each individual value improving the balanced
+accuracy of the binary segmentations as depicted in Figure 40.
+Figure 40: Testing β values for MRF with Graph-cut optimazation on SegNet25 model.
+The improved balanced accuracies from MRF are compared to assigning pixels to the
+closest class (0 or 1) based on probability (orange line) and assigning only using V 1 poten-
+tials (dashed green line). These methods provide almost identical results. We ﬁnd the β
+value with the highest balanced accuracy to be 40 We use this β to test the model on the
+scenes seen in Figure 41 (Scene 1, 2 and 6 from Figure 2)
+57
+==PAGE:68==
+Figure 41: Left: Ice Charts. Middle: Assigning classes by thresholding probability map
+from network at 0.5. Right: Segmentation using MRF with graph-cuts on probability
+map from network.
+58
+==PAGE:69==
+5.7.5
+Conclusion for MRF
+Using MRf with graph-cut optimization on all cut-outs in the test set, we see that all values
+of β in the range tested improves the overall balanced accuracy of the entire set. When
+applied to individual scenes we mostly see the more uniform segmentations we set out to
+achieve. This is the case for both water and ice. We also see that not all scenes have
+improved, as the value of β in some cases will rather have an entire cut-out predicted as
+containing one class, which is why we see the squares in our segmentations in Figure 41. In
+the cases where the subswath is still being modelled, we could actually end up enhancing
+the eﬀects as seen on Scene 6, which instead worsens the performance. Choosing a lower
+value of β might help getting rid of this eﬀect. It would also help on computation time, as
+higher values of β takes longer for the graph-cut algorithm to calculate. However we will
+stick to the value β = 40, which gave a better result for the overall data, as ﬁnding a lower
+β value, which produces the right trade-oﬀbetween uniform segmentations and absolute
+cut-out classiﬁcation, could prove rather diﬃcult. We save the binary cut-out predictions
+with MRF post-processing from the SegNet25 model along with the HH and HV channel,
+which are to be used in the multilabel classiﬁcation.
+5.8
+Multilabel Classiﬁcation
+Figure 42 illustrates what we achieved so far.
+From the HH and HV channel comes a
+prediction of the binary segmentation. This is updated using MRF with graph-cut opti-
+mization.
+Figure 42: Using HH and HV channel for binary predictions and hereafter MRF for im-
+proving predictions.
+Figure 43: Using HH and HV channel along with binary prediction, we make a multiclass
+prediction.
+This gives us three channels for training a new neural network for prediction of multil-
+abel cut-outs as depicted in Figure 43. We will test if adding this third input will improve
+the performance of the multilabel classiﬁer. Therefore we also test the model performance
+if we only were to use the HH and HV channels as network input. We can recycle much of
+59
+==PAGE:70==
+our SegNet25 network structure used for binary classiﬁcation, but we will have to change
+the number of input and output channels based on the method we choose. Besides training
+networks with two and three inputs, we will also try out two diﬀerent multilabel classiﬁ-
+cation methods. As our ﬁrst method we will use the same RMSE regression principle as
+in the Synthesis Project [3] presented in Section 3. In second method we use soft-max
+regression, which was introduced with Eq. (4) in the MNIST walkthrough. Additionally,
+we will have to test the third output on diﬀerent scales. The binary predictions are saved as
+0’s and 1’s for water and ice respectively, but since HH and HV have been scaled between
+-1 and 1 (see Section 2.2), and we still see values beyond this range, we have to consider
+that they might not work well together with the binary segmentation. Therefore we also
+test the models, where the binary segmentations are given as -1 (water) and 1 (ice), and 0
+(water) and 100 (ice). By testing for diﬀerent scales, we will see whether our models merely
+produce arbitrary results when adding the third input, or if changing the scales will visibly
+impact the ﬁnal segmentation. We have the following eight multilabel classiﬁers:
+• RMSE Regression:
+– No third input.
+– Third input with water as 0 and ice as 1 (0/1).
+– Third input with water as -1 and ice as 1 (-1/1).
+– Third input with water as 0 and ice as 100 (0/100).
+• Soft-max Regression:
+– No third input.
+– Third input with water as 0 and ice as 1 (0/1).
+– Third input with water as -1 and ice as 1 (-1/1).
+– Third input with water as 0 and ice as 100 (0/100).
+5.8.1
+Regression with RMSE Loss
+The root mean squared error is the standard deviation of the residuals, which is a measure
+of how far from the true classiﬁcation we are. It is given as
+LRMSE =
+v
+u
+u
+t 1
+N
+N
+X
+i=1
+( ˆYi −Yi)2.
+(52)
+Our loss function will thus minimize the residuals. We will try to estimate the SICs of
+all 21 classes. The predictions will be a 300 × 300 feature map with one channel containing
+the predicted concentrations between 0% and 100%. We will not use any activation function
+at the end of our networks. In the Synthesis Project we tried to predict the mean SIC of
+a cut-out using the same same technique, but here we aim to predict the individual pixel
+values.
+60
+==PAGE:71==
+5.8.2
+Soft-Max Regression
+We already discussed the Soft-max activation function in Section 4 which is given by Eq.
+(4). We use this activation on the output layer of the network and hereafter compute the
+loss using cross-entropy loss given by Eq. 6. In the MNIST task we had an output neuron
+for each of the 10 classes. That will be the same in this case, except with a segmentation
+task we want the class of each pixel, and should thus have a channel for each class.
+Figure 44: Example of cut-out with ﬁve classes and how these are distributed into ﬁve
+channels.
+Figure 44 illustrates how a true ice chart would be split up into ﬁve channels, had we
+only had ﬁve classes. Each channel has 1’s if the pixel from the true ice chart has the
+respective label and otherwise 0’s. To better compare to the RMSE model, we predict all
+21 classes, and will therefore have an output layer with the dimensions 21 × 300 × 300,
+which will be soft-max activated.
+61
+==PAGE:72==
+6
+Results
+6.1
+Binary Classiﬁcation Summarized
+The ﬁrst task was to ﬁnd a proper binary classiﬁer. We tried diﬀerent sizes of bottlenecks
+in the ﬁrst generation, and found that networks with smaller bottlenecks generally gave
+a better result. In the second generation we tried adding more convolutions per block to
+produce a deeper neural network with a larger receptive ﬁelds. The overall trend showed
+that adding more convolutions per block did not improve the performance of the binary
+classiﬁers, and we so we kept the simpler networks with only one convolution per block.
+We also investigated whether using total variation regularization would help produce more
+uniform segmentations, but had to conclude that no improvement could be spotted with the
+chosen hyperparameter. We ultimately ended up with two networks, which were tweaked
+such that we double the amount of channels every time we downsample and halve them,
+when we upsample.
+Each model was trained for 250 epochs, where we saved the best
+model in each case. With the SegNet25 model we used MRF with graph-cut optimization
+to produce a more uniform segmentation with overall better performance.
+The results
+hereof were afterwards used in a multilabel segmentation.
+6.2
+Multilabel Classiﬁcation Results
+We have now tested two methods for multilabel classiﬁcation. For each method we tested
+four variations. After many attempts with our network, we found that the best model
+usually comes up within the ﬁrst 50 epochs, and thus we train all eight models for 50
+epochs and still extract the best found. Example of trained scenes can be seen in Figure
+45, 46, 47 and 48, which depicts both RMSE regression and soft-max regression models.
+We can already make a clear distinction between the two models, given that the RMSE
+regression has predicted numbers between 0 and 100 for ice concentration and the soft-max
+classiﬁcation have been set to predict one of 21 classes, which was then multiplied by 5 to
+get the SIC. Thus we have a continuous result from our RMSE models, and a discrete result
+from the soft-max models. To better compare both of these, we discretize the results from
+our RMSE models by rounding to nearest 5. However, the results still has the appearance
+of a continuous feature map due to a large number of classes.
+We have earlier talked
+about the eﬀects of the subswaths appearing very clearly in the water regions. These also
+appear in our multilabel classiﬁcations from the RMSE regressions, but can hardly be
+found in the soft-max models. Scene 6 seen in Figure 46 has caused a lot of trouble as the
+subswaths kept being predicted in the binary model. It has also caused some trouble with
+the multilabel segmentation as we can see with the RMSE model, where we actually see
+a dampened eﬀect hereof when including the third input in training. The soft-max model
+on the other hand has done a great job of removing most of the subswath, most notably
+when not including the binary input. Unfortunately, the binary prediction contains the
+subswath and we clearly see how this aﬀect the classiﬁcations with large squares. In the
+soft-max models this means that we have large areas in the water not only being predicted
+as ice, but high concentrations hereof as well. The RMSE models tackles this better by
+predicting low levels of ice, but the eﬀect of including the binary predictions is still visible.
+62
+==PAGE:73==
+Figure 45: Scene 1: Top row: Three network inputs and ice chart. Middle row: Re-
+gression models with RMSE loss function. Bottom row: Soft-max classiﬁcation models
+We have established that including the third input clearly aﬀects the segmentations.
+In situations like the one seen in Figure 47, where there is little information to extract
+from the HH and HV scenes, the binary segmentation input actually helps our soft-max
+model, which had a hard time locating the ice in the scene. This has resulted in a rather
+non-uniform segmentation mostly consisting of water when omitting the third input. Even
+the binary classiﬁer struggled to predict a uniform segmentation, as the information is
+scarce in the HH and HV channels. As a result we see holes in the otherwise uniform
+binary segmentation, which are also visible in the multilabel classiﬁcations. For both the
+RMSE and soft-max models the eﬀects of the binary segmentation are more apparent as
+we increase the span of the scale.
+This is likely due to weights being tuned to ﬁt the
+broader scale. When merely using a 0/1 scale on the soft-max models we ﬁnd that a lot
+of the noise from the HH and HV channels is transferred as well, whereas with the 0/100
+scale we typically see more uniform segmentation, as if it forces the binary segmentation.
+For the RMSE models it is diﬃcult to establish ﬁxed traits of the inclusion of the binary
+segmentation, as we see varying results from scene to scene.
+63
+==PAGE:74==
+Figure 46: Scene 6: RMSE regression vs. Soft-max classiﬁcation
+Figure 47: Scene 7: RMSE regression vs. Soft-max classiﬁcation
+64
+==PAGE:75==
+By only looking at Figure 45, 46 and 47 we could be tempted to think, that the soft-
+max models aren’t able to predict lower concentrations of ice. But Scene 4 in Figure 48
+suggests, that when there is enough information to be extracted from the HH and HV
+input, both methods will do a ﬁne job at predicting the lower SICs. Here we once again
+see that including the third input beneﬁts the model predictions.
+Figure 48: Scene 4: RMSE regression vs. Soft-max classiﬁcation
+65
+==PAGE:76==
+6.3
+Performance on Full Test Set
+We have looked at some of the products of our networks and found clear visual eﬀects
+of including the binary segmentation as a third input.
+Now let us look at the overall
+performance on the test set. We start by looking at the losses during training.
+Figure 49: Loss during 50 epoch training of our four RMSE models.
+Figure 49 shows us the loss from the 50 epoch training sessions of the RMSE models.
+Here the results for the ﬁrst three cases are rather indistinguishable, whereas we see many
+huge ﬂuctuations in the validation data on the 0/100 scale model during the training.
+Figure 50: Loss during 50 epoch training of our four soft-max models.
+Figure 50 display the losses of the four soft-max models. Diﬀerent from the RMSE loss
+session is the shape of the training loss curve. This is likely caused by the batch sizes used
+during training. Since the output of the RMSE models is a single channel and the soft-
+max had 21 channels, there wasn’t enough memory to load the same size batches. For the
+RMSE models we used batch sizes of 128, but only 16 for the soft-max models. Our trainer
+optimizes the model after every batch, which means that the soft-max models have been
+updated roughly eight times more during the ﬁrst epoch compared to the RMSE models.
+The soft-max models validation loss curves are rather stable throughout the training for
+when we use the 0/1 and -1/1 binary segmentations. When omitting it or using the 0/100
+binary segmentation we see more ﬂuctuations in the validation curve.
+66
+==PAGE:77==
+ERMSE
+2 inputs
+3 inputs
+(Water: 0/Ice: 1)
+3 inputs
+(Water: -1/Ice: 1)
+3 inputs
+(Water: 0/Ice: 100)
+RMSE
+19.41
+19.61
+19.93
+20.62
+Soft-max
+28.56
+25.77
+26.14
+27.56
+Table 9: ERMSE of the eight multilabel classiﬁcation models.
+We measure the error for both RMSE and soft-max models using RMSE given by
+Eq. (52), which we call ERMSE. The results seen in both Figure 49 and 50 can also be
+spotted when computing the ERMSE for all cut-outs, which can be seen in Table 9. For
+the RMSE models the ultimate worst performing model is the fourth trained with 0/100
+binary segmentation. The best contender use no third input at all. With our soft-max
+models, we see that all models with the third input does a better classiﬁcation job than the
+model without. Here the 0/1 binary segmentation does the best job. The RMSE models
+classiﬁcations deviates up to four classes (20%) from the true SIC. The soft-max models
+performs worse on this measure, as we see between ﬁve (25%) and six (30%) classes in
+deviation.
+Figure 51: Prediction errors for all 21 classes for all four RMSE models. Errors are given
+as ERMSE for each respective class.
+67
+==PAGE:78==
+Figure 51 shows the means of each predicted class for all four RMSE models. Here
+the errors are the ERMSE computed for each respective class. Each model generally do a
+decent job at predicting the lower SIC classes, as the means are closer to the true values,
+and the errors are relatively low as well. In comparison the higher SIC values tend to have
+larger error spans. The 100% SIC class is on average predicted as being 30-40% lower than
+the truth, whereas the rest is usually no more than 20% oﬀ, which we also saw in Table 9.
+Figure 52: Prediction errors for all 21 classes for all four Soft-max models. Errors are given
+as RMSE for each respective class.
+Similar to Figure 51, Figure 52 also shows predicted mean and errors of each class for
+the soft-max models. Some of the lower SIC mean predictions are closer to the true value
+compared to the RMSE models. For higher classes the predicted means between the two
+methods are rather indistinguishable, except for the 100% SIC class which is predicted as
+roughly 50% for all soft-max models. In addition the errors of each class are much higher
+compared to the RMSE models, which we also saw in Table 9. For the 100% SIC class
+we see RMSE values above 50% indicating that our soft-max models generally predict SIC
+values below 50% for this class. From both Figure 51 and 52 we see no predictions for the
+classes 5% and 25%. This is due to there being no pixels classiﬁed as either in the test set.
+68
+==PAGE:79==
+6.4
+Binariﬁcation of Model Predictions
+Finally we will explore whether our models are better at distinguishing low ice concentra-
+tions (< 10%) from high (≥10%) by binarizing the predictions from all eight models. We
+once more compute F1 score and balanced accuracy for the entire test set, the results of
+which can be seen in Table 10 and 11 respectively.
+F1 Score
+2 inputs
+3 inputs
+(Water: 0/Ice: 1)
+3 inputs
+(Water: -1/Ice: 1)
+3 inputs
+(Water: 0/Ice: 100)
+RMSE
+0.933
+0.940
+0.934
+0.933
+Soft-max
+0.845
+0.876
+0.874
+0.894
+Table 10: F1 scores of the binarized results from the eight multilabel classiﬁcation models.
+Balanced
+Accuracy
+2 inputs
+3 inputs
+(Water: 0/Ice: 1)
+3 inputs
+(Water: -1/Ice: 1)
+3 inputs
+(Water: 0/Ice: 100)
+RMSE
+0.727
+0.825
+0.758
+0.746
+Soft-max
+0.796
+0.853
+0.842
+0.853
+Table 11: Balanced accuracies of the binarized results from the eight multilabel classiﬁca-
+tion models.
+Here we that all the RMSE models has a higher F1 score than the soft-max models,
+but the inverse is the case for the balanced accuracy. If we go back and look at Eq. (41)
+and (43), we see that recall, speciﬁcity and precision is used to compute these performance
+measures. In the F1 score we don’t use true negatives, unlike balanced accuracy where we
+use all elements from the confusion matrix. Therefore when the soft-max models were better
+at predicting the water class, we will see the eﬀects of the true negative in the balanced
+accuracies. The RMSE models on the other hand struggled more to produce a uniform
+segmentation for the lower classes, and thus performs more poorly compared to soft-max.
+The RMSE models did better with the F1 score, and when we look closer into it, we see
+that the RMSE models on average have a higher recall than the soft-max models. This
+means that our soft-max models generally predicts more false negatives (water predictions
+that should have been ice) per true positive (true ice predicted as ice). It would therefore
+seem that our soft-max models has a tendency to predict more water than is actually found
+in the ice charts. The performance measures in above tables indicates that including the
+third input in the form of a binary segmentation split up at 10%, will help improve the
+ability of the networks to separate low and high SIC values, as all models with a third
+input performs better or as good as the corresponding model without.
+69
+==PAGE:80==
+7
+Discussion
+7.1
+Binary Classiﬁcation
+We initially did binary classiﬁcation, where we split up our data at 10% SIC, such that
+concentrations below would be classiﬁed as water and above as ice. We tested oﬀa variety
+of network architectures and found the best to be a SegNet structure with a bottleneck of
+25 × 25. The loss curves of this model and a similar less deep version with a bottleneck of
+50 × 50 can be seen in Figure 32. It is normal to see the model performing better on the
+training data compared to validation and test set, since the model parameters is adjusted
+according to the training set. But in this case we see a rather large deviation, which would
+indicate that our models are overﬁtting the training data. This means that our models
+are adapting so much to the speciﬁc training data, that it is not able to recognize patterns
+that are shared across all data (training, validation and test). A potential way to ﬁx this
+could be through more regularization or more training data. In our SegNet25 network
+we have a total 195,025 trainable parameters compared to the approximately 50,000 data
+points, and it would therefore be preferred if we included more data.
+However we are
+limited both on new data and space to store it. Alternatively we could resample the saved
+data several times to reach a total of data points above our number of parameters. The
+downside hereof is that we would be recycling the same data several times (even more for
+the minority classes we oversampled). Therefore more regularization is perhaps a better
+solution for our problem. For training both SegNet50 and SegNet25 we used a batch size
+of 128 during training, but as presented in Section 4.7.2, using a smaller batch size could
+help regularize the model. Figure 50 actually shows the loss curves from models trained
+with a batch size of 16 only, but the results indicate that the best model is found very
+early during training, and then doesn’t improve substantially for validation or test. Then
+we could have gone further in depth with the total variation, and tested diﬀerent values of
+λ to add more regularization. In second generation of networks we tested λ = 0.1, which
+didn’t have any signiﬁcant eﬀect on the results. At last we could change the percentage
+of dropouts we use per block, as 20% might not be enough in a network with this many
+parameters compared to the training data. These are just the regularization methods we
+have tried out, but there are of course many other ways to regularize. More data could for
+example be introduced by augmentation of preexisting data such as rotation, or data could
+be split up into smaller cut-outs.
+In the part about binary segmentation we tried many diﬀerent network structures,
+which were omitted at later generations. These could potentially have produced better
+results had we just saved the best model from each training session, trained for longer or
+used the improved sampled data seen later in the process. As a deep learning problem can
+be complex, it is likely that the deeper networks seen in second generation would have per-
+formed a lot better than what we ultimately saw under the aforementioned circumstances.
+But as we have just discussed, with a deeper network comes more parameters, and we
+would therefore need more regularization or more data (or both) if we were to make use of
+the networks with two or three convolutions per block.
+70
+==PAGE:81==
+A recurring problem in both the binary and multilabel classiﬁcation is the prediction of
+subwaths. If we use our binary predictions as a third input in the multilabel classiﬁcation,
+it is essential that our model knows to classify these areas over water as water. To solve
+this problem we could use soft-max classiﬁcation like we did in the multilabel section, as
+this proved to do a good job of eliminating the subswaths (see Section 6.2). Unfortunately
+we also saw that the soft-max models had a tendency to predict water more often in areas
+of ice, but with a binary training set, we might see better results.
+The sigmoid activated network output from SegNet25 still had some noise, which we
+tried to ﬁx by using MRF. We generally saw improvement in all parameters when doing
+this, but often we would end up with large squares in the segmentations. This is likely the
+result of a high β value, where it would be least costly to have an entire cut-out belong to
+one class. Though this overall helps improve the F1 score and balanced accuracy, we would
+also see larger areas with a lot of noise being misclassiﬁed. This eﬀect is most clearly seen
+when our model predicts the subswath over water as being ice. To meet this problem we
+could use a lower value of β, as all tested values improved the overall balanced accuracy.
+When visualize larger scenes we extract a cut-out, feed it through a model, denoise it using
+MRF with grap-cuts and then put it back where we extracted it. If we ﬁrst applied the
+MRF denoising after patching the predicted scene together, we would avoid seeing these
+squares in our scene visualizations. However, this takes a very long time for low β values,
+and might take hours for a single scene if we use β = 40. Alternatively, we could ﬁrst
+distribute each pixel to its closest class mean like with the one-clique potentials. Hereafter
+we could apply a morphological ﬁlter, e.g. a majority vote ﬁlter, to ”patch up” where the
+noise isn’t too dominant.
+7.2
+Multilabel Classiﬁcation
+With the binary prediction from the SegNet25 network, we tried out two diﬀerent methods
+for multilabel classiﬁcation. For each method we had a model, where we didn’t include the
+binary predictions as a third input and then three models where we tested the third input
+on diﬀerent scales (0/1, −1/1 and 0/100). When we look at the visual representations
+given by the scenes in Section 6.2, we clearly see that the inclusion of the third input has a
+visual impact. This is especially clear in Scene 6 and 7, where the squares from the binary
+segmentations are visible in both the RMSE and Soft-max models. For both methods this
+has improved each respective models ability to distinguish values below and above 10%
+SIC. However, when we investigated each models performance on the individual classes
+(see Figure 51 and 52), we found that not a single pixel in the test set had a true SIC of
+5% or 25%, and since the 5% is half of the water class when binarized, this could give a
+false impression of the performance of each model.
+In Figure 51 and 52 we also see that the soft-max models has a larger error than the
+RMSE models, which was apparent already in Table 9. The Soft-max models misclassify
+71
+==PAGE:82==
+with up to two classes more than the RMSE models, which is very likely contributed to
+the way we predict. With the RMSE models we have a continuous function able to pre-
+dict in between the ﬁxed classes, after which it is discretized by rounding to nearest class,
+allowing for more freedom of uncertainty for the model. If it couldn’t decide between two
+neighbouring classes, then the RMSE models have the luxury of predicting a value between
+the two classes, giving a lower error. The soft-max model predict one of 21 classes, which
+are separated by an interval of 5. Therefore if the Soft-max model is uncertain of a class,
+it would instead misclassify with a starting point of 5% error.
+With both the RMSE and soft-max models we predict one of 21 classes per pixel, which
+are values from 0% to 100% separated with an interval of 5%. We can thus describe the
+pixels as being variables on an interval scale as there is an ordering of the data, meaning
+that the class 0% is lower than 5%, which again is lower than 10%, and we could keep
+going all the way up to 100% [47]. However, when our soft-max models predict the SIC
+of a pixel, we’re given the probability of it belonging to a certain class. We then pick the
+class deemed most probable, which would ignore the principle of the interval scale, as each
+class is instead treated as a category.
+As a model structure we simply copied the same architecture found in the SegNet25
+model we used for binary classiﬁcation. Though it overall seems to work ﬁne, multilabel
+classiﬁcation is a more complex tasks than binary classiﬁcation. It would therefore seem
+valid to suggest that a more extensive model would produce better results, as having more
+neurons would mean more parameters to train. Our model might then be better at rec-
+ognizing some of the more complex patterns in the input data needed for a multilabel
+classiﬁcation. The SegNet25 model was chosen as it was already established to perform
+better at binary segmentation, and we wanted the multilabel segmentation to focus more
+on testing whether involving a third input in the models would improve the results seen.
+In Table 9 we saw that the RMSE regression models didn’t beneﬁt from the having the
+third input, which all had an overall worse performance, except for when the predictions
+were binarized. This is likely due to the extra input helping to lower the eﬀect of the
+subswaths over water. For the Soft-max model we only see improvements after including a
+third input. This goes for both ERMSE and the binary classiﬁcation metrics. In Section 6
+on Results, we could establish, that models with a lower recall would predict ice as water
+more often. This is seen very clearly for the soft-max model with only two inputs in both
+Figure 45 and 47, where the information in the HH and HV channels were rather sparse,
+and as a result we see large areas of ice predicted as water. This problem is dampened
+when we include the third input, as the binary segmentation seemingly serves as a guide
+to the model for where we see ice and water. Therefore we also see these square holes in
+the ice areas originating in the predicted binary segmentation. The RMSE models handles
+the sparse information from the input data better, but when we introduce the third input
+with large square holes, it forces our models to wrongfully predict lower SIC within the
+ice, thus increasing the ERMSE. The eﬀects of the diﬀerent scales can be rather diﬃcult
+72
+==PAGE:83==
+to determine when just looking the RMSE models.
+We see a lot of the patterns from
+the original HH and HV channels in the predicted scenes, and the results come oﬀrather
+arbitrary. On the soft-max models we can more easily distinguish the eﬀects. For the
+0/1 and −1/1 Soft-max models we see some of the original noisy patterns from the input
+data, whereas for the 0/100 model we usually have very uniform segmentations. We also
+notice that the soft-max models rarely predicts low SIC near the ice edges. This goes for
+both the models with two and three inputs. This is yet another point where our RMSE
+models proves better than than the soft-max models. In the soft-max models, where we
+use the binary segmentation, we generally only see high ice concentrations. So if our binary
+prediction input forces the model to predict high SIC values we have another source of the
+high ERMSE values seen in Table 9.
+8
+Conclusion
+In this project we have been using CNN’s with diﬀerent architectures to see if we could
+predict the location of water and ice around the shores of Greenland, as well as the concen-
+trations of the found ice. We had data from the Sentinel-1 mission at our disposal for this
+project, where we used the HH and HV channels. This was a project split into two major
+parts. First we investigated what network structures would be the best for working with
+the given satellite data. We designed several CNN’s for binary classiﬁcation using a sigmoid
+activation of the network output and the BCE loss function. The results showed us that
+simpler networks produced the best binary segmentations of our satellite data. We also saw
+that increasing the receptive ﬁeld of our models would help improve the performance of our
+models, as long as these ﬁelds didn’t get too large. We ultimately ended up choosing the
+SegNet25 model to perform our ﬁnal binary segmentations to be used in second part of the
+project. These predictions were improved using MRF with graph-cut optimization, which
+decreased the noise of the segmentations. As an early alternative to this post-processing
+of data, we tried implementing total variation in our loss function, but the value of the
+regularization parameter made this method impactless on the segmentations.
+In the second part we checked whether using the binary segmentations, which we pre-
+dicted in the ﬁrst part, would improve the performance of our CNN’s. This was done by
+training both a model with this third input and without. Thus we would have a model,
+which only took in the HH and HV channels as input data, and a model which also took
+in the binary segmentation along with the other two inputs. To see if the results achieved
+from doing this would just be arbitrarily generated or if there was actually some connection
+between the scale used on the binary predictions, we tested three diﬀerent scales. 0/1 was
+the original output produced, −1/1 corresponded to the scaling of the satellite data and
+0/100 to see what eﬀects drastically extending the scaling would have. This was tested for
+both RMSE regression models and soft-max regression. For the RMSE models we saw that
+including the third input would worsen the overall ERMSE of all three cases, thus the best
+performing model only used the satellite data as input. The soft-max models generally
+performed worse, as the ERMSE for the entire data set as well as the individual classes
+73
+==PAGE:84==
+was signiﬁcantly higher than the RMSE models. However, when the predicted multilabel
+segmentations was binarized we saw that including the third input helped both methods
+distinguish between water (< 10%) and ice (≥10%). The RMSE models had the highest
+F1 scores, telling us that they were generally better at predicting the ice class, whereas
+the soft-max models had higher balanced accuracies, meaning they where better at bal-
+ancing the prediction of both water and ice. If we wanted to produce a proper multilabel
+segmentation of our scenes, we would get the best results from one of the RMSE models.
+However, if we wanted to produce a proper distinction between water and ice, one of the
+soft-max models with a third input, would give the best results. The RMSE model with
+the 0/1 scaled binary segmentation input would give us the best balance between both of
+these criteria.
+Though we saw some rather promising results for both the binary and multilabel clas-
+siﬁcations, there is still room for improvement.
+It would be worth to return and look
+into some of the earlier networks used. Here we’re thinking about both the CNN’s with
+more convolutions per block from the second generation, but also the abandoned U-Net
+architecture brieﬂy used in the ﬁrst generation. In both the binary and multilabel we saw
+indications of training data overﬁt. To ﬁx this we should therefore include more data and
+regularization in future experiments. More data could be achieved by ﬁrst of all sampling
+more cut-outs from each chunk. We could also use data augmentation such as rotation of
+cut-outs or we could include data from other areas of the world, for example the Gulf of
+Saint Lawrence, which was used in the article that inspired this project.
+74
+==PAGE:85==
+References
+[1] European Space Agency (ESA). Instrument payload, Accessed: 05/06-2020. https:
+//sentinel.esa.int/web/sentinel/missions/sentinel-1/instrument-payload.
+[2] Vedrana Dahl and Anders Dahl. Markov Random Fields Lecture. For DTU Course
+02506 Advanced Image Analysis, March 2019.
+[3] Anders Richard Pankoke Holm. Asip synthesis project - 30220 - predicting sea ice
+concentrations with deep learning, 24/01-2020. Synthesis Project on which this
+Masters Project is built.
+[4] European Space Agency (ESA). Sentinel missions, Accessed: 05/06-2020. http:
+//www.esa.int/Applications/Observing_the_Earth/Copernicus/Overview4.
+[5] European Space Agency (ESA). Heritage, Accessed: 05/06-2020.
+https://sentinel.esa.int/web/sentinel/missions/sentinel-1/heritage.
+[6] European Space Agency (ESA). Sentinel-1, Accessed: 05/06-2020.
+https://sentinel.esa.int/web/sentinel/missions/sentinel-1.
+[7] ASIP team. ASIP Sea Ice Data Set, User Manual, June 2019.
+[8] K. Andrea Scott & David A. Clausi Lei Wang. Sea Ice Concentration Estimation
+during Freeze-Up from SAR Imagery Using a Convolutional Neural Network. MDPI,
+April 2017.
+[9] Lei Wang. Learning to estimate sea ice concentration from sar imagery, 2016. Thesis
+for degree of Doctor of Philisophy in Systems Design Engineering.
+[10] Yan Xu and K. Andrea Scott. Impact of intermediate ice concentration training data
+on sea ice concentration estimates from a convolutional neural network.
+INTERNATIONAL JOURNAL OF REMOTE SENSING, December 2018.
+[11] Norwegian Polar Institute. The marginal ice zone, Accessed: 19/06-2020.
+https://www.npolar.no/en/themes/the-marginal-ice-zone/.
+[12] Haohan Wang & Bhiksha Raj. On the Origin of Deep Learning, March 2017.
+https://arxiv.org/pdf/1702.07800.pdf.
+[13] Unknown. Artiﬁcial Neural Networks, Accessed: 16/12-2019. http:
+//www2.psych.utoronto.ca/users/reingold/courses/ai/cache/neural4.html.
+[14] PyTorch. PyTorch Homepage, Accessed: 08/06-2020. https://pytorch.org/.
+[15] MATLAB. Introduction to Deep Learning: Machine Learning vs Deep Learning,
+April 2019. https://www.youtube.com/watch?v=-SgkLEuhfbg.
+[16] Anders Bjorholm Dahl. Neural Networks. For DTU Course 02506, Advanced Image
+Analysis, March 2019.
+75
+==PAGE:86==
+[17] 3Blue1Brown (Youtube Channel). Youtube Series: Neural Networks, Last updated:
+August 2018. https:
+//www.youtube.com/playlist?list=PLZHQObOWTQDNU6R1_67000Dx_ZCJB-3pi.
+[18] Harshit Kumar. Autoencoder: Downsampling and Upsampling, 15/02-2019.
+https://kharshit.github.io/blog/2019/02/15/autoencoder-downsampling-
+and-upsampling.
+[19] Anders Bjorholm Dahl. Convolutional Neural Networks. For DTU Course 02506,
+Advanced Image Analysis, April 2019.
+[20] Ian Goodfellow, Yoshua Bengio, and Aaron Courville. Deep Learning. MIT Press,
+2016. http://www.deeplearningbook.org.
+[21] Janus Nørtoft Jensen. Optimization. For DTU Course Deep Learning in Computer
+Vision, June 2019.
+[22] D. Randall Wilson & Tony R. Martinez. The general ineﬃciency of batch training
+for gradient descent learning. Elsevier, April 2003.
+http://axon.cs.byu.edu/papers/Wilson.nn03.batch.pdf.
+[23] Wikipedia. Total variation denoising, Last edited: 29/03-2020.
+https://en.wikipedia.org/wiki/Total_variation_denoising.
+[24] Leonid I. Rudin, Stanley Osher, and Emad Fatemi. Nonlinear total variation based
+noise removal algorithms, 1992. http://citeseerx.ist.psu.edu/viewdoc/
+download?doi=10.1.1.117.1675&rep=rep1&type=pdf.
+[25] Vania V. Estrela, Hermes A. Magalh˜aes, and Osamu Saotome. Total variation
+applications in computer vision, 2016.
+https://arxiv.org/ftp/arxiv/papers/1603/1603.09599.pdf.
+[26] Pedro M. Ferreira, Filipe Marques, Jaime S. Cardoso, and Ana Rebelo. Physiological
+inspired deep neural networks for emotion recognition, 07/10-2018.
+https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=8472816&tag=1.
+[27] Vijay Badrinarayanan, Alex Kendall, and Roberto Cipolla. Segnet: A deep
+convolutional encoder-decoder architecture for image segmentation, 10/10-2016.
+[28] Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U-net: Convolutional
+networks for biomedical image segmentation, 18/05-2015.
+[29] Andr´e Araujo, Wade Norris, and Jack Sim. Computing receptive ﬁelds of
+convolutional neural networks. Distill, 2019.
+https://distill.pub/2019/computing-receptive-ﬁelds.
+[30] Dang Ha The Hien. A guide to receptive ﬁeld arithmetic for convolutional neural
+networks, 05/04-2017. https://medium.com/mlreview/a-guide-to-receptive-
+field-arithmetic-for-convolutional-neural-networks-e0f514068807.
+76
+==PAGE:87==
+[31] Dennis Aumiller. Answers to questions on ”fully convolutional network receptive
+ﬁeld”, 06/08-2018. https://stackoverflow.com/questions/51704012/fully-
+convolutional-network-receptive-field.
+[32] Wenjie Luo, Yujia Li, Raquel Urtasun, and Richard Zemel. Understanding the
+eﬀective receptive ﬁeld in deep convolutional neural networks, 2016.
+http://www.cs.toronto.edu/~wenjie/papers/nips16/top.pdf.
+[33] M. Croier and L. D. Griﬃn. Using Basic Image Features for Texture Classiﬁcation.
+Springer Science + Business Media, January 2010.
+[34] Vedrana Dahl and Anders Dahl. Advanced Image Analysis - Course Note. For DTU
+Course 02506 Advanced Image Analysis, March 2019.
+[35] Daniel Gordoy. Understanding binary cross-entropy / log loss: a visual explanation,
+21/11-2018. https://towardsdatascience.com/understanding-binary-cross-
+entropy-log-loss-a-visual-explanation-a3ac6025181a.
+[36] The TensorFlow Authors. Sigmoid cross-entropy with logits (for tensorﬂow), 2015.
+https://www.tensorflow.org/api_docs/python/tf/nn/sigmoid_cross_entropy_
+with_logits.
+[37] Kevin Markham dataschool.io. Image segmentation loss: Iou vs dice coeﬃcient,
+25/03-2014. https://www.dataschool.io/simple-guide-to-confusion-matrix-
+terminology/.
+[38] Wikipedia. Confusion matrix, Last edited: 01/05-2020.
+https://en.wikipedia.org/wiki/Confusion_matrix.
+[39] Youtube Channel: SmartAlpha AI. Image segmentation loss: Iou vs dice coeﬃcient,
+07/11-2019. https://www.youtube.com/watch?v=AZr64OxshLo.
+[40] Wikipedia. Sørensen–dice coeﬃcient, Last edited: 24/02-2020.
+https://en.wikipedia.org/wiki/S%C3%B8rensen%E2%80%93Dice_coefficient.
+[41] Wikipedia. F1 score, Last edited: 10/04-2020.
+https://en.wikipedia.org/wiki/F1_score.
+[42] Kenneth Tay. What is balanced accuracy?, 23/01-2020.
+https://statisticaloddsandends.wordpress.com/2020/01/23/what-is-
+balanced-accuracy/.
+[43] Peter Cliﬀord. Markov random ﬁelds in statistics. Oxford University Press, 1990.
+Grimmett, G. R.; Welsh, D. J. A. (eds.), Disorder in Physical Systems: A Volume in
+Honour of John M. Hammersley.
+[44] Stan Z. Li. Markov Random Field Modeling in Image Analysis. Springer, 2009.
+77
+==PAGE:88==
+[45] Vladimir Kolmogorov. Pymaxﬂow documentation, Accessed: 25/05-2020.
+http://pmneila.github.io/PyMaxflow/index.html#boykov04.
+[46] Yuri Boykov and Vladimir Kolmogorov. An Experimental Comparison of
+Min-Cut/Max-Flow Algorithms for Energy Minimization in Vision. Oxford
+University Press, 2004. https://www.csd.uwo.ca/~yboykov/Papers/pami04.pdf.
+[47] GraphPad. What is the diﬀerence between ordinal, interval and ratio variables? why
+should i care?, October 2019.
+https://www.graphpad.com/support/faq/what-is-the-difference-between-
+ordinal-interval-and-ratio-variables-why-should-i-care/.
+78
+==PAGE:89==
+Appendices
+Appendix A - Scripts used for the ASIP Master Project
+The following scripts were used to produce the ﬁnal products seen in the report, and thus
+serves as cleaned up ﬁnal versions of all the code used throughout the project. The scripts
+are Jupyter notebooks containing both functions, neural networks, model trainers and much
+more. The scripts can be found in the zip-ﬁle alongside the report.
+ASIP 000 asip functions
+Contains all the functions that are used repeatedly throughout the code in other scripts.
+These functions include:
+• mrf graph cut: With the probability map produced by our binary classiﬁers, class
+means from our training data and a chosen β values, we use Vladimir Kolmogorov’s
+Graph-cut algorithm to produce uniform segmentations.
+• conf mat bi & conf mat multi: Produces the confusion matrix for binary and
+multilabel segmentations respectively using the binary predictions and the binarized
+ice charts.
+• accuracy bi, balanced accuracy bi, IoU bi, dice bi & f1 bi: Computes accu-
+racy, balanced accuracy, intersection over union, dice coeﬃcient and F1 score respec-
+tively using the confusion matrix obtained using conf mat bi.
+• sizeof fmt: Used to display the size of all variables in memory. Code supplied by
+Fred Cirera in a stackoverflow.com thread. Link found in code.
+• print time: With a time span given in seconds this function will print time given
+in hours, minutes and second. Used to keep track of run time during training.
+• stats: Prints type, maximum and minimum value, and shape (dimensions) of either
+numpy array or PyTorch tensor.
+• color bar: Produces nice color bars for our plots.
+• ﬁnd closest: Rounds array to nearest value which is a multiple of a given value. This
+is used when we binarize data or when we discretize our RMSE model predictions by
+rounding to nearest 5.
+• compute receptive ﬁeld Takes in operational parameters for e.g. convolutions or
+max-pooling as well as the input data dimensions and compute the development of
+receptive ﬁeld, jump and feature map for each operation. For more information see
+section 4.9 on receptive ﬁelds. Given the shown parameters the function will print
+the following output when prints=True.
+79
+==PAGE:90==
+• norm shape & sliding window: Functions provided by David Malmgren-Hansen
+for extracting cut-outs from larger scenes.
+• rmse loss, bce loss, bce total variation & ce loss: The Root Mean Square
+Error (RMSE) loss, Binary Cross-Entropy (BCE) loss, BCE with total variation
+implementation and Cross-Entropy (CE) loss respectively.
+These are used during
+training of neural networks.
+• S1 scene load: Given the name of a scene, will load HH and HV channels as well
+as ice chart of the respective scene.
+• data loader binary, data loader multi softmax 21classes &
+data loader multi regression: Data loaders used to retrieve cut-outs during train-
+ing from the destination where the cut-out ﬁles are saved. Together with the DataLoader
+function in the PyTorch package, the cut-outs will be randomly sampled in batches
+of chosen size and converted to tensors.
+80
+==PAGE:91==
+ASIP 001 neural networks
+Contains the CNNs used throughout this project. These are imported into other Jupyter
+notebooks whenever we are training a model. Hence name and location of the notebooks
+from which we imported the networks must remain the same after training. If they aren’t
+we wont be able to load the model for later testing.
+ASIP 002 data unpack binary multiclass
+Creates paths in which we save all the training, validation and test data for both the
+binary and multilabel classiﬁcation as described in the report. The data is sampled from
+all 29 chunks of cut-outs. This is the destination from which the data loaders collect the
+respective data.
+ASIP 003 training binary classiﬁer
+Training the binary classiﬁers for the third generation of CNNs.
+ASIP 004 mrf with graph cuts post processing
+Testing diﬀerent values of β on diﬀerent binary classiﬁers, as well as testing which β values
+provides the best binary segmentations.
+ASIP 005 testing models on scenes with mrf beta 10
+Testing the chosen binary classiﬁer with MRF with Graph-cuts using β = 10 by predicting
+test scenes.
+ASIP 005 testing models on scenes with mrf beta 40
+Testing the chosen binary classiﬁer with MRF with Graph-cuts using β = 40 by predicting
+test scenes.
+ASIP 006 saving predictions to multilabel data set
+Using the best β value for MRF, we predict all cut-outs in the multilabel data sets and
+save them with the binary predictions to the same destination.
+ASIP 007 training multiclass classiﬁer diﬀerent scale 3rd input
+Training multilabel classiﬁers for diﬀerent scales of binary input (−1/1 and 0/100) for both
+RMSE and Soft-max models.
+ASIP 007 training multiclass classiﬁer rmse
+Training multilabel classiﬁer for RMSE models with binary input of 0/1 scale and without
+third input.
+ASIP 007 training multiclass classiﬁer softmax
+Training multilabel classiﬁer for Soft-max models with binary input of 0/1 scale and without
+third input.
+81
+==PAGE:92==
+ASIP 008 testing multiclass classiﬁers
+Testing all eight trained multilabel models by predicting test scenes. We then compare the
+scenes visually.
+ASIP 009 performance meassures
+Computes performance meassures for the multilabel classiﬁcations.
+ASIP 010 ﬁgure generator
+Script using for producing nice ﬁgures for use in report.
+ASIP 011 testing ﬁrst generation models
+Testing the ﬁrst generation of CNNs by visualizing predictions and computing performance
+measures for binary segmentations.
+ASIP 012 testing ﬁrst generation models
+Testing the second generation of CNNs by visualizing predictions and computing perfor-
+mance measures for binary segmentations.
+ASIP 013 testing second generation models
+More testing of third generation models. Mostly used for producing ﬁgures for report.
+ASIP 014 testing multilabel classiﬁers
+More testing of multilabel classiﬁers. Mostly used for producing ﬁgures and performance
+measures for report.
+ASIP 015 receptive ﬁelds
+Computes and prints all receptive ﬁelds of all networks used throughout report.
+82
+==PAGE:93==
+Appendix B - Convolutional Neural Networks
+First Generation
+83
+==PAGE:94==
+84
+==PAGE:95==
+85
+==PAGE:96==
+86
+==PAGE:97==
+87
+==PAGE:98==
+Second Generation
+88
+==PAGE:99==
+89
+==PAGE:100==
+90
+==PAGE:101==
+Third Generation
+91
+==PAGE:102==
+Multilabel Classiﬁcation Network
+92
+==PAGE:103==
+DTU Space 
+National Space Institute 
+Technical University of Denmark  
+ 
+Building 348, 1st Floor, Ørsteds Plads, 2800 Kongens 
+Lyngby 
+DK - 2800 Kgs. Lyngby 
+Tel. (+45) 45 25 57 00 
+Fax (+45) 45 93 16 34 
+ 
+www.space.dtu.dk 

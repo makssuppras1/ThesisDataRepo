@@ -1,0 +1,1633 @@
+==PAGE:1==
+Learning and Generalizing Polynomials in Simulation
+Metamodeling
+Jesper Hauch
+DTU Management
+Technical University of Denmark
+2800 Kgs. Lyngby, Denmark
+Abstract
+The ability to learn polynomials and generalize out-of-distribution is essential
+for simulation metamodels in many disciplines of engineering, where the time
+step updates are described by polynomials. While feed forward neural networks
+can fit any function, they cannot generalize out-of-distribution for higher-order
+polynomials. Therefore, this paper collects and proposes multiplicative neural
+network (MNN) architectures that are used as recursive building blocks for approx-
+imating higher-order polynomials. Our experiments show that MNNs are better
+than baseline models at generalizing, and their performance in validation is true to
+their performance in out-of-distribution tests. In addition to MNN architectures, a
+simulation metamodeling approach is proposed for simulations with polynomial
+time step updates. For these simulations, simulating a time interval can be per-
+formed in fewer steps by increasing the step size, which entails approximating
+higher-order polynomials. While our approach is compatible with any simulation
+with polynomial time step updates, a demonstration is shown for an epidemiology
+simulation model, which also shows the inductive bias in MNNs for learning and
+generalizing higher-order polynomials.
+1
+Introduction
+Inductive learning is a fundamental task of machine learning models describing the process where pat-
+terns are induced from data. In the field of machine learning, multilayer feed forward neural networks
+(FFNNs) have been shown to be powerful inductive learners, as they are universal approximators
+capable of approximating any measurable function to any desired degree of accuracy [16]. However,
+the high flexibility of neural networks makes them prone to overfitting the data on which they are
+trained, indicating that they cannot properly generalize to unseen data. There exist approaches to
+avoid overfitting during training [40], but even when these are successfully applied, models can
+still struggle to generalize to unseen data, especially when the unseen data come from a different
+distribution than the training data. In this case, additional biases are critical for neural networks to
+generalize, since an unbiased program, which uses training data as its only source of information,
+cannot outperform programs that use rote learning [30]. To enable neural networks to generalize to
+unseen out-of-distribution data, inductive biases can be introduced by making reasonable assumptions
+about the underlying patterns of the data on which induction is performed.
+Inductive learning is closely related to how progress is made in the field of natural sciences, where
+empirical evidence from experimentation and observation is used to understand the world. More
+specifically, the aim is to understand a process and its underlying mechanisms to model the outcome
+in different situations, for example, using simulation. Simulation models are a popular tool for
+exploring the behavior of a process over time, given a set of parameters and state variables. The
+state variables describe the state of the process at some given time step, and their behavior over time
+are expressed as differential equations in many disciplines of engineering. As a result, a simulation
+==PAGE:2==
+(a) In and out-of-distribution performance for
+f(x) = x + 1.
+(b) In and out-of-distribution performance for
+f(x) = x2 −x.
+Figure 1: Multilayer FFNN with ReLU activation learning low-order polynomials with samples from
+N(0, 1) distribution.
+run is performed by solving the system of differential equations that describes the process [25].
+Unfortunately, solving this system for high-complexity processes can be computationally expensive
+to an extent that renders simulation almost useless in practice. An approach to this problem is to
+use metamodeling, where a simpler mathematical model is introduced to approximate the behavior
+induced by the differential equations of the computationally expensive simulation model. In discrete
+event simulation, these differential equations can be expressed as polynomials that relate the current
+values of state variables to the past values. The order of these polynomials is determined by the
+number of discrete time steps that are approximated at a time, where approximating multiple time
+steps entails approximating higher-order polynomials. Therefore, a simulation metamodel should
+be able to approximate both low- and high-order polynomials to be successful in many engineering
+applications. Neural networks are popular metamodels for this purpose, as FFNNs should be able to
+approximate any function if enough neurons and layers are used [16].
+As an example, consider the two simple low-order polynomial functions f(x) = x + 1 and f(x) =
+x2 −x. These polynomials are approximated using a multilayer FFNN with ReLU activation that
+learns from samples drawn from a conditional standard normal distribution. If the multilayer FFNN
+has learned the underlying polynomials, it should be able to generalize to samples outside of the
+training distribution. The polynomial f(x) = x + 1 is closely approximated within the training
+distribution, as seen in Figure 1a by the near perfect fit between the lines in the red area. As samples
+further away from the training distribution are used, the error between the true values and predictions
+starts to grow but remains relatively low. Likewise, for the quadratic polynomial f(x) = x2 −x in
+Figure 1b, the fit is also near perfect within the training distribution, but errors begin to occur as soon
+as samples outside the training distribution are used. When samples are used that lie even further
+away from the training distribution, the error between the true values and predictions is large.
+The example shows that FFNNs, which are architectures without inductive biases, can learn polyno-
+mials in-distribution but struggle with out-of-distribution generalization, especially for polynomials
+of second-order. It is reasonable to assume that the polynomials describing real-world processes are
+much more complex than the simple ones in the example, which implies that FFNNs perform even
+worse when modeling these processes out-of-distribution. Therefore, in this thesis, we focus on the
+development of neural network simulation metamodels that can learn polynomials and generalize
+out-of-distribution. The following contributions are made:
+• Collect and repurpose multiplicative neural network (MNN) architectures, which are building
+blocks that can be used recursively to model polynomials of arbitrary order. This thesis
+proposes the PDCLow architecture based on MNNs in the literature.
+• Performance evaluation is done out-of-distribution from the training distribution to test
+whether MNNs are able to generalize. Across all experiments, MNNs outperform baseline
+models in out-of-distribution tests, and their performance in validation is true to their
+performance in out-of-distribution tests.
+2
+==PAGE:3==
+• A novel metamodeling approach for discrete event simulations with time step updates
+described by polynomials. The approach is demonstrated in this work for an epidemiology
+simulation model.
+• The code is available for open source use at https://github.com/jesperhauch/
+polynomial_deep_learning.
+The remaining sections of the paper are structured as follows. In Section 2, the relevant literature is
+reviewed. Section 3 describes how higher-order outputs can be produced for polynomial learning
+and presents the proposed simulation metamodeling approach. The experimental setup and the
+experiments themselves are thoroughly described in Section 4, while their results are evaluated in
+Section 5 with an emphasis on out-of-distribution generalization. Limitations and ideas for future
+work are discussed in Section 6 before the paper is concluded in Section 7.
+2
+Literature Review
+This section reviews the literature on simulation metamodeling and the literature that bridges the
+gap between neural networks and polynomials. The first section describes the machine learning
+models used in the metamodeling literature, where emphasis is placed on their generalization
+capabilities. Some of this literature is implicitly concerned with polynomial fitting, which creates a
+natural transition to the second section that focuses solely on approaches that explicitly approximate
+polynomials. The final section explains the development and use of polynomial neural networks.
+2.1
+Machine learning metamodels
+This section reviews the use of machine learning models that approximate the input-to-output
+function of simulators, also known as simulation metamodels. Focus is placed on the advantages and
+disadvantages of using certain machine learning models for metamodeling, especially in terms of
+their out-of-distribution generalization capabilities.
+Random Forest (RF) is a machine learning model that generates a set of decision trees to make a
+prediction collectively. They are capable of fitting non-linear data using a small number of samples,
+which can be useful when only a limited amount of data from the simulator is available [9]. Diverse
+applications have seen RF act as a decision support in design optimization [9, 34] and as predictors of
+soil emissions [28] and drainage fraction in water resource management [2]. RF models are powerful
+but can be computationally expensive to train, depending on the size of the ensemble and the depth
+of the decision trees. Furthermore, RF models can be undesirable for metamodeling, as they do not
+generalize well beyond training data if testing is performed out-of-distribution [2].
+The lack of generalization capabilities is also a problem for Bayesian networks, despite the widespread
+assumption that they are good at out-of-distribution detection [8]. Nevertheless, Bayesian networks
+have been applied in metamodeling with great success in terms of interpretability and computational
+efficiency. In discrete event simulation, Bayesian networks can track the probability distribution of
+the simulation state over the duration of the simulation. This enables in-depth analysis in individual
+time steps and what-if analyzes, where state variables can be fixed in a certain time step to investigate
+their influence [35]. Although Bayesian networks are highly interpretable models, implementing
+them successfully can be tedious. Their structure is determined by the cause-effect relationship
+between variables, which is difficult to assess for complex processes [39], and cyclical relationships
+between variables cannot be dealt with [19]. These factors, among others, result in Bayesian networks
+not being commonly used for metamodeling.
+A common machine learning metamodel is the Gaussian process, which is also referred to as a
+kriging model in the literature. Ordinary kriging can be applied in deterministic simulation [24], but
+extensions have enabled applications in stochastic simulation [1]. Unfortunately, kriging models scale
+poorly, since an unknown correlation function has to be approximated with maximum likelihood
+estimation [24]. As a result, the number of input variables and the amount of training data must be
+low to reduce the computation time. Although the latter is an acceptable limitation in metamodeling
+(due to often slow simulation tools), the number of input variables may need to be high depending on
+the process at hand, making this a challenge. On the other hand, a benefit of kriging models compared
+with other approaches is that the uncertainty of the predictor is quantified by default, which facilitates
+transparency of performance if kriging is applied in out-of-distribution scenarios in practice. As
+3
+==PAGE:4==
+an extension to the default uncertainty estimation, the work of Lam and Zhang [26] even combines
+stochastic kriging with neural networks to provide prediction intervals that quantify the uncertainty
+of a prediction with greater precision.
+Neural networks are also widely used for metamodeling because of their flexible architectures. The
+work by Kasim et al. [20] proposes a method based on neural architecture search, which enables the
+acceleration of scientific simulations up to 2 billion times using limited training data [20]. Simpler
+neural networks, such as FFNNs, have also been successfully applied to accelerate simulation time
+[37, 38], but their out-of-distribution generalization capabilities are rarely explored. However, the use
+of convolutional neural networks has shown promising results in generalization to unseen data [29].
+This is likely to be attributable to the inductive biases of convolutional neural networks, which are
+useful for computer vision applications.
+2.2
+Polynomial Approximation
+The machine learning metamodels covered in the previous section are implicitly learning the often
+underlying polynomial input-to-output functions of simulators. In contrast, this section reviews the
+literature explicitly learning polynomial functions. Recent work by Zhu et al. [41] proposes how
+common neural networks can adhere to physical laws by representing them as Taylor polynomials of
+arbitrary order and placing constraints on their state predictions. While their work assumes that the
+true polynomials that model dynamical systems are unknown from a learning perspective, the work
+of Pei et al. [33] attempts to approximate the terms of known polynomials with neural networks. By
+assuming that the polynomial is known, they design neural network architectures that are specific
+for a single polynomial term, e.g. approximating the third polynomial term alone. Unfortunately,
+their architectures are isolated to one-variable and two-variable cases up to the third-order. However,
+designing neural networks to approximate known mathematical functions is the first step toward
+understanding how neural networks can be designed to solve unknown problems [33].
+2.3
+Polynomial Neural Networks
+The combination of polynomials and neural networks happened in the late 1960s with the Group
+Method of Data Handling algorithm, which can automatically determine the best performing neural
+network structure for a specific application. The structure is generated by selecting a subset of two
+input variables in each neuron, termed partial descriptions (PDs), and treating them as quadratic
+regression polynomials [17]. The highly systematic design approach means that the layers and neuron
+connections change dynamically during training. Unfortunately, self-organizing networks following
+this approach tend to generate complex polynomials for simple systems, produce overly complex
+models, and lack flexibility if there are fewer than three input variables [31]. These problems are
+alleviated in another approach to self-organizing networks called polynomial neural networks (PNNs)
+[31], where the PDs can have a different number of input variables and exploit polynomials of
+different order. The structure of the PNN is selected based on the number of input variables and the
+order of the PDs in every layer. In the basic PNN structure shown in Figure 2, the number of input
+variables is the same in every layer, while the modified PNN structure can have varying numbers of
+input variables from layer to layer. These two structures are applied in simulations of gas furnaces,
+sewage treatment, and non-linear static systems, where they outperform baseline models in mean
+squared error and stability index. The stability index expresses the performance deterioration of the
+model in the test data and is a good indicator of the approximation and generalization capabilities of
+the PNN. As PNNs are self-organizing, their structure is automatically determined for an application,
+whereas another study considers PNNs as FFNNs equipped with a polynomial activation function or
+transfer function to accommodate polynomial approximation [22].
+3
+Methodology
+This section concerns the methodology that comprises the main contributions of this thesis. The first
+section describes the multiplicative neural networks (MNNs) used to produce higher-order outputs
+from input. The second section covers the simulation metamodeling approach, compatible with
+simulations where state updates are described by polynomials.
+4
+==PAGE:5==
+Figure 2: Basic polynomial neural network (PNN) structure [31]. The partial descriptions (PDs) are
+subsets of the input variables.
+3.1
+Producing Higher-Order Outputs
+The introduction of this paper highlights why unbiased estimators, such as an FFNN, require inductive
+biases to generalize beyond the training data. Our introductory example in Figure 1 shows how a
+multilayer FFNN is able to generalize well for a first-order polynomial, but struggles for a quadratic
+function. In contrast to the unbiased architecture of such models, this section concerns architectures
+aiming at producing higher-order outputs. These architectures are termed multiplicative neural
+networks (MNNs) because of their use of multiplications to raise the input to higher-order output.
+The first architecture is highly inspired by the work on deep PNNs [22], which defines PNNs as
+FFNNs with a polynomial activation function. The polynomial activation function simply applies a
+selected exponent to the input, as shown in Figure 3, to facilitate the approximation of higher-order
+polynomials. However, this architecture only facilitates fitting the highest-order term in a polynomial
+and neglects lower-order terms, which is problematic depending on the polynomial at hand.
+Figure 3: Polynomial Activation Neural Network (PANN). PANN is a FFNN with polynomial
+activation, which raises input to the ith order.
+While the PANN uses a polynomial activation function to produce higher-order outputs, the Coupled
+CP decomposition (CCP) from the Π-Nets paper [5] uses a special kind of skip connection instead.
+Their work focuses on applications that require convolutional layers in the CCP architecture, such as
+image generation and classification, whereas this thesis models input-output functions using linear
+layers. A visualization of a CCP architecture that can generate third-order output is found in Figure
+4, where the linear layers are shown as white boxes, the mathematical operations are shown as gray
+boxes, and the different colored areas indicate the polynomial order of the output produced by that
+area. The green area produces first-order output using the linear layer U1, which performs a linear
+transformation of the input. The output of the green area is multiplied by the first-order output of
+U2 in the red area, which raises the output to the second-order. To preserve a term of first-order, the
+output from the green area is added to the second-order output via a skip connection. The concept
+of using the same first-order output to both represent the first-order term and raise the input to the
+second-order is called weight sharing, since the weights in U1 are shared between these two use cases.
+5
+==PAGE:6==
+When the weights are shared, the number of parameters that need to be trained is reduced, increasing
+the computational efficiency of the training process. The aforementioned procedure for the red area
+is repeated for the yellow area with the output of the red area, where a third-order output is generated,
+and is repeatable to generate output of any desired order.
+Figure 4: Third-order Coupled CP (CCP) model [5]. The architecture can be used recursively to
+achieve higher-order output than shown here. The output of the green area is of first-order, red area is
+second-order, and yellow area is third-order.
+The work on Π-Nets is extended with a more expressive model in a separate work, the Polynomial
+Deep Classifier (PDC) [6], which also produces a higher-order output of the input. The main
+difference between PDC and CCP is that weight sharing is no longer assumed across the different
+orders in the architecture, which allows for higher expressiveness but increases model size. In practice,
+this means that the special skip connection used in CCP is no longer present. The applications of the
+two models are similar, although PDC is mainly applied in image and audio classification problems,
+where different variants of the PDC architecture are embedded in baseline models, which consistently
+outperform baseline models without PDC embedded. The different PDC variants are achieved by
+changing the number of channels in the convolutional layers and the depth of the model. In this thesis,
+the generic PDC model is applied, since the different variants can only be created if convolutional
+layers are used. A third-order PDC is shown in Figure 5a, where linear layers are shown as white
+boxes, mathematical operations are shown as gray boxes, and the different colored areas indicate the
+polynomial order of the output produced by that area, as for the CCP. The absence of weight sharing
+in PDC is apparent by the increase in the number of U layers, which are multiplied together within
+each colored area in the figure. For example, raising to second-order is done by multiplying the output
+of U2,1 and U2,2 independently of the first-order output from U1. Furthermore, the introduction of
+hidden layers V , significantly increases the depth and number of parameters in PDC compared to
+CCP. Therefore, to allow comparisons of models without weight sharing and a similar number of
+parameters, this thesis proposes an architecture in which the V layers are absent, called PDCLow,
+visualized in Figure 5b. PDCLow is essentially a CCP without weight sharing and a low-parameter
+version of PDC.
+3.2
+Simulation Metamodeling Approach
+Polynomials are an important tool in simulation, where they are used to relate the values of state
+variables over time. In discrete event simulations, the state values in the next time step are approxi-
+mated by polynomials of the previous state values, which have varying order depending on the size
+of the time step. The size of the time step denotes the time increment from progressing a single step
+in a simulation. If the size of the time steps is increased, the metamodel approximates state values
+further ahead in time in the same number of time steps, and the order of the polynomials describing
+the time step updates increases. Therefore, simulating a given time interval can be done in fewer time
+steps by modeling higher-order polynomials. Decreasing the number of time steps in a simulation is
+useful in machine learning, as there are fewer time steps for approximation errors to accumulate. The
+approach is general to all simulations that use polynomials for time step updates, but the following
+shows a demonstration for an epidemiology simulation model to better illustrate it.
+Epidemiology models represent the spread of an infectious disease in a population over time and
+consider the population in three different categories or compartments: Susceptible, Infected and
+Recovered (SIR). Susceptible individuals can contract a disease from infected individuals, whereafter
+they can recover and are then considered immune to reinfection [12]. The SIR model in this
+experiment is a Kermack-McKendrick (KM) model [21], which models the spread of disease in
+a closed population. The KM model uses parameters β and γ to model the rate of infection and
+recovery, respectively. The infection rate β controls the rate of transition from susceptible to infected,
+whereas the recovery rate γ controls the rate from infected to recovered. The transitions between
+6
+==PAGE:7==
+(a) Third-order PDC model [6].
+(b) Third-order PDCLow model, obtained
+from PDC in Figure 5a by removing the V
+layers.
+Figure 5: Third-order examples of Polynomial Deep Classifier (PDC) models. The architectures can
+be used recursively for higher-orders than shown here. Our proposal, PDCLow, is essentially a CCP
+without weight sharing and a low-parameter version of PDC. The colored areas denote the order of
+the output, where green represents first-order, red is second-order, and yellow is third-order.
+compartments are expressed in terms of the preceding time step, as seen in Equations 1-3.
+st+1 = st −βstit
+(1)
+it+1 = it + βstit −γit
+(2)
+rt+1 = rt + γit
+(3)
+The three state variables st, it and rt describe the fraction of a population N that is susceptible,
+infected and recovered at a certain time step t. The transition equations clarify that there exist two
+transitions in the KM model, where βstit determines the fraction of newly infected people in time
+step t + 1 and γit determines the fraction of newly recovered people in time step t + 1. The state in
+the time step t + 1 is fully explained by the state values of the previous time step t, which means that
+the KM model has the memoryless property or the Markov property. Another important property
+of the KM model for this experiment is that future states can be directly calculated in a recursive
+manner. For example, if the state of the population in time step t is known, this information can be
+used to directly calculate the state in time step t + 2 shown in Equations 4-6.
+st+2 = st+1 −βst+1it+1
+= β3s2
+ti2
+t −β2γsti2
+t + β2sti2
+t −βs2
+tit + βγstit −2βstit + st
+(4)
+it+2 = it+1 + βst+1it+1 −γit+1
+= −β3s2
+ti2
+t + β2γsti2
+t −β2sti2
+t + β2s2
+tit −2βγstit + βstit + γ2it −2γit + it
+(5)
+rt+2 = rt+1 + γit+1
+= βγitst −γ2it + 2γit + rt
+(6)
+These equations are obtained by inserting the definitions from Equations 1-3. When doing so, two
+time steps are approximated at a time, which means that a lag size of two is used. As the lag size
+increases, the polynomial order of the transition equations increases. For example, with a lag size
+of two, the state variable s is described by a seventh-order polynomial as opposed to a third-order
+polynomial using a lag size of one. In general, as the lag size L increases by one, the polynomial
+order of the transition equations for s and i increases to 2nL−1 + 1 and for r increases to 2nL−1,
+where nL−1 is the polynomial order when using a lag size of L −1.
+The learning problem for the metamodel essentially consists of predicting the next state given a
+previous state. To do this, a model is fed all relevant information about a state, st, it, and rt, as well
+as exogenous variables, that are general across all time steps, β and γ. This is illustrated in Figure 6,
+where all the aforementioned values are concatenated into a vector and fed to three neural networks,
+7
+==PAGE:8==
+where the superscripts indicate which compartment they are learning. A neural network is used for
+each compartment since the influence of the previous state values on the next state values is different
+for each of them. The influence of the previous state is also largely determined by the lag size, as
+seen in the transition equations. For example, the transition equation for r with a lag size of one
+(Equation 3) depends only on r and i from the previous state. For a lag size of two (Equation 6), r
+depends on all previous state values. The next state predictions are the concatenated scalar outputs of
+the neural networks, which also describe fractions of a population that sums to one. This property
+makes the softmax function useful to ensure that the output has the same property as the input, which
+is helpful for this specific application in training, validation, and testing. In general, the output of
+the softmax function is the next state predictions, which are used to calculate the loss along with
+the true values. However, while validation and testing use the previous state predictions as input for
+the next state predictions, the true values are used in training. Therefore, errors accumulate for each
+simulation time step in validation and testing. In addition to the state values, β and γ are also used to
+model future time steps, and the above procedure repeats itself throughout the simulation.
+Figure 6: The simulation metamodeling approach and training process of machine learning metamod-
+els. The NN boxes indicate neural networks or other machine learning models and their superscript
+denotes which compartment they are trying to learn. In simulation with multiple state variables that
+sum to one, using softmax is useful for regularization of the state value predictions.
+4
+Experiments
+The experiments in this thesis explore the viability of MNNs learning polynomials out-of-distribution
+and show how MNNs can be used as metamodels for a simulation model with polynomial time step
+updates. In the first experiment, polynomials are iteratively selected to identify characteristics that
+make them difficult to learn. The second experiment models synthetic functions from a literature
+benchmark and compares MNNs with baseline models. The third experiment concerns the use of
+MNNs as metamodels for an epidemiology simulation model, where transitions between time steps
+are described by polynomial functions. To carry out these experiments, the following experimental
+setup is used.
+Evaluation metrics are essential for evaluating experimental results, where this thesis uses the root
+relative square error (RRSE), which is relative to predicting the mean of the true values [13]. This is
+apparent from Equation 7, where the squared error of a predictor is divided by the squared error of
+the average predictor. In other words, the RRSE is similar to the root mean square error (RMSE),
+but scaled by the variance in the output domain. An RRSE of zero is the lowest possible score and
+means that the true values and predictions match exactly. There is no upper limit to the metric, but an
+RRSE greater than one indicates that the predictor is worse than an average predictor. Therefore, the
+relativeness of the RRSE allows performance comparisons between experiments and a perspective in
+the form of an average predictor. Note that for the RRSE used in the out-of-distribution tests, the
+average predictor based on the training distribution likely results in an RRSE higher than one on
+the test set, as the two distributions are different. A description of the additional logged metrics is
+8
+==PAGE:9==
+provided in the Appendix A.3.
+RRSE =
+sPn
+i=1(ˆyi −yi)2
+Pn
+i=1(yi −¯y)2
+(7)
+where ¯y = 1
+n
+n
+X
+i=1
+yi
+Baseline models are introduced to put the performance of MNNs into perspective. They are simple
+but powerful machine learning models implemented using the scikit-learn library [32]:
+• Linear Regression (LR)
+• Gradient Tree Boosting (GB)
+• Random Forest (RF)
+Linear regression (LR) is the most simple baseline model, which is fitted by minimizing the residual
+sum of squares between the targets and predictions from a linear approximation [32]. The LR baseline
+model only considers first-order polynomials, since the feature matrix created by incorporating higher-
+order interactions between the features can become extremely wide and lead to high computational
+complexity. In addition to LR, the ensemble methods GB and RF are used. They are both tree-based
+methods, but are separated by their procedure for creating and aggregating their weak learner trees.
+GB is a boosting algorithm, where trees are built sequentially based on the previous one. The purpose
+of building a new tree is to correct the errors of the previous tree and to achieve a strong learner
+collectively [32]. In contrast, RF is a bagging method, which builds its trees in parallel and aggregates
+its output by averaging its trees [32]. This thesis uses the default hyperparameters defined in the
+scikit-learn documentation [32].
+Hyperparameters are determined on the basis of an initial experimental analysis, where the choice
+of a mean squared error loss function, Adam optimizer [23], learning rate of 0.001, batch size of 32
+and 64 hidden neurons showed good results.
+Models are the four MNNs described in Section 3.1, which are ideal for generating higher-order
+output. The number of input layers of CCP, PDC, and PDCLow is determined by the order of
+the polynomial being learned norder, whereas PANN only has one input layer with a polynomial
+activation function following it. Hidden layers are omitted from PANN because an initial experimental
+analysis showed sufficient flexibility to learn higher-order polynomials without them. Further tuning
+of the aforementioned hyperparameters is not conducted due to limitations on computational resources.
+In summary, the model architectures used are:
+• PANN: Two-layer FFNN with 64 hidden neurons and norder polynomial activation between
+the input and output layers. A general example is shown in Figure 3.
+• CCP: Architecture with weight sharing, 64 hidden neurons, and norder input layers. A
+third-order example is visualized in Figure 4.
+• PDC: Architecture without weight sharing and with 64 hidden neurons, Pnorder
+i=1
+i input
+layers and norder −1 hidden layers. A third-order example is visualized in Figure 5a.
+• PDCLow: PDC architecture without hidden layers. A third-order example is visualized in
+Figure 5b.
+Despite using similar mechanics, MNNs have a vastly different number of parameters, depending on
+the number of input variables, output variables, and the order of the polynomial being learned, which
+varies greatly in the experiments. Therefore, the expressions to calculate the number of parameters
+9
+==PAGE:10==
+for each MNN are provided below.
+PANN parameters = ni · nh + nh + nh · no + no
+CCP parameters = norder (ni · nh + nh) + nh · no + no
+PDCLow parameters =
+norder
+X
+d=1
+d
+X
+j=1
+(ni · nh + nh) + nh · no + no
+PDC parameters =
+norder
+X
+d=1
+
+
+d
+X
+j=1
+(ni · nh + nh) + n2
+h + nh
+
++ nh · no + no
+The expressions are sorted in ascending order, which means that PANN always has the lowest number
+of parameters, while PDC always has the highest regardless of the polynomial order. PANN has the
+same number of layers throughout this thesis, which means that the number of parameters depends
+only on the input size ni, the number of neurons nh, and the output size no. For the remaining three
+models, the number of parameters also depends on the order of the polynomial norder. In the special
+case where a first-order polynomial is modeled, PANN, CCP, and PDCLow have the same number of
+parameters.
+4.1
+Learning Polynomials
+The experiment on polynomial learning is carried out to obtain an indication of the performance of
+using MNN to learn polynomials in-distribution and generalize out-of-distribution. Polynomials are
+selected to have additions, subtractions, and multiplications between an arbitrary number of variables
+of arbitrary degrees. The experiments do not include polynomials with negative exponents or division
+by variables. The selected polynomials with a varying number of variables, polynomial order, and
+variable interactions are provided in Table 1. The order of the polynomial is reported as the maximum
+exponent of the function terms, whereas the degree refers to the exponent of individual terms. Variable
+interactions are the number of distinct variables multiplied, regardless of their exponent. For example,
+two variables multiplied together denote two interactions, three variables multiplied are denoted as
+three interactions, and so on. The polynomials in Table 1 are selected in an iterative manner, where
+the performance of the models learning the "previous" polynomial is taken into account for the next
+polynomial. The complexity of a polynomial is increased by adding more variables, increasing the
+order of the polynomial, or the number of interactions.
+Table 1: A selection of polynomials for experiments with MNNs. Order is the maximum exponent in
+a polynomial and interactions determines the number of interactions between distinct variables.
+Polynomial
+# of variables
+Order
+Interactions
+a
+1
+1
+1
+a2
+1
+2
+1
+5a2 + 6b2
+2
+2
+1
+2a36b2
+2
+5
+2
+2a3b2 −3c
+3
+5
+2
+2a3b3 −3c
+3
+6
+2
+2a2b2c2 −3d
+4
+6
+3
+2a3b2c2 −d6
+4
+7
+3
+a3b2c3 −d3e3
+5
+8
+3
+a3b3c3 −d4e4
+5
+9
+3
+a3b2c2d3 −e5f 5
+6
+10
+4
+abcdefg
+7
+7
+7
+abc + d −e −f −g
+7
+3
+3
+a10 −b9
+2
+10
+1
+The experiment is carried out using MNNs to learn each polynomial for 30 epochs with samples from
+a Gaussian distribution N(0, 5). To determine whether a model can generalize out-of-distribution, it
+10
+==PAGE:11==
+is tested on samples from nine different distributions. The distributions are all Gaussian with their
+mean and standard deviation given by every combination of µ = [−50, 0, 90] and σ = [1, 5, 25]. The
+choices of mean and standard deviation are chosen to ensure nonoverlapping distributions and high
+numerical diversity in the test sets. An additional small-scale experiment is carried out by training
+with samples from a Gaussian distribution N(0, 1) to explore the implications of using a different
+training distribution than N(0, 5).
+4.2
+Modeling Synthetic Functions
+In this experiment, synthetic functions are modeled using MNNs and baseline models. This class
+of functions has previously been used as benchmark functions in engineering problems, such as
+optimization and metamodeling tasks. The learning problem is to model the input-output functions
+with the MNNs and the baseline models using samples from their constrained input domains.
+The advantages of using these benchmark functions as opposed to the polynomials of the previous
+experiment is two-legged. First, by using standard functions, the domain of the input variables
+is predefined, and the output for this domain does not cause numerical overflow. Second, the
+complexity of each function is well studied and documented from an engineering perspective. For
+example, a literature survey comprises the most complete set of global optimization problems [18].
+Although complexity is not reported in the survey, Gavana [14] does this through their website on
+global optimization algorithms. Their work reports not only the performance of global optimization
+algorithms, but also the share of successful optimizations on particularly tough functions. The subset
+of functions used in this thesis is selected to include only terms with multiplication(s), addition(s), and
+subtraction(s) of variables, as in the previous experiment. Furthermore, the functions are selected to
+have varying polynomial order and complexity in the form of optimization success rates. In addition
+to the functions of the benchmark set, the functions of Lim [27], Currin [7], and Dette-Pepelyshev [11]
+are included. An overview of the selected benchmark functions, along with their number of variables,
+polynomial order, and variable input domain(s) is shown in Table 2. The functions themselves are
+left out of the table for brevity, but are found in Appendix A.1 (Equations 8-16).
+Table 2: Benchmark functions used for experiments with MNNs and baseline models. If input
+domain is described with xi, the specific domain counts for all input variables of the function, i.e.
+∀i ∈(1 . . . n) where n is the number of variables.
+Author
+# of variables
+Polynomial order
+Input domain
+Currin [7]
+2
+2
+xi ∈(0, 1)
+Bukin 6 [4]
+2
+2
+x1 ∈(−15, 5), x2 ∈(−3, 3)
+Price 3 [36]
+2
+4
+xi ∈(−500, 500)
+Dette-Pepelyshev [11]
+3
+4
+xi ∈(0, 1)
+Colville [18]
+4
+4
+xi ∈(−10, 10)
+Lim [27]
+2
+5
+xi ∈(0, 1)
+Camel Three Hump [3]
+2
+6
+xi ∈(−5, 5)
+Beale [18]
+2
+8
+xi ∈(−4.5, 4.5)
+Goldstein-Price[15]
+2
+8
+xi ∈(−2, 2)
+The experiment is carried out by learning the functions in Table 2 over 100 epochs with the four
+MNNs and the three baseline models. The data is generated by drawing 100,000 samples for each
+variable from a uniform distribution with minimum and maximum according to their input domain,
+sorting the samples, and using the 5-95 percentile range for training and the remaining for testing.
+Outside the 5-95 percentile range, the input-output behavior of the synthetic functions is often
+significantly different from that inside the range, which can be viewed in Appendix A.2. The different
+input-output behavior in training compared to testing serves the same purpose as testing with samples
+from a different distribution. Therefore, this is still considered an out-of-distribution test.
+4.3
+Epidemiology Simulation Model
+The third experiment concerns the task of MNNs being metamodels for the SIR simulation model,
+which is described along with the metamodeling approach in Section 3.2, while this section focuses
+11
+==PAGE:12==
+on how the experiment and the out-of-distribution tests are carried out. In this experiment, the
+metamodels are trained with SIR simulation data generated with a set of parameters, where the aim is
+to be able to generalize out-of-distribution when different parameters are used. The parameters of the
+SIR simulation are considered to be the starting state consisting of s0, i0, r0, the infection rate β, the
+recovery rate γ, the duration of the simulation T, and the lag size L.
+The starting state values s0, i0, and r0 represent the fraction of the population that is susceptible,
+infected, or recovered in the first time step of the simulation. Therefore, the starting state values are
+between zero and one, summing to one within a single time step. A set of starting state values is
+randomly generated for each simulation run by sampling values from Uniform(0, 100) and dividing
+each of them by their sum, which is considered the population size. The division by population size
+ensures that fractions of the population are modeled instead of absolute counts. This is mandatory,
+as transition equations described in Section 3.2 would end up modeling negative counts of people
+otherwise.
+In relation to the transition equations, the infection rate β and the recovery rate γ control the transition
+rate between the three compartments and are sampled in each simulation run like the starting state val-
+ues. Likewise, β is sampled from Uniform(0.02, 0.09) and γ is sampled from Uniform(0.022, 0.01)
+in training, while being sampled from Uniform(0.1, 0.25) and Uniform(0.05, 0.1) in test, respec-
+tively. The two distributions for each parameter are nonoverlapping, implying that models are tested
+with out-of-distribution β and γ values. Simulations with the lower and upper limits of the values of
+β and γ in training and testing are visualized in Figure 7. The four subplots in the figure show the
+evolution of the three compartments, Susceptible, Infected, and Recovered, over a duration of 120
+time steps from the same starting state. The first simulation in Figure 7a shows a simulation with
+very low values of β and γ. Thus, the rate of transition between the three compartments is slow, as
+seen by the small change in the simulation from its starting state. The second simulation in Figure
+7b shows a rapid decrease for the susceptible, a rapid increase for the infected, and a slow increase
+for the recovered. This indicates that the value of β is high compared to the value of γ. The third
+simulation in Figure 7c shows a slow decrease for the susceptible and a slow increase for the infected
+and recovered. The infected decreases toward the end of the simulation, which could indicate that the
+value of γ is relatively high. Finally, the fourth simulation in Figure 7d shows high values of β and γ
+seen by a sharp decrease in susceptible and a sharp increase in recovered. These simulations show
+that varying β and γ values can lead to different transition behaviors. Therefore, models are required
+to learn a range of input-output behaviors in this experiment.
+The final parameters (T and L) are essential to test the viability of MNNs in metamodeling. The
+duration of the simulation T defines the time interval, which the simulation spans over, while the lag
+size L describes the size of the time steps. These parameters are closely related, as the number of
+modeled time steps decreases if the lag size is increased for a fixed duration. To be exact, the number
+of time steps modeled for a simulation is given by T//L, where // is the integer division operator.
+The number of modeled time steps must be above one for the learning problem to be meaningful,
+which entails that the duration and lag size must be chosen such that T//L > 1. This experiment is
+carried out by varying the duration of the simulation T and the lag size L to explore its implications
+on the performance of MNNs and baseline models. First, the impact of the simulation duration is
+tested for the values T = [2, 6, 12, 24, 30, 40, 60, 120] with a fixed lag size of L = 1. For this lag
+size, an MNN is constructed with a polynomial order of three for each of the three compartments.
+In terms of the duration, it is expected that performance worsens as the duration increases, as there
+are more time steps for errors to accumulate. For the second part of this experiment, the duration is
+fixed at T = 120 and the lag size is tested for the values L = [1, 2, 3, 4, 5]. Increasing the lag size
+decreases the number of modeled time steps in a simulation, as explained by the expression T//L.
+Consequently, the number of modeled time steps for these lag sizes and a duration of 120 are found
+to be T//L = [120, 60, 40, 30, 24], respectively. Therefore, the tested values of duration and lag size
+are chosen in a way that allows comparison of runs with the same number of modeled time steps but
+with different lag sizes, and thereby different polynomial order. Conducting this experiment involves
+modeling polynomials of orders 3, 7, 15, 31, and 63, respectively. The downside to modeling such
+high-order polynomials is that the number of model parameters increases drastically, as seen in Table
+3, where the models are sorted in increasing order by their number of parameters.
+For each experimental run, 100,000 simulations are generated and a batch size of 32 is used. As
+a result, the feature matrix has dimension [B, T//L −1, F] = [32, T//L −1, 5], since the same
+batch size B and the same number of features F are used for all runs. The features include the three
+12
+==PAGE:13==
+(a) SIR simulation using the lower
+bound training values for β and γ.
+(b) SIR simulation using the upper
+bound training values for β and γ.
+(c) SIR simulation using the lower
+bound testing values for β and γ.
+(d) SIR simulation using the upper
+bound testing values for β and γ.
+Figure 7: SIR simulations with the same starting state of s0 = 0.99, i0 = 0.01 and r0 = 0. and
+varying β and γ values. The graphs in the upper row use the training parameter values, and the
+bottom row uses the testing parameter values.
+Table 3: Model parameters for when using MNN building blocks in SIR simulation model for different
+lag sizes L. The numbers in parentheses denote the polynomial order incurred by the corresponding
+lag size.
+Building Block
+L = 1
+(3)
+L = 2
+(7)
+L = 3
+(15)
+L = 4
+(31)
+L = 5
+(63)
+PANN
+1.3K
+1.3K
+1.3K
+1.3K
+1.3K
+CCP
+3.6K
+8.2K
+17.4K
+35.9K
+72.7K
+PDCLow
+7.1K
+32.4K
+138K
+571K
+2.3M
+PDC
+44.5K
+119K
+325K
+958K
+3.1M
+state variables and the two transition rates β and γ. The middle dimension of the feature matrix is
+subtracted by one as the objective is to predict the next state from a previous one. Naturally, this
+means that the target matrix has a similar dimension [B, T//L −1, Fstate] = [32, T//L −1, 3],
+where Fstate denotes the three state variables in the simulation.
+5
+Results
+The results of the three experiments described in the previous section are presented and interpreted
+in this section. The first experiment aims to identify the characteristics of polynomials that make it
+difficult to learn in-distribution and generalize out-of-distribution. The second experiment consists
+of modeling a set of synthetic functions with MNNs and baseline models, which further tests the
+viability of MNNs learning polynomial functions out-of-distribution. The third experiment uses
+MNNs and baseline models as metamodels for an epidemiology simulation model, where duration of
+the simulation and lag size are varied.
+13
+==PAGE:14==
+5.1
+Polynomials
+The polynomials in Table 1 are ordered in terms of the iterative process in which they were chosen.
+As a result, the complexity of the polynomials gradually increases until performance starts to decrease
+drastically. Up until the sixth-order, the performance is great in validation and remains satisfactory
+in the tests. Beyond the sixth-order, MNNs perform worse than an average predictor in validation,
+and the results in the tests are even worse, as seen in the Appendix A.1. To avoid redundancy in
+this section, evaluation is done for four selected polynomials shown in Figure 8, where performance
+is visualized as box plots of the RRSE scores in the test distributions. The colored boxes denote
+the interquartile range (IQR) of the RRSE test scores for each MNN in the nine test distributions.
+Moreover, the whiskers extend to 1.5 × IQR and all scores beyond this are considered outliers and
+marked with diamonds.
+Figure 8a shows the RRSE test scores for the polynomial 2a2b2c2 −3d, which is a sixth-order
+polynomial with four variables. The IQR of the models are located between zero and one, with
+the exception of CCP, whose RRSE score is high in the test distributions N(−50, 1), N(0, 1), and
+N(90, 1) compared to the rest of the test distributions. This is the case for all models, but the
+difference in RRSE is less significant than for CCP. In general, PDC has the lowest RRSE scores,
+indicated by the low placement of the IQR, but it has an outlier with an RRSE score greater than four,
+which is recorded in the Gaussian N(0, 1) distribution.
+The results of a more complex polynomial are shown in Figure 8b, where the RRSE scores have
+increased drastically, as seen by the range of the y-axis. As the polynomial order increases, the
+chance of numerical overflow and producing a "not a number" (NaN) increases as well. In this
+case with a tenth-order polynomial, only five of the nine test distributions are usable, as the rest
+produce NaNs. Therefore, the performance is likely worse than what the figure shows, which is
+already terrible. However, PDCLow performs well in most test distributions, with the exception of
+a worse performance in N(0, 5) and a terrible performance in N(0, 1). PDCLow and CCP have
+much greater overall performance than the much larger PDC model for the complex, tenth-order
+polynomial, whereas PDC has better performance than PDCLow and CCP in the less complex,
+sixth-order polynomial previously seen.
+As NaNs are encountered for the tenth-order polynomial, the order of the polynomial decreases
+and the number of variables increases. The performance in Figure 8c shows that the RRSE has
+similar magnitude as the previous polynomial, but longer whiskers and more outliers are present.
+This is potentially attributed to the fact that none of the test distributions produce NaNs and that the
+performance is more true to reality than previously seen. In terms of their RRSE scores, it is difficult
+to separate the models. The median and lower quartile are very close for CCP, PDCLow, and PDC,
+whereas the median for PANN is slightly lower, but the lower quartile is higher than the three other
+models. PANN also has a surprisingly narrow IQR, which indicates that it performs consistently for
+this polynomial. This is likely a result of the PANN architecture, which only uses multiplication
+to generate higher-order output, where the remaining MNNs use both multiplication and addition,
+which preserves modeling of lower degree terms. As this polynomial contains only multiplication,
+PANN can have a stronger inductive bias towards learning polynomials of this type. Outliers for this
+polynomial are produced by the test distributions N(−50, 1) and N(90, 1), but the performance is
+generally unsatisfactory.
+In an attempt to get around this, the number of variables remains fixed, but the polynomial order
+is significantly decreased. Figure 8d shows the RRSE scores of the MNNs for a seven-variable
+third-order polynomial, where the magnitude of the y-axis has decreased greatly. It is evident that
+PDC and PDCLow are superior to CCP and PANN, as seen by their narrow IQR close to zero, which
+is a perfect performance in RRSE. The outliers of PDC and PDCLow are below an RRSE of 0.5,
+which is very low compared to the RRSE outliers of CCP and PANN recorded on the N(90, 1) test
+distribution.
+From the results presented above and shown in Appendix A.1, some patterns in terms of MNN
+performance in learning and generalizing polynomials are becoming apparent. The number of
+variables alone has no significant impact on the ability to learn a polynomial out-of-distribution.
+The order of the polynomial seems to have an effect, as models struggled for polynomials above
+sixth-order. A possible cause is that MNN models, with the exception of PANN, grow larger as
+the polynomial order increases, which requires them to be trained for longer before learning starts
+to converge. However, this has not been pursued in this experiment due to limited computational
+14
+==PAGE:15==
+(a) Sixth-order polyno-
+mial with four variables.
+(b) Tenth-order polyno-
+mial with six variables.
+(c) Seventh-order polyno-
+mial with seven variables.
+(d) Third-order polyno-
+mial with seven variables.
+Figure 8: Performance of MNNs - PANN, CCP, PDCLow, and PDC - for four different polynomials
+from Table 1. Values for each box-plot are the RRSE scores when tested with the nine test distributions.
+The whiskers extend to 1.5 × IQR and the outliers are marked by diamonds.
+resources. Furthermore, in higher-order polynomials, small changes in the input variables can lead
+to outputs numerically far from each other, which is more difficult to learn for neural networks.
+Another issue with higher-order polynomials is the increasing chance of numerical overflow as seen
+for some of the test distributions in this experiment. While the polynomial order has a clear impact
+on out-of-distribution performance, it is difficult to identify the impact of the number of interactions
+between variables, since it is closely related to the polynomial order. In terms of testing distributions,
+it is apparent that distributions with a standard deviation of one caused many outliers of RRSE. This
+could be explained by the properties of the training distribution N(0, 5), which is a wider distribution
+than the test distributions with a standard deviation of one. The additional small-scale experiment
+showed that when training is conducted with a Gaussian N(0, 1), outliers are present in different test
+distributions than training with a Gaussian N(0, 5). While this is an interesting problem to explore
+further, it is not pursued in this thesis.
+5.2
+Synthetic Functions
+In the previous experiment with polynomials, numerical overflow is encountered in the test distri-
+butions of tenth-order polynomials. Additionally, for these polynomials, small changes in the input
+lead to large output ranges, which are harder for MNNs to learn and generalize to. These issues are
+addressed in this experiment by using synthetic functions, where constraints are placed on the domain
+of the input variables. In most of the functions, this entails function output that is also constrained to
+a reasonable range. The results of using MNNs and baseline models to learn the synthetic functions
+of Table 2 are shown in Table 4. The table shows the RRSE in testing for the models in each function,
+where the first four columns are the results of the baseline models and the last four columns are for
+the MNNs. The numbers in bold indicate which model has the lowest RRSE for a specific synthetic
+function.
+Table 4: Out-of-distribution testing RRSE of baseline and MNN models for all the synthetic functions.
+Bold indicates the lowest RRSE score for a specific function.
+Baseline
+MNN
+Author
+Avg.
+LR
+GB
+RF
+PANN
+CCP
+PDCLow
+PDC
+Currin [7]
+1.282
+8.78e-01
+1.89e-01
+1.61e-01
+4.52e-06
+1.06e-05
+4.25e-06
+4.11e-07
+Bukin 6 [4]
+1.301
+1.189
+0.158
+0.121
+0.660
+0.660
+0.667
+0.652
+Price 3 [36]
+9.162
+9.067
+2.620
+2.611
+11.211
+11.132
+11.124
+11.120
+Dette-Pepelyshev [11]
+3.184
+3.109
+0.802
+0.815
+0.208
+0.040
+0.412
+0.031
+Colville [18]
+5.044
+5.021
+1.685
+1.613
+0.213
+0.114
+0.036
+0.020
+Lim [27]
+1.002
+0.241
+0.138
+0.138
+0.033
+0.018
+0.018
+0.009
+Camel Three Hump [3]
+4.695
+4.686
+1.891
+1.878
+0.168
+0.040
+0.126
+0.055
+Beale [18]
+5.170
+5.227
+2.388
+2.284
+0.064
+0.074
+0.023
+0.022
+Goldstein-Price [15]
+1.271
+1.168
+0.310
+0.299
+0.102
+0.150
+0.134
+0.107
+In addition to the MNNs and baseline models already introduced, the RRSE of the average predictor
+based on the training data (Avg. in Table 4) is also shown to highlight the severity of the out-of-
+distribution test and the fluctuations of each function. When MNNs are tested on this set of synthetic
+functions, the PDC has the lowest RRSE for five of the nine functions, while PANN and CCP have the
+lowest RRSE for one function each, both having a polynomial order greater than six. PDCLow falls
+15
+==PAGE:16==
+closely behind the best performing models, but does not have superior performance for any function.
+Interestingly, the baseline RF model has the lowest RRSE for two of the functions, both of which
+have a relatively low polynomial order of two and four. From these results, there is no indication that
+higher-order polynomials are harder to learn than lower-order polynomials. For example, low RRSE
+scores of the MNNs are seen for the eight-order Beale function, whereas significantly higher RRSE
+values are seen for the second-order Bukin function. While the Bukin function is reported as the
+toughest function and the Beale function is reported as the simplest in terms of optimization success
+rate, there are no other similar relationships between the optimization success rate and the test RRSE.
+Furthermore, high RRSE scores are reported for all models in the Price 3 function, where none of the
+MNNs are better than an average predictor based on the training data. The consistently high RRSE
+for this function could be due to the wide range of function output, which ranges from 0 to 2e+13. In
+comparison, the next-widest output range in the Beale function ranges from 0 to 1.8e+5, where most
+models have low RRSE scores.
+Table 5: In-distribution validation RRSE of baseline and MNN models for all the synthetic functions.
+Bold indicates the lowest RRSE score for a specific function. The average predictor is omitted from
+this table as it is has an RRSE of one for all functions.
+Baseline
+MNN
+Author
+LR
+GB
+RF
+PANN
+CCP
+PDCLow
+PDC
+Currin [7]
+5.04e-01
+3.67e-02
+3.85e-03
+3.15e-06
+6.61e-06
+3.67e-06
+5.35e-07
+Bukin 6 [4]
+0.702
+0.136
+0.009
+0.488
+0.496
+0.489
+0.486
+Price 3 [36]
+1.000
+0.026
+0.007
+1.424
+1.415
+1.418
+1.417
+Dette-Pepelyshev [11]
+0.919
+0.086
+0.026
+0.090
+0.018
+0.109
+0.009
+Colville [18]
+0.986
+0.068
+0.050
+0.062
+0.021
+0.015
+0.006
+Lim [27]
+0.620
+0.029
+0.004
+0.032
+0.009
+0.009
+0.005
+Camel Three Hump [3]
+1.000
+0.016
+0.003
+0.038
+0.005
+0.015
+0.007
+Beale [18]
+0.999
+0.113
+0.016
+0.038
+0.015
+0.006
+0.005
+Goldstein-Price [15]
+0.861
+0.065
+0.007
+0.120
+0.089
+0.106
+0.086
+MNNs generally have considerably lower RRSE scores than baseline models in testing. However,
+in validation, baseline models often outperform MNNs in terms of RRSE, as seen in Table 5. From
+validation to testing, the RRSE of the baseline models increases greatly, whereas the RRSE scores
+for MNNs in validation are much closer to the RRSE scores in testing. Therefore, the validation
+performance of MNNs is more representative of the out-of-distribution testing performance than
+it is for the baseline models. The fact that baseline models struggle in testing and that the average
+predictor based on the training data generally has much higher RRSE than one, indicates that testing
+is out-of-distribution and highlights the inductive biases of MNNs towards generalizing polynomials.
+5.3
+Epidemiology Simulation Metamodels
+In both of the previous experiments, it is found that polynomial functions are harder to learn
+when their output range is extremely wide. Additionally, it is found that increasing the order of
+polynomials does not lead to increasing complexity by itself. The first finding is addressed in this
+experiment by having constrained input and output ranges, and the latter is further investigated by
+modeling polynomials up to 63rd order. The results of varying the duration of the simulation by
+T = [2, 6, 12, 24, 30, 40, 60, 120] and keeping the lag size fixed at L = 1 are the first to be presented
+in this section. The next results presented are achieved by keeping the duration fixed at T = 120 and
+varying the lag size by L = [1, 2, 3, 4, 5]. The final results of this experiment come from comparing
+simulations with the same number of modeled time steps (T//L) but with a different lag size and,
+therefore, with a different polynomial order.
+The first results are shown in Figure 9, where two graphs show the performance of RRSE in validation
+and testing for all models and baselines. Validation results are shown in Figure 9a, where baseline
+models (dotted lines) outperform MNNs (solid lines) for all durations. The MNNs are grouped
+in terms of their performance with a large gap to the baseline models. Moreover, the RF baseline
+model has the lowest RRSE across all durations, whereas PDC surprisingly has the highest RRSE of
+the MNNs. These validation results correspond well with the validation results from the previous
+experiment, where the baseline models outperformed the MNNs in modeling synthetic functions. The
+results of the out-of-distribution tests are shown in Figure 9b, where the takeaway from validation to
+testing is quite similar to the previous experiment. The MNNs are also grouped together here, but
+16
+==PAGE:17==
+have lower RRSE scores than the baseline models. For durations up to 12, the LR baseline model
+has the lowest RRSE narrowly beating the PDC. However, for the remaining durations, the RRSE
+of LR steadily increases and PDC has the lowest RRSE. PDC is closely followed by PDCLow and
+CCP, while PANN seems to consistently have a higher RRSE than the other MNNs. The RRSE of
+the baseline models exceeds one when a duration of 30 and greater is used. In contrast, this is only
+true for MNNs with a duration of 120. In general, it is observed that the performance of MNNs
+in validation is true to their performance in the out-of-distribution test. This is not the case for the
+baseline models, which have great performance in validation, but end up with terrible performance in
+test for higher durations.
+(a) Validation performance where MNNs are
+outperformed by baseline models.
+(b) Testing performance where MNNs out-
+perform baseline models.
+Figure 9: Experiment with fixed lag size of one and varying length of simulation. Baseline models
+are shown with dotted lines and MNNs are shown with solid lines. The y-axis shows the RRSE score,
+which means lower scores are better.
+In the second part of these results, the lag size is increased, while the duration is kept fixed at T = 120.
+As the lag size increases, the polynomial order of the transition equations increases and the number of
+modeled time steps decreases, which should entail lower RRSE values, as there are fewer time steps
+for errors to accumulate in validation and testing. The results of increasing the lag size are visualized
+in Figure 10, where the validation results in Figure 10a show a general pattern of decreasing RRSE
+scores as the lag size increases. The two exceptions are the LR baseline, which has nearly identical
+performance across all lag sizes, and PANN, which has an increasing RRSE using a lag size of four
+and five. The lowest RRSE score are seen for the baseline RF in all lag sizes, closely followed by the
+CCP, PDCLow, and the baseline GB with a lag size of five. The test results in Figure 10b show how
+the MNNs outperform the baseline models in the out-of-distribution test in terms of RRSE, as in the
+first results of this experiment. PANN follows the same pattern as in validation, where the RRSE
+increases using a lag size of four and five. However, the RRSE score decreases for the remaining
+MNNs as the lag size increases. In contrast, the test RRSE of the baseline models is constant or
+increases slightly as the lag size increases. From these results, it is obvious that CCP, PDCLow, and
+PDC are capable of learning polynomials up to the 63rd order and generalize better than baseline
+models for these higher-order polynomials.
+The final results of this experiment in Figure 11 combine the results of Figures 9 and 10 to allow
+further interpretation of MNN performance. The two graphs show the lowest RRSE score of the
+MNNs at a specific number of modeled time steps. The blue line consists of the RRSE scores obtained
+using a fixed lag size L = 1 and varying the duration by T = [24, 30, 40, 60, 120], whereas the orange
+line comes from using a fixed duration T = 120 and a variable lag size of L = [5, 4, 3, 2, 1], that
+is, T//L = [24, 30, 40, 60, 120]. Therefore, RRSE is recorded at the same number of modeled time
+steps for both approaches, but the difference between the lines is the order of the polynomials that
+are modeled. For example, at 24 modeled time steps, a comparison can be made between modeling
+a third-order polynomial (blue) and a 63rd-order polynomial (orange). The RRSE scores at 120
+modeled time steps come from the same run, but is shown for both lines for interpretability. In Figure
+11a, the validation results show that modeling higher-order polynomials is more desirable, as it results
+in lower RRSE scores than modeling third-order polynomials. The difference is most notable at 60
+modeled time steps at a polynomial order of seven and least notable at 24 modeled time steps at a
+polynomial order of 63. For the testing, shown in Figure 11b, the interpretation is similar to that in
+17
+==PAGE:18==
+(a) Validation performance where the MNNs
+are comparable to baseline models in RRSE.
+(b) Testing performance where MNNs con-
+sistently outperform baseline models.
+Figure 10: Experiment with fixed duration and varying lag size. Baseline models are shown with
+dotted lines and MNNs are shown with solid lines. The y-axis shows the RRSE score, which means
+lower scores are better.
+the validation but with a smaller difference when higher-order polynomials are modeled. However,
+the largest difference is still found at 60 modeled time steps.
+(a) RRSE scores in validation showing that
+modeling higher-order polynomials (orange
+line) results in lower RRSE than modeling
+third-order polynomials (blue line).
+(b) RRSE scores in testing. The difference
+between modeling higher-order polynomials
+(orange line) and third-order polynomials is
+less significant than in validation.
+Figure 11: RRSE performance of MNNs as a function of the number of modeled time steps. The
+blue lines are a result of keeping lag size fixed while varying duration and vice versa for the orange
+line. Each point is the lowest RRSE score of the MNNs at a given value of T//L.
+6
+Discussion
+The results presented in this paper have a number of limitations, which stems from a lack of
+computational resources. First, the results come from a single experimental run, which ideally should
+be an aggregation of multiple runs with different seeds. Therefore, the robustness of the results and
+conclusions is unknown. Second, hyperparameters are selected manually and used universally for
+all models and runs, where automated hyperparameter tuning for each model and learning problem
+is more desirable. A third limitation related to using universal hyperparameters is that models are
+trained for the same number of epochs despite varying greatly in number of parameters. Ideally, each
+model should be trained until the validation loss has converged. However, better performance in
+validation does not necessarily lead to better performance in out-of-distribution tests.
+Out-of-distribution is a central concept in this work, as it is used to test generalization capabilities
+of the models. In this aspect, nonoverlapping training and test distributions have been considered
+sufficient, but it has not been quantified how far these distributions should be apart from each other
+for testing to be considered out-of-distribution. This is especially a limitation to the experiment in
+simulation metamodeling, as distributions for multiple parameters have to be considered. Furthermore,
+18
+==PAGE:19==
+for this experiment, polynomials of very high order are modeled, leading to significantly different
+training times of the metamodels. Although these training times could influence whether MNNs are
+more suitable metamodels than the baseline models considered, they have not been reported in this
+work. A final limitation is the absence of kriging or Gaussian processes as a baseline model, given its
+importance and popularity in the metamodeling literature.
+For future work, it would be interesting to experiment with additional variations of MNN architectures.
+An obvious extension to the MNN models considered in this work, would be a deep version of CCP
+implemented by adding hidden layers, in the same spirit as the V layers of PDC. This would enable
+comparisons of whether deeper models perform better in generalizing polynomials and simulation
+metamodeling. Moreover, the proposed simulation metamodeling approach should be applied for
+more simulation models, and preferably for simulations that are computationally expensive, as
+opposed to the SIR simulation considered in this work.
+7
+Conclusion
+This thesis highlights the importance of being able to learn and generalize polynomials for simulation
+metamodels. For this purpose, MNN architectures are used, which can raise input to higher-order out-
+put through multiplication. PANN, CCP, and PDC were collected from the literature and repurposed,
+while PDCLow was proposed based on these. Experiments on polynomial learning showed that
+MNNs are capable of generalizing out-of-distribution for sixth-order polynomials, while struggling
+for higher-order polynomials. From this experiment alone, it could not be determined whether this
+was the case due to the high order of the polynomial or the wide output range incurred from increas-
+ing the polynomial order, which increased the chances of numerical overflow in out-of-distribution
+tests. To account for this, the second experiment modeled synthetic functions with constrained input
+domains, where it was evident that the width of the output range, rather than the polynomial order,
+influenced the ability of MNNs to learn and generalize a polynomial. Additionally, the validation and
+out-of-distribution testing performance of MNNs was more similar than that for the baseline models.
+This was further confirmed in the experiment that metamodeled an epidemiology simulation.
+The proposed simulation metamodeling approach showed how increasing the size of the time steps
+entailed approximating higher-order polynomials for simulations with time step updates described by
+polynomials. A useful property of this approach is that the number of time steps, where approximation
+errors can accumulate, is lowered while simulating the same time interval. The third experiment
+exemplified this by showing decreasing RRSE scores for MNNs as a result of increasing the lag size.
+Furthermore, the third experiment showed better performance for MNNs approximating higher-order
+polynomials as opposed to lower-order polynomials, which supports the presence of an inductive
+bias in MNNs towards learning and generalizing polynomials. An inductive bias for generalizing
+higher-order polynomials is critical to simulation metamodels, as it allows simulations further ahead
+in time in the same amount of time steps.
+References
+[1] B. Ankenman, B. L. Nelson, and J. Staum. Stochastic kriging for simulation metamodeling.
+Operations Research, 58(2):371–382, 2010. ISSN 0030364X, 15265463. URL http://www.
+jstor.org/stable/40605923.
+[2] E. Bjerre, M. N. Fienen, R. Schneider, J. Koch, and A. L. Højberg. Assessing spatial transfer-
+ability of a random forest metamodel for predicting drainage fraction. Journal of Hydrology,
+612:128177, 2022. ISSN 0022-1694. doi: https://doi.org/10.1016/j.jhydrol.2022.128177. URL
+https://www.sciencedirect.com/science/article/pii/S0022169422007508.
+[3] F. H. Branin. Widely convergent method for finding multiple solutions of simultaneous nonlinear
+equations. IBM Journal of Research and Development, 16(5):504–522, 1972. doi: 10.1147/rd.
+165.0504.
+[4] A. D. Bukin. New minimization strategy for nonsmooth functions. INSPIRE HEP, 10 1997.
+URL https://inspirehep.net/files/1b29add4ea1e13332c1f8adc2f0e5246.
+19
+==PAGE:20==
+[5] G. Chrysos, S. Moschoglou, G. Bouritsas, J. Deng, Y. Panagakis, and S. Zafeiriou. Deep
+polynomial neural networks. CoRR, abs/2006.13026, 2020. URL https://arxiv.org/abs/
+2006.13026.
+[6] G. G. Chrysos, M. Georgopoulos, J. Deng, and Y. Panagakis. Polynomial networks in deep
+classifiers. CoRR, abs/2104.07916, 2021. URL https://arxiv.org/abs/2104.07916.
+[7] C. Currin, T. Mitchell, M. Morris, and D. Ylvisaker. Bayesian prediction of deterministic
+functions, with applications to the design and analysis of computer experiments. Journal
+of the American Statistical Association, 86(416):953–963, 1991. ISSN 01621459. URL
+http://www.jstor.org/stable/2290511.
+[8] F. D’Angelo and C. Henning. Uncertainty-based out-of-distribution detection requires suitable
+function space priors. CoRR, abs/2110.06020, 2021. URL https://arxiv.org/abs/2110.
+06020.
+[9] S. K. Dasari, A. Cheddad, and P. Andersson. Random forest surrogate models to support
+design space exploration in aerospace use-case. In J. MacIntyre, I. Maglogiannis, L. Iliadis,
+and E. Pimenidis, editors, Artificial Intelligence Applications and Innovations, pages 532–544,
+Cham, 2019. Springer International Publishing. ISBN 978-3-030-19823-7.
+[10] N. Detlefsen, J. Borovec, J. Schock, A. Jha, T. Koker, L. Di Liello, D. Štancl, Q. Changsheng,
+M. Grechkin, and W. Falcon. Torchmetrics - measuring reproducibility in pytorch. The Journal
+of Open Source Software, 7, 02 2022. doi: 10.21105/joss.04101.
+[11] H. Dette and A. Pepelyshev. Generalized latin hypercube design for computer experiments. Tech-
+nometrics, 52(4):421–429, 2010. ISSN 00401706. URL http://www.jstor.org/stable/
+40997249.
+[12] A. B. Downey. Modeling and Simulation in Python, chapter 11. No Starch Press, 2023. URL
+https://allendowney.github.io/ModSimPy/index.html.
+[13] C. Ferreira. Genexprotools, 2006. URL https://www.gepsoft.com/gxpt4kb/Chapter10/
+Section1/SS07.htm.
+[14] A. Gavana. Tough functions and boring tables, 2021. URL http://infinity77.net/go_
+2021/scipy_extended.html#tables-tough-functions-and-boring-tables.
+[15] A. A. Goldstein and J. F. Price. On descent from local minima. Mathematics of Computation, 25
+(115):569–574, 1971. ISSN 00255718, 10886842. URL http://www.jstor.org/stable/
+2005219.
+[16] K. Hornik, M. Stinchcombe, and H. White. Multilayer feedforward networks are universal
+approximators. Neural Networks, 2(5):359–366, 1989. ISSN 0893-6080. doi: https://doi.
+org/10.1016/0893-6080(89)90020-8. URL https://www.sciencedirect.com/science/
+article/pii/0893608089900208.
+[17] A. G. Ivakhnenko. Polynomial theory of complex systems. IEEE Transactions on Systems,
+Man, and Cybernetics, SMC-1(4):364–378, 1971. doi: 10.1109/TSMC.1971.4308320.
+[18] M. Jamil and X. Yang. A literature survey of benchmark functions for global optimization
+problems. CoRR, abs/1308.4008, 2013. URL http://arxiv.org/abs/1308.4008.
+[19] F. Jensen and T. Nielsen. Bayesian Networks and Decision Graphs. Springer, 01 2001. ISBN
+978-1-4757-3504-8. doi: 10.1007/978-1-4757-3502-4.
+[20] M. F. Kasim, D. Watson-Parris, L. Deaconu, S. Oliver, P. Hatfield, D. H. Froula, G. Gregori,
+M. Jarvis, S. Khatiwala, J. Korenaga, J. Topp-Mugglestone, E. Viezzer, and S. M. Vinko.
+Building high accuracy emulators for scientific simulations with deep neural architecture search.
+Machine Learning: Science and Technology, 3(1):015013, dec 2021. doi: 10.1088/2632-2153/
+ac3ffa. URL https://doi.org/10.1088%2F2632-2153%2Fac3ffa.
+20
+==PAGE:21==
+[21] W. O. Kermack and A. G. McKendrick. A contribution to the mathematical theory of epidemics.
+Proceedings of the Royal Society of London. Series A, Containing Papers of a Mathematical and
+Physical Character, 115(772):700–721, 1927. ISSN 09501207. URL http://www.jstor.
+org/stable/94815.
+[22] J. Kileel, M. Trager, and J. Bruna. On the expressive power of deep polynomial neural networks,
+2019. URL https://doi.org/10.48550/arXiv.1905.12207.
+[23] D. P. Kingma and J. Ba. Adam: A method for stochastic optimization, 2017. URL https:
+//doi.org/10.48550/arXiv.1412.6980.
+[24] J. Kleijnen. Kriging metamodeling in simulation: A review. European Journal of Operational
+Research, 192:707–716, 02 2007. doi: 10.1016/j.ejor.2007.10.013.
+[25] G. Korn. Advanced dynamic-system simulation: Model-replication techniques and monte carlo
+simulation. Advanced Dynamic-system Simulation: Model-replication Techniques and Monte
+Carlo Simulation, pages 1–2, 05 2006. doi: 10.1002/0470085169.
+[26] H. Lam and H. Zhang. Prediction intervals for simulation metamodeling, 2022. URL https:
+//arxiv.org/pdf/2204.01904.pdf.
+[27] Y. B. Lim, J. Sacks, W. J. Studden, and W. J. Welch. Design and analysis of computer
+experiments when the output is highly correlated over the input space. The Canadian Journal of
+Statistics / La Revue Canadienne de Statistique, 30(1):109–126, 2002. ISSN 03195724. URL
+http://www.jstor.org/stable/3315868.
+[28] E. Lugato, L. Paniagua, A. Jones, W. Vries, and A. Leip. Complementing the topsoil information
+of the land use/land cover area frame survey (lucas) with modelled n2o emissions. PLoS ONE,
+12, 04 2017. doi: 10.1371/journal.pone.0176111.
+[29] M. Messner. Convolutional neural network surrogate models for the mechanical properties of
+periodic structures. Journal of Mechanical Design, 142:1–8, 10 2019. doi: 10.1115/1.4045040.
+URL https://www.osti.gov/pages/servlets/purl/1632185.
+[30] T. M. Mitchell. The Need for Biases in Learning Generalizations by The Need for Biases
+in Learning Generalizations. Rutgers CS Tech Report CBM-TR-117, 1980. URL https:
+//www.cs.cmu.edu/~tom/pubs/NeedForBias_1980.pdf.
+[31] S.-K. Oh, W. Pedrycz, and B.-J. Park. Polynomial neural networks architecture: analysis and
+design. Computers & Electrical Engineering, 29(6):703–725, 2003. ISSN 0045-7906. doi:
+https://doi.org/10.1016/S0045-7906(02)00045-9. URL https://www.sciencedirect.com/
+science/article/pii/S0045790602000459.
+[32] F. Pedregosa, G. Varoquaux, A. Gramfort, V. Michel, B. Thirion, O. Grisel, M. Blondel,
+P. Prettenhofer, R. Weiss, V. Dubourg, J. Vanderplas, A. Passos, D. Cournapeau, M. Brucher,
+M. Perrot, and E. Duchesnay. Scikit-learn: Machine learning in Python. Journal of Machine
+Learning Research, 12:2825–2830, 2011.
+[33] J.-S. Pei, J. P. Wright, and A. W. Smyth. Mapping polynomial fitting into feedforward neural
+networks for modeling nonlinear dynamic systems and beyond. Computer Methods in Applied
+Mechanics and Engineering, 194(42):4481–4505, 2005. ISSN 0045-7825. doi: https://doi.org/
+10.1016/j.cma.2004.12.010. URL https://www.sciencedirect.com/science/article/
+pii/S0045782504005316.
+[34] A. Pillai, P. Thies, and L. Johanning. Mooring system design optimization using a surrogate
+assisted multi-objective genetic algorithm. Engineering Optimization, 51:1–23, 10 2018. doi:
+10.1080/0305215X.2018.1519559.
+[35] J. Poropudas and K. Virtanen. Simulation metamodeling with dynamic bayesian networks.
+European Journal of Operational Research, 214(3):644–655, 2011. ISSN 0377-2217. doi: https:
+//doi.org/10.1016/j.ejor.2011.05.007. URL https://www.sciencedirect.com/science/
+article/pii/S0377221711004127.
+21
+==PAGE:22==
+[36] W. L. Price. A controlled random search procedure for global optimisation. The Computer
+Journal, 20(4):367–370, 01 1977. ISSN 0010-4620. doi: 10.1093/comjnl/20.4.367. URL
+https://doi.org/10.1093/comjnl/20.4.367.
+[37] M. Shahriari, D. Pardo, B. Moser, and F. Sobieczky. A deep neural network as surrogate
+model for forward simulation of borehole resistivity measurements. Procedia Manufacturing,
+42:235–238, 2020.
+ISSN 2351-9789.
+doi: https://doi.org/10.1016/j.promfg.2020.02.075.
+URL https://www.sciencedirect.com/science/article/pii/S2351978920306399.
+International Conference on Industry 4.0 and Smart Manufacturing (ISM 2019).
+[38] S. M. E. Sharifnia, S. Amrollahi Biyouki, R. Sawhney, and H. Hwangbo. Robust simulation
+optimization for supply chain problem under uncertainty via neural network metamodeling.
+Computers & Industrial Engineering, 162:107693, 2021. ISSN 0360-8352. doi: https://doi.org/
+10.1016/j.cie.2021.107693. URL https://www.sciencedirect.com/science/article/
+pii/S0360835221005970.
+[39] L. Uusitalo. Advantages and challenges of bayesian networks in environmental modelling.
+Ecological Modelling, 203(3):312–318, 2007. ISSN 0304-3800. doi: https://doi.org/10.1016/
+j.ecolmodel.2006.11.033. URL https://www.sciencedirect.com/science/article/
+pii/S0304380006006089.
+[40] X. Ying.
+An overview of overfitting and its solutions.
+Journal of Physics: Conference
+Series, 1168(2):022022, feb 2019. doi: 10.1088/1742-6596/1168/2/022022. URL https:
+//dx.doi.org/10.1088/1742-6596/1168/2/022022.
+[41] F. Zhu, D. Jing, F. Leve, and S. Ferrari. Nn-poly: Approximating common neural networks
+with taylor polynomials to imbue dynamical system constraints. Frontiers in Robotics and AI, 9,
+2022. ISSN 2296-9144. doi: 10.3389/frobt.2022.968305. URL https://www.frontiersin.
+org/articles/10.3389/frobt.2022.968305.
+22
+==PAGE:23==
+A
+Appendix
+A.1
+Preliminary Experiments with Arbitrary Polynomials
+Preliminary experiments with arbitrary polynomials are conducted to test the viability of learning
+polynomials with MNNs in-distribution and out-of-distribution. Selected results are shown in the
+paper while the rest are shown here. The validation results from the use of a Gaussian N(0, 5)
+training distribution are shown in Table 6. The test results are visualized as box plots from the
+RRSE scores of nine test distributions, which are Gaussian distributions with mean and standard
+deviation composed of all combinations between µ = [−50, 0, 90] and σ = [1, 5, 25]. The results for
+all polynomials are shown in Figure 12.
+Table 6: Validation RRSE for all arbitrary polynomials and models using samples from a Gaussian
+N(0, 5) distribution. Bold indicates the lowest RRSE score for a polynomial.
+Polynomial
+PANN
+CCP
+PDCLow
+PDC
+a
+5.555e-08
+5.216e-08
+5.471e-08
+5.094e-08
+a2
+9.245e-08
+9.067e-04
+7.731e-05
+9.453e-08
+5a2 + 6b2
+0.008
+0.005
+0.008
+0.001
+2a36b2
+0.400
+0.045
+0.220
+0.014
+2a3b2 −3c
+0.457
+0.193
+0.038
+0.027
+2a3b3 −3c
+0.722
+0.487
+0.206
+0.045
+2a2b2c2 −3d
+0.834
+0.349
+0.350
+0.387
+2a3b2c2 −d6
+0.861
+0.522
+0.451
+0.465
+a3b2c3 −d3e3
+1.741
+1.229
+1.368
+1.167
+a3b3c3 −d4e4
+1.904
+0.932
+1.295
+1.090
+a3b2c2d3 −e5f 5
+4.690
+2.672
+1.862
+2.249
+abcdefg
+2.561
+1.636
+1.510
+1.522
+abc + d −e −f −g
+0.046
+0.042
+0.003
+0.059
+a10 −b9
+1.237
+0.975
+1.050
+0.793
+A.2
+Synthetic Functions
+The synthetic functions of Table 2 are shown in Equations 8-16 and the ones with two input variables
+are visualized as surface plots in Figure 13. The first synthetic function has two variables, a low
+polynomial order of two, and a narrow input domain for its variables. The Currin function is
+considered the simplest of the synthetic functions, although it does not have the difficulty reported
+[14]. The second synthetic function is reported to be the toughest, with an overall success of 0.31%
+using a wide range of optimizers. Although the Bukin function uses both the square root and absolute
+value operators, it is included to determine whether functions that are deemed extremely difficult
+to optimize are also difficult to learn out-of-distribution. The function is visualized in Figure 13b,
+where the function plane is similar to that of a paper plane. The third synthetic function, the Price 3
+function, has a reported optimization success of 70.77%, but the output of the function ranges greatly
+in magnitude, as seen in Figure 13c. Additionally, the input domain is the widest of all synthetic
+functions. The Dette-Pepelyshev function is the fourth synthetic function, has a polynomial order of
+four, and a narrow input domain. Like the Bukin 6 function, this function uses the square root operator,
+but is much simpler. The fifth function, the Colville function, has the largest number of variables in
+the synthetic functions. It has a reported optimization success of 59.31%, which is the second lowest
+of the synthetic functions used in this experiment. The sixth synthetic function, the Lim polynomial
+function, has a polynomial order of five, but is considered one of the simpler synthetic functions.
+The input domain is narrow, and the function hyperplane does not have unexpected behavior in the
+extremes of the input domain. The ThreeHumpCamel function is the seventh synthetic function and is
+shown in Figure 13e. It is not evident from the figure, but the three humps come from the three local
+minima that occur around (0,0). However, this cannot be viewed from the figure, as the fluctuations
+are much smaller than the overall magnitude of the function output. It is a relatively simple function
+23
+==PAGE:24==
+(a) Shown in paper.
+(b) Shown in paper.
+(c) Shown in paper.
+(d) Shown in paper.
+Figure 12: Test results from learning arbitrary polynomials with MNNs. Models are tested on nine
+distributions where eight are out-of-distribution from the training.
+with an optimization success of 95.54%, although extreme behavior occurs in the extremes of the
+input domain. Likewise, the eighth synthetic function, the Beale function, has extreme behavior in
+the extremes of the input domain compared to the rest of the input domain. Despite this, Beale is
+reported to be one of the least tough functions with an optimization success of 96.69%. The final
+and ninth synthetic function is visualized in Figure 13f. The function shows extreme behavior in one
+corner of its hyperplane and is comprised of many terms compared to the other synthetic functions. It
+is still a simple function with an optimization success of 96.15%.
+24
+==PAGE:25==
+fCurrin(x) = 4.9 + 21.15x1 −2.17x2 −15.88x2
+1 −1.38x2
+2 −5.26x1x2
+(8)
+fBukin6(x) = 100
+q
+|x2 −0.01x2
+1| + 0.01|x1 + 10|
+(9)
+fP rice3(x) = 100(x2 −x2
+1)2 + 6
+ 6.4(x2 −0.5)2 −x1 −0.6
+
+(10)
+fD&P (x) = 4(x1 −2 + 8x2 −8x2
+2)2 + (3 −4x2)2 + 16
+√
+x3 + 1(2x3 −1)2
+(11)
+fColville(x) = 100(x1 −x2
+2)2 + (1 −x1)2 + 90(x4 −x2
+3)2 + (1 −x2
+3)
+(12)
++ 10.1((x2 −1)2 + (x4 −1)2) + 19.8(x2 −1)(x4 −1)
+fLim(x) = 9 + 5
+2x1 −35
+2 x2 + 5
+2x1x2 + 19x2
+2 −15
+2 x3
+1 −5
+2x1x2
+2 −11
+2 x4
+2 + x3
+1x2
+2
+(13)
+fCamel(x) = 2x2
+1 −1.05x4
+1 + x6
+1
+6 + x1x2 + x2
+2
+(14)
+fBeale(x) = (1.5 −x1 + x1x2)2 + (2.25 −x1 + x1x2
+2)2 + (2.625 −x1 + x1x3
+2)2
+(15)
+fGoldstein−P rice =
+
+1 + (x1 + x2 + 1)2(19 −14x1 + 3x2
+1 −14x2 + 6x1x2 + 3x2
+2)
+
+(16)
+
+30 + (2x1 −3x2)2(18 −32x1 + 12x2
+1 + 48x2 −36x1x2 + 27x2
+2)
+
+A.3
+Experiment Metrics
+Metrics are recorded for all experiments in the Python TorchMetrics library Detlefsen et al. [10]
+and root relative squared error (RRSE) as defined in the GeneXproTools 4.0 software Ferreira [13].
+Training and validation loss is implemented as the mean squared error (MSE) of the error between
+true values and predictions, as shown in Equation 17. For diagnostics during model training, the R2
+score and RRSE are logged in validation after each epoch. The R2 score represents the proportion
+of variance of the target y explained by the independent variable(s) in the model. Therefore, R2
+cannot exceed one, as the independent variable(s) cannot explain more variance than there is. This
+is consistent with the fact that a perfect model would result in the numerator in Equation 18 being
+zero and thereby subtracting zero from one. R2 should not be below zero, but it is possible if the
+model is worse than predicting the average of the target y. RRSE is largely similar to R2 as seen by
+comparing Equations 18 and 19. A subtle but big difference is that the target y is subtracted from
+the prediction ˆy in the RRSE and not the other way around for R2. RRSE ranges between zero and
+infinity, where being closer to zero indicates better performance in contrast to R2. In addition to R2
+and RRSE, models are evaluated in the out-of-distribution tests with mean absolute error (MAE) as
+seen in Equation 20.
+MSE = 1
+n
+n
+X
+i=1
+(yi −ˆyi)2
+(17)
+R2 = 1 −
+Pn
+i=1(yi −ˆyi)2
+Pn
+i=1(yi −¯y)2
+(18)
+RRSE =
+sPn
+i=1(ˆyi −yi)2
+Pn
+i=1(yi −¯y)2
+(19)
+MAE = 1
+n
+n
+X
+i=1
+|yi −ˆyi|
+(20)
+Absolute metrics, such as MSE and MAE, allow meticulous comparisons of model performance
+within the same polynomial and data distribution. MSE is recorded to be able to directly interpret
+the learning process of the neural networks. However, the MSE is on a different scale than the
+data, and it can be hard to distinguish unsatisfactory MSE values from satisfactory ones. This is
+the main motivation behind including MAE since this is directly comparable to the scale of the
+data. Unfortunately, comparisons with absolute metrics cannot be made across polynomials and data
+distributions, which introduced the need for relative metrics in this project. As a result, the relative
+metrics, R2 and RRSE, are included for this reason. For really simple learning problems, it can be
+25
+==PAGE:26==
+(a) Currin function[7].
+No re-
+ported optimization success rate.
+(b) Bukin 6 function [4].
+Suc-
+cessful optimization rate of 0.31%
+[14]
+(c) Price 3 function [36]. Success-
+ful optimization rate of 70.77%
+(d) Lim polynomial [27]
+(e) Camel Three Hump function
+[3]. Successful optimization rate
+of 95.54%
+(f) Goldstein-Price function [15].
+Successful optimization rate of
+96.15%
+(g) Beale function [18]. Success-
+ful optimization rate of 96.69%
+Figure 13: Contour surface plots of synthetic functions with two variables. The values along the
+z-axis are the output of f(x1, x2), where the function f is the synthetic function as described in the
+caption of each subplot.
+relatively easy to achieve a perfect R2 of one. If multiple models reach this score, it is impossible to
+separate them in evaluation. Fortunately, it is rare to train a model that has perfect predictions, which
+means that RRSE might be more appropriate when comparing great-performing models. Absolute
+and relative metrics complement each other and are used on a shifting basis.
+A.4
+Learning Objectives
+This paper has been written as part of a thesis at the Technical University of Denmark. It is common
+practice to have learning objectives that highlight the objectives that the author is expected to achieve
+in a successful project. The learning objectives are formulated as:
+• Define polynomials and their usefulness in modeling real-world phenomena and processes
+through simulation
+• Describe the relationship between neural networks and polynomials
+26
+==PAGE:27==
+• Conduct small-scale experiments with neural networks that learn polynomials
+• Formulate neural network architectures with inductive bias for learning polynomials
+• Demonstrate performance of formulated architectures compared to baseline machine learn-
+ing models
+• Apply formulated architectures as a simulation metamodel
+• Organize code in an efficient way for reproducibility and shareability
+• Be able to present findings and methodology clearly in a report
+27

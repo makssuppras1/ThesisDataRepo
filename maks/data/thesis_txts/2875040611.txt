@@ -1,0 +1,1490 @@
+==PAGE:1==
+AutoQ­VIS
+Improving Unsupervised Video Instance Seg­
+mentation via Automatic Quality Assessment
+Master Thesis
+DTU Compute
+Department of Applied Mathematics and Computer Science
+==PAGE:2==
+==PAGE:3==
+AutoQ­VIS
+Improving Unsupervised Video Instance Segmentation via Automatic Quality Assessment
+Master Thesis
+September, 2025
+By
+Kaixuan Lu
+==PAGE:4==
+Approval
+This thesis has been prepared over six months at the Section for Visual Computing, De­
+partment of Applied Mathematics and Computer Science, at the Technical University of
+Denmark, DTU, in partial fulfilment for the degree Master of Science in Engineering, MSc
+Eng.
+It is assumed that the reader has a basic knowledge in the areas of computer vision.
+Kaixuan Lu ­ s232248
+Signature
+Date
+ii
+AutoQ­VIS
+==PAGE:5==
+Abstract
+Video Instance Segmentation (VIS) faces significant annotation challenges due to its dual
+requirements of pixel­level masks and temporal consistency labels. While recent unsuper­
+vised methods like VideoCutLER eliminate optical flow dependencies through synthetic
+data, they remain constrained by the synthetic­to­real domain gap. We present AutoQ­
+VIS, a novel unsupervised framework that bridges this gap through quality­guided self­
+training. Our approach establishes a closed­loop system between pseudo­label genera­
+tion and automatic quality assessment, enabling progressive adaptation from synthetic
+to real videos. Experiments demonstrate state­of­the­art performance with 52.6 AP50
+on YouTubeVIS­2019 val set, surpassing the previous state­of­the­art VideoCutLER by
+4.4%, while requiring no human annotations. This demonstrates the viability of quality­
+aware self­training for unsupervised VIS. The source code of our method is available at
+https://github.com/wcbup/AutoQ­VIS.
+AutoQ­VIS
+iii
+==PAGE:6==
+Acknowledgements
+I am deeply grateful to Prof. Dimitrios Papadopoulos and Mehmet Onurcan Kaya for their
+invaluable guidance and tireless effort in guiding me and refining this work. I am so lucky
+to have them supervise me. They are the best of the best.
+iv
+AutoQ­VIS
+==PAGE:7==
+Contents
+Preface . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ii
+Abstract . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iii
+Acknowledgements
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iv
+1
+Introduction
+1
+2
+Related Work
+3
+2.1
+Unsupervised video object segmentation (VOS) . . . . . . . . . . . . . . . .
+3
+2.2
+Unsupervised video instance segmentation (VIS) . . . . . . . . . . . . . . .
+6
+2.3
+Looped self­training method . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+3
+Method
+13
+3.1
+Initial training stage . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13
+3.2
+Multi­round self­training . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 14
+3.3
+DropLoss for mask head . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 18
+4
+Experiment
+21
+4.1
+Experimental results . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21
+4.2
+Ablation studies . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 23
+4.3
+Limitations
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+5
+Conclusion and Future Work
+27
+Bibliography
+29
+A Additional qualitative visualizations
+33
+AutoQ­VIS
+v
+==PAGE:8==
+vi
+AutoQ­VIS
+==PAGE:9==
+1
+Introduction
+Video Instance Segmentation (VIS) is the challenging task of simultaneously detecting,
+segmenting, and tracking object instances across video sequences [2, 3, 4, 5, 6, 7].
+This capability is fundamental for scene understanding in applications ranging from au­
+tonomous driving [8] to video content editing [9]. However, training high­performance
+VIS models typically requires pixel­level annotations across all frames [2]. This process
+is expensive due to the labor­intensive nature of annotating temporal consistency and
+instance identities. As a result, there is an urgent need to develop unsupervised video in­
+stance segmentation frameworks that can accurately interpret video content and function
+effectively across diverse, unlabeled environments.
+Prior work [10, 11, 12, 13, 14, 15, 16, 17] in unsupervised video segmentation predom­
+inantly addresses Video Object Segmentation (VOS), focusing on separating a single
+foreground object via motion or consistency cues. While OCLR [18] introduces unsu­
+pervised VIS that supports multiple instances, its predefined object count during training
+prevents dynamic adaptation to varying instances during inference. Furthermore, prior
+approaches [10, 11, 12, 13, 18] rely on optical flow estimators (e.g., RAFT [19]) that are
+trained on human­annotated datasets. VideoCutLER [1] marks a breakthrough in unsu­
+pervised VIS and achieves unprecedented performance by demonstrating multi­instance
+segmentation without optical flow dependencies. Its core innovation lies in synthetic video
+generation via spatial augmentations of CutLER [20] pseudo­labels from ImageNet [21].
+However, VideoCutLER remains constrained by synthetic­to­real domain gaps and static
+instance modeling, i.e., the synthetic videos lack natural and realistic motion patterns.
+Building upon VideoCutLER’s synthetic data paradigm, which generates training videos
+through spatial augmentations of static image pseudo­labels, we introduce AutoQ­VIS to
+address its critical domain gap limitation. While VideoCutLER’s synthetic videos provide
+initial instance awareness, they lack natural motion patterns and real­world appearance
+variations, hindering adaptation to authentic video dynamics. Our framework bridges this
+synthetic­to­real domain gap through a self­training loop that progressively adds quality­
+filtered pseudo­labels from unlabeled real videos. Inspired by Mask Scoring R­CNN [22],
+which directly predicts mask quality scores via an auxiliary branch, we implement a quality
+assessment module for pseudo­label filtering of instance masks.
+AutoQ­VIS advances unsupervised video instance segmentation through an iterative self­
+training paradigm with quality­aware pseudo­label selection (fig. 1.1). The system ini­
+tializes using synthetic video data from VideoCutLER, which provides pseudo­labels to
+bootstrap a VideoMask2Former [23, 24] VIS model and a specialized mask quality pre­
+dictor (section 3.1). The mask quality predictor estimates mask IoU quality scores by
+analyzing frame­level features and mask predictions. During multi­round optimization,
+the VIS model generates pseudo­labels on unlabeled videos, which are then scored by
+the quality predictor. High­quality pseudo­labels surpassing a fixed threshold are pro­
+gressively incorporated into the training set, enabling dataset augmentation without any
+human supervision (section 3.2).
+To enhance the mask head training, we employ a
+DropLoss that zeros out mask losses whose maximum ground­truth overlap falls below
+0.01 (section 3.3). By alternating rounds of VIS training (with occasional weight resets)
+and quality­based dataset expansion, AutoQ­VIS dynamically enriches its training dataset
+and steadily sharpens segmentation performance.
+AutoQ­VIS
+1
+==PAGE:10==
+VIS
+Model
+Unlabeled Videos
+Quality Scores
+Mask
+Quality
+Predictor
+Filter with a 
+Fixed Threshold
+Synthetic Videos
+with Annotations
+Pseudo Masks
+Train with both synthetic dataset
+and filtered pseudo masks
+Multi-Round Self-Training
+0.9
+0.8
+0.5
+0.9
+Figure 1.1: AutoQ­VIS overview. In the initial training stage, both the VIS model and
+the mask quality predictor are trained on synthetic videos with pseudo annotations [1].
+During the multi­round self­training stage, the VIS model generates pseudo masks on un­
+labeled videos, which are then scored by the frozen quality predictor. Pseudo masks with
+high predicted quality are selected and added to the training set. The VIS model is sub­
+sequently retrained on both the synthetic data and the selected pseudo labels, enabling
+iterative refinement and progressive performance gains. This figure is created with the
+help of Mehmet Onurcan Kaya.
+Our key contributions are threefold:
+• Annotation­Free VIS Framework: We propose AutoQ­VIS, an unsupervised frame­
+work that overcomes annotation dependency through cyclic pseudo­label refine­
+ment with automated quality control, enabling video instance segmentation training
+directly from unlabeled videos.
+• Automatic Quality Assessment: We propose a simple quality predictor that reli­
+ably filters pseudo labels across self­training rounds.
+• New State­of­the­art Performance: Our AutoQ­VIS archives 52.6 AP50 on YouTubeVIS­
+2019 [2] val split, surpassing the previous state­of­the­art VideoCutLER [1] by 4.4
+AP50.
+2
+AutoQ­VIS
+==PAGE:11==
+2
+Related Work
+This chapter provides an overview of related work focusing on the following areas: unsu­
+pervised video object segmentation (section 2.1), unsupervised video instance segmen­
+tation (section 2.2), and the looped self­training method (section 2.3).
+2.1
+Unsupervised video object segmentation (VOS)
+Figure 2.1: Sample sequences from video object segmentation DAVIS 2016 dataset [25].
+Unsupervised video object segmentation (VOS) [26, 25, 27, 28, 29] targets finding and
+segmenting the most salient objects throughout the entire video sequence without any
+human­annotated labels in the training. It is worth noting that some materials [30, 31,
+32, 33] refer to video salient object detection (SOD) as ”Unsupervised VOS”, which is a
+different task that requires human­annotated labels.
+Current unsupervised video segmentation methods predominantly rely on detection based
+on motion or consistency cues. Motion Grouping [10] introduces a method that uses
+optical flow to train an unsupervised video segmentation network, and it uses only optical
+flow as input.
+As illustrated in fig. 2.2, Motion Group [10] takes optical flow It→t+n as input and predicts
+a set of reconstruction and opacity layers. The framework consists of three main compo­
+nents: a feature encoder, an iterative binding module, and a layer decoder, which together
+reconstruct the input flow. To address motion ambiguities such as small displacements
+and to mitigate noise in optical flow, the method enforces consistency between flow fields
+computed with different frame gaps during training. During inference, only the top half
+branch of the pipeline is used, producing segmentation masks from a single­step flow.
+As shown in fig. 2.3, Motion Group [10] is capable of handling one object at one time. If
+there are multiple moving objects, the model outputs multiple objects as one segmentation
+mask.
+AutoQ­VIS
+3
+==PAGE:12==
+Figure 2.2: The pipeline of Motion Grouping.
+Figure 2.3: Qualitative results of Motion Group [10] on SegTrackv2 [27]. The first row:
+RGB image. The second row: optical flow. The third row: prediction. The fourth row:
+ground truth.
+Following Motion Group [10], many unsupervised VOS methods use optical flow as in­
+put or use it to supervise the model during training. EM [11] formulates an unsupervised
+video segmentation framework rooted in the EM algorithm, while also proposing a novel
+data augmentation strategy tailored for optical flow characteristics. GWM [12] is trained
+on individual video frames with optical flow as the supervisory signal, eliminating reliance
+on flow data during evaluation and enabling inference on static images. BSO [13] em­
+ploys a two­stage training framework: first learning to localize objects through optical flow
+analysis, then refining the model via image appearance cues by leveraging both intrinsic
+low­level visual coherence within individual frames and statistically derived figure­ground
+learned images. Similar to Motion Group [10], many unsupervised VOS methods [11, 12,
+13] suffer from the inability to handle multiple objects simultaneously.
+OCLR [18] introduces an unsupervised framework capable of multi­instance video ob­
+ject segmentation. The method establishes a synthetic data generation pipeline by com­
+positing layered representations, enabling end­to­end training while circumventing labor­
+4
+AutoQ­VIS
+==PAGE:13==
+intensive manual annotation requirements. This automated data synthesis mechanism
+further facilitates Sim2Real generalization without domain adaptation supervision.
+Figure 2.4: The architecture of the OCLR [18] model.
+As architecturally depicted in fig. 2.4, OCLR [18] adopts a U­Net backbone integrated
+with Transformer­based bottleneck processing. The framework ingests optical flow se­
+quences through hierarchical CNN encoders for spatial feature extraction; these fea­
+tures undergo spatio­temporal fusion via a global transformer encoder operating across
+all temporal frames. The processing progresses to a transformer decoder that dynami­
+cally instantiates layer representations, where each learnable query vector is dedicated
+to individual object instantiation with explicit depth inference. Simultaneously, multi­head
+cross­attention maps from the final transformer decoder layer are channeled through CNN
+decoders with progressive upsampling to reconstruct amodal segmentation masks for all
+moving objects.
+Figure 2.5: Qualitative results of OCLR [18] on YouTubeVIS­2019 [2]. The first row: RGB
+image. The second row: ground truth. The third row: prediction.
+AutoQ­VIS
+5
+==PAGE:14==
+The qualitative results of OCLR [18] on YouTubeVIS­2019 is shown in fig. 2.5. While
+OCLR [18] pioneers the first unsupervised video object segmentation framework capable
+of handling multiple instances, its requirement for a fixed, uniform instance count across
+all training videos limits practical application, as the model cannot dynamically adjust to
+varying instance quantities during inference.
+Unlike methods [10, 11, 12, 13, 18] that depend on supervised pre­trained optical flow
+estimators (e.g., RAFT [19]), AMD [17] introduces a fully end­to­end, zero­shot video in­
+stance segmentation framework, training its motion network from scratch without reliance
+on pre­existing optical flow estimators.
+Figure 2.6: The pipeline of AMD [17].
+Figure 2.6 illustrates AMD’s [17] dual­network architecture, which incorporates (1) a single­
+image segmentation network and (2) a dual­frame motion network, jointly trained via an
+unsupervised image reconstruction objective. The system operates by sampling a frame
+pair (i, j) from unlabeled video data. While frame i undergoes mask prediction through the
+segmentation branch, both frames are processed by the motion network to derive spatio­
+temporal motion features. These features undergo mask­adaptive pooling followed by
+per­segment flow prediction. The resulting segment­flow assemblies form a composite
+flow field i →j, which synthesizes frame ˆj through backward warping for reconstruction
+loss computation against ground truth j. During the inference time, only the segmentation
+network is used.
+Figure 2.7 shows the qualitative results of AMD [17] on SegTrackv2 [27]. Despite only
+using one image as input at once during inference and training without the pre­trained
+optical flow model, it can still effectively detect and segment the moving object in the
+video.
+2.2
+Unsupervised video instance segmentation (VIS)
+Unsupervised Video Instance Segmentation (VIS) [2, 3, 4, 5, 6, 7] is the task of simul­
+taneously detecting, segmenting, and tracking object instances across video sequences
+without any human­annotated labels in the training.
+VideoCutLER [1] is the first and the current only method that is built for the truly unsu­
+pervised VIS task. Here, the ”truly unsupervised” means that VideoCutLER doesn’t use
+any supervised pretrained image segmentation model, such as SAM [34]. Though previ­
+ous unsupervised VOS methods [18, 10, 17] can handle the VIS task, their performance
+6
+AutoQ­VIS
+==PAGE:15==
+Figure 2.7: The qualitative results of AMD [17] on SegTrackv2 [27].
+Figure 2.8: Sample sequences from video instance segmentation YouTubeVIS­2019
+dataset [2].
+on the VIS task is very bad. VideoCutLER [1] establishes a milestone in unsupervised
+video instance segmentation (VIS), surpassing previous benchmarks by demonstrating
+multi­instance segmentation without using optical flow. While its key innovation – a syn­
+thetic video generation pipeline leveraging spatial augmentations of CutLER [20] pseudo­
+labels (originally derived from ImageNet [21]) – enables remarkable performance, the ap­
+proach remains fundamentally limited by synthetic­to­real domain discrepancies and rigid
+instance modeling. Specifically, the static object configurations in synthesized videos fail
+to capture authentic motion dynamics observed in natural video sequences.
+Figure 2.9 shows the pipeline of the VideoCutLER [1], which contains three stages: (1)
+Pseudo­Masking: creating pseudo masks on unlabeled images from ImageNet [21] using
+MaskCut, which is a method introduced by CutLER [20], and we will discuss it in more
+detail in section 2.3; (2) ImageCut2Video: by performing some simple copy­paste strat­
+egy and spatial transformation, VideoCutLER creates synthetic videos using the pseudo
+masks from previous stage; (3) Unsupervised Model learning: using the synthetic videos
+to train the video instance segmentation model.
+AutoQ­VIS
+7
+==PAGE:16==
+Figure 2.9: The pipeline of the VideoCutLER [1].
+Figure 2.10: The qualitative results of VideoCutLER [1] on YouTubeVIS­2019 dataset [2].
+The qualitative results of VideoCutLER [1] on YouTubeVIS­2019 [2] is shown in fig. 2.10.
+Compared to previous unsupervised video segmentation methods [17, 10, 18, 12, 13,
+11], VideoCutLER can generate higher quality masks for multi­object scenarios. What’s
+more, since VideoCutLER does not rely on optical flow, it can handle static objects more
+effectively.
+2.3
+Looped self­training method
+The paradigm of looped self­training has emerged as a powerful mechanism for bootstrap­
+ping model capabilities through iterative self­improvement. By establishing a closed­loop
+feedback system between pseudo­label generation and model retraining, this framework
+enables continuous knowledge distillation from the model’s own predictions. Recent ad­
+vances demonstrate its versatility across diverse vision tasks through carefully designed
+interaction protocols.
+CRST [35] introduces a confidence regularized self­training framework, which iteratively
+takes high­confidence target­domain predictions as pseudo­labels for retraining. CRST
+proposes a joint optimization framework that models pseudo­labels as continuous latent
+variables through alternating updates. This approach incorporates dual confidence reg­
+8
+AutoQ­VIS
+==PAGE:17==
+ularizers: (1) Label Regularization (LR) conducts probabilistic label refinement using soft
+pseudo­label assignments, while (2) Model Regularization (MR) enforces prediction con­
+sistency across stochastically perturbed network variants.
+Figure 2.11: Illustration of the confidence regularization proposed by CRST [35].
+Figure 2.11 demonstrates the confidence regularization mechanism in CRST [35]. Con­
+ventional self­training without confidence regularization relies on hard pseudo labels for
+supervision, producing sharply defined network outputs. In contrast, label­regularized
+self­training employs soft pseudo labels, resulting in smoother output distributions. While
+model­regularized self­training still utilizes hard pseudo labels, it introduces an explicit
+regularizer to directly enforce output smoothness through consistency constraints. Com­
+pared to the traditional self­training domain adaptation method that use hard pseudo la­
+bels [36], CRSTs have better performance.
+Noisy Student [37] is a looped self­training framework, where an EfficientNet [38] teacher
+model pre­trained on labeled ImageNet [21] data generates pseudo­labels for 300M un­
+labeled images; a larger student model is subsequently trained on the union of true and
+pseudo labels. Noisy Student iterates this process by putting the student back as the
+teacher. The pipeline of the Noisy Student is illustrated in fig. 2.12.
+ST3D [39] proposes an unsupervised framework for unsupervised domain adaptation in
+3D object detection: their pipeline alternates between updating high­quality pseudo­labels
+(via a triplet memory bank) and retraining the detector (with curriculum augmentation) in
+an iterative loop.
+ST3D enhances self­training performance through three synergistic components: (1) Ran­
+dom Object Scaling (ROS) mitigates object­size bias via geometric perturbation; (2) Quality­
+Aware Triplet Memory Bank (QTMB), which can reduce pseudo­label noise and stabilize
+training; (3) Curriculum Data Augmentation (CDA) employs a phased augmentation pro­
+tocol that ensures initial learning efficacy before progressively introducing challenging
+samples, thereby preventing model overfitting to high­confidence pseudo­labels (easy
+examples).
+AutoQ­VIS
+9
+==PAGE:18==
+Figure 2.12: The pipeline of the Noisy Student [37].
+Figure 2.13 delineates the ST3D pipeline operating through three distinct phases: (a)
+Source­domain pre­training employs Random Object Scaling (ROS) to address object­
+size bias via geometry­aware augmentation; (b) Target­domain pseudo­labeling subse­
+quently conducts discriminative feature matching through Quality­Aware Triplet Memory
+Bank (QTMB) for noise­resistant annotation; (c) Curriculum­based training finally imple­
+ments progressive difficulty escalation using Curriculum Data Augmentation (CDA), en­
+suring initial knowledge consolidation before exposing the detector F to challenging sce­
+narios to prevent overfitting on high­confidence targets (easy examples).
+Similarly, TWIST [40] jointly refines semantic and offset (instance) pseudo­labels via a
+two­way interaction; the model alternates between generating these two kinds of pseudo­
+labels and retraining on them.
+In CutLER [20], the model updates its pseudo­labels dataset by adding new object masks
+at the end of each training loop, which improves both the quality of predictions and the
+number of objects predicted. As shown in fig. 2.14, self­training consistently improves the
+performance of the model. The model can gradually detect more objects and produce
+higher­quality masks.
+10
+AutoQ­VIS
+==PAGE:19==
+Figure 2.13: The pipeline of ST3D [39].
+Figure 2.14: The qualitative results of CutLER [20] on UVO dataset [41] at the end of each
+self­training.
+AutoQ­VIS
+11
+==PAGE:20==
+12
+AutoQ­VIS
+==PAGE:21==
+3
+Method
+The overview of AutoQ­VIS is shown in fig. 1.1. During the initial training phase, the
+video instance segmentation model and mask quality predictor are jointly optimized on
+ImageNet­based synthetic videos [21] with pseudo­labels from CutLER [20]. The self­
+training phase then initiates cyclical refinement: (1) The VIS model generates candidate
+pseudo masks on unlabeled videos; (2) The frozen quality predictor (pre­trained in previ­
+ous stage) performs confidence scoring for noise suppression; (3) High­quality masks
+meeting selection thresholds are aggregated into the training dataset; (4) The model
+undergoes progressive retraining using both synthetic data and curated pseudo­labels,
+achieving iterative performance improvement through successive training cycles.
+We divide AutoQ­VIS into three key parts:
+• Initial training (section 3.1), where we jointly pretrain a VideoMask2Former [23,
+24] VIS model and a Mask­Scoring­R­CNN–style [22] quality predictor on synthetic
+videos from VideoCutLER [1];
+• Multi­round self­training (section 3.2), in which we alternate between: (i) using
+the VIS model to generate pseudo­labels on unlabeled videos, (ii) scoring each
+pseudo­label by regressing its IoU via the quality predictor, and (iii) adding only
+those pseudo­labels back into the training set that are both confident and have high
+predicted IoU, as determined by a combined quality score exceeding a fixed thresh­
+old;
+• DropLoss for the mask head (section 3.3), which dynamically suppresses loss
+contributions from any predicted mask whose maximum ground­truth overlap falls
+below a small IoU threshold and enhances the mask head training. Through this
+iterative, quality­guided dataset augmentation, our pipeline progressively refines in­
+stance segmentation accuracy without requiring any human annotations.
+3.1
+Initial training stage
+3.1.1
+Video instance segmentation (VIS) model
+Following VideoCutLER [1], we use the VideoMask2Former [23, 24] with the ResNet­
+50 [42] backbone and Deformable­DETR [43] pixel decoder as our video instance seg­
+mentation (VIS) model. The architecture of the VideoMask2Former is shown in fig. 3.1.
+3.1.2
+Quality predictor
+For the quality predictor, as shown in fig. 3.2, we use an architecture inspired by Mask
+Scoring R­CNN [22]. Our architecture processes individual frame features and single­
+object mask predictions per inference step. Following Mask Scoring R­CNN, our model
+takes the image feature and the predicted mask together as input, and predicts the IoU be­
+tween the input mask and the pseudo mask. Supervision is established through threshold­
+binarized (0.5) mask IoU between predictions and matched pseudo masks, optimized via
+ℓ2 regression loss:
+Lqualtiy = ||IoU −
+ˆ
+IoU||2
+(3.1)
+where the IoU is the IoU between the threshold­binarized (0.5) predicted mask and the
+matched pseudo mask,
+ˆ
+IoU is the output of the quality model.
+AutoQ­VIS
+13
+==PAGE:22==
+Back-
+bone
+Pixel
+Decoder
+L×
+Transformer
+Decoder
+class
+mask
+VideoMask2Former
+Figure 3.1: The architecture of the VideoMask2former [24].
+Following VideoCut­
+LER [1], we use ResNet­50 [42] as the backbone and Deformable­DETR [43] as the pixel
+decoder.
+Although the architecture of our quality predictor and Mask Scoring R­CNN is similar,
+there is a key difference between our model and theirs. In Mask Scoring R­CNN, the
+input predicted mask is threshold­binarized (0.5). In our case, we find it crucial to use
+the raw predicted mask instead of the threshold­binarized predicted mask. If we use the
+threshold­binarized predicted mask, the quality predictor can not produce any meaningful
+output.
+3.1.3
+Synthetic videos.
+VideoCutLER [1] provides a high­quality pseudo­labeled synthetic video dataset that was
+built on the unlabeled images from ImageNet [21], which is very suitable to train and
+initialize our VIS model and quality predictor. We also use the trained VideoMask2Former
+model [24] from VideoCutLER to initialize our VIS model. Instead of freezing the VIS
+model and training the quality predictor only, we found that training them both can lead to
+higher IoU prediction accuracy.
+3.2
+Multi­round self­training
+As shown in fig. 1.1, we optimize the VIS model through iterative self­training and dynamic
+dataset augmentation. The training dataset is initialized using the synthetic videos from
+VideoCutLER [1]. Empirically, we find that executing model parameter restoration from
+the initial model weight (trained in section 3.1) achieves a better performance.
+After training the VIS model, we use the predicted masks on unlabeled videos with a
+confidence score over 0.25 as pseudo­labels. Here, the confidence score is the softmax
+output of the class head of the VideoMask2Former [24] (As illustrated in fig. 3.1). Then,
+we use the quality predictor to predict the IoU of each pseudo­label predicted mask. Let
+ˆ
+IoUl denote the predicted IoU of label l, sl denotes the confidence score of label l. We
+define the quality score of label l as:
+Ql =
+ˆ
+IoUl · sl
+(3.2)
+We implement quality­based pseudo­label selection using a fixed quality score threshold
+τth. For each pseudo­label l, we select it if Ql ≥τth. At the end of each round, we add all
+the pseudo­labels to the training dataset.
+14
+AutoQ­VIS
+==PAGE:23==
+In the following subsections, we describe the details of the multi­round self­training:
+• Section 3.2.1: How we use spatio­temporal non maximum suppression (NMS) to
+remove duplicate pseudo labels.
+• Section 3.2.2: How we filter pseudo labels using the quality scores.
+• Section 3.2.3: How we fuse the new pseudo labels and old pseudo labels.
+3.2.1
+Automated pseudo­annotation with spatio­temporal NMS
+In this subsection, we describe how we use spatio­temporal non maximum suppression
+(NMS) to remove duplicate pseudo labels.
+After the training of the VIS model, we use it to label the unlabeled videos. Let D = {di}N
+i=1
+denote the initial detection set per video, where each detection d = (si, {mt
+i}T
+t=1) contains:
+• si ∈[0, 1]: Confidence score
+• {mt
+i}T
+t=1: Binary mask sequence across T frames
+We filter those detections that have confidence scores larger than or equal to 0.25:
+Dfiltered = {di ∈D | si ≥0.25}
+(3.3)
+However, the detection sets may contain duplicate detections. To solve this problem, we
+need to perform spatiotemporal non­maximum suppression. First, we sort the detections
+based on their confidence scores:
+Dsorted = {d(k)}|Dfiltered|
+k=1
+s.t.
+∀i < j : s(i) ≥s(j)
+(3.4)
+Our method eliminates redundant detections through spatiotemporal overlap analysis:
+Any lower­confidence prediction is suppressed if exhibiting mask overlap (IoU ≥0.5)
+with higher­confidence detections in at least one video frame. Formally, let Dsuppressed ⊆
+Dsorted represent the preserved detection set after suppression:
+d(k) ∈Dsuppressed ⇐⇒∄d(p) ∈Dsuppressed where p < k s.t.
+∃t ∈[1, T] :
+∥mt
+(k) ∩mt
+(p)∥
+∥mt
+(k) ∪mt
+(p)∥≥0.5
+|
+{z
+}
+Frame­specific overlap condition
+(3.5)
+where ∥· ∥denotes pixel cardinality. This temporal­existential criterion suppresses dupli­
+cates appearing in any frame of the video sequence.
+3.2.2
+Confidence­aware filtration via quality predictor
+In this section, we describe how we filter pseudo labels using the quality scores.
+Let D(k)
+global denote the union of Dsuppressed of all videos:
+D(k)
+global =
+[
+v∈V
+D(k)
+suppressed,v
+(3.6)
+where D(k)
+suppressed,v denotes preserved detections for video v after spatiotemporal NMS at
+iteration k.
+AutoQ­VIS
+15
+==PAGE:24==
+For each detection d ∈D(k)
+global, we define:
+Qt
+d = sd · ˆ
+IoU
+t
+d
+∀t ∈[1, Tv]
+(3.7)
+where Qt
+d is the quality score of detection d in frame t, sd is the confidence score of
+detection d, and Tv denotes the number of frames in video v.
+We implement quality­based pseudo­label selection using a fixed quality threshold τth.
+For each detection d ∈D(k)
+global across all videos:
+St
+d =
+(
+1
+Qt
+d ≥τ (k)
+0
+otherwise
+(3.8)
+where St
+d denote whether pseudo­label of detection d in frame t is selected. For each
+detection, if its results are not selected in any frames, we discard it:
+D(k)
+retained =
+(
+dv ∈D(k)
+global
+
+Tv
+X
+t=1
+St
+d > 0
+)
+(3.9)
+where D(k)
+retained is the set of detections we retain in iteration k.
+3.2.3
+Dynamic dataset augmentation through adaptive fusion of newly
+curated annotations
+In this section, we describe how we fuse the new pseudo labels and old pseudo labels.
+The augmentation process operates in two distinct modes depending on whether the video
+containing the new detections already exists in the training set. For novel videos, we
+perform bulk insertion of all qualified detections. For existing videos, we implement an
+instance­level fusion protocol that intelligently merges new predictions with historical an­
+notations while preserving temporal consistency.
+Let T (k) = {(v, Dv)} denote the training dataset at iteration k, where Dv contains all
+preserved detections for video v. We need to merge the D(k)
+retained into the T (k) = {(v, Dv)}.
+For each video, if it’s not in the training dataset, we simply add all its detections to the
+training dataset. Formally, let D(k)
+retained,v denote the detections belong to video v:
+D(k)
+retained,v =
+n
+d ∈D(k)
+retained
+ d belongs to video v
+o
+(3.10)
+Let V(k)
+new = π1(D(k)
+retained) \ π1(T (k)) denote completely new videos, where π1 projects to
+video identifiers. Let T (k)
+new denote labels of new videos:
+T (k+1)
+new
+=
+[
+v∈V(k)
+new
+n
+v, D(k)
+retained,v
+o
+(3.11)
+For videos already present in the training set, we implement a temporal­aware fusion
+protocol that resolves conflicts between new detections and historical annotations.
+To merge the existing detections and new detections, we need to identify whether two
+detections overlap. We define the spatiotemporal overlap predicate for two detections:
+ϕ(dnew,v, dexist,v) ≜∃t ∈[1, Tv] : ∥mt
+new ∩mt
+exist∥
+∥mtnew ∪mt
+exist∥≥0.5
+(3.12)
+16
+AutoQ­VIS
+==PAGE:25==
+This predicate is very similar to what we use in spatiotemporal NMS. If in any frames, two
+detections’ masks overlap (IoU ≥0.5), we consider them overlapped detections. If two
+detections overlap, we need to fuse them. We fuse the new detection and the existing
+detection frame by frame. For one frame, if only the existing detection’s label is selected,
+we use its label; otherwise, we use the new detection’s label. Let F denote the fusion
+operation:
+F(dnew,v, dexist,v) = {St
+merge, mt
+merge}Tv
+t=1
+(3.13)
+where:
+St
+merge = max(St
+new, St
+exist)
+(3.14)
+∀t ≤Tmerge : mt
+merge =
+(
+mt
+exist
+if St
+exist = 1 ∧St
+new = 0
+mt
+new
+otherwise
+(3.15)
+If the new detection doesn’t overlap with any existing detections, we simply add it. Let
+V(k)
+exist = π1(T (k)) denote existing videos. For each existing video v ∈V(k)
+exist, we process
+all new detections D(k)
+retained,v through:
+D(k+1)
+v
+= D(k)
+v
+M
+D(k)
+retained,v
+(3.16)
+where the fusion operation L is defined as:
+D
+M
+D′ =
+[
+d′∈D′
+ D ⊕d′
+(3.17)
+with per­detection fusion:
+D ⊕dnew =
+
+
+
+
+
+
+
+
+
+
+
+D ∪{dnew}
+if ∀dexist ∈D,
+¬ϕ(dnew, dexist)
+D \ dexist ∪F(dnew, dexist)
+if ∃dexist ∈D,
+ϕ(dnew, dexist)
+(3.18)
+In the end, we merge the labels of new videos and existing videos:
+T (k+1) = T (k+1)
+new
+∪T (k+1)
+exist
+(3.19)
+where:
+T (k+1)
+exist
+=
+[
+v∈V(k)
+exist
+n
+v, D(k+1)
+v
+o
+(3.20)
+During the training, for each video, we need to sample 3 frames as the input of the model.
+To provide good­quality labels, we only sample those frames where all their detections
+are selected. For each video v ∈V(k+1)
+train , we define the eligible frame set:
+F(k+1)
+eligible(v) =
+n
+t ∈[1, Tv]
+ ∀d ∈D(k+1)
+v
+: St
+d = 1
+o
+(3.21)
+The training batch is constructed through uniform sampling:
+B(k+1)
+train (v) = UniformSample
+3
+
+F(k+1)
+eligible(v)
+
+(3.22)
+AutoQ­VIS
+17
+==PAGE:26==
+Although we only use a subset of pseudo­labels, all pseudo­labels persist in the training
+set regardless of selection status, enabling progressive refinement.
+To balance data distribution between VideoCutLER’s [1] extensive synthetic videos and
+our pseudo­labeled videos, we implement a balanced stochastic sampling strategy. Each
+training batch has an equal probability (50%) of being drawn from either the synthetic
+videos or the pseudo­labeled set. This prevents overfitting to either domain while main­
+taining the synthetic data’s regularization benefits during self­training.
+3.3
+DropLoss for mask head
+We enhance the mask head training by suppressing loss contributions from low­overlap
+predictions, following CutLER [20]. For each predicted mask mi, we discard its loss con­
+tribution if its maximum ground truth IoU falls below the threshold τ IoU:
+Ldrop(mi) = 1(IoUmax
+i
+> τ IoU)Lvanilla(mi)
+(3.23)
+Here, IoUmax
+i
+is the maximum overlap between mi and any ground truth mask, while Lvanilla
+denotes the original mask head loss from VideoMask2Former [23, 24]. We employ a low
+threshold (τ IoU = 0.01) to filter only near­zero overlap predictions. By using the DropLoss,
+we encourage the model to ”discover” new objects that are not labeled yet.
+18
+AutoQ­VIS
+==PAGE:27==
+Transformer
+Decoder
+Class
+Mask
+Backbone
+Pixel
+Decoder
+Input
+Frames
+Last Layer
+Features
+Predicted
+Masks
+Early Layer Features
+Classical VideoMask2Former Model for Video Instance Segmentation
+Frame-Based Quality Predictor Head based on Mask Scoring R-CNN
+Feature for
+a Frame
+Mask for
+a Frame
+Max-Pool
+Max-Pool
+Concatenate
+Linear Layer
+Linear Layer
+Linear Layer
+Convolution Layer
+(Kernel Size: , Stride: )
+Convolution Layer
+(Kernel Size: , Stride: )
+Predicted IoU Score
+Figure 3.2: Network architecture of VideoMask2Former [23, 24] and Mask Quality
+Predictor. Our quality predictor integrates mask predictions and pixel decoder features
+following [22], employing a sequential architecture with four convolution layers (3×3 ker­
+nels, final layer stride of 2 for spatial reduction) followed by three fully­connected lay­
+ers that ultimately produce mask IoU predictions. This figure is created with the help of
+Mehmet Onurcan Kaya.
+AutoQ­VIS
+19
+==PAGE:28==
+20
+AutoQ­VIS
+==PAGE:29==
+4
+Experiment
+4.0.1
+Datasets
+Our model is trained on synthetic videos from VideoCutLER [1] and the unlabeled train
+split of YouTubeVIS­2019 [2]. We evaluate our model’s performance on the val split of
+YouTubeVIS­2019 in a class­agnostic manner, which means there are only two classes
+in the dataset (object and background). We merge the 40 object classes in YouTubeVIS­
+2019 into one ”object” class.
+4.0.2
+Evaluation metrics
+Following VideoCutLER [1], we use Average Precision (AP) and Average Recall (AR)
+as evaluation metrics. We evaluate the models in a class­agnostic manner, treating all
+classes as a single one during evaluation.
+4.0.3
+Implementation details
+For the initial training stage, we use the pretrained VideoMask2Former model [23, 24]
+from VideoCutLER [1] to initialize our VIS model. Then we train the VIS model and quality
+predictor on synthetic videos from VideoCutLER for 8,000 iterations using a single V100
+GPU, with a batch size of 2 and a learning rate of 2×10−5. For each round of multi­round
+self­training, we train the VIS model for 10,000 iterations on two V100 GPUs, with a batch
+size of 4 and a learning rate of 2×10−5. In practice, we find that two rounds of self­training
+provide the best performance.
+4.1
+Experimental results
+4.1.1
+Comparison with the­state­of­the­art method
+Method
+AP50
+AP75
+AP
+APS
+APM
+APL
+AR10
+MotionGroup [10]
+0.5
+0.0
+0.1
+0.0
+0.4
+0.1
+1.2
+OCLR [18]
+5.5
+0.3
+1.6
+0.1
+1.6
+6.1
+11.5
+CutLER [20]
+36.4
+13.5
+16.0
+3.5
+13.9
+26.0
+29.8
+VideoCutLER [1]
+48.2
+22.9
+24.5
+6.7
+17.7
+36.3
+42.3
+AutoQ­VIS
+52.6
+28.2
+28.1
+6.7
+21.2
+40.7
+42.5
+vs. previous SOTA
++4.4
++5.3
++3.6
++0.0
++3.5
++4.4
++0.2
+Table 4.1: YouTubeVIS­2019 val. We reproduced MotionGroup [10], OCLR [18], Cut­
+LER [20], and VideoCutLER [1] results with the official code and checkpoints. AutoQ­
+VIS outperforms the state­of­the­art VideoCutLER by 4.4% AP50. We evaluate results on
+YouTubeVIS­2019’s val split in a class­agnostic manner.
+We compare AutoQ­VIS with previous top­performing methods in table 4.1. AutoQ­VIS
+achieves a remarkable improvement (about 4.4% AP50). Especially for AP75, AutoQ­VIS
+can outperform the state­of­the­art VideoCutLER [1] by 5.3%. The increase in the Average
+Precisions proves that our method enhances the predicted mask quality of the model.
+4.1.2
+Comparison with the theoretical and practical limit
+Table 4.2 reveals a significant performance gap (10.1 AP50) between AutoQ­VIS and the
+practical upper bound, indicating substantial potential for improvement through enhanced
+AutoQ­VIS
+21
+==PAGE:30==
+Method
+AP50
+AP75
+AP
+APS
+APM
+APL
+AR10
+Theoretical limit
+76.8
+48.7
+46.8
+13.5
+43.6
+62.9
+58.0
+Practical limit
+62.7
+33.2
+33.9
+4.3
+27.3
+53.2
+47.5
+AutoQ­VIS
+52.6
+28.2
+28.1
+6.7
+21.2
+40.7
+42.5
+Table 4.2: Comparison with the theoretical and practical limit.
+Theoretical Limit:
+Upper­bound performance achieved by training on ground­truth labels from YouTubeVIS­
+2019 train split in class­agnostic mode, representing ideal supervision conditions. Prac­
+tical Limit: Best attainable performance when using all pseudo­labels with IoU ≥0.5
+against ground truth, simulating perfect pseudo­label selection.
+pseudo­label utilization. The theoretical limit represents a fully supervised training using
+all ground­truth annotations from YouTubeVIS­2019 train set. The practical limit rep­
+resents an oracle experiment that simulates perfect pseudo­label selection by using all
+predictions with IoU ≥0.5 against ground truth.
+4.1.3
+Qualitative results
+Video
+CutLER
+Our 
+Method
+Ground 
+Truth
+Figure 4.1: The qualitative results on YouTubeVIS­2019 val split. AutoQ­VIS demon­
+strates superior instance discovery capabilities compared to VideoCutLER [1]: (1) En­
+hanced multi­object detection capacity, particularly for semantically distinct instances
+(e.g., person and bull in Column 2); (2) Improved segmentation fidelity through precise
+boundary delineation (e.g., the leopard in Column 3). (3) Better comprehensive instance
+coverage, eliminating false negatives (e.g., detecting humans in Columns 1 & 4 that Video­
+CutLER completely misses, even without occlusion or scale challenges).
+Figure 4.1 demonstrates AutoQ­VIS’s advancements over VideoCutLER [1]. Our com­
+parative analysis reveals three key advantages of AutoQ­VIS over VideoCutLER [1] in
+instance discovery:
+• Enhanced multi­object differentiation capability, particularly for semantically distinct
+entities (e.g., simultaneous detection of human and bull in Column 2);
+• Superior segmentation precision with refined edge definition, as evidenced by the
+felid contour accuracy in Column 3;
+• Improved instance recall rates that substantially mitigate missing detections, no­
+tably demonstrated by consistent human identification in Columns 1 and 4, where
+22
+AutoQ­VIS
+==PAGE:31==
+VideoCutLER failed despite the absence of occlusions or scale variations.
+4.2
+Ablation studies
+4.2.1
+Component ablation analysis
+Method
+AP50
+AP75
+AP
+APS
+APM
+APL
+AR10
+w/o quality predictor
+50.5
+25.9
+27.2
+5.7
+19.0
+40.5
+43.3
+w/o DropLoss
+48.0
+23.7
+24.6
+3.8
+16.9
+37.8
+39.2
+w/o resetting each round
+51.6
+28.0
+28.2
+6.4
+22.8
+40.6
+42.9
+AutoQ­VIS
+52.6
+28.2
+28.1
+6.7
+21.2
+40.7
+42.5
+Table 4.3: Ablation study on the contribution of each component. Without quality
+predictor: We remove the quality predictor, and use the confidence score sl as quality
+score Ql with threshold τth = 0.85. Without DropLoss: We use the vanilla loss for the
+mask head instead of the DropLoss. Without resetting each round: The model weights
+are not reset at the beginning of each round.
+Table 4.3 quantifies individual component contributions through progressive additions.
+The DropLoss provides the most substantial gains (+4.6 AP50), followed by the quality
+predictor’s +2.1 AP50 improvement. Notably, even the confidence score baseline sur­
+passes VideoCutLER by +2.3 AP50, demonstrating fundamental advantages of our self­
+training method (the confidence score is the softmax output of the class head of the Video­
+Mask2Former [23, 24], as illustrated in fig. 3.1). While model resetting yields marginal
+gains (+1.0 AP50, +0.2 AP75), it maintains baseline AP performance.
+4.2.2
+Self­training round analysis
+Self­training
+AP50
+AP75
+AP
+APS
+APM
+APL
+AR10
+1 round
+51.3
+26.5
+26.9
+7.0
+22.3
+38.4
+43.2
+2 rounds
+52.6
+28.2
+28.1
+6.7
+21.2
+40.7
+42.5
+3 rounds
+52.0
+27.0
+27.7
+6.2
+21.8
+40.1
+42.1
+Table 4.4: Ablation study on the number of self­training rounds. Our framework
+achieves peak performance (52.6 AP50) at the second round before gradual degrada­
+tion (­0.6 AP50) from pseudo­label noise accumulation. This establishes round 2 as the
+optimal stopping point to balance accuracy and error propagation risks.
+Table 4.4 tests how many self­training rounds work best. The model hits its peak (52.6
+AP50) at round 2, then slowly gets worse. This drop occurs because, as we perform more
+rounds, mistakes in the pseudo­labels pile up. Based on these results, we recommend
+stopping after 2 rounds to get the best performance before these errors hurt the model.
+4.2.3
+Quality score threshold τth analysis
+Table 4.5 examines the impact of quality score thresholds on pseudo­label selection. We
+observe a non­monotonic relationship: While lower thresholds (τth ≤0.75) generally yield
+superior performance by retaining more valid samples, excessively lenient selection (τth =
+0.50) introduces noisy supervision, degrading results. The optimal balance occurs at τth =
+0.75, achieving peak performance.
+AutoQ­VIS
+23
+==PAGE:32==
+τth
+AP50
+AP75
+AP
+APS
+APM
+APL
+AR10
+0.95
+48.7
+25.3
+26.1
+5.9
+18.8
+38.5
+40.7
+0.85
+48.8
+24.6
+26.0
+5.8
+18.6
+38.6
+41.2
+0.75
+52.6
+28.2
+28.1
+6.7
+21.2
+40.7
+42.5
+0.50
+52.4
+25.7
+27.1
+6.5
+20.1
+39.9
+42.2
+Table 4.5: Ablation study on the quality score threshold τth. Optimal performance
+(52.6 AP50) emerges at τth = 0.75, balancing valid sample retention and noise suppres­
+sion. Lower threshold (τth = 0.50) degrades results by admitting too many low­quality
+predictions, while the higher thresholds (τth = 0.95 and τth = 0.80) oversuppress valid
+samples.
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+0.2
+0.4
+0.6
+0.8
+1.0
+IoU
+Quality score, Ql (ρs = 0.57)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+0.2
+0.4
+0.6
+0.8
+1.0
+IoU
+Confidence score, sl (ρs = 0.42)
+Figure 4.2: Visualized comparison of quality score Ql and confidence score sl. Here,
+ρs denotes the Spearman’s rank correlation coefficient. Subplot (a) visualizes quality
+scores Ql and their ground truth IoU. Subplot (b) visualizes confidence scores sl and
+their ground truth IoU.
+4.2.4
+Quality score vs. confidence score
+As shown in fig. 4.2, our quality score Qs has a higher correlation to the IoU of the pseudo
+label and the ground truth label than the confidence score of VideoMask2Former, which
+proves our quality predictor’s effectiveness in pseudo­label quality assessment. This re­
+sults in a significant improvement in the final VIS model performance (+2.1 AP50) in ta­
+ble 4.3.
+It is worth noting that not every object in the YouTubeVIS­2019 [2] is labeled, which means
+that if the model identifies a non­labeled object, the ”ground truth” IoU of the predicted
+mask will become zero. This results in many data points falling at the bottom of the figures.
+4.3
+Limitations
+4.3.1
+Trade recall for precision
+An shown in table 4.1, the improvement of AR10 is small (0.2%). The reason may be that
+our pipeline removes many low­quality pseudo labels (as described in chapter 3 and the
+pipeline seems to trade recall for precision.
+In table 4.4, we can see that the AR10 decreases as the number of self­training increases,
+which further strengthens our claim.
+24
+AutoQ­VIS
+==PAGE:33==
+4.3.2
+No improvement on small instances
+In table 4.1, we also compare the APS, APM, APL of the methods. We gain an improve­
+ment of 4.4% APL and 3.5% APM. But we don’t gain any improvement in APS, indicating
+that our method mostly benefits from large and medium instances. It is worth noting
+that there is no curriculum data augmentation [39] that enforces the model to learn from
+high­confidence instances (easy examples) to low­confidence instances (hard examples),
+which is probably the reason why our pipeline doesn’t benefit from small instances.
+4.3.3
+Limited performance quality predictor
+As shown in fig. 4.2, the improvement between the quality score and the confidence score
+is very limited. The correlation between the quality score and IoU is not strong (0.57). In ta­
+ble 4.2, we can see that there is still a big gap between our current method’s performance
+and the practical limit (the performance when we have perfect pseudo­label selection),
+which means that our quality predictor strongly limits the performance of our method.
+4.3.4
+Over sensitive to quality score threshold
+As we can see in table 4.5, the quality score threshold τth has a huge impact on the
+performance of the model. When the τth is not correctly set, AP50 only increase 0.5%
+or 0.6%. This may result in the bad performance of the method on various datasets that
+have huge domain gaps.
+AutoQ­VIS
+25
+==PAGE:34==
+26
+AutoQ­VIS
+==PAGE:35==
+5
+Conclusion and Future Work
+We present AutoQ­VIS, a quality­aware self­training framework that advances unsuper­
+vised video instance segmentation through iterative pseudo­label refinement with auto­
+matic quality control. By establishing a closed­loop system of pseudo­label generation
+and automatic quality assessment, our method achieves state­of­the­art performance
+(52.6 AP50) on YouTubeVIS­2019 val split without requiring any human annotations. The
+simple quality predictor proves effective in pseudo­label quality assessment.
+Future work may begin by applying the pipeline to larger unlabeled datasets and evalu­
+ating on a wider range of video segmentation datasets. For example, we can train the
+model on video classification datasets such as YouTube­8M [44] (containing 6.1 million
+videos), and evaluate it on more difficult datasets such as OVIS [45].
+The current architecture of our quality predictor is very simple. We can consider using
+a more powerful tool, such as a vision­language model like Molmo [46] to empower our
+quality predictor. And we can also consider using other ways instead of the quality score
+threshold to filter the pseudo labels, since the results are over sensitive to the score thresh­
+old.
+We can also incorporate the curriculum data augmentation [39] into our pipeline, which
+can ensure initial learning efficacy before progressively introducing challenging samples,
+thereby preventing model overfitting to high­confidence pseudolabels (easy examples).
+Hopefully, it will make our pipeline benefit more from small instances.
+AutoQ­VIS
+27
+==PAGE:36==
+28
+AutoQ­VIS
+==PAGE:37==
+Bibliography
+[1]
+Xudong Wang et al. “Videocutler: Surprisingly simple unsupervised video instance
+segmentation”. In: Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition. 2024, pp. 22755–22764.
+[2]
+Linjie Yang, Yuchen Fan, and Ning Xu. “Video instance segmentation”. In: Proceed­
+ings of the IEEE/CVF international conference on computer vision. 2019, pp. 5188–
+5197.
+[3]
+Junfeng Wu et al. “Seqformer: Sequential transformer for video instance segmenta­
+tion”. In: European Conference on Computer Vision. Springer. 2022, pp. 553–569.
+[4]
+Chung­Ching Lin et al. “Video instance segmentation tracking with a modified vae
+architecture”. In: Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition. 2020, pp. 13147–13157.
+[5]
+Miran Heo et al. “Vita: Video instance segmentation via object token association”. In:
+Advances in neural information processing systems 35 (2022), pp. 23109–23120.
+[6]
+Yuqing Wang et al. “End­to­end video instance segmentation with transformers”. In:
+Proceedings of the IEEE/CVF conference on computer vision and pattern recogni­
+tion. 2021, pp. 8741–8750.
+[7]
+Tao Zhang et al. “Dvis: Decoupled video instance segmentation framework”. In:
+Proceedings of the IEEE/CVF International Conference on Computer Vision. 2023,
+pp. 1282–1291.
+[8]
+Fisher Yu et al. “Bdd100k: A diverse driving dataset for heterogeneous multitask
+learning”. In: Proceedings of the IEEE/CVF conference on computer vision and pat­
+tern recognition. 2020, pp. 2636–2645.
+[9]
+Tianfei Zhou et al. “A survey on deep learning technique for video segmentation”.
+In: IEEE transactions on pattern analysis and machine intelligence 45.6 (2022),
+pp. 7099–7122.
+[10]
+Charig Yang et al. “Self­supervised video object segmentation by motion grouping”.
+In: Proceedings of the IEEE/CVF International Conference on Computer Vision.
+2021, pp. 7177–7188.
+[11]
+Etienne Meunier, Anaı￿s Badoual, and Patrick Bouthemy. “Em­driven unsupervised
+learning for efficient motion segmentation”. In: IEEE Transactions on Pattern Anal­
+ysis and Machine Intelligence 45.4 (2022), pp. 4462–4473.
+[12]
+Subhabrata Choudhury et al. “Guess What Moves: Unsupervised Video and Im­
+age Segmentation by Anticipating Motion”. In: British Machine Vision Conference
+(BMVC). 2022.
+[13]
+Long Lian, Zhirong Wu, and Stella X Yu. “Bootstrapping objectness from videos
+by relaxed common fate and visual grouping”. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. 2023, pp. 14582–14591.
+[14]
+Emanuela Haller and Marius Leordeanu. “Unsupervised object segmentation in
+video by efficient selection of highly probable positive features”. In: Proceedings
+of the IEEE international conference on computer vision. 2017, pp. 5085–5093.
+[15]
+Kaihua Zhang et al. “Deep transport network for unsupervised video object seg­
+mentation”. In: Proceedings of the IEEE/CVF international conference on computer
+vision. 2021, pp. 8781–8790.
+[16]
+Nikita Araslanov, Simone Schaub­Meyer, and Stefan Roth. “Dense unsupervised
+learning for video segmentation”. In: Advances in Neural Information Processing
+Systems 34 (2021), pp. 25308–25319.
+AutoQ­VIS
+29
+==PAGE:38==
+[17]
+Runtao Liu et al. “The emergence of objectness: Learning zero­shot segmentation
+from videos”. In: Advances in Neural Information Processing Systems 34 (2021),
+pp. 13137–13152.
+[18]
+Junyu Xie, Weidi Xie, and Andrew Zisserman. “Segmenting moving objects via an
+object­centric layered representation”. In: Advances in neural information process­
+ing systems 35 (2022), pp. 28023–28036.
+[19]
+Zachary Teed and Jia Deng. “Raft: Recurrent all­pairs field transforms for optical
+flow”. In: Computer Vision–ECCV 2020: 16th European Conference, Glasgow, UK,
+August 23–28, 2020, Proceedings, Part II 16. Springer. 2020, pp. 402–419.
+[20]
+Xudong Wang et al. “Cut and learn for unsupervised object detection and instance
+segmentation”. In: Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition. 2023, pp. 3124–3134.
+[21]
+Jia Deng et al. “Imagenet: A large­scale hierarchical image database”. In: 2009 IEEE
+conference on computer vision and pattern recognition. Ieee. 2009, pp. 248–255.
+[22]
+Zhaojin Huang et al. “Mask scoring r­cnn”. In: Proceedings of the IEEE/CVF con­
+ference on computer vision and pattern recognition. 2019, pp. 6409–6418.
+[23]
+Bowen Cheng et al. “Masked­attention mask transformer for universal image seg­
+mentation”. In: Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition. 2022, pp. 1290–1299.
+[24]
+Bowen Cheng et al. “Mask2former for video instance segmentation”. In: arXiv preprint
+arXiv:2112.10764 (2021).
+[25]
+Federico Perazzi et al. “A benchmark dataset and evaluation methodology for video
+object segmentation”. In: Proceedings of the IEEE conference on computer vision
+and pattern recognition. 2016, pp. 724–732.
+[26]
+Ning Xu et al. “Youtube­vos: Sequence­to­sequence video object segmentation”.
+In: Proceedings of the European conference on computer vision (ECCV). 2018,
+pp. 585–601.
+[27]
+Fuxin Li et al. “Video segmentation by tracking many figure­ground segments”.
+In: Proceedings of the IEEE international conference on computer vision. 2013,
+pp. 2192–2199.
+[28]
+Peter Ochs, Jitendra Malik, and Thomas Brox. “Segmentation of moving objects by
+long term video analysis”. In: IEEE transactions on pattern analysis and machine
+intelligence 36.6 (2013), pp. 1187–1200.
+[29]
+Hala Lamdouar et al. “Betrayed by motion: Camouflaged object discovery via motion
+segmentation”. In: Proceedings of the Asian conference on computer vision. 2020.
+[30]
+Minhyeok Lee et al. “Guided slot attention for unsupervised video object segmenta­
+tion”. In: Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition. 2024, pp. 3807–3816.
+[31]
+Tianfei Zhou et al. “Matnet: Motion­attentive transition network for zero­shot video
+object segmentation”. In: IEEE transactions on image processing 29 (2020), pp. 8326–
+8338.
+[32]
+Sucheng Ren et al. “Reciprocal transformations for unsupervised video object seg­
+mentation”. In: Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition. 2021, pp. 15455–15464.
+[33]
+Shu Yang et al. “Learning motion­appearance co­attention for zero­shot video ob­
+ject segmentation”. In: Proceedings of the IEEE/CVF international conference on
+computer vision. 2021, pp. 1564–1573.
+[34]
+Alexander Kirillov et al. “Segment anything”. In: Proceedings of the IEEE/CVF in­
+ternational conference on computer vision. 2023, pp. 4015–4026.
+30
+AutoQ­VIS
+==PAGE:39==
+[35]
+Yang Zou et al. “Confidence regularized self­training”. In: Proceedings of the IEEE/CVF
+international conference on computer vision. 2019, pp. 5982–5991.
+[36]
+Yang Zou et al. “Unsupervised domain adaptation for semantic segmentation via
+class­balanced self­training”. In: Proceedings of the European conference on com­
+puter vision (ECCV). 2018, pp. 289–305.
+[37]
+Qizhe Xie et al. “Self­training with noisy student improves imagenet classification”.
+In: Proceedings of the IEEE/CVF conference on computer vision and pattern recog­
+nition. 2020, pp. 10687–10698.
+[38]
+Mingxing Tan and Quoc Le. “Efficientnet: Rethinking model scaling for convolutional
+neural networks”. In: International conference on machine learning. PMLR. 2019,
+pp. 6105–6114.
+[39]
+Jihan Yang et al. “St3d: Self­training for unsupervised domain adaptation on 3d
+object detection”. In: Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition. 2021, pp. 10368–10378.
+[40]
+Ruihang Chu et al. “Twist: Two­way inter­label self­training for semi­supervised 3d
+instance segmentation”. In: Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition. 2022, pp. 1100–1109.
+[41]
+Weiyao Wang et al. “Unidentified video objects: A benchmark for dense, open­world
+segmentation”. In: Proceedings of the IEEE/CVF international conference on com­
+puter vision. 2021, pp. 10776–10785.
+[42]
+Kaiming He et al. “Deep residual learning for image recognition”. In: Proceedings
+of the IEEE conference on computer vision and pattern recognition. 2016, pp. 770–
+778.
+[43]
+Xizhou Zhu et al. “Deformable detr: Deformable transformers for end­to­end object
+detection”. In: Proceedings of The International Conference on Learning Represen­
+tations. 2021.
+[44]
+Sami Abu­El­Haija et al. “Youtube­8m: A large­scale video classification bench­
+mark”. In: arXiv preprint arXiv:1609.08675 (2016).
+[45]
+Jiyang Qi et al. “Occluded video instance segmentation: A benchmark”. In: Interna­
+tional Journal of Computer Vision 130.8 (2022), pp. 2022–2039.
+[46]
+Matt Deitke et al. “Molmo and pixmo: Open weights and open data for state­of­the­
+art vision­language models”. In: Proceedings of the Computer Vision and Pattern
+Recognition Conference. 2025, pp. 91–104.
+AutoQ­VIS
+31
+==PAGE:40==
+32
+AutoQ­VIS
+==PAGE:41==
+A
+Additional qualitative visualizations
+We provide additional qualitative results of our VIS model and quality predictor in fig. A.1
+and fig. A.2.
+AutoQ­VIS
+33
+==PAGE:42==
+Time
+Figure A.1: Qualitative results of our VIS model on YouTubeVIS­2019 val split.
+34
+AutoQ­VIS
+==PAGE:43==
+Time
+Figure A.2: Qualitative results of our quality predictor on YouTubeVIS­2019 train
+split. The quality scores are shown in the center of each pseudo label.
+AutoQ­VIS
+35
+==PAGE:44==
+Technical
+University of
+Denmark
+Richard Petersens Plads, Building 324
+2800 Kgs. Lyngby
+Tlf. 4525 1700
+www.compute.dtu.dk

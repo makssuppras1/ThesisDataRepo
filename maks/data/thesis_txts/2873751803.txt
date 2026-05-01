@@ -1,0 +1,755 @@
+==PAGE:1==
+DTU Compute
+MSc in Computer Science and Engineering
+Technical University of Denmark
+Optimal Blending of Frames in
+Interactive Computer Graphics
+Maser Thesis
+Maximilian Maria Olden-Jørgensen (s204178)
+Under supervision of Jeppe Revall Frisvad
+July 10, 2025
+==PAGE:2==
+Abstract
+In computer graphics, aliasing artifacts are a problem for which many different
+methods to combat have been developed and researched, and one strategy that
+has been widely adopted is temporal antialiasing (TAA). Its good results and
+low performance cost have skyrocketed its popularity, but it also has its own
+artifacts: blurring, ghosting, and flickering. These all stem from the underlying
+implementation, in which the current frame is blending together with a historic
+accumulation of past frames. The value for this blending factor is often static
+or relies on simple heuristics, but there exists a theoretical optimal per-pixel
+blending factor if the variance and squared difference between the current and
+past frames can be accurately estimated. In this paper, we implement a spatial
+estimation of this technique and extend it with a temporal accumulation to
+better estimate variance and squared difference. We then show when compared
+to other current TAA options available, it performs better on average than any
+other single option.
+==PAGE:3==
+Contents
+Contents
+II
+1
+Introduction
+1
+1.1
+Antialiasing . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+1
+2
+Related works
+4
+3
+Theory
+6
+3.1
+TAA . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+3.1.1
+Jittering . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+3.1.2
+Reprojection and filtering . . . . . . . . . . . . . . . . . .
+7
+3.1.3
+Blending . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+3.2
+Theoretical optimal blending factor . . . . . . . . . . . . . . . . .
+9
+3.3
+Implementation details . . . . . . . . . . . . . . . . . . . . . . . .
+11
+4
+Result
+12
+4.1
+CPBD . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+4.2
+RMSE of image difference . . . . . . . . . . . . . . . . . . . . . .
+14
+4.3
+RMSE of difference of image difference . . . . . . . . . . . . . . .
+15
+4.4
+Performance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+5
+Discussion
+18
+6
+Conclusion
+18
+6.1
+Future works
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+References
+19
+==PAGE:4==
+1
+Introduction
+In computer graphics, aliasing has always been a prevalent issue as if it is not
+correctly removed or handled it leaves unwanted artifacts in the final render-
+ing. Throughout the years many different methods and algorithms to deal with
+aliasing have been developed. But since over ten years ago, when temporal an-
+tialiasing was first conceptualized, it has only grown in popularity and is now
+one of the most widely used antialiasing methods in computer graphics[1]. This
+is thanks the to relatively good quality it can provide for the low-performance
+cost it has compared to other methods. In recent times, another method has
+gained much notoriety, namely AI-powered antialiasing. Tech giants such as
+NVIDIA[2] and Intel[3] have both released technologies that use AI tools to
+improve both performance and antialiasing. Other technologies such as FSR,
+released by AMD, have both non-AI, namely FRS1 up to FSR3, and AI-based
+methods FSR4[4]. All three methods are gaining more widespread use, as the
+AI-based methods besides just antialiasing also have support for massive per-
+formance improvements, from frame generation and upscaling.
+While these
+developments have significantly advanced the state of the art, many of these
+techniques rely on fixed, simple heuristics, or pre-trained models to calculate
+the blending factor, that is the factor for how to combine the historical/tempo-
+ral part with the current frame. There exists however, a theoretical method for
+finding the optimal per pixel blending factor[5]. In this paper, we will look at
+implementing this method in the popular game engine Unity, and then explore
+different techniques for estimating the values needed to calculate the optimal
+blending factor, as well as compare it to other popular temporal antialiasing
+methods available.
+1.1
+Antialiasing
+The term aliasing originates from signal processing, where it is a phenomenon in
+which a reconstructed signal contains noise because the sampling resolution is
+too small, similarly aliasing in computer graphics happens because of the same
+fundamental reason. Since we can neither calculate nor have infinite resolution
+when rending to a screen, artifacts from the limited resolution then appear
+as what is called aliasing. Aliasing can manifest in different ways, such as in
+the spatial sense with the ”staircase effect”(figure 1), or in the temporal sense
+where thin lines can appear in one frame but not the next causing flickering
+when multiple frames are being viewed in sequence (figure 2).
+1
+==PAGE:5==
+Figure 1: Example of the staircase effect, the green triangle has a smooth line,
+but because of limited pixels, the output, the blue triangle, has a jagged edge
+Figure 2: Example of flickering, in the first frame the rectangle is drawn, but in
+the next frame it is located between pixels and not drawn, causing it to flicker
+Antialiasing is then the term that covers the methods used to diminish the
+effect of this when rendering a frame. In general, they work to reduce aliasing
+by softening edges, which would help remove jaggedness from lines, see figure 3.
+Or try to get more accurate information about the underlying colors in a pixel,
+which helps against flickering, see figure 4
+2
+==PAGE:6==
+Figure 3: Example of using smoothed edges to reduce aliasing, with the less
+stark contrast to the neighboring pixels the triangle is not as jagged
+Figure 4: Example of using the amount of box overlap in each pixel to shade
+with a more or less sharp blue color
+3
+==PAGE:7==
+2
+Related works
+Since temporal antialiasing is such a widely adopted method, there exists much
+research into different implementations and extensions, as such an overview of
+current works will be given here.
+While temporal antialiasing is one of the most popular antialiasing methods,
+it is not the only one. Other methods such as FXAA, MSAA, and SMAA exist
+and are still used.
+FXAA(fast approximate antialiasing) works by searching for edges in the
+rendered frame, then for every edge it finds smooth the edge according to values
+calculated from the values of the pixels found around the edges[6]. While it is
+extremely performant it is not of the greatest quality, and can depending on
+how well the edge detection works overblur the image, especially in regards to
+letters.
+MSAA(multisample antialiasing) as the name implies takes multiple sam-
+ples to try and improve antialiasing, since aliasing is usually found on edges it
+only takes more samples on edges[7]. It does this by using the depth buffer,
+a buffer that contains the depth value of every pixel, and checking if there is
+a significant enough difference in the depth value. If a significant difference is
+detected, it then samples that pixel multiple times, usually 2, 4, or 8 times,
+and averages the values sampled. However, MSAA is not easily combined with
+deferred rendering, in which all geometry is rendered before light and shading
+are done, thus allowing for many more light sources[8]. In deferred rendering
+the geometry, colors, and normals are stored in buffers, which are only in pixel
+resolution, thus MSAA cannot, without overhead or changes to the rendering,
+sample multiple times per pixel.
+SMAA(subpixel morphological antialiasing), builds on top of MLAA (mor-
+phological antialiasing) which works similarly to FXAA in that it searches
+the fully rendered frame for edges and smooths them, MLAA however builds
+an edge map and smooths the edges based on the shape thus improving the
+antialiasing[9]. SMAA improves on this by using a better edge detection method,
+in which edges in both horizontal and vertical directions are compared, and only
+if the sharpness of the edge is above a certain threshold is that edge blurred[10].
+SMAA can also be extended by using other methods such as multisampling like
+in MSAA or temporal multisampling, to improve the quality of the antialiasing
+at the cost of performance.
+Since aliasing stems from not having a high enough resolution, and simply
+rendering the frame at a high resolution is not feasible, another method then in-
+stead of using space to overcome aliasing is to use time. Namely, using the past
+rendered frames to help render the current frame.
+TAA(temporal antialias-
+ing), originating from more than a decade ago[11], has had many expansions
+and changes over the years. In general, it works by keeping a buffer with the
+accumulated historic value of every pixel, and using what the position of the
+current pixel was in the last frame to blend the historic color and the current
+color together[1]. Another key part is that is adds a slight jitter to the camera,
+4
+==PAGE:8==
+which means even when the camera is stationary the output image would differ
+slightly from frame to frame. These two techniques also give rise to most of the
+problems with TAA, namely flickering and ghosting. Flickering is as described
+earlier for objects in motion, but can now because of the jittering, also appear
+for objects not moving. Ghosting appears when the historic value blends too
+much into the current value and leaves after images of objects in motion in the
+output image. A way to help solve this issue is to use the motion vectors for
+each pixel, that is the distance and direction every pixel moved since the last
+frame, to check for occlusion or guide the blending factor for objects with high
+speeds.
+A technique where TAA can offer improvements to quality is upscaling, up-
+scaling works by rendering the frame at a smaller resolution and then upscaling
+to the desired resolution. This helps performance but comes with a potentially
+huge cost to quality since aliasing happens exactly because the resolution is too
+small, these effects are then multiplied when upscaling. Normally you use some
+form of blurring by using neighbors to fill in the missing pixels, but when com-
+bined with TAA it can achieve much higher quality[12]. Because of the historic
+buffer and the jittering TAAU(taa upscaling) can get a much better approxima-
+tion of every pixel’s real color. Another area where TAA can improve quality is
+in ray-tracing and path-tracing where it can work as a denoiser[13]. Similarly,
+as with upscaling, the historical buffer provides an elegant way to average the
+tracing algorithm’s output over time, thus working as a denoiser but with all
+the benefits (and disadvantages) of TAA.
+In recent times using deep learning / AI with TAA has shown great results,
+and graphic cards have introduced proprietary DLSS(deep learning super sam-
+pling) methods[2][3]. These work by having pre-trained networks use jittered
+frames and motion vectors to predict how the current frame should look. Newer
+versions also support many performance-related methods, such as upscaling
+and frame generation, where AI is used to upscale from a low resolution to the
+needed one, like TAAU, if no upscaling is preset it works just as deep learning
+antialiasing. Frame generation uses AI to generate frames in between rendered
+frames thus boosting FPS, but with varying degrees of quality depending on
+the scene and original FPS. Other AI-based methods, not using proprietary
+networks on graphics cards, have also been researched in which multiple small-
+scale CNNs(convolutional neural networks) are used to calculate the final pixel
+value[14]. A notable challenge with this is that since the CNNs do not use highly
+specific hardware like DLSS and XESS, the size of the network cannot be too
+large otherwise the performance hit would be too severe. And even with the
+resolution set to 640 x 480, which today is not a resolution gaming and computer
+graphics are rendering at mostly, except if heavy upscaling is done afterward,
+the paper still calculated it to be decently performance-heavy. Another issue
+with needed small-scale CNNs is that they are limited in how general they can
+work, in the paper, which they are only trained on a small subset of the testing
+data, they are still tested in the same scenes.
+5
+==PAGE:9==
+3
+Theory
+In this chapter, we will provide some theory for how TAA works, as well as the
+basics of how the theoretical blending factor is calculated. Lastly, we will cover
+the chosen engine for implementation and a few engine-specific details.
+3.1
+TAA
+While TAA was briefly covered in related works, a more detailed overview as
+well as a description of the different parts will be covered here.
+3.1.1
+Jittering
+One of the fundamental parts of TAA is the jittering of the camera, as this
+is what leads to temporal supersampling. The jittering adds a small sub-pixel
+offset to the camera’s projection, thus slightly changing what exactly is ren-
+dered in each frame. This jittering has a few requirements to work properly.
+Firstly, it should be well distributed in the sample space it has, as otherwise
+sampling bias means it doesn’t obtain equal information for every part of the
+sub-pixel. Another property that is desired is that the sequence does not have
+a too long sequence length, as while it may be well distributed, if it takes too
+long to visit most parts of a sub-pixel, occlusion or lighting changes might take
+too long to resample. One such popular sequence that has these properties is
+the Halton sequence[15]. The Halton sequence generates deterministic quasi-
+random numbers, that is the numbers are the same if you use the same inputs
+but the numbers appear random when viewed in a sequence. It generates these
+numbers by using an index, the ith number in the sequence, and a base or di-
+mension, which decides how the sequence behaves. To use it as a jitter offset,
+two sequences are used one for x and one for y, where normally 2 and 3 are used
+as their bases respectively, shorthanded to Halton(2,3), the jitter offsets it pro-
+duces can be seen in figure 5. How these are sampled differs a bit, some sample
+only the first 16 or 8 samples while others continuously sample the sequence,
+which can have small differences in the output.
+6
+==PAGE:10==
+Figure 5: First 20 numbers of the Halton(2,3) sequence, note how later numbers
+from the sequence are close in position to earlier numbers
+3.1.2
+Reprojection and filtering
+When sampling motion vectors, history color, and pixel color, just simply sam-
+pling the information at the current uv-coordinate is not sufficient to ensure
+good quality, because accuracy, geometry, and jittering all affect the output,
+and as such special measures have to be put in place. When sampling the mo-
+tion vector for the current pixel, if the pixel is currently on the edge of a moving
+object, the motion vector returned might not be correct, because of aliasing, as
+such one can use the depth buffer to sample better. If when we sample the mo-
+tion vector we use the depth buffer to search in a small 3x3 box for the closest /
+nearest matching depth and use that uv-coordinate instead when sampling the
+motion vector[16], a much better value is found when the frame is in motion or
+when occlusion occurs.
+Now with a correct motion vector, the current pixel’s corresponding historic
+value can then be sampled and then blended together with the current pixel’s
+value, this operation is also called reprojecting the current pixel. There are also
+a few things to keep in mind, namely that the historic value might be invalid, this
+can happen because of occlusion or sudden change in color, from lighting, or base
+color of the object changing. After detecting such invalid history, there are many
+methods for dealing with it, from completely rejecting the history, eg choosing
+only the current pixel’s value as output or clamping/clipping the historic value
+to the neighborhood’s value. While completely rejecting the historic value is
+7
+==PAGE:11==
+simple to do and fast, it is still undesired as you lose all the historical data for
+the pixel, and have to start from scratch with the antialiasing for the pixel. A
+more sophisticated method to rectify the historic value is then to clamp the value
+to the current pixel’s neighborhood’s values[17]. Neighborhood clamping works
+by finding the minimum and maximum of the four corners around the current
+pixel, and clamping the historic value to the min and max values. An extension
+to this is instead of clamping, to clip the color according to the neighbor’s values,
+this helps not getting to extremes of the min/max of the neighborhood and thus
+make the output color fit better[16], a visual difference between the two can be
+seen in figure 6.
+Figure 6: Difference between clamped and clipped color, not how the clamped
+can get stuck in extremes/corners, while the clipped is more varied. Color space
+visualized in 2D for simplicity
+Before clipping the color, since the historic color is blurred from all the
+prior blending, some TAA algorithms also include sharpening of the historic
+color[18]. This makes the final output clearer, as well as keeps the historic value
+from becoming too blurred. Conversely, some TAA implementations apply an
+additional blur on the current color, such as a Gaussian blur with the neighbors.
+This helps serve as a soft FXAA and can hide aliasing when not much history
+is recorded yet, but it blurs the final image even more.
+3.1.3
+Blending
+As it is not feasible to keep a record of all historic values for a given pixel,
+instead TAA implementations use a recursive accumulated function:
+f(p) = α ∗c(p) + (1 −α) ∗h(r(p))
+(1)
+Where p is the current pixel, f(p) is the output for the frame’s color at the pixel,
+c(p) is the current frame’s color at the pixel, h(r(p)) returns the historic color
+for the given pixel, where r(p) is the reprojection function. This function thus
+makes older samples influence the final color less and less, for static α it comes
+8
+==PAGE:12==
+out as an exponential decrease of influence. While static α is easy to use and
+is still used today, it has less control over the output, and with the usual value
+of around 0.1-0.2, has to rely on history rejection to not introduce too much
+ghosting.
+As such, many implementations use some metric to influence the
+blending factor. A popular and simple method is to use the already sampled
+motion vector of the pixel and increase α when the movement of the pixel
+is high[19]. This intuitively works well to diminish ghosting, as that is only
+present in motion. Another possibility is to keep track of the number of samples
+currently recorded in the historic accumulation and decrease α according to the
+number of samples[13]:
+α = 1
+N
+(2)
+While this leads to fast convergence, it also uses more storage as the number
+of samples accumulated has to be stored. Lastly calculating an error or weight,
+between the current sample and the historic sample can be used to guide the
+blending factor. In [15], a difference between the historic pixels’ luminance and
+the current pixel’s luminance is used, after scaling the difference into a value
+between 0 and 1, this is then used as the blending factor.
+3.2
+Theoretical optimal blending factor
+In [5], a theoretical optimal blending value is proposed which uses the bias and
+variance of the historical pixel and of the current pixel, to find the best blending
+factor. It is derived from the formula 1, by modelling c(p) and h(r(p)) as random
+variables, and finding the value of α which minimizes the error:
+α = 1 −
+σ2
+Y
+E[(X −Y )2]
+(3)
+or alternatively
+α = 1 −
+σ2
+Y
+(E[X] −E[Y ])2 + σ2
+X + σ2
+Y
+(4)
+Where X is the historic pixel value, and Y is the current pixel, σ2
+Y is then
+the variance of the current pixel, and σ2
+X is the variance for the historic pixel.
+E[(X −Y )2] is the expected value of the squared difference between the his-
+toric and current pixel. The graphical meaning of σ2
+Y is the aliasing captured
+in that pixel, that is how wildly the sampling of the pixel changes while still
+having a static average. The graphical meaning of E[(X −Y )2] is then camera
+movement, occlusion, or other things that cause the current pixel to have a
+different expected value compared to the history. The formula then intuitively
+tells us to use a low α when the expected difference is low, that is the camera
+is stationary and the scene is static, and the variance is high. Then, when the
+expected difference is high and the variance is low, a high value of α is used.
+The challenge here is the fact that reliably calculating the variance and squared
+difference is not trivial. A straightforward method would be to do as in MSAA
+9
+==PAGE:13==
+and sample the current pixel many times to closely estimate variance and differ-
+ence, just like MSAA would have performance issues if a high-quality estimation
+is wanted. Additionally, in deferred rendering, this kind of resampling is not
+possible. A more efficient way to calculate the variance is to temporally calcu-
+late it, by using a buffer to store the variance, we can over time get a more and
+more accurate estimate of the variance. This comes with a small overhead to
+memory, from needing a new buffer, and performance, the lookup in memory for
+the buffer’s data, but it is a lot less than sampling the pixel multiple times. A
+problem with this method is that when the number of historical samples is low,
+the data may be imprecise, a possible improvement is to use a special estimate
+when the historical variance is too volatile[13].
+To efficiently store the variance we use the Welford method for variance
+and mean calculation, since it uses a single-pass method it is well suited for
+continuous data. The Welford method uses three counters to keep track of the
+mean, variance, and sample count this means it is easily stored in a single buffer,
+as we have access to and r, g, b, and a components in each buffer. An example
+of how this is used is shown below
+vec4 data = readBuffer(buffer, prevUv)
+if data.b < 2 or isOffscreen(prevUv) then
+data.r = luminance(currentPixel)
+data.g = 0
+data.b = 2
+else
+old_mean = data.x
+data.r += (luminance(currentPixel) - data.r) / data.b
+data.g += (luminance(currentPixel) - data.r) * (luminance(currentPixel) - old_mean)
+data.b += 1
+end if
+[...]
+mean = data.r
+variance = data.g / data.b
+We can then also use the same method to estimate E[(X −Y )2], since we
+still have an unused alpha channel to store the information in:
+if data.b < 2 or isOffscreen(prevUv) then
+data.a = (luminance(historicPixel) - luminance(currentPixel))^2
+[...]
+else
+diff = (luminance(historicPixel) - luminance(currentPixel))^2
+data.a += (diff - data.a) / data.b
+[...]
+end if
+In both examples, we use the luminance of the pixels, as this gives a simple
+value of pixels that can be stored in just one number.
+A downside of this
+10
+==PAGE:14==
+implementation is that the mean of the squared error will only change slowly
+when the value of the newer pixel changes its underlying mean. Another option
+could then be to use 4 instead, as that uses the variance also which updates
+faster than the mean when different values are observed. To do this, however,
+another buffer would be needed, which uses extra memory and processing.
+3.3
+Implementation details
+In this paper, we chose to use Unity as our engine as it is a popular and much-
+used engine in the world of games and computer graphics. It also comes with
+many functionalities already baked in, such as lighting, camera, and other an-
+tialiasing methods to compare with, which means we could fully focus on using
+the theory to explore how the optimal blending works and how it can be re-
+alized. In Unity, the HDRP(High Definition Render Pipeline) is used for the
+improved graphics it brings, this also means deferred rendering is used.
+11
+==PAGE:15==
+4
+Result
+In this section, we will compare the output of using TAA with the described
+blend factor against Unity’s standard library of TAA options, which includes a
+normal TAA, FSR2, and DLSS. They will be compared in four different metrics:
+CPBD, performance, RMSE of difference, and RMSE of difference of difference.
+For the comparisons, we chose two different scenes, a detailed classroom
+with a moving camera, to see how they perform in a setting with many details
+in which aliasing can easily occur. A simple fence with a moving light and a
+static camera, to measure how they perform with moving shadows on static
+terrain (figure ?? top left).
+They are all compared to reference images, which are the scenes rendered
+with no antialiasing at 8k resolution and then downscaled to 1440p, which is
+the resolution the TAAs were benchmarked at.
+4.1
+CPBD
+One side effect that TAA has is the blurring of the output image, which is one
+of the most common complaints against TAA usage. To measure and compare
+the amount of blur in the TAA output we use the Cumulative Probability of
+Blur Detection(CPBD), which is a no-reference image blur metric based on the
+human perception of blur in images[20]. This function evaluates edges in an
+image and gives the P(PBLUR ≤PJNB), where PBLUR is the amount of blur
+in the edge(s), and PJNB is a value describing ”Just Noticeable Blur” based
+on the human perception of blur.
+As such, the output of CPBD describes
+the percentage of edges for which the probability of blur is less than the JNB,
+meaning the higher the output value, the closer to 1, the clearer the image is.
+And the lower the output value is, the closer to 0, the more blurry the image is.
+The following table shows the average CPBD value for each method in the
+different scenes:
+Scene
+Ref
+base TAA
+DLSS
+FSR
+Our
+Classroom
+0.614
+0.426
+0.275
+0.407
+0.36
+Fence
+0.243
+0.188
+0.09
+0.358
+0.154
+Table 1: CPBD value of different methods in the different scenes
+While higher CPBD values might represent less overall blur in the image, the
+focus should be on which method is closest to the reference’s CPBD value. In
+the classroom scene, DLSS performs the worst, and looking at 7, it is noticeably
+more blurry than the other methods. Our method is also slightly more blurry
+than both base TAA and FSR. Looking at the comparison below, another ar-
+tifact, which is a common complaint against TAA, can be seen: ghosting. In
+the base TAA, the chair leg is bleeding into the curtain behind, which is greatly
+diminished in our implementation. The same problem is just barely noticeable
+in the FSR while looking at the ends of the chair pieces.
+12
+==PAGE:16==
+Ref
+Base TAA
+FSR
+DLSS
+Our
+Figure 7: Zoom in on curtains behind the chairs, note the different amount of
+ghosting in base TAA, FSR, and our
+In the pillar scene, base TAA has the value closest to the reference’s value,
+and FSR has the highest value. But looking at figure 8, FSR got clear artifacts,
+which causes the CPBD value to be higher than it should be. Likewise, base
+TAA also got artifacts, where some extra lines are present, but they are not as
+noticeable. Neither DLSS nor our got any type of artifacts, as such, the CPBD
+score accurately reflects their blurriness.
+13
+==PAGE:17==
+Ref
+Base TAA
+FSR
+DLSS
+Our
+Figure 8: Zoom in on shadows in pillar scene, note the different artifacts in FSR
+and base TAA
+The CPBD numbers show that any form of TAA, as expected, introduces
+more blur compared to the reference. The number cannot be blindly trusted,
+since artifacts might influence the CPBD score. As such, we next turn to com-
+paring the output directly.
+4.2
+RMSE of image difference
+To measure how different the output of the TAA is compared to the reference,
+we use RMSE. Below is a table with the average RMSE for each method in the
+two scenes:
+Scene
+base TAA
+DLSS
+FSR
+Our
+Classroom
+8.82
+11.04
+7.71
+8.68
+Fence
+3.69
+2.11
+6.6
+2.26
+Table 2: RMSE value of different methods in the different scenes
+An interesting pattern can be seen here, where depending on the scene, FSR
+and DLSS perform widely differently. In the classroom scene, DLSS performs
+the worst, while FSR performs the best. The DLSS score comes from DLSS
+having a significant amount of ghosting and a large amount of blurring. FSR
+14
+==PAGE:18==
+however, performs very well, due to having next to no ghosting and little blur-
+ring. Our method contains less ghosting than the base TAA, so it is a bit better,
+but it suffers more from flickering, which we will see in the next comparison.
+Conversely, for the fence scene, DLSS performs the best, and FSR performs the
+worst. The reason for DLSS’ good performance is due to the fact that it is a
+very simple scene, as such excessive blurring is a lot more subdued, and ghosting
+hardly occurs as there is no object moving in front of each other. FSR’s bad
+performance comes from the many artifacts it has, which the base TAA also
+had. While ours is not the best in either case, it is only slightly behind the best.
+Its score also shows that it is robust and can produce good results in both kinds
+of scenes.
+4.3
+RMSE of difference of image difference
+Another side effect of TAA is flickering, the artifact that manifests if the method
+is temporally unstable. To measure the degree of flickering present in the images,
+we first compute the difference between each frame of all the TAA outputs and
+the reference. By first converting the image to grayscale and then computing
+the absolute difference. Then we can calculate the RMSE, for which the average
+value is shown below in the table:
+Scene
+base TAA
+DLSS
+FSR
+Our
+Classroom
+7.98
+8.26
+7.47
+8.10
+Fence
+4.24
+1.61
+8.26
+1.87
+Table 3: RMSE value of difference images for the methods in the different scenes
+While these numbers are similar to the RMSE of just the images, we can
+see that the blurring DLSS creates reduces the flickering measured, as such
+its score is much lower.
+Meanwhile, since both base TAA and our exhibits
+some flickering, the score is relatively the same. Base TAA and FSR have a
+much higher difference score in the pillar scene again because of the artifacts,
+which introduce a lot of movement between frames, which does not exist in the
+reference.
+4.4
+Performance
+Lastly, we will measure the performance of the different TAA, compared to
+having no TAA running. Unfortunately, it is not possible to measure the precise
+timing of only the TAA in Unity, as such, the total frame time is measured:
+15
+==PAGE:19==
+Figure 9: Performance with no TAA
+Figure 10: Performance with the FSR
+Figure 11: Performance with the DLSS
+Figure 12: Performance with the base TAA
+Figure 13: Performance with our TAA
+In all pictures, the first 300 frames are shown. When a bright yellow color
+is present at the top, it means the current frame took over 16ms, meaning it is
+16
+==PAGE:20==
+running at less than 60fps. After a bit of startup lag, it is clear that running
+with no TAA is, as expected, the most performant. DLSS comes second with
+a small overhead, which makes sense since it is native to the GPU, meaning it
+can run very performant. Our TAA and the base TAA both have very similar
+performance, which means our method does not introduce any extra overhead
+compared to Unity’s standard implementation. FSR performs the worst, which
+might be because of the many operations it performs.
+17
+==PAGE:21==
+5
+Discussion
+The per-pixel blending factor described in the paper was successfully imple-
+mented in Unity and tested against other popular methods available. And while
+it doesn’t give much higher visual fidelity compared to the others, it boasts over-
+all higher stability and the ability to work reliably in different scenes, with no
+large computational overhead compared to the other methods. The reasons for
+this come down to the fact that robustly estimating variance and squared dif-
+ference is difficult, and while historical accumulation for the variance showed
+promising results, keeping the variance accurate while on the edges proved the
+hardest, which resulted in the flicking in the TAA. Using historical accumulation
+to find the squared difference gave mixed results, which could be because for-
+mula 3 does not work well when we only have access to the accumulated history
+and not the underlying value of the last pixel. While Unity provided easy access
+to getting a basic scene up and running, and also provided an easy way to switch
+between the different TAA methods, since they were already implemented. It
+also had many limitations, such as combining different TAA methods was not
+possible, as Unity automatically disables the base TAA when either FSR or
+DLSS is selected. Personal little experience with Unity was also a hindrance,
+since using custom post processing in HDRP has little documentation, as such,
+much time was spent on getting the implementation to work.
+6
+Conclusion
+In this paper, we covered the formula that provides a theoretical optimal blend-
+ing factor between frames, implemented it in Unity, and looked at how it per-
+forms with extensions against other popular TAA methods available in Unity.
+6.1
+Future works
+The biggest issue with would be worth further research is obtaining reliable
+squared difference estimates, a possible angle is looking at formula 4 and us-
+ing more buffers. Another interesting approach could be to combine the TAA
+with other methods such as FSR or DLSS, especially together with upscaling.
+Another possible extension could be to employ a similar solution as was used
+in history clamping/clipping, to try and rectify the historic value, when sudden
+changes to the variance or squared difference occur.
+18
+==PAGE:22==
+References
+[1] Liu S. Yang, L. and M. Salvi. A survey of temporal antialiasing techniques.
+Computer Graphics Forum, 39(2):607–621, 2020.
+[2] Nvidia
+dlss
+2.0:
+A
+big
+leap
+in
+ai
+render-
+ing.
+https://www.nvidia.com/en-gb/geforce/news/
+nvidia-dlss-2-0-a-big-leap-in-ai-rendering/.
+[3] Xess2.
+https://www.intel.com/content/www/us/en/developer/
+topic-technology/gamedev/xess2.html.
+[4] Game-changing
+updates:
+Fsr
+4,
+afmf
+2.1,
+ai-powered
+fea-
+tures
+more!
+https://community.amd.com/t5/gaming/
+game-changing-updates-fsr-4-afmf-2-1-ai-powered-features-amp/
+ba-p/748504l.
+[5] Henrik Philippi and Jeppe Revall Frisvad. Practical temporal and stereo-
+scopic filtering for real-time ray tracing. Proceedings of Eurographics Sym-
+posium on Rendering, pages 111–118, 2023.
+[6] Nvidia fxaa whitepaper.
+https://developer.download.nvidia.com/
+assets/gamedev/files/sdk/11/FXAA_WhitePaper.pdf.
+[7] Kurt Akeley. Reality engine graphics. Computer Graphics Forum, SIG-
+GRAPH ’93:109–116, 1993.
+[8] Shawn Hargreaves. Deferred shading. https://shawnhargreaves.com/
+DeferredShading.pdf.
+[9] Alexander Reshetov. Morphological antialiasing. Proceedings of the Con-
+ference on High Performance Graphics, 31(2pt1):109–116, 2009.
+[10] SOUSA T. GUTIERREZ D IMENEZ J., ECHEVARRIA J. I. Smaa: En-
+hanced subpixel morphological antialiasing.
+Computer Graphics Forum,
+31(2pt1):355–364, 2012.
+[11] Lei Yang, Diego Nehab, Pedro V. Sander, Pitchaya Sitthi-amorn, Jason
+Lawrence, and Hugues Hoppe. Amortized supersampling. ACM transac-
+tions on graphics, 28(5), 2009.
+[12] Screen
+percentage
+with
+temporal
+upscale.
+https://
+dev.epicgames.com/documentation/en-us/unreal-engine/
+screen-percentage-with-temporal-upscale-in-unreal-engine.
+[13] Christoph Schied,
+Anton Kaplanyan,
+Chris Wyman,
+Anjul Patney,
+Chakravarty R. Alla Chaitanya, John Burgess, Shiqiu Liu, Carsten Dachs-
+bacher, Aaron Lefohn, and Marco Salvi. Spatiotemporal variance-guided
+filtering: real-time reconstruction for path-traced global illumination. Pro-
+ceedings of High Performance Graphics, (2):1–12, 2017.
+19
+==PAGE:23==
+[14] Killian Herveau, Max Piochowiak, and Carsten Dachsbacher. Minimal con-
+volutional neural networks for temporal anti aliasing. Computer Graphics
+Forum, 2023.
+[15] Lasse Jon Fuglsang Pedersen. Temporal reprojection anti-aliasing in inside.
+Game Developers Conference, 2016.
+[16] Brian Karis. High quality temporal supersampling. SIGGRAPH - Advances
+in Real-Time Rendering in Games, 2014.
+[17] Tiago Sousa. Graphics gems from cryengine 3. SIGGRAPH - Advances in
+Real-Time Rendering in Games, 2013.
+[18] Jorge Jimenez. Filmic smaa: Sharp morphological and temporal antialias-
+ing. SIGGRAPH - Advances in Real-Time Rendering, 2016.
+[19] Unity
+anti-aliasing.
+https://docs.unity3d.com/Packages/
+com.unity.postprocessing@3.3/manual/Anti-aliasing.html#
+temporal-anti-aliasing-taa.
+[20] Niranjan D. Narvekar and Lina J. Karam. A no-reference image blur met-
+ric based on the cumulative probability of blur detection (cpbd). IEEE
+Transactions on Image Processing, 20, 2011.
+20

@@ -1,0 +1,1784 @@
+==PAGE:1==
+Vision-Language Object Detection
+Adapter
+Till Ariel Aczel
+Kongens Lyngby 2023
+==PAGE:2==
+Technical University of Denmark
+Department of Applied Mathematics and Computer Science
+Richard Petersens Plads, building 324,
+2800 Kongens Lyngby, Denmark
+Phone +45 4525 3031
+compute@compute.dtu.dk
+www.compute.dtu.dk
+==PAGE:3==
+Summary
+Large-scale Vision-Language models have shown great capability on open-
+vocabulary image classification. However, vision-language models fail when
+applied directly in an open-vocabulary object detection setting. To overcome
+the domain shift between vanilla classification and classification for object de-
+tection, instead of the commonly used approach of knowledge distillation, I
+propose Vision-Language Object Detection Adapter (VLODA). By freezing
+the vision-language model and training components which adapt its predictions
+to the object detection task we can fully take advantage of the generalization
+capabilities of the open-vocabulary classifier. My model archives 20.6 segmen-
+tation APr on the LVIS dataset, which is an improvement of 0.6 segmentation
+APr compared to the previous state-of-the-art.
+==PAGE:4==
+ii
+==PAGE:5==
+Preface
+This thesis was prepared at DTU Compute in fulfilment of the requirements for
+acquiring an M.Sc. in Engineering.
+Lyngby, 22-May-2023
+Till Ariel Aczel
+==PAGE:6==
+iv
+==PAGE:7==
+Acknowledgements
+I want to thank Soren Hauberg, Siyuan Li, Tobias Fischer, Thomas Huang, and
+Martin Danelljan for their guidance and help throughout this project. I would
+also like to thank Sebastian Borchert, Bernd Dammann, Andrea Bordoni, and
+Nick Rubner Papior from DTU HPC [1] for both the provided compute and
+technical support.
+==PAGE:8==
+vi
+==PAGE:9==
+Contents
+Summary
+i
+Preface
+iii
+Acknowledgements
+v
+1
+Introduction
+1
+2
+Related Work
+5
+2.1
+Object detectors
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+2.2
+Vision-language classifiers . . . . . . . . . . . . . . . . . . . . . .
+9
+2.3
+Open-vocabulary object detectors . . . . . . . . . . . . . . . . . .
+11
+3
+Methodology
+15
+3.1
+Frozen CLIP classifier on bounding boxes
+. . . . . . . . . . . . .
+17
+3.2
+Trained modules
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+3.3
+Inference . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+4
+Experiments
+23
+4.1
+Implementation details . . . . . . . . . . . . . . . . . . . . . . . .
+23
+4.2
+Open-vocab. object detection benchmarks . . . . . . . . . . . . .
+24
+4.3
+Ablations
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+28
+5
+Discussion
+31
+Bibliography
+33
+==PAGE:10==
+viii
+CONTENTS
+==PAGE:11==
+Chapter 1
+Introduction
+The more and higher quality data is available the better a deep learning model
+will perform. Most use cases do not have much training data available and
+data collection is expensive. Open-vocabulary models are trained in a way that
+allows them to dynamically change the categories at inference time. This can be
+achieved by training on image-text pairs scrapped from the internet, see Figure
+2.5 for sample data. The image-text pairs are ideal to train classifiers, as the
+text describes what is on the image, and the vast amount of data available on
+the internet allows for a big vocabulary size. Object detection is the task of
+both localizing and classifying objects in the image by predicting instances with
+bounding box coordinates and class probabilities. The image-text pairs are not
+suitable for training an open vocabulary object detector, it requires different
+data, where objects with location are paired up with text description, which is
+not as widely available. It was demonstrated by VILD [2] that localizers trained
+on a set of base categories can generalize well to novel categories. Thus a strong
+open-vocabulary object detector can be constructed by training the localizer on
+base categories and adapting an open-vocabulary classifier to object detection.
+The main line of research [2], [3], [4], [5], [6] focuses on distilling the CLIP [7]
+open vocabulary classifier into an open vocabulary object detector. To be able
+to take full advantage of the generalization capability of the open-vocabulary
+classifier on novel categories, I decided to adapt the CLIP classifier by freezing
+it and training additional components instead of using distillation.
+==PAGE:12==
+2
+Introduction
+Using an open-vocabulary classifier out-of-the-box for object detection cannot
+work because of two reasons: 1) vanilla classification scores do not take into
+account the localization quality, and 2) it can not localize objects.
+0
+20
+40
+60
+80
+cub
+gazelle
+nosebag
+foal
+zebra
+probability
+0
+20
+40
+60
+80
+plate
+paper plate
+french toast
+crape
+pastry
+probability
+Figure 1.1: Visualization of failure cases caused by the difference between
+vanilla classification and classification for object detection. Images and categories
+are from the LVIS dataset and arbitrary bounding boxes were selected. The
+image was cropped by the bounding box, and the cropped image was inferenced
+by the RN50 CLIP model, with the default CLIP preprocessing. In both cases,
+the model prediction is reasonable for vanilla classification, but are failure cases
+of classification for object detection. Top: zebras can be found in the bounding
+box, but it is not a single zebra and the bounding box is not tight around it, all
+classes should have low confidence for object detection. Bottom: The bounding
+box is tight around the plate and not the cake, thus the prediction should be
+plate.
+Using the open vocabulary classifier and only learning the localization does not
+work, as classification does not generalize well onto classification for detection,
+see examples in Figure 1.1. For a given bounding box only that category score
+should be high for which there exists an object in the image which fully fills
+==PAGE:13==
+3
+the bounding box. In other words, if an object is small, and does not cover the
+whole bounding box, then the object detector should predict a low probability
+for the given class. An object detector only using the frozen CLIP classifier for
+classification, and not adjusting the class probabilities with localization quality
+achieves 4.8 novel and 2.7 overall segmentation average precision (AP) [8] on
+the LVIS [9] dataset, compared to the 22.6 novel and 20.6 overall AP of my
+best model. In open-vocabulary classification training data, the text description
+usually describes a dominant feature in the image, which does not need to fill the
+whole image tightly. Applying a vanilla classifier to object detection classification
+leads to many false positives, as some large bounding box, with a small object in
+it will be classified as that object with a high confidence. This can be overcome
+by predicting how tightly the object fits in the image and if any other objects fill
+the image more. A high classification score for an object should only be given if
+the following three conditions are true: 1) the open-vocabulary classifier predicts
+that category, 2) the object fits tightly into the image (counter-example in Figure
+1.1 top), 3) there are no other objects which fill the image even more (counter-
+example in Figure 1.1 bottom). I propose to ensemble the final classification
+score from 1) the frozen CLIP classifier, 2) an intersection over union (IoU)
+head to detect if there are no objects fitting tightly in the bounding box, 3) a
+distillation head to detect of there are other objects filling the bounding box
+even more.
+Localization can be solved by training a class-agnostic localizer on the base classes.
+Although the CLIP features contain the necessary information to localize objects,
+they are not as suitable as features of a fine-tuned backbone. This can be
+mitigated by using a more complex neck to transform the frozen features.
+Main contributions of this work are:
+• Proposing an ensemble classifier using localization quality scoring modules,
+more specifically intersection over union (IoU) scoring and classification
+distillation modules, with which the open-vocabulary classification scores
+can be adapted to open-vocabulary object detection.
+• Demonstrating that cascading features work better on frozen classification
+pre-trained backbone features.
+I achieve state-of-the-art performance by focusing on the shortcomings of the
+open-vocabulary classifier in the object detection setting.
+==PAGE:14==
+4
+Introduction
+==PAGE:15==
+Chapter 2
+Related Work
+Before talking about my model, is it important to familiarize ourselves with
+previous works. For an open-vocabulary object detector, we need to discuss object
+detectors, open-vocabulary classifiers, and open-vocabulary object detectors.
+My VLODA model builds on the CLIP [7], Sparse-RCNN [10], F-VLM [11],
+DiffusionDet [12], and Mask scoring RCNN [13] models.
+2.1
+Object detectors
+Object detection is the task of localizing and classifying objects in an image. The
+training dataset consists of images with a list of instance annotations for each
+image. Each instance is annotated with a class label ci bounding box coordinates
+bi ∈R1×4 and might be annotated with a segmentation mask si ∈Rw×h, where
+w and h are the width and height of the bounding box in pixels. At inference time
+the object detector needs to identify each object, then classify it by predicting
+the class ci, and localize it by predicting the bounding box bi, or segmentation
+mask si. Samples from two datasets, the COCO [14] and LVIS [9] dataset can
+be seen in Figure 2.1. The LVIS dataset has 1203 categories with a long-tailed
+distribution compared to the COCO dataset with only 80 categories. You can
+see the category distribution in Figure 2.2. LVIS is a federated dataset, this
+means the categories are not exclusive. Each image is annotated with some
+==PAGE:16==
+6
+Related Work
+(a) COCO [14]
+(b) LVIS [9]
+Figure 2.1: Samples from the COCO [14] and LVIS [9] datasets. The two
+datasets have the same images, but they are annotated differently. COCO has
+80, while LVIS has 1203 categories. For both datasets, each bounding box
+is annotated with a class label, and for the LVIS dataset with an additional
+segmentation mask. The categories and segmentation masks are not visualized.
+positive labels, but also with categories that are not on the image. Only those
+category predictions are counted as false positives that are in the negative set
+for the given image.
+Faster-RCNN: Faster RCNN [15] is a commonly used two-stage detector model.
+The input image is first transformed by a feature extractor backbone. The two
+stages are a region proposal network (RPN) and the detector heads. The region
+proposal network predicts a class-agnostic objectness score for pre-defined anchor
+boxes. Based on the objectness scores the bounding boxes are sorted, and
+non-maximum-suppression (NMS) is applied to reduce the number of duplicate
+predictions. The RPN selected proposal boxes, are fed to the second stage.
+Each proposal box corresponds to a region of interest (RoI), by applying RoI
+aligning on the backbone features (which can be thought of as cropping out the
+bounding box in the feature space), we can get a proposal-specific feature matrix.
+These RoI-aligned features are fed into the two detection heads: bounding box
+regression and classification. The bounding box regressor predicts a correction
+of the proposal bounding box coordinates. The classification head predicts the
+category distribution for each instance. For the final prediction, the proposal
+==PAGE:17==
+2.1 Object detectors
+7
+(a) COCO [14]
+(b) LVIS [9]
+Figure 2.2: Histogram of COCO [14] and LVIS [9] category distribution. For
+both datasets, the number of instances per category is counted and plotted in
+descending order. LVIS has a long-tailed category distribution, where 1.2% of
+the instances are from the least frequent 50% of categories compared to COCO
+with 17.8% of the instances from the least frequent 50% fo categories.
+boxes are adjusted by the predicted bounding box deltas, and a class-specific
+NMS is applied.
+Mask-RCNN: Mask-RCNN [16] extends the Faster-RCNN object detector to
+instance segmentation, by introducing a mask head. The mask-head inputs are
+the RoI-aligned backbone features and it uses convolutional and convolutional
+upsample layers to predict the per-pixel segmentation mask.
+Cascade-RCNN: The second stage in the Faster RCNN corrects the proposals.
+Cascade-RCNN [17] repeats the second stage n times and predicts a bounding
+box correction and class distribution at each stage. This allows high-quality
+predictions even if the proposals are of bad quality.
+Sparse-RCNN: Sparse RCNN [10], see Figure 2.3 takes advantage of the
+power of Cascade-RCNN, by instead of using an RPN network, it learns a fixed
+number of proposal boxes and refines them at each stage. For better information
+flow between the stages, it introduces a per-instance feature vector which is
+propagated between the layers. The instance feature vectors and the RoI-aligned
+backbone features are mixed by two dynamic convolutions at each stage. For
+coordination between the proposals, a self-attention in the instance dimension is
+introduced, this way proposals can know if another proposal already detected the
+same object. Sparse-RCNN uses fewer proposal boxes. The reduced number of
+proposals allows it to use a more complicated refinement process. Borrowed from
+DETR [18] Sparse-RCNN replaces the matching with the Hungarian assigner,
+which computes the optimal bipartite matching between predictions and ground
+truth objects. This is only possible as there is information flow between the
+proposals, and the model can learn to only detect each object once. Using the
+1-to-1 Hungarian assigned allows Sparse-RCNN not to use NMS as it does not
+==PAGE:18==
+8
+Related Work
+predict duplicates.
+learned
+bboxes
+learned
+feats.
+backb.
+feats
+dynamic
+head
+cats
+boxes
+feats
+dynamic
+head
+cats
+boxes
+feats
+· · ·
+dynamic
+head
+cats
+boxes
+model
+input
+tensor output
+legend
+Figure 2.3: Sparse-RCNN [10] builds on Cascade-RCNN, by replacing each
+stage with a dynamic head and using learned bounding boxes and learned
+instance features. Each stage refines the prediction of the previous stage by
+correcting the bounding box coordinates, predicting new class labels from the
+improved bounding box coordinates, and refining the instance features.
+backb.
+feats
+feats
+bboxes
+RoI
+self
+attention
+feed
+forward
+layer
+feed
+forward
+layer
+feed
+forward
+layer
+feed
+forward
+layer
+feed
+forward
+network
+cats
+bboxes
+feats
+model
+input output
+legend
+Figure 2.4: Dynamic head [10] is used in the Sparse-RCNN model. It refines
+each cascading stage’s bounding box coordinate, class prediction, and instance
+features. The dynamic head uses self-attention in the bounding box dimension to
+transfer information between instances and two successive dynamic convolutions
+to mix the instance features with the RoI cropped backbone features.
+==PAGE:19==
+2.2 Vision-language classifiers
+9
+DiffusionDet: Riding on the popularity of diffusion models, DiffusionDet [12]
+formulates the detection problem as a reverse diffusion process. From random
+bounding boxes, it learns the reverse process, denoising them into bounding
+boxes from the data distribution. Instead of conditioning the reverse diffusion
+process on some text, like in text-to-image diffusion models, it conditions the
+reverse process on the image features. DiffusionDet achieves this by replacing
+the learned proposals from Sparse-RCNN [10] with random proposals.
+Mask Scoring RCNN: Object detector classifiers do not take into account
+the quality of the localization. By reducing confidence for object predictions
+with poor localization quality, the high-confidence instance predictions will have
+better localization. The Mask Soring RCNN [13] predicts the intersection over
+union (IoU) between the predicted and ground truth instance mask, from the
+RoI pooled features and the predicted segmentation mask. The IoU is defined
+as the area of overlap over the area of union, in other words, how much of the
+prediction overlaps with the ground truth relative to the overall prediction and
+ground truth size. The Mask Scoring RCNN optimizes the squared L2 distance
+between the predicted score and the segmentation IoU:
+LIoU =|| σ(sIoU) −IoU(mpred, mgt) ||2
+2
+(2.1)
+where mpred and mgt are the predicted and ground truth mask, and σ is the
+sigmoid function. Mask scoring RCNN uses an ensemble for the final calibrated
+score by multiplying the category probability and segmentation mask IoU score:
+pcalibrated = pclassification · σ(sIoU)
+(2.2)
+where pclassification is the predicted classification probability before the IoU score
+calibration.
+2.2
+Vision-language classifiers
+Vision-language classifiers solve the open-vocabulary classification problem by
+pre-training the classifier on web-scraped image-text pairs.
+Examples of a
+commonly used image-text dataset, the LAION5B [19] can be seen Figure 2.5.
+By learning the similarity between pairs of texts and images, the model is able
+to classify any object which is in its vocabulary.
+CLIP: Contrastive image-language pertaining (CLIP) [7] trains an open-vocabulary
+classifier on web-scrapped image-text pairs. The model training pretext task
+can be seen in 2.6. Each image and text in the batch is encoded using an image
+and text encoder respectively. The objective is, for image-text pairs with similar
+==PAGE:20==
+10
+Related Work
+FETEAM 86’x70’ Juego de
+Cama Microfibra 100 Suave
+Dulce Sufrimiento Bedding
+Sábanas Pareja DE Almo-
+hadas
+Monocromo P10 Plus
+Bernette Funlock 42 Cover-
+stitch Machine
+Objektbild
+6 x GPU mining rig RX 580
+- 8GB - ETH 190mh/s Dual
+Mining only 1 month old -
+as new
+The
+Celebrated
+Frog
+of
+Calaveras
+County
+Easy
+Reading PowerPoint
+Bedroom
+news
+file
+2080
+58383c6f71bec
+Image 1
+Figure 2.5: Samples from the LAION5B [19] dataset, a commonly used dataset
+for contrastive language image pertaining. CLIP [7] was trained on a similar,
+but private dataset.
+==PAGE:21==
+2.3 Open-vocabulary object detectors
+11
+semantic information to be close in the embedding space, and for image-text
+pairs with dissimilar semantic information to be far in the embedding space.
+CLIP uses cosine similarity as its distance metric between embeddings:
+s(ximage, xtext) =
+xT
+imagextext
+|| ximage || · || xtext ||
+(2.3)
+The CLIP training objective can be formulated as a classification task, where
+for each image/text in the batch, the model needs to be able to classify, which
+text/image is the most similar to it. At training time CLIP constructs a similarity
+matrix, where each row corresponds to an image and each column corresponds
+to a text. The similarity matrix of a trained CLIP model should be close to the
+identity matrix by having values near one in the diagonal, and zeros everywhere
+else. CLIP optimizes the encoder network parameters, by applying the following
+InfoNCE [20] for each row and column:
+pi,j =
+esi,j/τ
+PB
+j esi,j/τ
+for i = 1, 2, . . . , B
+(2.4)
+LCLIP = −
+B
+X
+j=1
+yi,j log(pi,j)
+(2.5)
+where B is the batch size, yi,j is the one hot encoded binary category label and τ is
+the temperate hyperparameter which adjusts the sharpnes of the softmax function.
+As the cosine similarity is between minus one and one s(ximage, xtext) ∈[−1, 1],
+before applying the softmax all scores are divided by the temperate τ. CLIP can
+perform open-vocabulary classification by computing the similarity between an
+image and the text embeddings of the categories, and selecting the category with
+the highest cosine similarity. As the training dataset contains more sentences as
+words, category prompts are modified with prompt templates, for example "an
+image of a {CATEGORY}". CLIP uses an ensemble of templates by averaging
+the text embeddings of different prompts for each category. The contrastive
+pretext task allows the model to be trained on a massive dataset, which creates
+a diverse vocabulary, and a model robust to data distribution shift.
+2.3
+Open-vocabulary object detectors
+Similar to an open-vocabulary classifier, an open-vocabulary object detector
+needs to be able to classify any objects at inference time. At training time all
+the annotations are from a set of base classes CB. Test time classes include novel
+categories CN, but can also include base categories CB. An open-vocabulary
+==PAGE:22==
+12
+Related Work
+i1 · t1
+i1 · t2
+i1 · t3
+· · ·
+i1 · tN
+i2 · t1
+i2 · t2
+i2 · t3
+· · ·
+i2 · tN
+i3 · t1
+i3 · t2
+i3 · t3
+· · ·
+i3 · tN
+...
+...
+...
+...
+...
+iN · t1
+iN · t2
+iN · t3
+· · ·
+iN · tN
+i1
+i2
+i3
+...
+iN
+t1
+t2
+t3
+· · ·
+tN
+image
+encoder
+text
+encoder
+dog
+cat
+plane
+...
+house
+model
+input
+tensor output
+legend
+Figure 2.6: CLIP [7] model at training time. Training data consists of image-
+text pairs.
+The texts are encoded using the text encoder and the images
+are encoded using the image encoder. The cosine similarity (Equation 2.3) is
+computed between all image and text embeddings. Each image/text should have
+a similarity of 1 with its pair and 0 with every other sample, thus the similarity
+matrix should be an identity matrix. To achieve this the InfoNCE [20] is applied
+at each row and column.
+object detector needs to recognize objects from both base CB and novel CN
+categories.
+VILD: Vision and Language Knowledge Distillation (VILD) [2] was one of the
+first papers building on the CLIP open-vocabulary classifier [7] to create an
+open-vocabulary object detector. The VILD model has three different versions:
+VILD-text, VILD-image, and VILD-ens. VILD-text distills the text encoder and
+VILD-image distills the image encoder into the detector. VILD-text encodes
+the CB base categories in the training dataset and replaces the last layer of the
+classification head in a Mask-RCNN [16] detector with these embeddings. By
+normalizing the features before the last layer, and replacing the class weights
+with class text embeddings, the last layer becomes a cosine similarity between
+==PAGE:23==
+2.3 Open-vocabulary object detectors
+13
+the features and the frozen category CLIP text embeddings. Training a detector
+with the frozen CLIP text embedding classifier distills its predictions into the
+model. During test time these category embeddings can be replaced with the CN
+categories, and the model is able to generalize, as the novel categories are in the
+CLIP text encoder vocabulary. VILD-image is similar to the VILD-text detector,
+but the image-encoder features are used instead of distilling the text-encoder
+features. First, proposal boxes are predicted with a pre-trained object detector
+for each image, and the CLIP image encoder computes the target embeddings
+for each cropped region. During training, the target features of the frozen CLIP
+model are distilled into the model, by using RoI-align with the proposal boxes
+and optimizing an L1 loss between the predicted student features and the teacher
+features. As the teacher feature space on the image-cropped regions is aligned
+with the student features on the RoI-aligned regions, the CLIP text encoder
+can be used at test time for classification. The VILD-ens model trains both
+VILD-text and VILD-image heads and ensembles them by geometric mean at
+test time.
+RegionCLIP: It was demonstrated by [2], that object detectors trained on
+base categories CB have similar localization performance as detectors trained
+on both base CB and novel CN categories. As the localization works well for
+open-vocabulary object detection, RegionCLIP [4] disentangles the localization
+from classification by using a separate backbone and detector for the localizer
+and only training a network for classification. RegionCLIP inserts an extra
+step between the contrastive image-text pretraining of CLIP [7] and the object
+detection knowledge distillation, by introducing a region-text pretraining step on
+a region-text dataset, where frozen text features are distilled into the RoI-aligned
+visual features by a contrastive classification and an L1 loss. The region-text
+pretrained model can already be used for zero-shot object detection, and by
+fine-tuning it on the training set, it outperforms VILD on both LVIS [9] and
+COCO [14].
+OV DETR: Detection Transformer (DETR) [18] is an end-to-end trained one-
+stage object detector with comparable performance to two-stage object detectors.
+It uses a transformer encoder-decoder architecture, where the encoder is used
+to extract features from the image, and the decoder predicts the bounding box
+coordinates and the class probabilities. The decoder queries are learned and
+each token corresponds to one predicted instance. Open-vocabulary Detection
+Transformer (OV DETR) [6] adapts the DETR architecture by summing the
+learned queries with CLIP text embeddings, thus making each query class
+conditioned. Similarly to other open-vocabulary object detectors, it is trained
+on the base classes CB, but by replacing the category embeddings to the novel
+classes CN it can generalize to the novel objects at test time.
+DetPro: Prompt engineering is an important part of inferencing language
+==PAGE:24==
+14
+Related Work
+models, which can be performed automatically with backpropagation by ex-
+tending the context with learnable tokens. Context Optimization (CoOp) [21]
+demonstrated that prompt tuning can be an effective fine-tuning method for
+vision-language models like CLIP [7]. Detection Prompt (DetPro) [5] uses CoOp
+to fine-tune the text encoder for the object detection task, and trains a VILD
+[2] model with the fine-tuned text encoder.
+pretrained
+image
+encoder
+faster-RCNN
+detector head
+I
+bboxes
+det.
+scores
+T
+pretrained
+text
+encoder
+dog
+cat
+plane
+...
+house
+RoI
+pretrained
+pooler
+I
+CLIP
+scores
+scores
+T
+geo.
+mean
+model frozen model
+input
+tensor output
+legend
+Figure 2.7: F-VLM [11] at test time. Instead of cropping the input image
+to 224X224, it uses an RoI-align between the local feature extractor and the
+global pooling layer of the ResNet50 backbone. This allows for multiple instance
+classification predictions without running the whole backbone several times.
+F-VLM ensembles the frozen category predictions with learned distilled CLIP
+predictions.
+F-VLM: Instead of only using knowledge distillation, F-VLM [11] freezes the
+CLIP image encoder backbone, uses an RoI align between the feature extractor
+and the pooling layer, and ensembles it with a VILD-text style classification
+head. Model architecture at test time can be seen in Figure 2.7. Freezing the
+backbone speeds up the training and enables the model to better take advantage
+of the bigger CLIP [7] models, as the frozen backbone can not overfit on the
+base categories.
+==PAGE:25==
+Chapter 3
+Methodology
+In an open-vocabulary setting, the training data consist of annotations from CB
+base classes, but during inference, the model needs to be able to classify CN
+novel classes. Novel categories CN can contain categories that are not in CB,
+thus not seen at training time.
+My method, the Vision-Language Open-Vocabulary Adapter (VLODA) adapts
+the CLIP classifier to open-vocabulary object detection. To be able to capitalize
+on the generalization capabilities of the CLIP model, I freeze the image encoder
+and adapt it for object detection, by adding an RoI-align to the classifier and
+training additional localization quality measuring components on top of the
+frozen features. The model architecture can be seen in Figure 3.1.
+First, in Section 3.1 I am describing how the frozen CLIP classifier can be
+adapted to predict the category probabilities for several bounding boxes without
+inferencing the backbone multiple times. Then in Section 3.2 I continue by
+describing the trained components of the detector and finally, in Section 3.3 I
+write about how the trained components can be mixed with the frozen classifier
+to get the final prediction.
+==PAGE:26==
+16
+Methodology
+pretrained
+image
+encoder
+VLODA
+detector
+head
+X
+mask
+bbox
+IoU
+scores
+distil.
+scores
+T
+pretrained
+text
+encoder
+dog
+cat
+plane
+...
+house
+random boxes
+bbox loss
+mask loss
+IoU loss
+distil. loss
+model frozen model
+input
+tensor output
+legend
+(a) Model architecture at training time. Novel categories are not known at train time,
+thus only base categories are embedded. The bounding box, mask, IoU score, and
+distillation score losses are applied to the outputs.
+pretrained
+image
+encoder
+VLODA
+detector
+head
+X
+mask
+bbox
+IoU
+scores
+distil.
+scores
+T
+pretrained
+text
+encoder
+dog
+cat
+book
+...
+table
+random boxes
+RoI
+pretrained
+pooler
+X
+frozen
+scores
+scores
+T
+geo.
+mean
+model frozen model
+input
+tensor output
+legend
+(b) Model architecture at test time.
+Novel categories are introduced, and their
+embedding is calculated. In addition to the trained modules, the model is expanded by
+the frozen classifier, by applying an RoI-alagin on the predicted boxes and computing
+the cosine similarity to the text embeddings.
+Figure 3.1: The VLODA model architecture. At both train and test times
+the categories/images are embedded using the frozen CLIP text/image encoder.
+From the image features and random boxes, the detector head predicts the
+bounding boxes, IoU scores, distilled classification scores, and the segmentation
+mask.
+==PAGE:27==
+3.1 Frozen CLIP classifier on bounding boxes
+17
+3.1
+Frozen CLIP classifier on bounding boxes
+Before it can be discussed how the classification probabilities can be corrected
+by taking into consideration the localization quality, we need to discuss how the
+classifier can be adapted to work on many bounding boxes at the same time.
+The ResNet50 CLIP [7] image encoder was pre-trained on 224X224 images and it
+outputs one classification probability per class for the whole image. Running the
+whole backbone for each bounding box cropped image would be computationally
+infeasible. Let us define the ResNet50 backbone by splitting it into two parts:
+F() which extracts the features locally and P() which pools the local features into
+a global vector. Similarly to F-VLM [11], by not square cropping and resizing
+the images to 224X224, but using an RoI align of the predicted bounding boxes
+on the frozen backbone features F(I), where I is the image, we can predict a
+classification distribution for each bounding box while only inferencing F() once.
+The class probabilities are given by:
+sf =
+xT
+frozenxtext
+|| xfrozen || · || xtext ||
+(3.1)
+pf =
+esc,f/τ
+P|C|
+j
+esj,f/τ
+for c = 1, 2, . . . , | C |
+(3.2)
+where xfrozen is the RoI pooled backbone feature vector and xtext is the text
+embedding. The projector P() and frozen classifier are only used during test
+time.
+3.2
+Trained modules
+I adapt the CLIP classifier to object detection by introducing localization and
+localization quality modules. Localization is done by class-agnostic bounding
+box, and class-agnostic segmentation mask heads. The localization quality is
+measured by a bounding box IoU score and a CLIP distilled open-vocabulary
+classifier. The VLODA head can be seen in Figure 3.2. To be able to use the
+frozen classifier during test time, the ResNet backbone is frozen. Using a frozen
+backbone reduces GPU memory requirements and decrases training time.
+Proposals: The inputs of the detector head are the frozen backbone features
+F(I) and bounding box proposals bp. I test three different proposal types: RPN
+[15], learned proposals [10], and random proposals [12]. The baseline Mask-
+RCNN [16] model uses its default RPN for proposals. For the cascading stages, I
+experiment with two additional settings, learned and random which were inspired
+by Sparse-RCNN [10] and DiffusionDet [12] respectively.
+==PAGE:28==
+18
+Methodology
+rand
+bboxes
+backb.
+feats
+FPN
+RoI
+dynamic
+head
+X
+IoU
+boxes
+feats
+dynamic
+head
+X
+IoU
+boxes
+feats
+· · ·
+dynamic
+head
+X
+IoU
+boxes
+RoI
+Mask
+head
+mask
+model
+input
+tensor output
+legend
+Figure 3.2: VLODA head consists of 6 cascading dynamic head stages. Instance
+features are refined at each stage and passed to the next stage.
+Distilled
+classification features, IoU score, and bounding boxes are predicted at each stage,
+while for computational reasons segmentation mask is only predicted once, after
+the cascading stages.
+For the learned proposals, the model learns N proposal boxes bp ∈RN×4 and
+initial proposal features fp ∈RN×d, where d is the VLODA head dimension. At
+test time the same learned boxes and features are used for all images.
+The intuition behind the random proposals is not to overfit on the base category
+bounding box locations and sizes but to initialize the proposal boxes randomly.
+The random boxes are parameterized by relative center x, center y, width, and
+height and drawn from a normal distribution with a mean of 0.5 and standard
+deviation of 0.25, bp ∼N(0.5, 0.25). The initial proposal features are also not
+learned, but they are initialized by the RoI pooled FPN features. An advantage
+of using random proposals instead of learned ones is that at test time the number
+of proposals can be adjusted.
+Assigner: Predictions need to be matched up with ground truth instances in
+order to be able to compute the loss. I experiment with two matching strategies,
+1 to 1 matching with a Hungarian assigner [18] and a 1 to K matching using the
+simOTA assigned [12]. Both assigners compute the matching cost, which is the
+loss between the predictions and ground truth labels. The Hungarian assigner
+solves an optimal transport assignment problem between the predictions and the
+ground truth boxes, using the above-mentioned cost matrix and the Hungarian
+algorithm. The 1 to K simOTA assigner uses an optimal transport assignment
+algorithm and selects the up to K predictions dynamically for each ground truth.
+==PAGE:29==
+3.2 Trained modules
+19
+fpn
+feats
+feats
+boxes
+RoI
+self
+attention
+feed
+forward
+layer
+feed
+forward
+layer
+feed
+forward
+layer
+feed
+forward
+layer
+feed
+forward
+network
+X
+boxes
+feats
+IoU
+model
+input output
+legend
+Figure 3.3: The dynamic head refines the instance features from the previous
+stage by applying self-attention in the instance dimension and mixing it with the
+RoI pooled FPN features with two dynamic convolutional layers. The output of
+the dynamic head are the refined features, predicted IoU scores, bounding boxes
+and distilled classification features.
+Neck: I adapt a feature pyramid network (FPN) to extract features from the
+frozen ResNet CLIP features. N(F(I))
+Cascading stages: Borrowed from Sparse-RCNN, the detector head consists of
+6 cascading dynamic head [10] stages. One of these stages can be seen in Figure
+3.3. Classification distillation, bounding box localization, and intersection over
+union (IoU) scoring is done at each stage, while for computational reasons, the
+mask prediction is only performed after the cascading stages on bounding box
+RoI-aligned FPN features. A stage consists of the following: it takes as input
+a set of proposal boxes, an instance feature vector for each bounding box, and
+the FPN features. First, we apply self-attention over the bounding boxes on the
+instance feature vectors. The FPN features are RoI cropped by the proposal
+boxes. The RoI pooled features are mixed together with the instance features
+by two successive dynamic convolutions. Finally from the mixed features, we
+regress the new instance features, classification scores, bounding box coordinates,
+and IoU scores. For the localizer to be able to generalize to novel categories we
+are using class-agnostic bounding box regression with L1 and generalized IoU
+loss [22]:
+Lbox =|| bpred −bgt ||1 −GIoU(bpred, bgt)
+(3.3)
+where bpred is the predicted bounding box, bgt is the matched ground truth
+==PAGE:30==
+20
+Methodology
+bounding box and GIoU is the generalized IoU [22].
+If the prediction has a low IoU with the ground truth, then the bounding box
+does not fit tightly around the detected object, and all category probabilities
+should be low. The classification score can be adjusted by the localization quality
+if we know the expected IoU between the predicted object and the ground truth.
+For each prediction, the bounding box IoU score between itself and the matched
+ground truth is calculated, and optimized by the MSE loss:
+LIoU =|| σ(sIoU) −IoU(bpred, bgt) ||2
+(3.4)
+where sIoU is the predicted IoU score and σ is the sigmoid function. The IoU
+scoring head was inspired by the Mask scoring RCNN [13]. As I am not motivated
+by improving the segmentation mask, but to correct the classification score by the
+localization quality, I am using the bounding box IoU instead of the segmentation
+mask IoU.
+Even if there is an object which tightly fills the bounding box, the CLIP classifier
+will give high confidence to all categories inside of the bounding box. Traditional
+classification heads in object detectors learn to predict a high score for only the
+biggest object, as a prediction is only matched up with the closest object. As
+the object detector needs to be able to generalize to novel categories it can not
+have a fixed number of outputs - one for each class - but it needs to be able to
+change the categories at inference time. Similar to VILD-text I distill the CLIP
+classifier, by using the frozen CLIP text embeddings, and training the image
+embeddings. The class probabilities are calculated by:
+sd =
+xT
+learnedxtext
+|| xlearned || · || xtext ||
+(3.5)
+where xlearned is the learned feature vector.
+This allows us, to generalize to novel categories while learning the object detection
+classification task. By using the frozen CLIP image embedder as my backbone,
+the distilled classification head only needs to learn a small transformation to
+adapt the image embeddings for the object detection task. The focal loss [23] is
+applied for the distilled category scores:
+Lclass = −
+|CB|
+X
+c
+log (σ(γycsc,d + β)) /γ
+(3.6)
+where y ∈{±1} specifies the ground truth class and σ is the sigmoid function.
+The LVIS [9] dataset has a long-tailed class distribution, and even after removing
+the rare categories, most annotations are belonging to only a few classes. The
+federated focal loss [24] mitigates this by not using all categories as negative
+==PAGE:31==
+3.3 Inference
+21
+classes for each batch, but sampling them according to their class distribution in
+the whole dataset. For the LVIS dataset, I am using the fed-focal loss instead of
+the focal loss.
+Mask head: I adopt the mask head from Mask-RCNN [16]. The input of the
+mask head is the predicted bounding box RoI-aligned FPN feature map. The
+mask head loss function is an average per-pixel binary cross-entropy loss:
+Lmask =
+1
+W · H
+W
+X
+i
+H
+X
+j
+−(yij log(pij) + (1 −yij) log(1 −pij))
+(3.7)
+where W and H are the width and height of the bounding box, yij and pij are
+the ground truth label and predicted mask for pixel (i, j).
+Losses: The final loss is the sum of the bounding box, IoU score, distillation,
+and mask losses:
+L = Lbox + LIoU + Lclass + Lmask
+(3.8)
+The bounding box, IoU score, and distillation loss are applied at each cascading
+stage, while the mask loss is only applied at the final stage, but multiplied by
+the number of stages.
+3.3
+Inference
+Localization is done by the trained bounding box and mask localization modules.
+The final category probabilities are ensembled from the frozen CLIP probability,
+distilled CLIP probability, and predicted bounding box IoU score with a weighted
+geometric mean:
+p = pwf
+f
+· σ(sd)wd · σ(sIoU)wIoU
+(3.9)
+where wf, wd and wIoU are the weight in the geometric mean. By using the
+geometric mean between the components of the final category prediction, a class
+will only have high confidence if all three components take on a high value. Note
+that because pc·wf
+f
+· σ(sd)c·wd · σ(sIoU)c·wIoU = (pwf
+f
+· σ(sd)wd · σ(sIoU)wIoU)c and
+because pf, σ(sd), σ(sIoU) ≤0, multiplying all the exponents with a constant c is
+a monotonic operation and does not change the order of confidence scores. Thus,
+keeping one exponent at a constant value and only performing hyperparameter
+search for the other two exponents is optimal. Compared to VILD [2] and F-VLM
+[11] I am simplifying the geometric mean by using the same weights for novel
+and base categories.
+==PAGE:32==
+22
+Methodology
+==PAGE:33==
+Chapter 4
+Experiments
+In Section 4.1 I am describing the implementation details, then in Section 4.2
+I compare VLODA to previous works, and finally in Section 4.3 I ablate the
+components of the VLODA model.
+4.1
+Implementation details
+Hyperparameters used for training and testing can be seen in 4.1, all experiments
+follow these parameters if otherwise not stated. For a fair comparison, I am
+using the same number of epochs for the LVIS [9] dataset as RegionCLIP [4]
+and DetPro [5]. As my model was overfitting on the COCO dataset, I stopped
+training after 40 000 iterations. I am using the CLIP [7] prompt templates to
+generate the CLIP category text embeddings. Gradient clipping and warmup
+steps are needed to avoid overflow errors.
+The decision of using the ResNet50 backbone and not taking advantage of bigger
+encoders was mostly made because of computing power limitations. Even with
+the frozen backbone training on 2 Nvidia V100 GPUs takes around 3 days with
+the ResNet50 backbone. Using bigger models would have required either more
+GPUs in parallel or using gradient accumulation which would have increased
+==PAGE:34==
+24
+Experiments
+training time drastically. As demonstrated by F-VLM [11] models which use
+frozen backbones benefit more from scaling up on the limited data, as they can
+not overfit the backbone features. Based on the F-VLM scaling-up experiments,
+I expect that using bigger CLIP [7] backbones, I could have increased the gap
+between my and other state-of-the-art models.
+LVIS
+COCO
+optimizer
+SGD
+SGD
+learning rate
+0.02
+0.02
+momentum
+0.9
+0.9
+weight decay
+1e-4
+1e-4
+gradient clipping
+norm
+norm
+iterations
+180 000
+40 000
+step decay factor
+0.1
+None
+step decay schedule
+[120 000, 160 000]
+None
+batch size
+16
+16
+warmup steps
+1000
+1000
+augmentation
+random cropping [10]
+random cropping [10]
+NMS threshold
+0.5
+0.5
+wf
+0.1
+0.4
+wd
+0.7
+0.2
+wIoU
+1.0
+1.0
+train # proposals
+500
+500
+test # proposals
+1000
+1000
+classification loss
+fed-focal
+focal
+Table 4.1: VLODA hyperparameter default setting. For all experiments, if not
+stated otherwise, these parameters were used.
+4.2
+Open-vocab. object detection benchmarks
+Open-vocabulary LVIS: Following recent works [2], [4], [6], [5], [11] I split the
+1203 LVIS [9] categories into 866 base and 337 novel categories. The common and
+frequent categories are used during training, but the rare category annotations are
+removed from the training dataset. I am using the generalized open-vocabulary
+detection setting, this means that at test time the model needs to classify all
+1203 categories. LVIS dataset’s main evaluation metric is the average precision
+==PAGE:35==
+4.2 Open-vocab. object detection benchmarks
+25
+[8] (AP). For testing the open-vocabulary performance the rare category average
+precision (APr) is compared to other models.
+(a) Ground truth bounding
+boxes plotted on the image
+(b)
+Predicted
+bounding
+boxes plotted on the image
+category
+prob
+airplane
+54.10
+jet plane
+45.10
+seaplane
+34.24
+fighter jet
+28.36
+(c) Category and probabil-
+ity for the top 4 predictions
+Figure 4.1: Visualization of a prediction for a sample image in the LVIS [9]
+dataset. There are many overlapping predictions, but as the categories are not
+the same they are not filtered out by NMS. Categories in the LVIS dataset are
+not exclusive, jet plane is a sub-category of airplane, and it is ambiguous which
+one should be predicted.
+You can see a visualization of an LVIS sample in Figure 4.1. There are many
+overlapping predictions from similar categories. Some categories should not be
+predicted, but for most objects, several category predictions could be correct.
+Because the LVIS dataset is a federated dataset, models optimized for the LVIS
+evaluation metrics have many false positives. It is hard to create an open-
+vocabulary evaluation setting which can strictly penalize false positives, as with
+the openness of the vocabulary many non-exclusive categories can be present.
+bbox
+mask
+APr↑
+APc↑
+APf↑
+AP↑
+APr↑
+APc↑
+APf↑
+AP↑
+VILD-ens [2]
+-
+-
+-
+-
+16.6
+24.6
+30.3
+25.5
+VILD (DetPro) [5]
+17.4
+27.5
+31.9
+27.5
+16.8
+25.6
+28.5
+25.2
+RegionClip [4]
+-
+-
+-
+-
+17.1
+27.4
+34.0
+28.2
+OV DETR [6]
+-
+-
+-
+-
+17.4
+25.0
+32.5
+26.6
+DetPro [5]
+20.8
+27.8
+32.4
+28.4
+19.8
+25.6
+28.9
+25.9
+DetPro-cascade [5]
+21.7
+29.6
+35.0
+30.5
+20.0
+26.7
+30.4
+27.0
+F-VLM [11]
+-
+-
+-
+-
+18.6
+-
+-
+24.2
+VLODA (my)
+22.6
+30.0
+32.7
+29.8
+20.6
+25.9
+27.4
+25.6
+Table 4.2: Comparing previous work on the LVIS [9] dataset. All models were
+trained on the common and frequent categories and evaluated in the generalized
+open-vocabulary setting. My VLODA model outperforms on the novel categories
+all previous works and performs comparably on all categories.
+Table 4.2 compares state-of-the-art (SoTA) models to my VLODA model on
+the LVIS benchmark. My model outperforms all other models in the novel AP
+==PAGE:36==
+26
+Experiments
+and performs comparably in overall AP. VLODA improves on the bounding box
+localization, but it does not change the mask prediction, thus the gap between
+VLODA and previous state-of-the-art is bigger for bounding box AP, than for
+segmentation AP. Conditioning the mask prediction on the refined cascading
+features could further improve the segmentation performance. VLODA does not
+outperform other models on the base categories. The model is using the frozen
+CLIP classifier, which was not fine-tuned on the base categories. By not freezing
+the CLIP classifier other models can outperform VLODA on the seen categories,
+but underperform on the novel categories. As it is impossible to include all
+categories in the training dataset, the models should be optimized for novel AP
+while not sacrificing too mutch of overall AP.
+The second best model is DetPro-cascade which uses prompt tuning. DetPro
+also benefits from using cascading stage, this support my results in Table 4.5 that
+the CLIP features are not ideal for localization. Prompt tuning is an orthogonal
+research direction to mine, so my model could also benefit from it.
+Open-vocabulary COCO: Following RegionCLIP [4], OV DETR [6] and
+F-VLM [11], I divide the COCO [14] dataset into 48 base and 17 novel categories.
+As the COCO benchmark has only 48 base categories the model is much more
+prone to overfit. Because of this, I have stopped training after only 40 000
+iterations. Also to combat overfitting I have changed the exponent parameters. I
+have increased the frozen exponent wf to 0.4, decreased the distilled classification
+exponent wd to 0.2 and kept the IoU score exponent wIoU at 1.0. COCO [14]
+dataset does not have instance segmentation annotations, thus the mask head is
+dropped and the AP50 is used as the main evaluation metric.
+Novel AP50↑
+Base AP50↑
+Overall AP50↑
+VILD-ens [2]
+27.6
+59.5
+51.3
+RegionClip [4]
+31.4
+57.1
+50.4
+OV DETR [6]
+29.4
+61.0
+52.7
+F-VLM [11]
+28.0
+-
+39.6
+VLODA (my)
+26.1
+36.6
+33.8
+Table 4.3: Comparison of previous work on the COCO [14] benchmark. My
+VLODA model underperforms previous works on both novel and overall AP.
+It can be seen in Table 4.3, that my model underperforms other models on
+the COCO [14] benchmark. My model is overfitting on the smaller number
+of base categories. As there are only 80 categories in the COCO dataset, the
+CLIP text embedding space is only approximated at 80 points. Areas of the
+distilled embeddings space which are not close to one of the categories will have
+poor alignment, as they were not incentivized to have a high cosine similarity
+==PAGE:37==
+4.2 Open-vocab. object detection benchmarks
+27
+with their labels in the CLIP text embeddings space. The Detic [3] paper has
+demonstrated that by using the ImageNet21K [25] classification dataset, which
+has over 21 000 categories, this problem can be overcome. By attracting the
+distilled embedding space in over 21 000 points to the CLIP text embedding
+space, the two have a high alignment, and novel categories that were not seen at
+training time are recognized with higher accuracy. I am following the setting
+from VILD [2], DetPro [5], OV DETR [6], and F-VLM [11] where the use
+of external data is not allowed, models need to generalize to novel categories
+with the help of the CLIP model only. The detector should not learn to be
+overconfident in on the base categories CB, VILD [2], F-VLM [11], and DetPro
+[5] have mitigated the overfitting by increasing the weight decay and multiplying
+the background category loss with a small number. Weight decay regularizes the
+model. By multiplying the background category loss with a small number, the
+model gradients are less influenced by the task of predicting if the detection is an
+object or the background. This way novel objects are less likely to be classified
+as background. Because of computation limitations, the exploration of training
+hyperparameters remains future work.
+Transfer learning: In most use cases the test time categories have some overlap
+with the train time categories, but the input image distribution shifts slightly.
+The transfer learning setup imitates this by training the model on all LVIS
+[9] categories, and testing on PASCAL VOC [26] and the COCO [14] datasets.
+Training on LVIS and evaluation on PASCAL VOC and COCO, assumes a higher
+overlap between the base and novel categories than other benchmarks, as both
+the PASCAL VOC and COCO dataset classes are a subset of the LVIS categories.
+This benchmark is close to the use case of deploying the object detector without
+finetuning and further away from the use case of providing direct interaction
+between the user and the model.
+OV DETR [6] outperforms all other models on the transfer learning benchmarks,
+it is less affected by the data distribution shift between the datasets.
+My
+VLODA model underperforms other models on the PASCAL VOC benchmark
+but performs similarly on the COCO benchmark. The LVIS and COCO datasets
+share the images but differ in their annotations. The cascading stages of the
+stronger localizer are more prone to overfit on the image distribution and are less
+capable to handle the distribution shift. As VLODA is using the frozen classifier,
+to capitalize on its generalization capabilities, it only outperforms other models
+on benchmarks which measure performance on rare not seen classes.
+==PAGE:38==
+28
+Experiments
+PASCAL VOC
+COCO
+AP50↑
+AP75↑
+AP↑
+AP50↑
+AP75↑
+VILD-ens [2]
+72.2
+56.7
+36.6
+55.6
+39.8
+VILD (DetPro) [5]
+73.9
+57.9
+34.1
+52.3
+36.5
+OV DETR [6]
+76.1
+59.3
+38.1
+58.4
+41.1
+DetPro [5]
+74.6
+57.9
+34.9
+53.8
+37.4
+F-VLM [11]
+-
+-
+32.5
+53.1
+34.6
+VLODA (my)
+70.4
+49.2
+35.3
+52.5
+37.8
+Table 4.4: Transfer learning performance by training the models on the 1203
+categories of the LVIS [9] dataset, and evaluating on PASCAL VOC [26] and
+COCO [14]. The VLODA model underperforms on the PASCAL benchmark
+and achieves similar performance on the COCO benchmark.
+4.3
+Ablations
+I use the open-vocabulary LVIS setting for the ablation studies where I train on
+the 866 base classes and evaluate with the generalized open-vocabulary setting
+on all 1203 classes. The not seen APr classes are used as the main indicator of
+performance.
+bbox
+mask
+APr↑
+AP↑
+APr↑
+AP↑
+RPN
+Mask RCNN
+10.8
+17.9
+12.5
+18.9
+RPN
+Cascade
+16.3
+25.1
+14.6
+21.6
+learned
+Cascade (Sparse-RCNN)
+13.6
+22.2
+12.0
+18.9
+random
+Cascade
+14.0
+22.5
+11.8
+18.7
+random
+Cascade + IoU scoring
+17.6
+25.8
+15.2
+21.5
+random
+Cascade + fed loss/1 to K matching
+21.0
+27.4
+18.4
+23.5
+RPN
+Cascade + IoU scoring + fed-focal/1 to K matching
+20.9
+27.0
+19.3
+23.6
+random
+Cascade + IoU scoring + fed-focal/1 to K matching
+22.6
+29.8
+20.6
+25.6
+Table 4.5: Ablation on starting from baseline (Mask-RCNN) to going to my best
+model on LVIS with 1X schedule. All models use the ResNet50 FPN backbone.
+For the first ablation, seen in Table 4.5, I explore the contribution of each
+component by starting from a Mask-RCNN baseline and going step-by-step to
+my final VLODA model. The Mask-RCNN [16] localizer does not work well
+on frozen CLIP [7] features, as the CLIP model was trained for classification
+and not localization. By using cascading stages, the localizer can transform the
+frozen features, and it is more capable of localizing the objects. There is no
+==PAGE:39==
+4.3 Ablations
+29
+significant difference between using learned or random proposals. Interestingly
+replacing the learned proposals with an RPN benefits the Sparse-RCNN, but
+with 1 to K matching and fed-focal loss, the random proposals perform better.
+This suggests that the 1 to K matching helps the model to more efficiently learn
+the localization, it can take full advantage of the cascading stages and does
+not need to rely on the RPN, which can overfit on base classes. The classifier
+distillation can not correct for the difference between vanilla classification and
+classification for object detection, thus the IoU scoring head is needed.
+exponents
+bbox
+mask
+wf
+wd
+wIoU
+APr↑
+AP↑
+APr↑
+AP↑
+0.00
+0.7
+1.0
+16.6
+28.8
+14.6
+24.4
+0.08
+0.7
+1.0
+21.5
+29.8
+19.4
+25.7
+0.10
+0.7
+1.0
+22.6
+29.8
+20.6
+25.6
+0.12
+0.7
+1.0
+21.9
+29.0
+19.5
+24.9
+(a) Ablation on the frozen exponent wf. Without using the frozen model, the classifier
+overfits on the base categories, and there is a sharp performance drop in novel AP.
+exponents
+bbox
+mask
+wf
+wd
+wIoU
+APr↑
+AP↑
+APr↑
+AP↑
+0.1
+0.0
+1.0
+11.2
+10.8
+10.9
+10.1
+0.1
+0.5
+1.0
+21.1
+28.5
+19.2
+24.5
+0.1
+0.7
+1.0
+22.6
+29.8
+20.6
+25.6
+0.1
+0.9
+1.0
+20.8
+29.7
+18.9
+25.6
+(b) Ablation on the distilled classifier exponent wd. By not using the distilled classifier,
+if there is an object which fills the bounding box tightly, the model will still give high
+confidence for objects from other categories, even if they do not fill the bounding box.
+exponents
+bbox
+mask
+wf
+wd
+wIoU
+APr↑
+AP↑
+APr↑
+AP↑
+0.1
+0.7
+0.0
+19.5
+27.9
+17.3
+23.9
+0.1
+0.7
+0.8
+21.5
+29.3
+19.5
+25.1
+0.1
+0.7
+1.0
+22.6
+29.8
+20.6
+25.6
+0.1
+0.7
+1.2
+22.5
+29.6
+20.2
+25.5
+(c) Ablation on the IoU score exponent wIoU. Without the IoU score the model has
+more false positives, as the distillation head alone can not correct for the difference
+between vanilla classification and classification for object detection.
+Table 4.6: Ablation on the inference geometric mean weights, where wf denotes
+the frozen CLIP score exponent, wd the distilled CLIP score exponent, and wIoU
+the IoU score exponent from Equation 3.9. The model was trained on the LVIS
+base categories and evaluated on the LVIS validation set.
+==PAGE:40==
+30
+Experiments
+In Table 4.6 I am ablating the importance of the exponents wf, wd, and wIoU.
+It is clear from Table 4.6a that the generalization capabilities of the frozen
+CLIP model are needed, as without it the VLODA model overfits on the base
+categories. The only component, which can correct the scores of small objects
+which obscure an object from another class is the distilled classification score.
+This is supported by the sharp performance drop in Table 4.6b when not using
+the distilled classifier. It can be observed in Table 4.6c, that the distilled classifier
+is not able to correct the score by the localization quality, and the model benefits
+from correcting the final prediction with the predicted IoU score. Ablations in
+Table 4.6 demonstrate that all three components of the final prediction score
+are important.
+By using the frozen score, the distilled score, and the IoU
+score the model can achieve state-of-the-art performance. Correcting the frozen
+CLIP classifier by the localization quality can bridge the gap between vanilla
+classification and classification for object detection. VLODA outperforms other
+models by not distilling the backbone, but capitalizing on the frozen classifiers’
+generalization capability and correcting its prediction for object detection.
+==PAGE:41==
+Chapter 5
+Discussion
+Deep learning model performance depends greatly on available computing power,
+data quality, and data quantity. It is cheaper, and thus more practical to fine-tune
+pre-trained models. I believe that open-source multimodal deep representation
+learning will play a major part in the future of deep learning. These models
+can be fine-tuned into task-specific models. These pre-trained models need to
+have a dense representation space that captures the semantic information in
+the input data. Using self-supervised or weakly supervised learning, models are
+not limited by the available data. The explosion in natural language processing
+would not have been possible without the use of unlabeled datasets, and pre-
+training. Similar techniques can improve model performance on other modalities
+as well. Models using a pre-trained backbone with a good embedding space can
+achieve high performance with low training cost and limited data, as they do
+not need to learn the feature transformation. Language was created for efficient
+communication between people, by using models which can understand human
+language, allows us a more direct interaction between the user and the software.
+As there is limited data for training open-vocabulary object detectors, it is a
+perfect example of pre-trained open-vocabulary classifier adaptation. The CLIP
+open-vocabulary classifier can be trained on the vast amount of image-text pairs
+on the internet, and its generalization capability can be exploited by adapting it
+for object detection. Open-vocabulary object detectors can be easily integrated
+into proof of concept products, and if higher performance is needed, further
+==PAGE:42==
+32
+Discussion
+fine-tuned to the specific data distribution. It can also be used in products where
+the user has a more direct interaction with the model, as it can understand
+human language and dynamically adapt to the needs of the user.
+In this work, I have demonstrated how a multimodal representation learning
+model, the CLIP open-vocabulary classifier can be fine-tuned and applied to
+another task, object detection with minimal data and compute resources. Vision-
+language models are strong open-vocabulary classifiers, but they do not work
+out of the box in the classification for object detection setting. The vanilla
+classification does not need to take into account the localization quality, and
+it can give high confidence to any category which is partially present in the
+picture. By freezing the CLIP classifier and training localization quality models,
+the frozen classification score can be adjusted. Freezing the backbone has the
+added benefits of reduced GPU memory usage and faster training time. The
+frozen CLIP features need to be transformed to perform localization, as the
+CLIP model was pretrained on the classification task. I have demonstrated
+that state-of-the-art performance can be achieved by correcting the classification
+scores with the localization quality and using a stronger localizer.
+Future work should focus on both better pre-training, and how the pre-trained
+models can be adapted for the given task. As proven by the performance of
+the RegionCLIP [4] models, the CLIP embedding space has limited localization
+information. By using a more appropriate representation learning task, the
+pre-trained backbones would be easier to apply to the downstream tasks. It is
+impossible to take into consideration all use cases when selecting the pretext
+tasks, thus use cases should focus on the shortcomings of the pre-trained model
+for the given task and correct for it. The pre-trained encoder should have better
+representation for localization, and the CLIP-based open-vocabulary object
+detectors should focus on the task-specific shortcomings CLIP model, namely
+how to adapt the vanilla open-vocabulary classifier to classification for object
+detection.
+==PAGE:43==
+Bibliography
+[1] DTU Computing Center, “DTU Computing Center resources,” 2022.
+[2] M. Wu, J. Gu, Y. Shen, M. Lin, C. Chen, X. Sun, and R. Ji, “End-to-end
+zero-shot HOI detection via vision and language knowledge distillation,”
+CoRR, vol. abs/2204.03541, 2022.
+[3] X. Zhou, R. Girdhar, A. Joulin, P. Krähenbühl, and I. Misra, “Detecting
+twenty-thousand classes using image-level supervision,” in Computer Vision
+- ECCV 2022 - 17th European Conference, Tel Aviv, Israel, October 23-27,
+2022, Proceedings, Part IX (S. Avidan, G. J. Brostow, M. Cissé, G. M.
+Farinella, and T. Hassner, eds.), vol. 13669 of Lecture Notes in Computer
+Science, pp. 350–368, Springer, 2022.
+[4] Y. Zhong, J. Yang, P. Zhang, C. Li, N. Codella, L. H. Li, L. Zhou, X. Dai,
+L. Yuan, Y. Li, and J. Gao, “Regionclip: Region-based language-image
+pretraining,” in IEEE/CVF Conference on Computer Vision and Pat-
+tern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24, 2022,
+pp. 16772–16782, IEEE, 2022.
+[5] Y. Du, F. Wei, Z. Zhang, M. Shi, Y. Gao, and G. Li, “Learning to
+prompt for open-vocabulary object detection with vision-language model,”
+in IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+CVPR 2022, New Orleans, LA, USA, June 18-24, 2022, pp. 14064–14073,
+IEEE, 2022.
+[6] Y. Zang, W. Li, K. Zhou, C. Huang, and C. C. Loy, “Open-vocabulary
+DETR with conditional matching,” in Computer Vision - ECCV 2022 - 17th
+European Conference, Tel Aviv, Israel, October 23-27, 2022, Proceedings,
+==PAGE:44==
+34
+BIBLIOGRAPHY
+Part IX (S. Avidan, G. J. Brostow, M. Cissé, G. M. Farinella, and T. Hass-
+ner, eds.), vol. 13669 of Lecture Notes in Computer Science, pp. 106–122,
+Springer, 2022.
+[7] A. Radford, J. W. Kim, C. Hallacy, A. Ramesh, G. Goh, S. Agarwal,
+G. Sastry, A. Askell, P. Mishkin, J. Clark, G. Krueger, and I. Sutskever,
+“Learning transferable visual models from natural language supervision,”
+in Proceedings of the 38th International Conference on Machine Learning,
+ICML 2021, 18-24 July 2021, Virtual Event (M. Meila and T. Zhang, eds.),
+vol. 139 of Proceedings of Machine Learning Research, pp. 8748–8763, PMLR,
+2021.
+[8] G. Salton and M. McGill, Introduction to Modern Information Retrieval.
+McGraw-Hill Book Company, 1984.
+[9] A. Gupta, P. Dollar, and R. Girshick, “LVIS: A dataset for large vocabulary
+instance segmentation,” in Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition, 2019.
+[10] P. Sun, R. Zhang, Y. Jiang, T. Kong, C. Xu, W. Zhan, M. Tomizuka,
+L. Li, Z. Yuan, C. Wang, and P. Luo, “Sparse R-CNN: end-to-end object
+detection with learnable proposals,” in IEEE Conference on Computer
+Vision and Pattern Recognition, CVPR 2021, virtual, June 19-25, 2021,
+pp. 14454–14463, Computer Vision Foundation / IEEE, 2021.
+[11] W. Kuo, Y. Cui, X. Gu, A. J. Piergiovanni, and A. Angelova, “F-VLM:
+open-vocabulary object detection upon frozen vision and language models,”
+CoRR, vol. abs/2209.15639, 2022.
+[12] S. Chen, P. Sun, Y. Song, and P. Luo, “Diffusiondet: Diffusion model for
+object detection,” CoRR, vol. abs/2211.09788, 2022.
+[13] Z. Huang, L. Huang, Y. Gong, C. Huang, and X. Wang, “Mask scoring
+R-CNN,” in IEEE Conference on Computer Vision and Pattern Recognition,
+CVPR 2019, Long Beach, CA, USA, June 16-20, 2019, pp. 6409–6418,
+Computer Vision Foundation / IEEE, 2019.
+[14] T. Lin, M. Maire, S. J. Belongie, L. D. Bourdev, R. B. Girshick, J. Hays,
+P. Perona, D. Ramanan, P. Doll’a r, and C. L. Zitnick, “Microsoft COCO:
+common objects in context,” CoRR, vol. abs/1405.0312, 2014.
+[15] S. Ren, K. He, R. B. Girshick, and J. Sun, “Faster R-CNN: towards real-time
+object detection with region proposal networks,” in Advances in Neural In-
+formation Processing Systems 28: Annual Conference on Neural Information
+Processing Systems 2015, December 7-12, 2015, Montreal, Quebec, Canada
+(C. Cortes, N. D. Lawrence, D. D. Lee, M. Sugiyama, and R. Garnett, eds.),
+pp. 91–99, 2015.
+==PAGE:45==
+BIBLIOGRAPHY
+35
+[16] K. He, G. Gkioxari, P. Dollár, and R. B. Girshick, “Mask R-CNN,” in IEEE
+International Conference on Computer Vision, ICCV 2017, Venice, Italy,
+October 22-29, 2017, pp. 2980–2988, IEEE Computer Society, 2017.
+[17] Z. Cai and N. Vasconcelos, “Cascade R-CNN: delving into high quality object
+detection,” in 2018 IEEE Conference on Computer Vision and Pattern
+Recognition, CVPR 2018, Salt Lake City, UT, USA, June 18-22, 2018,
+pp. 6154–6162, Computer Vision Foundation / IEEE Computer Society,
+2018.
+[18] N. Carion, F. Massa, G. Synnaeve, N. Usunier, A. Kirillov, and S. Zagoruyko,
+“End-to-end object detection with transformers,” in Computer Vision -
+ECCV 2020 - 16th European Conference, Glasgow, UK, August 23-28, 2020,
+Proceedings, Part I (A. Vedaldi, H. Bischof, T. Brox, and J. Frahm, eds.),
+vol. 12346 of Lecture Notes in Computer Science, pp. 213–229, Springer,
+2020.
+[19] C. Schuhmann, R. Beaumont, R. Vencu, C. Gordon, R. Wightman,
+M. Cherti, T. Coombes, A. Katta, C. Mullis, M. Wortsman, P. Schramowski,
+S. Kundurthy, K. Crowson, L. Schmidt, R. Kaczmarczyk, and J. Jitsev,
+“LAION-5B: an open large-scale dataset for training next generation image-
+text models,” in NeurIPS, 2022.
+[20] A. van den Oord, Y. Li, and O. Vinyals, “Representation learning with
+contrastive predictive coding,” CoRR, vol. abs/1807.03748, 2018.
+[21] K. Zhou, J. Yang, C. C. Loy, and Z. Liu, “Learning to prompt for vision-
+language models,” Int. J. Comput. Vis., vol. 130, no. 9, pp. 2337–2348,
+2022.
+[22] H. Rezatofighi, N. Tsoi, J. Gwak, A. Sadeghian, I. D. Reid, and S. Savarese,
+“Generalized intersection over union: A metric and a loss for bounding
+box regression,” in IEEE Conference on Computer Vision and Pattern
+Recognition, CVPR 2019, Long Beach, CA, USA, June 16-20, 2019, pp. 658–
+666, Computer Vision Foundation / IEEE, 2019.
+[23] T. Lin, P. Goyal, R. B. Girshick, K. He, and P. Dollár, “Focal loss for
+dense object detection,” in IEEE International Conference on Computer
+Vision, ICCV 2017, Venice, Italy, October 22-29, 2017, pp. 2999–3007,
+IEEE Computer Society, 2017.
+[24] D. Sarkar, A. Narang, and S. Rai, “Fed-focal loss for imbalanced data
+classification in federated learning,” CoRR, vol. abs/2011.06283, 2020.
+[25] J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L. Fei-Fei, “Imagenet:
+A large-scale hierarchical image database,” in 2009 IEEE conference on
+computer vision and pattern recognition, pp. 248–255, Ieee, 2009.
+==PAGE:46==
+36
+BIBLIOGRAPHY
+[26] M. Everingham, L. V. Gool, C. K. I. Williams, J. M. Winn, and A. Zisserman,
+“The pascal visual object classes (VOC) challenge,” Int. J. Comput. Vis.,
+vol. 88, no. 2, pp. 303–338, 2010.

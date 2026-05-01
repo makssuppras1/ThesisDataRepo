@@ -1,0 +1,3067 @@
+==PAGE:1==
+Cryptography on Mobile Devices
+Mikkel Ole Rømer, s113408
+Kongens Lyngby 2016
+==PAGE:2==
+Technical University of Denmark
+Department of Applied Mathematics and Computer Science
+Richard Petersens Plads, building 324,
+2800 Kongens Lyngby, Denmark
+Phone +45 4525 3031
+compute@compute.dtu.dk
+www.compute.dtu.dk
+==PAGE:3==
+Summary (English)
+The project deals with cryptographic implementations on mobile devices. Of
+particular interest is the AES (Advanced Encryption Standard) hardware sup-
+port in modern ARM CPUs such as ARMv8. In speciﬁc, this thesis demon-
+strates AES under the NIST recommended modes ECB, CTR, CBC, CFB,
+OFB, and CCM with the use of the NEON engine intrinsics. In addition, this
+paper implements an advanced instruction scheduler, allowing the subset of se-
+quential modes to perform similar to those of parallelisable nature. Essentially
+allowing CBC, CFB, and OFB to perform at approximately 1.3 cpb under a
+realistic online message distribution, optimising the modes by a factor 2 com-
+pared to their genuine implementations.
+Finally, the scheduler is applied to
+the authenticated mode CCM, contributing a factor 1.44 allowing the CCM to
+perform at 2.74 cpb.
+==PAGE:4==
+ii
+==PAGE:5==
+Preface
+This thesis was prepared at the Department of Applied Mathematics and Com-
+puter Science at the Technical University of Denmark, in fulﬁlment of the re-
+quirements for acquiring an Master of Science in Digital Media Engineering.
+Lyngby, 25-June-2016
+Mikkel Ole Rømer, s113408
+==PAGE:6==
+iv
+==PAGE:7==
+Acknowledgements
+I would like to thank the Section for Cryptography at DTU Compute, for setting
+the frame for this project. In speciﬁc, I would like to express my strongest grat-
+itude to my supervisors Elmar Wolfgang Tischhauser and Andrey Bogdanov for
+their patient support, and professional ﬁrst-class aiding towards the construction
+of this thesis.
+==PAGE:8==
+vi
+==PAGE:9==
+Contents
+Summary (English)
+i
+Preface
+iii
+Acknowledgements
+v
+1
+Introduction
+1
+1.1
+Motivation
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+1.2
+Related work . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4
+1.3
+Problem deﬁnition . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+1.4
+Outline
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+2
+Block Ciphers and Modes of Operation
+7
+2.1
+Block Ciphers . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+2.2
+Advanced Encryption Standard (AES) . . . . . . . . . . . . . . .
+10
+2.3
+Modes of operation . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+2.3.1
+Electronic Code Book, (ECB) . . . . . . . . . . . . . . . .
+12
+2.3.2
+Counter mode, (CTR) . . . . . . . . . . . . . . . . . . . .
+13
+2.3.3
+Cipher Block Chaining, (CBC) . . . . . . . . . . . . . . .
+14
+2.3.4
+Cipher Feedback, (CFB) . . . . . . . . . . . . . . . . . . .
+15
+2.3.5
+Output Feedback, (OFB)
+. . . . . . . . . . . . . . . . . .
+15
+2.4
+Authenticated Encryption . . . . . . . . . . . . . . . . . . . . . .
+16
+2.4.1
+Counter with Cipher Block Chaining-Message Authenti-
+cation Code, (CCM) . . . . . . . . . . . . . . . . . . . . .
+16
+3
+Pipelining and Instruction-Level Parallelism
+19
+3.1
+Exploiting the pipeline . . . . . . . . . . . . . . . . . . . . . . . .
+19
+3.2
+Working with a realistic message distribution . . . . . . . . . . .
+22
+3.3
+Combing . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+23
+==PAGE:10==
+viii
+CONTENTS
+4
+ARMv8 Architecture
+25
+4.1
+Experimental Setup
+. . . . . . . . . . . . . . . . . . . . . . . . .
+25
+4.2
+Infrastructure Analysis . . . . . . . . . . . . . . . . . . . . . . . .
+26
+4.2.1
+NEON - Advanced Encryption Standard (AES) Support .
+27
+4.3
+Fundamental ﬁndings
+. . . . . . . . . . . . . . . . . . . . . . . .
+28
+4.3.1
+AES Expected performance . . . . . . . . . . . . . . . . .
+31
+5
+Genuine ARMv8 Implementations
+33
+5.1
+AES-128 on ARMv8 . . . . . . . . . . . . . . . . . . . . . . . . .
+33
+5.2
+Electronic Code Book, (ECB) . . . . . . . . . . . . . . . . . . . .
+35
+5.3
+Counter mode, (CTR) . . . . . . . . . . . . . . . . . . . . . . . .
+36
+5.4
+Cipher Block Chaining, (CBC) . . . . . . . . . . . . . . . . . . .
+36
+5.5
+Cipher Feedback, (CFB) . . . . . . . . . . . . . . . . . . . . . . .
+37
+5.6
+Output Feedback, (OFB)
+. . . . . . . . . . . . . . . . . . . . . .
+38
+5.7
+Authenticated Encryption, (AE)
+. . . . . . . . . . . . . . . . . .
+39
+5.7.1
+Counter with Cipher Block Chaining-Message Authenti-
+cation Code, (CCM) . . . . . . . . . . . . . . . . . . . . .
+39
+6
+Fast AES with Comb Scheduler
+41
+6.1
+Radix sort . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+41
+6.2
+Pre-computing windows . . . . . . . . . . . . . . . . . . . . . . .
+42
+6.3
+Comb Scheduler
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+44
+6.4
+Performance index (Throughput) . . . . . . . . . . . . . . . . . .
+47
+7
+Discussion
+49
+8
+Conclusion
+53
+8.1
+Future work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+54
+List of Acronyms
+57
+Bibliography
+58
+Counter mode with CBC-MAC - C implementation
+63
+==PAGE:11==
+Chapter 1
+Introduction
+85% of all mobile devices featured ARM based processors in 2015 [riE15b]. In
+addition, the mobile platform exceeded desktops, by accounting for 60% of all
+digital media time spend already in mid 2014 [Lip14], clearly illustrating the
+size and demand of the mobile infrastructure. In 2011 ARM Limited (ARM)
+introduced the ARMv8 architecture as a successor to the ARMv7 instruction set
+architecture. The ARMv8 implements a 64 bit address space, contrary 32 bit
+on its predecessors. Commercially, ARMv8 grounds the basis of most modern
+System on Chip (SoC), including the Apple A7, A8, A8X, and the Exynos 7 and
+8, found in mobile devices such as iPhons 5s, 6, 6Plus, and SE, and Samsung
+Galaxy 6, Note 4 and Nexus 9 on the Android domain.
+This new architecture provides, for the ﬁrst time on ARM, dedicated hardware
+support for AES. This new instruction set features both encryption and decryp-
+tion, allowing tremendous execution speed-up compared to code based solutions,
+factor 10 according to ARM.
+This paper investigates the AES hardware support and performance on the
+ARMv8 architecture. In speciﬁc, this thesis addresses the ARMv8 environment
+present on the Samsung Galaxy S6, providing a quad-core 2.1 GHz Cortex-
+A57 and quad-core 1.5 GHz Cortex A-53 environments. The presented analysis
+will ground its investigation based on the Cortex A-57 environment. What is
+more, this thesis will provide genuine implementations of AES utilising these
+==PAGE:12==
+2
+Introduction
+pipeline instructions.
+In fact, this paper will demonstrate ARM based im-
+plementations of the National Institute of Standards and Technology (NIST)
+recommended modes of operation. Covering for the ﬁrst time, in a public pa-
+per, ARM supported implementations of Electronic Code Book (ECB), Counter
+mode (CTR), Cipher Block Chaining (CBC), Cipher Feedback (CFB), and
+Outpu Feedback (OFB). Along with the Authenticated Encryption (AE) mode
+Counter mode with CBC-MAC (CCM).
+The special NIST publications [Dwo01],[Dwo07] recommends the following ba-
+sic modes of operation: ECB, CBC, CFB, OFB and CTR.
+Moreover, they
+recommend CCM and Galois/Counter Mode (GCM) as authenticated encryp-
+tion modes, and Cipher-based Message Authentication Code (CMAC) as au-
+thentication mode. Of these modes of operation CBC, CFB, OFB, CMAC and
+CCM are inherently sequential. While GCM performs signiﬁcantly better than
+CCM, it is prune to authentication attacks as shown in [Fer05],[Jou06]. Hence,
+it makes sense to investigate the performance optimisation possibilities of CCM.
+Likewise within the basic modes of operation, CTR, ECB are inherently paral-
+lel. Thus these modes beneﬁts well from the pipeline interface. However, while
+the sequential modes of operations does beneﬁts signiﬁcantly from the pipeline
+interface, their subsequent design cannot draw complete pipeline utilisation.
+As the thesis will demonstrate, executing pipeline instructions provides two
+measurements of particular interest, namely throughput, T −1, and latency, L.
+The latency describes the time from instruction execution, until the output is
+ready. That is, the time of the instruction through the pipeline. The throughput
+however, measures the frequency of the pipeline. Hence it is readily observed,
+that while the pipeline can execute at frequency T −1, sequential messages are
+forced to stall the execution by the latency L. Thus, optimal performance cannot
+be achieved by a single message encryption under these modes.
+This paper will, for the ﬁrst time on the ARM architecture, describe, imple-
+ment, and analyse the multi-message scheduling algorithm, The Comb Sched-
+uler [BLT16], proposed by Andrey Bogdanov and Martin M. Lauridsen and
+Elmar Tischhauser. The algorithm allows, the otherwise sequential modes, to
+act in a non-sequential behaviour, drawing optimal beneﬁt of the pipeline. Its
+principles grounds in the observation, that multiple independent messages can
+be processed in parallel according to the parallelisation degree, P, which can be
+predetermined given the latency and throughput of the system.
+Hence the paper at hand, seeks to investigate AES based cryptographic algo-
+rithms on the ARMv8 architecture. In speciﬁc, this investigation will utilised the
+proposed Comb-Scheduler [BLT16], as the pipeline performance optimisation
+algorithm. The purpose is to demonstrate the performance gain of sequential
+modes. Essentially allowing the non-parallel modes to perform close to those
+==PAGE:13==
+1.1 Motivation
+3
+of which is inherently parallel. This optimisation would allow more dynamic
+choice of cryptographic algorithm disregarding speed, only taking security goals
+into consideration.
+1.1
+Motivation
+While ARM documents the existence of their supported instructions set, they
+provide little, if any, information upon the usage of these. In [riE14], where
+the cryptographic intrinsics are documented, in fact no further information are
+given, other than the instruction interface. Hence, the domain is in need of
+proper investigations. Not only analysis of the instructions performance, but
+also in the sense of use. Since addressing these subjects, can advance the imple-
+mentation discussion, evidently leading towards better implementations. More-
+over, clarifying the instructions will simplify, a so far abstract domain, grounding
+better public knowledge and providing programmers with stronger motivation
+going towards faster and more secure encryption.
+Furthermore, investigating fast AES is important.
+Especially, providing fast
+CCM is a huge gain for the AE community, as the faster alternative Oﬀset Code-
+book Mode (OCB) is patented, and thus expensive to use. However, fast encryp-
+tion in general is of great importance, as it would allow eﬃcient hard-drive en-
+cryption, similar to that of FireVault, and better Internet performance. Further-
+more, as the demand of mobile technologies are exploding [riE15b], lightweight
+cryptology is demanded. Modern mobile devises access vulnerable information
+each day. Mobile banking, private or corporate emails, user tracking, and vul-
+nerable private user information are just some of the information, which are
+contained within these devices, yielding the need of security and privacy. More-
+over, the mobile devices has limited access to power, contrary high availability
+is required, since these devices are becoming standardised in all everyday tasks.
+Lastly, mobile devices are expected to perform with high responsiveness, since
+they are used on the ﬂy, requiring actions performed by the user to be close to
+instant. In fact, according to Miller and Card et. al. [Mil68, SKCM91], the sys-
+tem is required to provide response within an 100ms time-frame to be conceived
+as instant, while 1 second will interrupt the ﬂow of the user, and ﬁnally stating
+that 10 seconds is the limit to which you will keep the attention of the user.
+These demands, in a cryptographic sense, yields specialised security measure-
+ments. AES is an obvious candidate for this purpose, as it enables high privacy.
+However, AES requires multiple arithmetic operations, along with multiple it-
+erations of the same message. Thus it make sense to investigate its performance
+and how to improve it.
+==PAGE:14==
+4
+Introduction
+While the inherent dependencies within the bespoken AES modes is unavoidably
+when processing single messages, multi-message processing would allow better
+pipeline utilisation. Furthermore, as multiple activities usually are present on
+communication devices, eg. OpenSSL connections or disk encryption, optimis-
+ing for multi-message processing is a reasonable goal.
+What is more, when
+processing single messages the payload of this optimisation is minimal.
+1.2
+Related work
+With the emerge of AES New Instructions (AES-NI), AES received signiﬁcant
+speed-up along with the possibility of using pipeline optimised algorithms. This
+break-through allowed for new implementations design allowing, eg. CBC, to
+perform at 0.36 cycles per byte (cpb), provided a multi-message encryption on
+6 cores [KAZ10]. Hence, the results was provided by utilising multi-threading.
+Andrey Bogdanov, Martin M. Lauridsen, and Elmar Tischhauser [BLT16] pi-
+oneered single threaded pipeline parallelisation, in the domain of AES, with
+the proposal of the Comb-Scheduler in 2015. The paper implements its mea-
+surements on the Intel Haswell microarchitecture, i5-4300U CPU running at
+1.90GHz, as well as the more recent Skylake microarchitecture, i7-6700 CPU
+running at 3.40GHz. By applying Comb they demonstrated an entire factor
+5 optimisation level for the AES modes: CBC, OFB, CFB, and CMAC. In
+fact, the sequential algorithms performs within a mere 10% slower than that
+of CTR, provided a realistic message distribution following the TCP and UDP
+distribution, also shown in ﬁgure 3.4. These results clearly illustrates the power
+of ﬁlling the pipeline.
+This paper extends the Comb Scheduler to the ARMv8 architecture. Illustrat-
+ing the power of combing cross platform. In addition, Andrey Bogdanov et.
+al. implemented Insertion Sort, as the sorting engine, optimising for constant
+space, while this paper extends the research by applying the Radix Sort algo-
+rithm [PMM93], sorting in linear time.
+In a recent study, 2015, Gouvëa et. al. [GL15] demonstrated usage of the ARMv8
+AES instruction set. In the article, Gouvëa et. al. implements GCM along with
+CTR, using the binary polynomial multiplication intrinsic achieving factor 9
+seed-up, compared to the predecessor ARMv7, in speciﬁc they obtained 1.21cpb
+for the CTR mode responsible of message encryption under GCM, and a mere
+0.51cpb for the GCM authentication 11 times faster than its predecessor.
+While Gouvëa likewise tested their implementation on the Cortex-A57, they
+only tested it using the AArch32 encoding. This study, builds its research to
+==PAGE:15==
+1.3 Problem deﬁnition
+5
+the Cortex-A57 AArch64 instruction space, while introducing the modes ECB,
+CBC, CFB, OFB, and CCM. Furthermore, Wang et. al. [WX15] exhibited how
+the vector-level parallelism provided by the NEON engine, can be exploited in
+order to achieve fast AES masking. While this paper, does not implement AES
+masking, it does make use of the vector techniques. Finally, Cynthia Crutch-
+ﬁeld [Cru14], demonstrated the use of AES ARMv8 instructions, to implement
+the OCB3 and Easy Authenticated Encryption (AEZ) modes achieving 1.62cpb
+and 1.34cpb respectively on the Apple A7 SoC.
+As mentioned, the public research/and information providing on the crypto-
+graphic instruction set is very vague. Thus this thesis, seeks to contribute to
+the knowledge domain, by demonstrating and analysing the available instruc-
+tions, with the main focus on AES.
+As follows from the discussion, the contributions of this study is listed below.
+1. Investigation and analysis of the cryptographic instruction support on the
+ARMv8 architecture.
+2. For the ﬁrst time, demonstration of the NIST recommended modes of
+operation: ECB, CBC, CFB, OFB, and CCM. optimised for the ARMv8
+AArch64 platform. Along with the previously implemented CTR.
+3. For the ﬁrst time, performance indexing of the above modes, under their
+genuine ARMv8 implementations.
+4. For the ﬁrst time, extensions of the pipeline multi-message algorithm, the
+Comb Scheduler, to ARMv8 AArch64 platform. Along with performance
+investigations of the above modes aided by Comb.
+1.3
+Problem deﬁnition
+The project deals with cryptographic implementations on mobile devices. Of
+particular interest is the AES hardware support in modern ARM CPUs such
+as ARMv8. This paper will provide a complete performance investigation of
+multiple AES modes, utilising the pipeline instruction set. In speciﬁc, this pa-
+per will investigate the modes ECB, CBC, OFB, CFB, and the authenticated
+encryption mode CCM. In addition, this paper will seek to optimise these im-
+plementations by enhancing the pipeline usage with a multi-message optimised
+algorithm, the Comb Scheduler.
+==PAGE:16==
+6
+Introduction
+1.4
+Outline
+Chapter 2 - Block Ciphers and Modes of Operation seeks to provide the
+reader with the terminology and cryptographic background used throughout
+this thesis. In speciﬁc, this chapter deals with Symmetric Encryption, Block
+Ciphers and Modes of operation.
+Chapter 3 - Pipelining and Instruction-Level Parallelism. This chapter
+investigates the properties of pipelines. The chapter, provides key insights into
+pipeline utilisation, which will be implemented in later chapters.
+Chapter 4 - ARMv8 Architecture is intended as the ﬁrst hands on inter-
+action with the ARMv8 platform. In general, it provides knowledge upon the
+architecture, the cryptographic instructions available. Followed by key obser-
+vations about both instruction Latency and Throughput. Grounding the very
+basics of this research.
+Chapter 5 - Genuine ARMv8 Implementations.
+Within this chapter,
+the thesis will present direct implementations of AES under diﬀerent NIST
+recommended modes, using the ARMv8 pipeline interface.
+Chapter 6 - Fast AES with Comb Scheduler. The Comb Scheduler im-
+plementation will be presented in this chapter. Moreover, this chapter provides
+fundamental performance investigations of the sequential modes.
+Chapter 7 - Discussion. The contributions of this thesis becomes subject to
+discussion. That is, this chapter will investigate validity and trust level of the
+results. In addition, this chapter will seek to relate the ﬁndings with previous
+studies.
+Chapter 8 - Conclusion. The project is rounded up, and future steps are
+discussed.
+==PAGE:17==
+Chapter 2
+Block Ciphers and Modes
+of Operation
+The following chapter is intended as an brief introductory towards modern cryp-
+tology.
+In speciﬁc, this chapter will explain key concepts within the domain
+of block ciphers, leading towards the Advanced Encryption Standard, AES. Fi-
+nally, this chapter will explain some of the most popular block cipher modes of
+operations, used throughout this paper.
+2.1
+Block Ciphers
+Cryptology is the science of securing communication between trusted parties,
+preventing a potential third party, the adversary, of obtaining knowledge about-
+or altering the contents of the communication undetected. This paper deals with
+cryptology in the sector of Symmetric Encryption. Symmetric encryption relies
+on the parties sharing the same secret key k. Hence, a communication ﬂow
+between A and B relies on an invertible two-way algorithm allowing encryption
+and decryption using the shared secret k. For the purpose of this thesis, it will
+be assumed that the key-exchange is done in a secure manner, and will not be
+investigated further. This chapter and the rest of this thesis follows the below
+listed cryptographic notations:
+==PAGE:18==
+8
+Block Ciphers and Modes of Operation
+• P is the set of plaintexts
+• m is a plaintext m ∈P, consisting of x blocks of n bits,
+m = [m0, m1, · · · , mx−1]
+• K is the set of keys
+• C is the set of ciphertexts
+• c is a ciphertexts c ∈C, consisting of x blocks of n bits,
+c = [c0, c1, · · · , cx−1]
+• ek(m) is the encryption of m using key k ∈K
+• dk(m) is the decryption of c using key k ∈K
+• MSBt(x) explains the operation of taking the t most signiﬁcant bits of x
+• LSBt(x) explains the operation of taking the t least signiﬁcant bits of x
+• INCR(x) explains the operation of incrementing x, according to the struc-
+ture of knowx
+Within cryptology the content of a communication is typically regarded in two
+diﬀerent stages, ﬁgure 2.1, that is the plaintext stage p and the ciphertext
+c.
+Within the plaintext stage, the content is decoded and presented as the
+author created it. Whenever the plaintext is encrypted, it is referred to as the
+ciphertext. The ciphertext represents the critical stage of a communication, as
+it is public viewable. A ciphertext should not provide any information upon the
+original message.
+Encrypton
+Decryption
+Plaintext m
+Ciphertext c
+Plaintext m
+Figure 2.1: The basic principle of a cryptographic system. The left-most plain-
+text is the message m input, which is encrypted and transferred
+as the ciphertext c. The ﬁnal stage is the decryption of c into its
+original format m.
+When constructing a symmetric cryptographic system the parties subject to
+the communication most establish a secret also refereed to as a key. The key
+is needed in order to encrypt and decrypt the communication, according to
+ﬁgure 2.2. A system could introduce key pairs. That is, each party provides
+a public available key, and a private secret key only known to the party itself.
+==PAGE:19==
+2.1 Block Ciphers
+9
+Encrypton
+Decryption
+Plaintext m
+Ciphertext c
+Plaintext m
+Key k
+Key k
+Figure 2.2: The shared key k is used for encryption and decryption, which is
+known as Symmetric Key Encryption.
+Such systems are called Asymmetric Key Encryption.
+This report, however
+focuses only on Symmetric Key Encryption.
+Within symmetric encryption Systems, two diﬀerent cipher domains exists.
+That is, Block Ciphers and Stream Ciphers.
+This paper grounds its princi-
+ples in Block Ciphers. From ﬁgure 2.3 the main principle of a block cipher is
+visible. In general, a block cipher is constructed of n-bits. The principle is to
+divide the plaintext m into x blocks of n-bits. The message m is then encrypted
+block by block, constructing a x-block cipher text, using a k-bit key.
+block cipher
+Plaintext
+n-bits
+key
+k-bits
+Ciphertext
+n-bits
+Figure 2.3: A block cipher of n-bits encrypted with k-bit key.
+Block cipher algorithms are the most used cryptographic environment. As men-
+tioned these algorithms executes by encrypting blocks of n bits. However, most
+messages are not likely to be sized of exactly on block, neither of to have a length
+multiple of n. Leading to the question of, how to encrypt messages bigger or
+smaller than n bits? In order to overcome this issue block cipher algorithms
+utilises modes of operation. Modes allows encryption of plaintexts of any bit
+length, by reusing the k-bit key over multiple blocks of n-bits, padding the
+last block if necessary. A disadvantage to keep in mind, when reusing the key,
+is redundancy. That is, given a set of ciphertext blocks all encrypted by the
+same key, could enforce ciphertext only attacks based on ciphertext redundancy
+evidently allowing eﬃcient key recovery. Thus it is crucial to understand the
+strengths and weaknesses of a mode. Throughout the following pages this paper
+will introduce the NIST recommended modes, ECB, CTR, CBC, OFB, CFB,
+and CCM.
+==PAGE:20==
+10
+Block Ciphers and Modes of Operation
+2.2
+Advanced Encryption Standard (AES)
+From the previous section, this thesis explored a speciﬁc variation of crypto-
+graphic systems. Namely the Symmetric Key environments. The outline pro-
+vided insights into block ciphers, as encryption schema. This section introduces
+the NIST standardised block cipher algorithm called AES.
+AES is a symmetric cryptographic algorithm, which is based upon the Rijn-
+dael cipher [oST01]. The Rijndael cipher was developed and submitted by Joan
+Daemen and Vincent Rijmen to the NIST AES competition (1997-2001). The
+modern AES is a 128-bit block cipher, with 3 diﬀerent key-sizes available, ta-
+ble 2.1. The algorithm is based on the Substitution-permutation network (SPN)
+principles [Sti06].
+A SPN network implements 3 functions to obtain security.
+That is, a non-
+linear function, known as the Substitution Box (s-box). The Permutation Box
+(p-box) responsible of diﬀusing the non-linearity. The secrecy obtained from an
+Exclusive-or (XOR) operation with a secret key.
+From ﬁgure 2.4, the SPN adoption of AES is illustrated. From the ﬁgure, the
+AddRoundKey corresponds to the SPN secrecy step. The SubBytes operation
+is the non-linear s-box, whilst ShiftRows in combination with MixColumns
+contributes the permutation layer, p-box.
+The key schedule is in charge of
+expanding the key into r+1 round keys. As an example AES-128 would expands
+the key space into (10 + 1) × 128 = 1408-bit key space.
+AddRoundKey
+SubBytes
+ShiftRows
+MixColumns
+AddRoundKey
+Key schedule
+n + 1 rounds
+SubBytes
+ShiftRows
+AddRoundKey
+Pre-whitening
+n −1 rounds
+Final round
+Figure 2.4: n rounds of AES encryption. Initiated by a pre-whitening XOR,
+followed by n−1 iterations of SubBytes, ShiftRows, MixColumns,
+and AddroundKey.
+The ﬁnal round of the algorithm executes
+without MixColumns.
+==PAGE:21==
+2.2 Advanced Encryption Standard (AES)
+11
+key-length, (bit)
+Block-length(bit)
+No. rounds (r)
+AES-128
+128
+128
+10
+AES-192
+192
+128
+12
+AES-256
+256
+128
+14
+Table 2.1: The AES crypto-system oﬀers three levels of security, 128,192, and
+256 keys. The keys are expanded into r + 1 round keys.
+The substitution layer of the AES algorithm, is visible from ﬁgure 2.5. The
+SubBytes step executes by substituting the ith byte with the i’th byte entry
+value in a ﬁxed look-up table, refereed to as the s-box. Hence, a byte value y
+will always correspond to the same y’th entry value in the look-up table.
+m0
+m4
+m8
+m12
+m1
+m5
+m9
+m13
+m2
+m6
+m10
+m14
+m3
+m7
+m11
+m15
+n0
+n4
+n8
+n12
+n1
+n5
+n9
+n13
+n2
+n6
+n10
+n14
+n3
+n7
+n11
+n15
+ni = S[mi]
+Figure 2.5: The AES SubByte operation, uses the byte value of m as the entry
+in the static s-box look-up table.
+The ﬁrst permutation step is the ShiftRow operation. The operation rotates
+the rows to the left according to ﬁgure 2.6. That is, when arranging the block
+in a 4 × 4 block, the i’th row is rotated i steps to the left. The rotation is done
+modulus 4. As an example consider the second row, that is row indexed by
+i = 2 containing the bytes vector vr = [n2, n6, n10, n14]. The vector vr is then
+rotated by two positions to the left, meaning that the j’th entry is rearranged
+2 steps to the left looping around the borders, generating the output vector
+vr = [n10, n14, n2, n6].
+n0
+n4
+n8
+n12
+n1
+n5
+n9
+n13
+n2
+n6
+n10
+n14
+n3
+n7
+n11
+n15
+n0
+n4
+n8
+n12
+n5
+n9
+n13
+n1
+n10
+n14
+n2
+n6
+n15
+n3
+n7
+n11
+ShiftRows
+Figure 2.6: The ShiftRows operation, rotates the iTh row vector entries iTh
+positions to the left, looping around borders.
+The second permutation step, the MixColumn, is slightly more complex. This
+step iterates each column-vector in the block according to ﬁgure 2.7. That is,
+for each column vector vc, the corresponding output vector pc is given by the
+==PAGE:22==
+12
+Block Ciphers and Modes of Operation
+matrix multiplication provided in ﬁgure 2.7.
+
+
+
+
+02
+03
+01
+01
+01
+02
+03
+01
+01
+01
+02
+03
+03
+01
+01
+02
+
+
+
+×
+
+
+
+
+v1
+v2
+v3
+v4
+
+
+
+=
+
+
+
+
+p1
+p2
+p3
+p4
+
+
+
+
+Figure 2.7: The permutation operation MixColumns, is a column vector mul-
+tiplication with the static matrix shown to the left.
+2.3
+Modes of operation
+Throughout this section, this paper will introduce the ﬂow of the NIST recom-
+mended basic modes of operation. These explanations will ground the basis for
+the coming implementation chapter 5. For further information on modes, please
+refer Knudsen et. al. [KR11].
+2.3.1
+Electronic Code Book, (ECB)
+ECB is the simplest mode of operation.
+The mode, visible form ﬁgure 2.8,
+simply divides the plaintext into a set of blocks of n-bit length, 128-bit in AES.
+Each of the plaintext chunks are then processed individually, using the same
+key, according to equation 2.1.
+(
+ci = ek(mi)
+mi = dk(ci)
+for
+1
+≤i ≤n
+(2.1)
+ECB is parallelisable by design, however it introduces a weakness. By inspect-
+ing ﬁgure 2.8 it is clear, that identical blocks of the plaintext will encrypt to
+identical blocks of ciphertext. Hence, the resulting ciphertext reveals valuable
+information about the plaintext. One way of preventing this information leak-
+age, is to arrange p into blocks of (n −x)-bits, and then appending a random
+x-bit sequence to the block [KR11].
+The intention behind the encryption block, ﬁgure 2.8, is that basically any block-
+cipher algorithm could be introduced as the encryption algorithm. In this this
+thesis the algorithm used is AES.
+==PAGE:23==
+2.3 Modes of operation
+13
+Encryption
+key
+k-bits
+m0 n-bits
+c0 n-bits
+Encryption
+key
+k-bits
+m1 n-bits
+c1 n-bits
+· · ·
+Encryption
+key
+k-bits
+mt−1 n-bits
+ct−1 n-bits
+Figure 2.8: Blockcipher encryption under ECB mode. t-blocks of n-bits pro-
+cessed independently.
+2.3.2
+Counter mode, (CTR)
+The Counter Mode is a strong mode of operation, it allows for independent data
+processing, making the mode parallelisable. However, dislike ECB, CTR does
+not encrypt identical blocks into the same cipher, given that the nonce is never
+reused under the same key k. This property drastically enhancing the security.
+The input is a nonce and a simple counter. Both of n/2 bits. The nonce and the
+counter can be combined into the needed n bit vector, by adding, concatenating,
+or with the use of XOR. The mode of operation is visible from ﬁgure 2.9 and
+equation (2.2)
+
+
+
+
+
+ci = mi ⊕MSBs(ek(xi))
+mi = ci ⊕MSBt(ek(xi))
+xi+1 = INCR(xi)
+for
+1 ≤i ≤n
+(2.2)
+Encryption
+key
+k-bits
+[c840d32f] [00000000]
+⊕
+m0 n-bits
+c0 n-bits
+Encryption
+key
+k-bits
+[c840d32f] [00000001]
+⊕
+m1 n-bits
+c1 n-bits
+· · ·
+Encryption
+key
+k-bits
+[c840d32f] [t−1]
+⊕
+mt−1 n-
+bits
+ct−1 n-bits
+Figure 2.9: Blockcipher encryption under CTR mode. t-blocks of n-bits pro-
+cessed independently.
+The execution of CTR introduces a stream cipher environment.
+That is, it
+generates a pseudo random key stream of length n-bits. This is, seen in that the
+==PAGE:24==
+14
+Block Ciphers and Modes of Operation
+content of the plaintext is in fact not processed through the ek. As seen from
+equation (2.2), what is encrypted is in fact the nonce counter vector. Leaving
+the secrecy of the message within the exclusive-or command with the ek(xi)
+output.
+From the algorithm this is done, using the t most signiﬁcant bits,
+allowing encryption of any message size.
+2.3.3
+Cipher Block Chaining, (CBC)
+CBC ﬁgure 2.10, is a sequential mode of operation. As the name implies, this
+mode utilises the ciphertext from the n −1 block as XOR vector to the n’th
+plaintext. Initially using a initialisation vector IV , the CBC environment follows
+the description of equation 2.3.
+(
+c0 = ek(m0 ⊕IV )
+and
+ci = ek(mi ⊕ci−1)
+m0 = dk(c0) ⊕IV
+and
+mi = dk(ci) ⊕ci−1)
+for
+2 ≤i ≤n
+(2.3)
+The advantage of CBC lies in the recursive block chaining. Whereas ECB leaked
+plaintext information due to the same block same cipher dilemma, CBC would
+require the entire plaintext and key to be identical. By introducing inherent
+XOR operation, even the smallest change to the plaintext, would result in an
+entire diﬀerent ciphertext. On the other hand, doing decryption under CBC,
+even the smallest network introduced error will diﬀuse the resulting plaintext.
+Encryption
+key
+k-bits
+m0 n-bits
+⊕
+iv
+c0 n-bits
+Encryption
+key
+k-bits
+m1 n-bits
+⊕
+c1 n-bits
+· · ·
+Encryption
+key
+k-bits
+mt−1 n-bits
+⊕
+ct−1 n-bits
+Figure 2.10: Blockcipher encryption under CBC mode. t-blocks of n-bits pro-
+cessed with Exclusive OR dependency of the ti input with the
+ti−1 output. Initially using an initialisation vector iv
+==PAGE:25==
+2.3 Modes of operation
+15
+2.3.4
+Cipher Feedback, (CFB)
+The Cipher Feedback mode, CFB, visible from ﬁgure2.11 diverges from CBC
+by XOR’ing the plaintext after the block process.
+The mode is sequential,
+dependant on the n −1 output. The mode of operation is explained formally
+by equation 2.4. While ﬁgure2.11 illustrates CFB the ﬂow in its simplest form.
+
+
+
+
+
+ci = mi ⊕MSBt(ek(xi))
+mi = ci ⊕MSBt(ek(xi))
+xi+1 = LSBb−t(xi)||ci
+for
+1 ≤i ≤n
+(2.4)
+CFB like OFB and CTR, is a block cipher mode that acts like a stream cipher.
+This is an important property, as it allows for eﬃcient processing of single
+character messages.
+Encryption
+key
+k-bits
+x0
+⊕
+m0 n-bits
+c0 n-bits
+Encryption
+key
+k-bits
+⊕
+m1 n-bits
+c1 n-bits
+· · ·
+Encryption
+key
+k-bits
+⊕
+mt−1 n-
+bits
+ct−1 n-bits
+Figure 2.11: Blockcipher encryption under CFB mode. t-blocks of n-bits pro-
+cessed with encryption dependency of the ti input with the ti−1
+output ciphertext block. Initially using an initialisation vector
+iv
+2.3.5
+Output Feedback, (OFB)
+OFB is a close relative to CFB. Refer ﬁgure 2.12. However, the block depen-
+dency is shifted. That is, OFB implements the dependant layer as the output
+from the block process, but before the plaintext XOR.
+OFB implements a stream like utilisation, which means that the encryption is
+not dependant on the input p, since the input p is simply added with XOR to
+the output encryption stream.
+==PAGE:26==
+16
+Block Ciphers and Modes of Operation
+Encryption
+key
+k-bits
+iv
+⊕
+Plaintext0
+n-bits
+Ciphertext0
+n-bits
+Encryption
+key
+k-bits
+⊕
+Plaintext1
+n-bits
+Ciphertext1
+n-bits
+· · ·
+Encryption
+key
+k-bits
+⊕
+Plaintextt−1
+n-bits
+Ciphertextt−1
+n-bits
+Figure 2.12: Blockcipher encryption under OFB mode. t-blocks of n-bits pro-
+cessed with encryption dependency of the ti input with the ti−1
+output encryption block. Initially using an initialisation vector
+iv
+This ﬂow is like the CTR, however in stead of using a counter vector, OFB
+generates the key stream using the previous ek output as the input vector. In
+practical terms, this makes the mode of operation sequential, but it allows for
+pre-computation of the key stream.
+2.4
+Authenticated Encryption
+Ciphers can be used in the context of Authentication, by introducing a Message
+Authentication Code (MAC). The typical usage of MACs relies on the parties
+computing a truncated authentication tag T. The authentication tag is typically
+appended to the ciphertext, before transmitting the message. The receiver can
+then use the tag to verify that the message received, has not been subject to
+change along the way. This thesis investigates the NIST recommended CCM.
+2.4.1
+Counter with Cipher Block Chaining-Message Au-
+thentication Code, (CCM)
+CCM is an AE encryption mode utilising CTR as the plaintext ek, dk mode,
+while introducing CBC-MAC responsible of creating an authentication check-
+sum, T. The NIST recommended standard [Dwo02], is attractive as it oﬀers
+message authentication and conﬁdentiality, while being royalty free.
+The mode of operation, visible from ﬁgure 2.13, as mentioned is based upon the
+==PAGE:27==
+2.4 Authenticated Encryption
+17
+already covered CTR and CBC. However, as CBC under this mode is respon-
+sible of creating the authentication tag, it visualises slightly diﬀerent compared
+to ﬁgure 2.10. The reason lies in the message digesting. That is, the CBC-MAC
+outputs a truncated message of one block size. It is, however, possible to trun-
+cate even further to x bits by taking the x most signiﬁcant bits. By deﬁnition of
+CBC the encryption is inherently dependent meaning, that the smallest change
+to the i’th bit of the j’th block would result in an entire diﬀerent T value,
+allowing the receiver to validate the message upon decryption.
+Encryption
+key
+k-bits
+fa|N|l
+⊕
+iv0
+Encryption
+key
+k-bits
+P0
+⊕
+· · ·
+Encryption
+key
+k-bits
+Pt−1
+⊕
+⊕
+S0
+T
+S0
+Encryption
+key
+k-bits
+fc|N|CTR0
+Encryption
+CTR1
+⊕
+C0
+· · ·
+Encryption
+CTRt−1
+⊕
+Ct−1
+Figure 2.13: The ﬁgure illustrates the ﬂow of CCM. The input is a plaintext
+of t blocks [P0, P1, · · · , Pt−1]. The plaintext is encrypted using
+the CTR mode, the upper encryption, resulting in a ciphertext
+set of t blocks [C0, C1, · · · , Ct−1]. The lower encryption ﬂow is a
+CBC mode, created a block dependent authentication tag T.
+Remark the special headers used for CCM, in principle these headers are used to
+provide information upon the size of the authentication ﬁeld, number of octets
+representing the l where l = |m|, or to authenticate non-encrypted message
+ﬁelds. For further information upon the header generation please refer [Dwo02].
+==PAGE:28==
+18
+Block Ciphers and Modes of Operation
+==PAGE:29==
+Chapter 3
+Pipelining and
+Instruction-Level Parallelism
+As bespoken, this thesis will cover an pipeline optimised instruction scheduler.
+For this reason, this thesis will shortly describe the relevant theory, regarding
+pipeline utilisation.
+3.1
+Exploiting the pipeline
+When implementing towards a pipeline architecture, it is important to notice
+that a pipeline is usually constructed of multiple stages, consider ﬁgure 3.1. In
+this example the pipeline is constructed of 4 staged A, B, C, and D. Pipeline
+stages are important, as they can tell something about the length, potential
+execution stall, and possible frequency of the pipeline. These parameters are
+the main parameters of concern, when talking pipelining and are known as
+latency and throughput, L and T −1 respectively. The latency is a measurement
+of the time, number of clock cycles (cc), it takes for an instruction to parse
+through the entire pipeline.
+That is, the accumulated pipeline stage width
+L = |A| + |B| + |C| + |D|, also denoted as the pipeline length. Throughput,
+on the other hand, is deﬁned as the number of instructions processed per time
+unit, T −1 = instructions/cycles. Visually, by inspecting ﬁgure 3.3, throughput
+==PAGE:30==
+20
+Pipelining and Instruction-Level Parallelism
+is the time taken from issuing instruction A until the pipeline are able to execute
+A again.
+A
+B
+C
+D
+Figure 3.1: A instruction is divided into multiple stages.
+Usually the ﬁrst
+stage, A in this case, is responsible of fetching the command from
+the cache, while the last stage usually stores the result to some
+register. This example, showes a 4 staged pipeline.
+When considering a sequential mode of operation, such as CBC. It is seen that
+the n’th block is dependant on the n −1 pipeline output. Thus, the execution
+of the n’th block is stalled until the output is at hand. This leads towards the
+sequential pipeline pattern illustrated in ﬁgure 3.2. It is readily seen, that this
+sequential approach does not contribute high pipeline utilisation. As, in this
+case, each stage in the pipeline is inactive for L cycles.
+A
+B
+C
+D
+A
+B
+C
+D
+A
+B
+C
+D
+A
+B
+C
+D
+cycles
+Figure 3.2: When the input to pipeline execution x is dependant upon the
+output from x −1, the x’th instruction is stalled until the data is
+available. Leaving low pipeline utilisation.
+By design it is not possible to split the sequential process of one message m′ into
+parallel computing. However, when considering multiple independent messages,
+the cause of pipeline optimisation of sequential package processing becomes
+highly interesting. Consider a set of 4 messages m′, m′′, m′′′, m′′′′ all of which
+are independent. According to the theory of reciprocal throughput, it is pos-
+sible to execute the pipeline stage according to its corresponding T −1. Thus,
+whenever a stage outputs, it is ready to execute the next block. This multi-
+message processing yields the behaviour illustrated in ﬁgure 3.3, where each
+row corresponds to each message. It is worth noting, that the individual mes-
+sage processing, in itself, is sequential. In other words, no performance increase
+is achieved when looking locally at each message individually, the performance
+simply lies within the pipeline utilisation, allowing more data to travel through
+the processor each clock cycle.
+==PAGE:31==
+3.1 Exploiting the pipeline
+21
+A
+B
+C
+D
+A
+B
+C
+D
+A
+B
+C
+D
+A
+B
+C
+D
+cycles
+Figure 3.3: Multiple independent data blocks can be issued every T −1 This
+enables optimal pipeline usage, and increases the amount of data
+being processed every clock cycle, however the single data block
+is not being processed faster.
+Throughout this analysis throughput will be denoted by equation (3.1), and as
+discussed latency according to equation (3.3). In order to utilise the pipeline
+width optimally, the paper denote P. P is the optimal number of messages to
+process in parallel, or the optimal parallelisation degree. The optimal parallali-
+sation degree can be computed once the latency and throughput is known. This
+observation reveals when investigating ﬁgure 3.3. In order to remove message
+stalling, the pipeline should be ready to execute the n + 1 block of message m′
+as soon as the output from block n is available. That is, after L cycles. But, de-
+pending on the T −1 the pipeline might be occupied at this exact moment. Thus,
+to comprehend this P can be calculated according to equation (3.4). When the
+performance of a data processing algorithm is subject to investigation, it makes
+sense to speak about cycles used per byte cpb, likewise known as throughput
+denoted by equation (3.2).
+T −1 = instructions
+cycle
+,
+(3.1)
+T = cycles
+byte ,
+(3.2)
+L = clock
+cycles,
+cc
+(3.3)
+P =
+L
+T −1 ,
+messages
+(3.4)
+T is used to clarify the results in the in context to what is being processed.
+Eg.
+one pipeline might process multiple bytes in one iteration.
+In addition
+==PAGE:32==
+22
+Pipelining and Instruction-Level Parallelism
+T can be used when investigating global latency of a system. The global la-
+tency of the multiple message environment, is prune to increase when ﬁlling the
+pipeline. Since the speed-up is limited to P one can at most hope for the same
+latency as for sequential processing [BLT16]. As the system seeks to increase
+the throughput of the global system, it makes sense to investigate the global
+latency increase as well. Given the throughput T of an execution of x messages
+of n1, n2, · · · , nx−1, nx bytes, this can be calculated according to equation (3.5).
+L = T ×
+x
+X
+i=1
+ni,
+cycles
+(3.5)
+3.2
+Working with a realistic message distribution
+In the previous section, the paper introduced the basic principle regarding
+pipeline optimisation. However, this theoretical approach need further consid-
+erations. The reasoning reveals when optimising for messages of varying sizes.
+From ﬁgure 3.4 the TCP/UDP package distribution is shown. It is observed that
+44% of the packages exists in the range of 40 to 100 bytes, 37% between 1400
+and 1500 bytes, while the remaining 19% exists in between, refer [DM12]. This
+concludes two observations. Huge data packages are not likely to be transmitted
+through the Internet. Multiple packages of diﬀerent length is expected.
+Figure 3.4: Package size distribution on the Internet,(TCP and UDP accumu-
+lated), in bytes.
+In order to ﬁll the pipeline, ﬁgure 3.3, the pipeline should have data-blocks ready
+for processing according to P, preferably of equal size. Consider ﬁgure 3.5, it
+==PAGE:33==
+3.3 Combing
+23
+is clear that this optimisation is not optimal even-though P is correctly chosen.
+Yet, the majority of the pipeline remains idle for most of the execution. The
+distribution, ﬁgure 3.4, is used and refereed to as the realistic message distribu-
+tion, throughout this thesis. Another aspect, relate to the amount of packages
+ready at a given point in time. For the purpose of this study, whenever a al-
+gorithm is measured under the "realistic" distribution, 300 messages are picked
+from the distribution. This message size was chosen as an realistic sample, after
+observations of data package count at diﬀerent web based applications such as
+Facebook.
+3.3
+Combing
+The following section covers the ground principle of the multi-package scheduler
+proposed by Andrey et. al [BLT16]. The algorithm is introduced to solve the
+dilemma of ﬁlling the pipeline when processing data chunks of varying length.
+A pipeline under varying utilisation is shown at ﬁgure 3.5, it is noted that the
+optimal solution reveals when processing P messages of equal length. Thus, it
+makes sense to sort the messages, Mi, according to their length li, this grounds
+the ﬁrst step of the scheduler Figure 3.6(1).
+Since the pipeline architecture
+dictates P as the optimal amount of independent data needed to ﬁll the pipeline,
+the algorithm proceeds by processing Mi in subsets of P messages. Figure 3.6(2).
+It is important to separate the initialisation payload from the actual combing,
+as multiple diﬀerent instructions will cause the system to stall, for this reason
+all cryptographic initialisation such as eg. header generation is done prior to
+the actual scheduling ﬁgure 3.6(2).
+A
+B
+C
+D
+A
+B
+C
+D
+A
+B
+C
+D
+A
+B
+C
+D
+A
+B
+C
+D
+A
+B
+C
+D
+cycles
+Figure 3.5: Multiple message of diﬀerent length, scheduled to draw optimal
+pipeline utilisation.
+The fourth step, Figure 3.6(4), seeks to divide the subset of Mi into w windows,
+such that in each window as many consecutive blocks is processed as possible.
+The algorithm then executes by looping through each w, processing each block of
+==PAGE:34==
+24
+Pipelining and Instruction-Level Parallelism
+Name
+Time Complexity
+Space Complexity
+Best
+Average
+Worst
+Worst
+Insertion Sort
+O(n)
+O(n2)
+O(n2)
+O(1)
+Radix Sort
+O(nk)
+O(nk)
+O(nk)
+O(n + k)
+Heapsort
+O(nlog(n))
+O(nlog(n))
+O(nlog(n))
+O(1)
+Table 3.1: Popular sorting algorithms. This study uses Radix Sort, as it pro-
+vides linear time sorting.
+each message within the window. The ﬁnal algorithm is discussed and illustrated
+in chapter 6. In short, the scheduler principle is to process blocks over messages.
+Meaning, that instead of stalling the execution of the dependent instruction Ian
+of message ma, until the result of instruction Ian−1 is computed, the scheduler
+proceeds by executing Ibn−1 of message mb.
+1> Sort M by decreasing length
+2> Process M in subsets, s, of length P
+3> Initialise cryptographic function
+4> Divide blocks of s into w windows
+5> Process blocks according to w
+6> Finalise cryptographic function
+Figure 3.6: The basic principle of the Comb Scheduler. The algorithm starts
+by sorting the messages (1), this is done such that the window
+generation (4) can be done eﬃciently. (5) Denotes the process of
+looping through each block of each message in window w.
+The Comb algorithm of ﬁgure 3.6 introduces overhead at two diﬀerent loca-
+tions. That is line (1) and (4), sorting and computation of parallelisation levels
+respectively. In the ﬁrst case the algorithm is sorting the messages according
+to size. The step is crucial, as the algorithm seeks to maximise the number
+of blocks in each window. Without this step the algorithm is likely to end up
+processing blocks at a nearly sequential level. Luckily, the sorting can be done
+by pointer swapping, removing unnecessary payload of copying data. According
+to ﬁgure 3.4 multiple messages of varying length is expected. Thus, a sorting
+algorithm should be chosen wisely. Evidently, a sorting algorithm should be
+evaluated with respect to time and space. From table 3.1 three popular sort-
+ing algorithms are listed. This paper seeks to optimise for speed, thus Radix
+Sort makes most sense, as its performance is linear in all scenarios. Radix Sort,
+however contributes rather big space complexity, compared to the constant com-
+plexity of both Insertion Sort and Heapsort.
+==PAGE:35==
+Chapter 4
+ARMv8 Architecture
+In the previous chapters, this thesis introduced a theory set, which is needed for
+the coming investigations to take their form. Within the following chapter, this
+study will explain the actual setup, in which the investigations was conducted.
+Moreover, this chapter seeks to provide knowledge about the ARMv8 infrastruc-
+ture.
+4.1
+Experimental Setup
+The analysis carried out by this paper is performed on the ARMv8-A family.
+This architecture is widely used in modern mobile devices such as the Apple
+A8 and A7 SoC, present in the iPhone 6 and 5s family respectively. The micro-
+architecture also grounds the basis of the Samsungs Exynos 7 and 8 SoC’s.
+One of the major updates in the ARMv8 family, compared to its predecessor
+the ARMv7, is the update from 32 bit architecture to 64 bit, along with ded-
+icated cryptographic hardware. The architecture is a Reduced instruction set
+computing (RISC) based construction, implying low T −1. The analysis subject
+to this thesis is carried out on the ARMv8 architecture present on the Sam-
+sung Galaxy s6. In speciﬁc the 2.1 Cortex-A57 AArch64 quad-core CPU. The
+==PAGE:36==
+26
+ARMv8 Architecture
+operations measured does not utilise the multi-core environment, and will be
+implemented in a single threaded sequential manner.
+The ARMv8 does not provide out of the box access to the clock cycle counter,
+and would require a custom kernel module implementation, in order to mod-
+ify the accessibility. For this reason all measurements, subject to this thesis,
+was conducted using the gettimeofday from the sys/time.h library. In
+addition, most measurements was operated via C implementations. However
+some measurements are provided using assembly language, in order to achieve
+high precision results. For further, study on the ARM assembly language re-
+fer [Kna16].
+4.2
+Infrastructure Analysis
+Before initiating the AES implementations, this paper will shortly introduce
+the required ARMv8 infrastructure.
+As mentioned earlier the target CPU
+of this project is the ARMv8 Cortex-A57.
+This platform provide a ARM
+Advanced Single Instruction, multiple data (SIMD) architecture also known
+as NEON [riE15a]. The NEON processing unit, is running along side the main
+ARM kernel. In general, SIMD processing units operates on vectorised data, in
+which each vector entry is subject to processing each clock cycle.
+An important observation is that, while the Cortex-A57 is a superscalar proces-
+sor, meaning that it can issue multiple instructions per cc, the NEON engine is,
+in most cases, single issue. Most cases, since the processor is capable of doing
+load and save operations, among others, accompanied with arithmetic instruc-
+tion. As mentioned NEON operates under a vector type deﬁnition, containing
+elements of the same data type. Furthermore, all vectors are subdivided into
+lanes. This structure is visualised by ﬁgure 4.1.
+<data-type><data-type-size>x<number of lanes>_t
+Figure 4.1: NEON data vector reprensentation (C-representation)
+These vectors must be stored using the specialised 128-bit NEON registers, the
+AArch64 platform provides a total of 32 such registers. In practical terms this
+means, that if more than 32 vectors are being operated on, the ALU most
+introduce a dynamical vector exchange which could stall the pipeline.
+The
+purpose of this SIMD and vector oriented data representation is speed. In fact,
+the NEON instructions is optimised towards executing up to n operations in
+parallel, where n is the number of lanes in the vector, refer quote [4.2].
+==PAGE:37==
+4.2 Infrastructure Analysis
+27
+Usually, each NEON instruction results in n operations occurring
+in parallel, where n is the number of lanes, that the input vectors
+are divided into /ARM [riE15a]
+[4.2]
+As an example, this paper mainly deals with the NEON vector type uint8x16_t.
+From ﬁgure 4.1, it is seen that this is a vector of 8 bit unsigned integers, and
+that the vector consists of 16 lanes, thus ﬁlling an entire 128 bit NEON register.
+Which, in relation to quote [4.2], in practical terms means that the engine, will
+try to evaluate n = 16 bytes per clock cycle. Finally the ordering of vector
+elements is from the least signiﬁcant bit. Meaning that the 0’th element uses
+the least signiﬁcant bit registers.
+Besides the vector representation, NEON provides a set of intrinsic functions.
+That is, functions build in to the compiler. An example of this, besides the
+upcoming encryption intrinsic functions, is the exclusive-or function visible from
+ﬁgure 4.2.
+veorq_u8(uint8x16 a, uint8x16 b)
+Figure 4.2:
+NEON exclusive or operation on two uint8x16 vectors.
+(C-
+representation, referring to the eor assembly command).
+4.2.1
+NEON - AES Support
+NEON provides access to specialised AES instructions, available for both en-
+cryption and decryption. As seen in the intrinsic listing visible from table 4.1
+both encryption and decryption are split into two instructions. Thus an entire
+AES encryption round is represented by ﬁgure 4.3.
+vaesmcq(vaeseq_8(uint8x16 block, uint8x16 subkey))
+Figure 4.3: NEON C Representation of an entire AES Round.
+This representation diverges from the Intel AES-NI implementation. While Intel
+splits the processing into two commands as well, these commands represents an
+entire AES round and the ﬁnal round respectively. Whereas ARM requires a
+manual exclusive-or to ﬁt a full AES encryption. Furthermore, it is noted that
+the NEON engine does not support a key-schedule instruction interface like the
+Intel platform.
+==PAGE:38==
+28
+ARMv8 Architecture
+Intrinsic Function
+Description
+vaeseq_u8(uint8x16_t block, uint8x16_t subkey)
+AddRoundKey
+SubBytes
+ShiftRow
+vaesmcq_u8(uint8x16_t block)
+MixColumn
+vaesdq_u8(uint8x16_t block, uint8x16_t subkey)
+InvShiftRow
+InvSubBytes
+AddRoundKey
+vaesimcq_u8(uint8x16_t block)
+InvMixColumn
+Table 4.1: Listing of specialised AES Intrinsic function on the NEON engine,
+and the corresponding AES operations. (C-representation)
+4.3
+Fundamental ﬁndings
+From chapter 3 it was shown that the optimal pipeline utilisation P was depen-
+dant on the throughput and latency of the concerned instructions. Thus the
+latency and throughput of the available instructions must be investigated.
+The latency of an instruction can be measured as the execution time of a single
+instruction. Throughout this paper, latency is measured as the average exe-
+cution time of x dependent instructions. In addition, as the cycle counter is
+inaccessible, the number of clocks is calculated using timestamps and the clock
+frequency, f, according to equation (4.1).
+Lmeasure = (tend −tstart) × f
+xdependent
+(4.1)
+Likewise, the analysis cannot use the actual cycle counter to calculate through-
+put. Thus, this calculations also uses the frequency. However, as the latency
+was calculated over dependant executions, throughput mus be calculated using
+in-dependant data. The measured throughput is calculated according to equa-
+tion (4.2), where xindependent represents the number of independent instructions
+executed.
+T −1
+measure =
+xindependent
+(tend −tstart) × f
+(4.2)
+From ﬁgure 4.4 and 4.5 code snippets used for measuring of latency and through-
+==PAGE:39==
+4.3 Fundamental ﬁndings
+29
+put respectively are illustrated. Remark, that this code is implemented using
+assembly language since high precision is required. The results, visible from
+table 4.2, 4.3, and 4.4 underlines the need for precision very well, as the data is
+ranging between just 1 and 8 cycles.
+bl
+gettimeofday
+aesmc
+v0.16b, v0.16b
+aesmc
+v0.16b, v0.16b
+aesmc
+v0.16b, v0.16b
+.
+.
+bl
+gettimeofday
+Figure 4.4: Assembly execution of the ARMv8 MixColumn instruction. The
+code is inherent dependant allowing Latency measurement.
+bl
+gettimeofday
+aese
+v1.16b, v0.16b
+aese
+v2.16b, v0.16b
+aese
+v3.16b, v0.16b
+aese
+v4.16b, v0.16b
+aese
+v5.16b, v0.16b
+.
+.
+bl
+gettimeofday
+Figure 4.5: Assembly execution of the ARMv8 AddRoundKey, SubBytes,
+ShiftRows instruction.
+The code implements independent ex-
+ecution, allowing full pipeline usage, needed when measuring
+Throughput.
+The entire AES intrinsic suite shares the same performance levels.
+That is,
+T −1 = 1 and L = 3.
+However, as two pipeline instructions are needed in
+order to complete an entire AES round (vaeseq_u8,vaesmcq_u8), the eﬀec-
+tive throughput and latency becomes T −1 = 1 and L = 6 respectively. Note
+that only the latency are growing when the two instructions are combined. A
+throughput of T −1 = 1 is expected given the single issue NEON architecture.
+ARMv8 deliverers pipeline interfaces for SHA1 and SHA2 as well. While these
+hash-functions are not considered any further within the scope of this thesis.
+Their respective instruction performance can be inspected from table 4.3 and 4.4.
+A straightforward observation to ﬁnd is the usage of longer pipelines. Moreover,
+whenever these pipelines reaches the width of L = 6, the throughput increases as
+well, T −1 = 2. These instruction increase are important, as they could stall the
+execution of the entire system, when applied together with faster instructions.
+==PAGE:40==
+30
+ARMv8 Architecture
+Instruction
+(C-style)
+Instruction
+calls
+Throughput
+(instructions/cycle)
+Latency
+(cycles)
+vaeseq_u8
+1010
+1
+3
+vaesdq_u8
+1010
+1
+3
+vaesmcq_u8
+1010
+1
+3
+vaesimcq_u8
+1010
+1
+3
+veorq_u8
+1010
+1
+3
+Table 4.2: AES intrinsics performance table.
+Instruction
+(C-style)
+Instruction
+calls
+Throughput
+(instructions/cycle)
+Latency,
+(cycles)
+vsha1h_u32
+1010
+1
+3
+vsha1cq_u32
+1010
+2
+6
+vsha1pq_u32
+1010
+2
+6
+vsha1mq_u32
+1010
+2
+6
+vsha1su0q_u32
+1010
+2
+6
+vsha1su1q_u32
+1010
+1
+3
+Table 4.3: SHA1 intrinsics performance table.
+Finally, it is remarked that all measurements was conducted using 1 × 1010
+instructions. Practically, these instructions was created using a loop of 106 iter-
+ations, iterating 104 instructions. In the latency observations, these instructions
+was inherently dependent as shown by ﬁgure 4.4. In addition, the throughput
+investigations was conducted using L × 2 independent instructions. L × 2 was
+chosen to ensure that the pipeline would have data-blocks ready for processing
+at all time. Furthermore, the date viewable from table 4.2, 4.3, and 4.3 has been
+suspect to ﬂoor rounding. Equation (4.3) and (4.4) are examples of such round-
+ing. In general the rounding removes below 1% and are most likely explained
+by noise from the time based counter.
+Lmeasure = 3.01067 ≃3
+(4.3)
+T −1
+measure = 1.00723 ≃1
+(4.4)
+All measurements was created on the Cortex-A57, 2.1GHz processor. And all
+experiments was created with an 25% warm-up phase. In this case 1010/4 =
+2.5 × 109 instructions was called prior to the experiment.
+==PAGE:41==
+4.3 Fundamental ﬁndings
+31
+Instruction
+(C-style)
+Instruction
+calls
+Throughput
+(instructions/cycle)
+Latency,
+(cycles)
+vsha256hq_u32
+1 × 1010
+2
+6
+vsha256h2q_u32
+1 × 1010
+2
+6
+vsha256su0q_u32
+1 × 1010
+1
+3
+vsha256su1q_u32
+1 × 1010
+2
+6
+Table 4.4:
+SHA2 intrinsics performance table.
+4.3.1
+AES Expected performance
+According to table 4.2, the throughput of the AES intrinsics was measured to
+1 instruction per cycle. Practically this means that the pipeline can initiate
+one instruction every cycle. What is more, each operation is conducted on the
+128-bit vector lane meaning that 16 bytes are processed through the pipelines
+every 3 cc, aese and aesmc respectively. In the context of T , this allows us to
+predict the expected throughput in cpb for the sequential modes of operation.
+Consider equation (4.5), it is known that the latency of the entire encryption
+round is Lrnd = 6. Meaning that the execution of sequential modes are expected
+to be stalled Lstall = 6 cc. In addition, 16-bytes are processed through the
+pipeline every 6 cc, yielding Tsingle = 6/16 = 0.375 cpb for one single instruction.
+Providing ground for an expected performance estimation of sequential modes,
+equation (4.5). Suggesting, that the sequential modes of operation performs at
+2.25cpb.
+Texpected = Lstall
+Lrnd
+bytes = 62
+16 = 2.25cpb
+(4.5)
+This chapter leads towards further rigorous observations.
+As described the
+NEON engine provides a single-issue interface, in some cases more, this was
+further documented by reciprocal throughput investigations, which for all AES
+intrinsics was found to be 1 instruction per cycle. This has drastic impact upon
+the possible performance increase, which can be reached by pipeline optimi-
+sation. Recall the expected optimisation described by P, latency/throughput,
+leading towards expecting a performance possibility of factor six, when combin-
+ing latency of the aese and aesmc disregarding the slightly less occurring eor
+command. But, as the interface only accepts 1 instruction per cycle, this is no
+longer possible. Inspect ﬁgure 4.6, visualised by the ﬁgure is a partial pipeline
+optimisation of 4 independent lanes. As seen at cc = 3, lane four is ready to
+execute the ﬁrst aese instruction. But at the same time, cc = 3, the ﬁrst lane
+is ready to execute the aesmc instruction. However, as only one instruction
+==PAGE:42==
+32
+ARMv8 Architecture
+can be issued at a clock cycle, evidently either of the two instructions will be
+stalled.
+From the discussion follows that, in fact, any parallelisation degree P ̸= 3 will
+result in a pipeline stall.
+Which in theoretical terms, means that optimised
+results measures are expected to at most provide a factor 3 optimisation. Fig-
+ure 4.7, visualises the optimal solution, given single issue and disregarding the
+exclusive-or instruction.
+Clock cycles (cc)
+aese
+aesmc
+aese
+aese
+aese
+Instruction collision
+Figure 4.6: The ARMv8 Cortex-A57 NEON SIMD, is a single-issue CPU lead-
+ing to the instruction issue collision at cc = 3. The collision will
+result in a instruction stall of either the upper aesmc or the lower
+aese instruction.
+Clock cycles (cc)
+aese
+aesmc
+aese
+aesmc
+aese
+aesmc
+Figure 4.7: In order to prevent the instruction collision, the algorithm imple-
+ments p = 3, providing the structure illustrated above, where each
+lane represents individual message blocks.
+==PAGE:43==
+Chapter 5
+Genuine ARMv8
+Implementations
+The following chapter will provide insights on how to implement AES along with
+a set of NIST recommended standards. The implementations i done in C.
+5.1
+AES-128 on ARMv8
+From chapter 2 this paper introduced the Advanced Encryption Standard (AES).
+In speciﬁc ﬁgure 2.4 described the AES algorithm, which will be implemented
+throughout this section, with the use of the ARMv8 instructions. In addition
+Chapter 4 showed the mapping of the AES intrinsics to the AES SPN algo-
+rithmic parts, table 4.1. Yet, the paper has to show how the instructions are
+mapped upon the full AES algorithm.
+It is clear, from the implementation
+choice of ARM, that the ARM interface implements slightly diﬀerent structure.
+The reason is the AddRoundKey operand present at the ﬁrst pipeline stage of
+the vaeseq_u8 instruction.
+This implementation choice aﬀects the AES round, as the common round im-
+plements AddRoundKey as the very last operand. For this reason, vaeseq_u8
+==PAGE:44==
+34
+Genuine ARMv8 Implementations
+must be implemented such that the very ﬁrst instruction call refers to the pre-
+whitining phase plus the following SubBytes and ShiftRows operands. This
+pre-whitening loop inclusion, yields the need of a manual AddRoundKey opera-
+tion, as this is a simple exclusive-or command, the implementation can make use
+of the veorq_u8. instruction. The complete mapping is illustrated in table 5.1
+AES Algorithm
+ARMv8
+Implementation
+pre-whitening
+AddRoundKey
+↑
+vaeseq_u8
+↓
+↑
+n −1 rounds
+↓
+SubBytes
+ShiftRows
+MixColumns
+vaesmcq_u8
+AddRoundKey
+↑
+vaeseq_u8
+↓
+↑
+last round
+↓
+SubBytes
+ShiftRows
+AddRoundKey
+veorq_u8
+Table 5.1: The ARMv8 instruction mapping to the AES algorithm. From the
+table, it is seen that a manual eor command is needed, in order to
+complete the entire AES encryption.
+The instruction mapping, table 5.1, can be used to implement the AES. Fig-
+ure 5.1 illustrates this implementation using C. For simplicity the code imple-
+ments a function aes_enc_rnd which is simply the vaeseq_u8 and vaesmcq_u8
+combined. Moreover, the implementation features loop-unrolling, to minimise
+unnecessary variables, thus noise, when measuring performance.
+In the sections to come, the aes_enc function refers to the implementation of
+ﬁgure 5.1, unless otherwise noted.
+==PAGE:45==
+5.2 Electronic Code Book, (ECB)
+35
+uint8x16_t aes_enc_rnd(uint8x16_t block, uint8x16_t rndKey){
+return vaesmcq_u8(vaeseq_u8(block, rndKey));
+}
+uint8x16_t aes_enc(uint8x16_t block, uint8x16_t *expkey){
+block = aes_enc_rnd(block, expkey[0]);
+block = aes_enc_rnd(block, expkey[1]);
+block = aes_enc_rnd(block, expkey[2]);
+block = aes_enc_rnd(block, expkey[3]);
+block = aes_enc_rnd(block, expkey[4]);
+block = aes_enc_rnd(block, expkey[5]);
+block = aes_enc_rnd(block, expkey[6]);
+block = aes_enc_rnd(block, expkey[7]);
+block = aes_enc_rnd(block, expkey[8]);
+block = vaeseq_u8(block, expkey[9]);
+return veorq_u8(block, expkey[10]);
+}
+Figure 5.1: Full AES encryption implementation using ARMv8 instruction
+suite. Note that the implementation disregards the key schedule,
+and expect a fully expanded key.
+5.2
+Electronic Code Book, (ECB)
+Recall the ECB mode from chapter 2 ﬁgure 2.8. This mode is very simple, as
+it divides the message into blocks which are the processed independently. The
+implementation is veriﬁed with the NIST test vectors. The implementation per-
+forms at 1.12 cpb, given 106 iterations of 8192 byte messages. The performance
+indicates that the pipeline is being utilised well by the independent executions,
+outputting close to one byte every cycle.
+void aes_ecb(const unsigned char* in, unsigned char *out,
+int length, const char *expkey){
+uint8x16_t block;
+for (int i = 0; i < length; i += 16){
+block = vld1q_u8(&((int8_t *)in)[i]);
+block = aes_enc(block, (uint8x16_t *)expkey);
+vst1q_u8(&((int8_t*)out)[i], block);
+}
+}
+Figure 5.2: Genuine implementation of AES-ECB mode of operation, perform-
+ing at 1.12 cpb
+==PAGE:46==
+36
+Genuine ARMv8 Implementations
+5.3
+Counter mode, (CTR)
+The counter mode is implemented very similar to that of ECB. However, the
+counter mode introduces an additional step, along with a slightly diﬀerent com-
+position. As seen, the actual plaintext is not encrypted using the ek of AES,
+in fact the plaintext are added, exclusive-or, to the ciphertext of the counter
+encryption, generating a stream cipher like behaviour.
+The CTR mode, visible from ﬁgure 5.3, is implemented such that it accepts
+a precomputed set of counter vectors counters. The reason behind this im-
+plementation choice, is to make the performance measurements independent of
+what counter mode the programmer would choose. Thus simply looking at the
+algorithm at hand. The mode of operation has been tested with the NIST test
+vectors.
+CTR performs very similar to ECB. In fact, when measuring the implementa-
+tions with similar data, 106 iterations of 8192 byte messages, the CTR performs
+at 1.32 cpb.
+That is only 1 −(1.12/1.32) ≃15% trade of, while obtaining
+tremendously better security.
+void aes_ctr(const unsigned char* in, unsigned char *out,
+int length, const char* counters, const char *expkey){
+uint8x16_t
+block;
+for (int i = 0; i < length; i += 16){
+block = vld1q_u8(&((int8_t *)counters)[i]);
+block = aes_enc(block, (uint8x16_t *)expkey);
+block = veorq_u8(vld1q_u8(&((int8_t *)in)[i]), block);
+vst1q_u8(&((int8_t*)out)[i], block);
+}
+}
+Figure 5.3: Genuine implementation of AES-CTR mode of operation, per-
+forming at 1.32 cpb.
+5.4
+Cipher Block Chaining, (CBC)
+CBC implements a inherently dependant structure, ﬁgure 2.10. It is enhancing
+security by adding, exclusive or, the ciphertext of the previous block to the
+current plaintext before encryption.
+The sequential implementation is listed in ﬁgure 5.4. Like the previous imple-
+==PAGE:47==
+5.5 Cipher Feedback, (CFB)
+37
+void aes_cbc(const unsigned char* in, unsigned char *out,
+int length, const char* iv, const char *expkey){
+uint8x16_t block, lastblock;
+lastblock = vld1q_u8((int8_t *)iv);
+for (int i = 0; i < length; i += 16){
+block = vld1q_u8(&((int8_t *)in)[i]);
+block = veorq_u8(block, lastblock);
+block = aes_enc(block, (uint8x16_t *)expkey);
+vst1q_u8(&((int8_t*)out)[i], block );
+lastblock = block;
+}
+}
+Figure 5.4: Sequential implementation of AES-CBC, performing as expected
+clocking on avarage 2.25 times per byte.
+mentations, the presented code was tested with the NIST test- vectors. When
+sampling the performance, using messages of ﬁxed length, 8192 bytes, iterated
+106 times, the resulting throughput yields 2.25 cpb. In fact, this assemblies
+the expected performance very well, recall equation (4.5) of chapter 4. When
+calculating the expected performance based on the previous instruction latency
+and throughput ﬁndings, it was clariﬁed that the eﬀective latency of the entire
+AES process was L = 6cc. evidently leading to the expected throughput of 2.25
+cpb. Which is exactly the performance measured.
+5.5
+Cipher Feedback, (CFB)
+Cipher Feedback is a very close relative to CTR. As seen from ﬁgure 5.5, the only
+diﬀerence is that while CTR uses a counter to create an independent behaviour,
+CFB is utilising the ciphertext from the previous process. This means, however,
+that the execution is dependent, and thus the performance is expected to be
+≃2.25 cpb, refer equation (4.5). As previous, the CFB implementation was
+veriﬁed using NIST test vectors.
+The performance of this implementation executes close to that of the expected.
+That is, 2.44 cpb when processing messages of equal length, 8192 bytes.
+==PAGE:48==
+38
+Genuine ARMv8 Implementations
+void aes_cfb(const unsigned char* in, unsigned char *out,
+int length, const char *expkey, const char* iv){
+uint8x16_t block;
+block = vld1q_u8((int8_t *)iv);
+for (int i = 0; i < length; i += 16){
+block = aes_enc(block, (uint8x16_t *)expkey);
+block = veorq_u8(vld1q_u8(&((int8_t *)in)[i]), block);
+vst1q_u8(&((int8_t*)out)[i], block);
+}
+}
+Figure 5.5: Sequential implementation of AES-CFB, performing at 2.44 cpb
+5.6
+Output Feedback, (OFB)
+The Output Feedback mode, implementing inherent dependency, by requiring
+the output from the previous process, before added with the message, as input to
+the next process. The implementation was veriﬁed using the NIST test vectors.
+Like CBC and CFB, performance results close to 2.25 cpb is expected, equa-
+tion (4.5). The performance is measured to 2.32 cpb. This measurement, in
+fact, only diverges 3%, equation (5.1), from the estimated performance.
+Note that this implementation takes both the message and the initialisation
+vector as input. In fact, this implementation should be expanded for practical
+use, such that the message is excluded from the method.
+By doing so, the
+implementation would allow for pre-computation of the key stream. Which in
+some cases could increase the performance. For the scope of this study, this
+feature is neglected, and left as an exercise for the reader.
+1 −(2.25/2.32) = 0.03017
+(5.1)
+==PAGE:49==
+5.7 Authenticated Encryption, (AE)
+39
+void aes_ofb(const unsigned char* in, unsigned char *out,
+int length, const char *expkey, const char* iv){
+uint8x16_t block, cipher;
+block = vld1q_u8((int8_t *)iv);
+for (int i = 0; i < length; i += 16){
+block = aes_enc(block, (uint8x16_t *)expkey);
+cipher = veorq_u8(vld1q_u8(&((int8_t *)in)[i]), block);
+vst1q_u8(&((int8_t*)out)[i], cipher);
+}
+}
+Figure 5.6: Sequential implementation of AES-OFB, performing at 2.32 cpb.
+5.7
+Authenticated Encryption, (AE)
+5.7.1
+Counter with Cipher Block Chaining-Message Au-
+thentication Code, (CCM)
+As illustrated by ﬁgure 2.13, CCM implements CTR as plaintext encryption
+mode, and CBC-MAC for tag generation. While the implementations of CTR
+and CBC was already covered by section 5.3 and 5.4 respectively, these imple-
+mentations will not be re-illustrated. Besides these algorithms, CCM features a
+special header generation which will not be covered here. For more information
+upon the mode please refer [Dwo02], for the entire implementation, including
+header generation please visit Appendix 8.1.
+As the implementation inherits two previously measured modes of operation,
+a naive guess upon the performance can be suggested. The implementation is
+completely sequential, providing space for a naive performance guess of TCT R +
+TCBC, equation (5.2). From the equation (5.2), it is expected that the CCM
+implementation is performing at 3.57 cpb.
+In fact, when investigating the implementation with ﬁxed length messages of
+8192 bytes, iterated 106 times, the resulting throughput is 3.82 cpb. Hence,
+the implemented mode performs just 6.5% worse than expected, equation 5.3.
+The payload is likely a feature of the custom header generation of CCM and
+the additional exclusive-or operation. What is more, this implementation pro-
+vides generation of the counter vectors as well, adding further payload to the
+measurement, compared to that of CTR alone.
+Tguess = TCT R + TCBC = 1.32cpb + 2.25cpb = 3.57cpb
+(5.2)
+==PAGE:50==
+40
+Genuine ARMv8 Implementations
+Message size (bits)
+128
+256
+512
+1024
+2048
+Mode
+T −1 (cpb)
+ECB
+1.13
+1.21
+1.17
+1.15
+1.14
+CBC
+2.13
+2.27
+2.26
+2.25
+2.25
+OFB
+2.20
+2.33
+2.33
+2.33
+2.32
+CFB
+2.29
+2.44
+2.44
+2.44
+2.44
+Table 5.2: Performance measure of AES under diﬀerent modes and message
+sizes. Measured in clocks per byte (cpb).
+pdiff = 1 −(3.57/3.82) ≃0.065 = 6.5%
+(5.3)
+Finally table 5.2 summarises the performance of the basic modes of operation
+under diﬀerent ﬁxed length messages. Given the nature of the sequential modes,
+it is expected that as the message size is increased the modes will approach sim-
+ilar performance. In fact, mode is composed of the same amount of instructions
+only executed in diﬀerent order. The variations could be present as an artifact
+of the compiler instruction scheduler. That is, given the order of the instruc-
+tions, the compiler could have a hard time scheduling the instructions optimal.
+However, while this was not further investigated, future chapters will illustrate
+this optimisation issue of the GCC compiler.
+==PAGE:51==
+Chapter 6
+Fast AES with Comb
+Scheduler
+The following chapter, will describe the Comb Scheduler implementation. In
+addition, the chapter will result in a performance comparison of the sequential
+modes under the use of Comb.
+The Comb Scheduler can be divided into three separate modules. The messages
+sorting, the window pre-computation, and the actual comb processor. From
+chapter 3 section 3.3, it was argued to implement Radix sort, as the sorting
+engine. Radix-sort was chosen since it contributes a linear worst case perfor-
+mance. Linear performance is feasible, since the realistic message distribution,
+ﬁgure 3.4, is expected to deliver a lot of messages of varying length.
+6.1
+Radix sort
+Radix sort is a non-comparative sorting algorithm [PMM93, THC09], meaning
+that the sorting is done without comparing the entire set of items.
+Instead
+Radix sorts by looking at the least signiﬁcant digit and combines the items into
+separate bins, such that bin0 contains the items whose least signiﬁcant digit is
+0, bin1 holds the items having 1 as the least signiﬁcant bit, and so on. It then
+==PAGE:52==
+42
+Fast AES with Comb Scheduler
+resorts the items again using the second least signiﬁcant digit, and proceeds
+in this manner until all digits has been processed. Thus, the entire sorting is
+completed by iterating all n items k times, where k is the number of digits in
+the biggest number, independent upon the level of sorting needed in the set.
+The operation of Radix sort can be inspected from ﬁgure 6.1.
+3
+2
+9
+4
+5
+7
+6
+5
+7
+8
+3
+9
+4
+3
+6
+7
+2
+0
+3
+5
+5
+−→
+7
+2
+3
+5
+4
+3
+4
+5
+6
+5
+3
+2
+5
+3
+
+0
+5
+6
+7
+7
+9
+9
+
+−→
+7
+3
+4
+8
+3
+4
+6
+
+2
+2
+3
+3
+5
+5
+5
+
+0
+9
+6
+9
+5
+7
+7
+−→
+
+3
+3
+4
+4
+5
+7
+8
+
+2
+9
+5
+5
+3
+6
+5
+7
+5
+7
+2
+0
+3
+9
+Figure 6.1: The execution of Radix sort on a set of three digit numbers. The
+left most column is the input set [THC09]. Note that this example
+sorts in ascending order, while the implementation subject to this
+report is sorting in descending order.
+The ﬁnal implementation of Radix sort is viewable from ﬁgure 6.3. Remark that
+the implementation takes a pointer of type struct Message this input ﬁeld
+is essentially a set M of n messages of n block sizes, the structure is displayed
+in ﬁgure 6.2. The message structure was created to simplify the message and
+message length relation.
+struct Message{
+unsigned char* M;
+int l;
+};
+Figure 6.2: The Comb Scheduler message input structure. A message repre-
+sented by a tuple (∗M, l), where ∗M is the pointer to the message,
+and l is the total length of the message in blocks.
+6.2
+Pre-computing windows
+When the messages are sorted in descending order, the next point of action for
+the comb scheduler, is to divide the messages into windows. A window represents
+the number of blocks and messages, which can be computed in parallel. Thus
+==PAGE:53==
+6.2 Pre-computing windows
+43
+void radixSortDescending (struct Message *M, int n)
+{
+int i,biggestNo=0,signicance=1;
+struct Message temp[n];
+for (i=0; i<n; i++)
+if (M[i].l>biggestNo)
+biggestNo=M[i].l;
+while (biggestNo/signicance>0)
+{
+int b[10]={0};
+for (i=0; i<n; i++)
+b[9-M[i].l/signicance%10]++;
+for (i=1; i<10; i++)
+b[i]+=b[i-1];
+for (i=n-1; i>=0; i--)
+temp[--b[9-M[i].l/signicance%10]]=M[i];
+for (i=0; i<n;i++)
+M[i]=temp[i];
+signicance*=10;
+}
+}
+Figure 6.3: Radixsort implementation, sorting a list of tuples (∗Mi, li) in de-
+scending order with respect to li.
+the computation is highly dependant on r. r represents P, which is the optimal
+parallelisation degree, however denoted by r since it is not given that P messages
+are available, in that case r becomes the number of available messages left.
+The pre-computations builds on the observation that ideally P messages of equal
+length is processed in parallel [BLT16], or refer section 3.3. Thus the algorithm
+executes by dividing the messages into two set:
+• ρ[w] a list of integers representing the number of messages to process in
+parallel in window w.
+• β[w] a list of integers representing the number of blocks to process in
+parallel in window w.
+The operation of the algorithm is illustrated in table 6.1. It is clear, given ta-
+ble 6.1, that the pipeline cannot be full at all time. Thus the task is to maximise
+the usage. Moreover, by inspecting the table, it becomes clear why pre-sorting
+is needed. If no sorting was done prior to the window computation, it would
+be a time consuming task identifying messages of equal number of consecutive
+==PAGE:54==
+44
+Fast AES with Comb Scheduler
+Message
+m0
+m1
+m2
+m3
+m4
+m5
+Windows
+Blocks
+9
+9
+6
+6
+3
+3
+(ρ[w],β[w])
+↑
+w0
+↓
+2
+2
+2
+2
+2
+2
+(6,3)
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+2
+↑
+w1
+↓
+2
+2
+2
+2
+(4,3)
+2
+2
+2
+2
+2
+2
+2
+2
+↑
+w2
+↓
+2
+2
+(2,3)
+2
+2
+2
+2
+Table 6.1: The ﬁgure illustrates how the window computation is executing.
+The messages [m0, m1, m2, m3, m4, m5] is inputted in descending
+order, the algorithm then divides the messages into three windows
+w, such that as many messages of equal length is processed at the
+same time.
+blocks, and would properly require some sort of dictionary in order to keep track
+of which messages and blocks to process when. The ﬁnal implementation is dis-
+played in ﬁgure 6.4. The ﬂow of the algorithm, is simply to iterate through the
+blocks of messages one by one, as long as all messages contains blocks, they are
+regarded in the same window.
+Finally, from table 6.1 the algorithm is visualised using P = 6. This is done out
+of exempliﬁcation, since previous chapters described the optimal P to be 3.
+6.3
+Comb Scheduler
+At this point, the messages has been sorted and subdivided into windows, in or-
+der to maximise the amount of blocks processed at a time.
+As visible from
+ﬁgure 6.5, the Comb Scheduler inputs a set of n unsorted messages M =
+[m0, m1, · · · , mn−1, mn], of which the block sizes are known L = [l1, , l2, · · · ,
+ln−1, ln]. In addition, the Scheduler inputs the parallisation degree P and the
+expanded key subset.
+It is noted, that if less that P messages are available at a given time, P is set
+to the number of available messages k. Furthermore, ﬁgure 6.5 denotes a step
+called process block. This part, as the name implies, is where the individual
+==PAGE:55==
+6.3 Comb Scheduler
+45
+int preComputeWindows(struct Message *M, int r, unsigned char *rho,
+unsigned char *beta){
+int w = 0;
+int qlast = 0;
+int i = r;
+while (i > 1){
+int q = M[i-1].l;
+int j = i-2;
+while (j >= 0 && M[j].l == q){
+j -=1;
+}
+rho[w] = i;
+beta[w] = q - qlast;
+qlast = q;
+i = j+1;
+w += 1;
+}
+if(i == 1){
+rho[w] = 1;
+beta[w] = M[0].l-qlast;
+}
+return w+1;
+}
+Figure 6.4: Precomputing of windows implementation, returning ρ, list of mes-
+sages in window, and β, list of blocks in window, along with the
+number of windows.
+blocks are processed. In the context of this report, this is where the AES under
+the speciﬁed mode is being executed.
+The very concept of the scheduler is to process blocks over messages. That is, in
+the genuine implementations from previous sections, the block processing was
+executed one message at a time. Whereas the Comb Scheduler processes block
+x of each message, grounding room for independent data-processing.
+Essentially, recalling chapter 3, the Comp Scheduler seeks to ﬁll the pipeline. For
+this reason it makes sense to discuss how the pipeline is utilised. From chapter 4,
+it was conducted that the encryption needs three intrinsics; aese, aesmcm and
+eor. Furthermore via inspection, all of these pipelines contributed 3 stages, and
+issue frequency of 1 instruction per clock. This observation provides reasoning
+for two diﬀerent scenarios listed below:
+1. Iterating block x of the messages; ﬁlling the pipeline with aese instruc-
+tions, reiterating and ﬁlling the pipeline with aesmc instructions.
+2. Iterating block x of the messages; ﬁlling the pipeline with aese + aesmc
+instructions.
+==PAGE:56==
+46
+Fast AES with Comb Scheduler
+void combScheduler(struct Message *M, int k, int P, const char *expkey)
+{
+radixSortDescending(M, k);
+int r, w, i, j, windows,z;
+uint8x16_t block[P], lblock[P];
+while(k>0)
+{
+r = P < k ? P : k;
+unsigned char rho[r];
+unsigned char beta[r];
+windows = preComputeWindows(M, r, rho, beta);
+int completedBlocks = 0;
+for(w = 0; w < windows; w++)
+{
+for (i = 0; i < beta[w]; i++)
+{
+for (j = 0; j < rho[w]; j++)
+{
+#ProcessBlock
+}
+completedBlocks += beta[w];
+}
+M = M + r;
+k -= r;
+}
+}
+Figure 6.5: The CombScheduler implementation, processing k messages, in w
+windows, at preferred parallelization degree P.
+Followed by performance investigations, the ﬁrst scenario performed worse by
+nearly a factor 12. When studying the scenario closer, the infeasibility of sce-
+nario 1 becomes clear.
+It follows, by splitting the round execution into two
+stages, provides the penalty of reiterating the blocks, whilst providing addi-
+tional logic to keep track of the stage. Hence the implementation strategy of
+scenario 2 was chosen. This strategy provides a pipeline utilisation similar to
+the one visible at ﬁgure 4.6 from chapter 4.
+Additionally, when expecting the assembly output generated when compiling
+the comb scheduler, further optimisations can be identiﬁed. The reason is that
+seemingly the compiler does not contribute a very good instruction scheduling,
+introducing minor stalls throughout the execution. This can be manually edited,
+or comprehended by writing the entire algorithm in assembly, by insuring that
+the execution is of the structure visible from ﬁgure 6.6:
+==PAGE:57==
+6.4 Performance index (Throughput)
+47
+#xor of the previous message, given CBC
+#xor only needed initially, and as the final addroundkey.
+cc
+1
+eor
+v27.16b, v27.16b, v12.16b
+2
+eor
+v28.16b, v28.16b, 13.16b
+3
+eor
+v29.16b, v29.16b, v14.16b
+#addroundkey + subbytes + shiftrows for the 3 messages
+4
+aese
+v27.16b, v19.16b
+5
+aese
+v28.16b, v19.16b
+6
+aese
+v29.16b, v19.16b
+#mixcolumns for the 3 messages
+7
+aesmc
+v27.16b, v27.16b
+8
+aesmc
+v28.16b, v28.16b
+9
+aesmc
+v29.16b, v29.16b
+..
+..
+..
+Figure 6.6: The Comb Scheduler assembly implementation processing 3 inde-
+pendent message blocks (v27,v28,v29). Each block is ready for
+processing every 3 cc. The implementation is for emphasising the
+instruction scheduling of the main intrinsics, and initial load and
+ﬁnal store plus branch commands are disregarded.
+6.4
+Performance index (Throughput)
+Previous section showed how to implement the comb scheduler, such that the al-
+gorithm can provide optimal pipeline utilisation. It is readily seen, from the im-
+plementations, that the comb scheduler introduces additional payload. That is,
+sorting and pre-computing the windows. However, as summarised by table 6.2,
+it is clear that the additional payload is minimal compared to the eﬀective gain.
+The table presents the eﬀective performance of the genuine implementations
+compared to the optimised performance using the Comb Scheduler.
+As de-
+scribed, all measurements has been conducted on the ARMv8 Cortex-A57 2.1GHz.
+infrastructure. The performance has been measured in two dimensions: ﬁxed
+length and according to the realistic online message distribution, ﬁgure 3.4. The
+ﬁxed length analysis was conducted using messages of 2048 bytes. All results are
+listed in cycles per byte (cpb). Finally, these measurements was created using
+parallelisation degree P = 3 as discussed in chapter 4. In addition all data for
+processing was generated at random.
+==PAGE:58==
+48
+Fast AES with Comb Scheduler
+Fixed lengths 2 KB
+Realistic distribution
+Mode
+Sequential
+Comb
+Speed-up
+Sequential
+Comb
+Speed-up
+ECB
+1.13
+-
+1.13
+-
+CTR
+1.32
+-
+1.34
+-
+CBC
+2.50
+0.9
+×2.77
+2.66
+1.32
+×2.01
+CFB
+2.46
+1.1
+×2.24
+2.67
+1.33
+×2.00
+OFB
+2.47
+0.9
+×2.74
+2.66
+1.32
+×2.01
+CCM
+3.83
+2.31
+×1.67
+3.94
+2.74
+×1.44
+Table 6.2: Performance comparison of all modes considered in this thesis.
+All result has been measured on the ARMv8 Cortex-A57 2.1GHz.
+present on the Samsung Galaxy 6. The performance indexes pre-
+sented are illustrated in cycles per byte (cpb).
+The practical speed-up for the basic NIST recommended modes of operations is
+benchmarking at around factor 2.5. In fact, all the sequential modes of opera-
+tion, (CBC, CFB, OFB), are performing ≃11% and ≃24% better compared to
+that of the parallelisable modes, ECB and CTR respectively. Not only making
+the sequential modes speed competitors, in fact each of the sequential modes
+are outperforming the parallelisable signiﬁcantly.
+As expected, the scheduler reaches the highest performance, when processing
+blocks of equal length. This is consistent with the theory presented in chapter
+??. In speciﬁc, the scheduler decreases in performance by roughly 5%, which in
+fact is very low. What is more, when comparing the trade-oﬀof the scheduler
+to that of the genuine implementations, 9%, the scheduler is performing with
+greater stability.
+Finally, the thesis investigated the AE mode CCM. As CCM is composed of
+CTR for message encryption and CBC as tag generation function. This mode
+was previously showed to implement similar performance as the two modes
+accumulated. In the light Comb, this seems to be the case as well. The algorithm
+is performing, under the realistic distribution, with a throughput of 2.74 cpb.
+Whereas, the two modes accumulated provides 1.34+1.32 = 2.66 cpb. From an
+optimisation perspective this only a factor 1.44 faster than regular CCM.
+==PAGE:59==
+Chapter 7
+Discussion
+Throughout this thesis, the cryptographic intrinsics present on the ARMv8 NEON
+engine has been subject to investigation. It has been clariﬁed how to use these
+instructions in the context of AES. However, the validity of these results is yet
+to be explained. The following chapter, is intended as a discussion and reasoning
+about the results as well as the experimental setups.
+In order to put the results, provided by this thesis, into better context, it makes
+sense to compare it towards the existing research. refer chapter 1 section 1.2.
+For the purpose of simplicity, the core results from these articles can be in-
+spected from table 7.1. It is noted, that these articles only investigate modes
+of parallelisabel nature. The papers provides three diﬀerent implementations of
+AES modes.
+This thesis provided an implementation of CTR, and its performance was cal-
+culated to 1.32 cpb on ﬁxed length messages of 2 Kb. As listed in the table,
+Gouvêa et. al. managed to execute this mode with a performance of 1.20 cpb
+using 10 Kb messages, on the similar AArch64 encoding, however carried out on
+the iOS SoC basis. A straight forward comparison reveals a ≃9% performance
+diﬀerence. This impact can be explained by three factors. 1) Gouvêa imple-
+ments the mode using assembly removing unnecessary noise. 2) Gouvêa utilises
+the clock_gettime command, while this thesis composes the measurements
+using the gettimeofday function. 3) Architectural diﬀerences, that is, as the
+==PAGE:60==
+50
+Discussion
+Architecture
+Messages
+ref
+Mode
+A57 AArch32
+Apple A7
+Apple A8X
+Size
+CTR
+1.84
+1.21
+1.19
+10.000
+[GL15]
+GCM
+3.73
+2.21
+2.21
+10.000
+[GL15]
+AEZ
+-
+1.34
+-
+4.096
+[Cru14]
+OCB3
+-
+1.64
+-
+4.096
+[Cru14]
+Table 7.1: This table summarises some of the results, from the existing liter-
+ature, all implementations make use of the NEON cryptographic
+intrinsics. All performance measurements are in cpb, and message
+sizes in bytes.
+measurements are not conducted on the same processor, diﬀerences could be in-
+troduced. Especially, when the investigation are conducted using a time-based
+approach, and not the actual counter.
+The very issue with the time-based counter most be addressed. Its vulnerability
+lies in the fact that this measurement is relying on the processor performing at
+max frequency at all time. Meaning that eg. if the CPU design implements
+frequency scaling based on work-load, introducing increase or decrease of clock
+frequency, the time-based counter would suﬀer heavily, as the frequency is kept
+constant. Leading to the question, why even introduce a time-based counter?
+The experiment design was chosen out of simplicity. That is, the ARMv8 does
+not provide out-of-the-box access to the cycle counter, even when running under
+root. This means, that in order to utilise the cycle counter, a custom kernel
+driver module most be implemented. In order to at least minimise scenarios
+where the processor could run with a lower frequency, this thesis provided a
+warm-up phase. The warm up phase provides a 0.25 × iterationmeasure loop,
+ensuring that the processor is not in some idle stage upon measurement start.
+A important aspect of the results provided in this research is the multi-message
+optimisation. The very results are provided that multiple messages are scoped
+for processing, at the very same time. As explained, the algorithm does not
+decrease the performance of sequential messages singularly. The reasoning be-
+hind combing multi-messages was grounded in the message distribution of of
+the Internet, refer ﬁgure 3.4. However, an important condition to consider is
+when only one message is available. In this case, one can only hope for the
+same performance as for the case without comb. But as bespoken, the algo-
+rithm will introduce overhead. But exactly what is this overhead? This yield an
+experiment. From section 5.4, it was shown that the genuine implementation of
+AES-CBC resulted in 2.25 cpb. In fact this results was shown to be the optimal
+==PAGE:61==
+51
+sequential performance, according to the intrinsic investigation of section 4.3.
+For this reason, this discussion will investigate AES-CBC under similar condi-
+tions, however executed under comb. Recall section 5.4, the measurement was
+conducted using 8192 byte message, iterated 106 times. Provided the same re-
+quirements the Comb Scheduler performs at a 2.66 cpb. The payload Psingle
+can be easily calculated by equation (7.1). As seen, the payload for combing
+a single message is accounting for approximately 15%, or in other words 0.41
+additional clock cycles per byte. In fact, when testing the Comb algorithm with
+just two messages (2 × 8192 bytes) the scheduler performs at 2.24 cpb, which is
+similar to that of the genuine implementation.
+Psingle = 1 −2.25
+2.66 ≃0.154
+(7.1)
+Given the small size of the single message payload, and recalling the fact that
+mobile Internet speed if vastly increasing, and the factor 2.75 performance under
+these conditions. The usages of Comb is very attractive. Practically it means
+that the Scheduler on this phone would be capable of encrypting/decrypting 2.1
+gigabytes per second, contrary only approximately 770 megabytes per second,
+under full CPU single threaded utility.
+Another aspect of this report is authenticated encryption. From this thesis it
+was showed that the genuine implementation of CCM was performing at 3.83
+cpb. Compared to its competitors, table 7.1, it is actually performing 42% worse
+than GCM, 65% worse than AEZ, and 57% worse than OCB3. This is expected,
+as the mentioned modes all implements parallelisable structure. Whereas CCM
+uses the sequential CBC in its tag generation. However when implemented under
+comb the performance of 2.74 cpb was achieved given the realistic distribution,
+and 2.31 under ﬁxed length messages. As the results from table 7.1 all relies
+on ﬁxed length messages. It makes sense to compare the ﬁxed length Comb as
+well. It is seen that the results table 7.1 still is signiﬁcantly faster, besides that
+of the GCM. However, further investigations should be put into optimising the
+assembly from the Comb implementation. As already bespoken, the compiler
+have shown prune to bad instruction scheduling.
+A huge drawback of this study, is the single issue interface of the NEON architec-
+ture. This design choice, has tremendous impact upon the pipeline utilisation,
+as it requires to optimising for latency 3 in stead of 6, in the AES context,
+halving the potential speed gain. In addition, as the Cortex-A57 is superscalar,
+it makes little point to introduce this bottleneck. However, as the NEON archi-
+tecture is already starting to implement multi-instruction issue, one can hope
+that this will better supported on future builds.
+==PAGE:62==
+52
+Discussion
+==PAGE:63==
+Chapter 8
+Conclusion
+Recall the objectives of this thesis listed below. Besides the enumeration, this
+thesis successfully assembled the existing research in the area of AES on modern
+mobile devices. As the thesis implies, this domain is not very covered, leading to
+the very ﬁrst objective in the below list. To investigation and analyse the cryp-
+tographic instruction support on the ARMv8 architecture.
+This investigation
+was conducted in chapter 4. The goal of the investigation was to introduce the
+intrinsics available and their usage, primarily with the focus of AES. The very
+mapping of the instruction on the AES algorithm was provided. In addition,
+these instructions was tested in the degrees of latency and throughput. The
+results yielded 6 cc and 1 instruction per cycle respectively. This analysis was,
+likewise, conducted for the SHA1 and SHA2 instructions. In addition, essential
+claeriﬁcation upon the ARMv8 NEON engine was provideded. Especially the
+SIMD design is of particular interest, as it allows for a specialised vector repre-
+sentation. A representation that is optimised for processing of multiple vector
+entries concurrently. This is essential, as it allows the instructions to execute
+with a very low cpb utilisation, explaining high performance of 0.375 cpb for a
+single AES round.
+1. Investigation and analysis of the cryptographic instruction support on the
+ARMv8 architecture.
+2. For the ﬁrst time, demonstration of the NIST recommended modes of
+==PAGE:64==
+54
+Conclusion
+operation: ECB, CBC, CFB, OFB, and CCM. optimised for the ARMv8
+AArch64 platform. Along with the previously implemented CTR.
+3. For the ﬁrst time, performance indexing of the above modes, under their
+genuine ARMv8 implementations.
+4. For the ﬁrst time, Extensions of the pipeline multi-message algorithm, the
+Comb Scheduler, to ARMv8 AArch64 platform. Along with performance
+investigations of the above code aided by Comb.
+The thesis, utilised this knowledge to implement the entire AES algorithm,
+along with the NIST recommended modes ECB, CTR, CBC, CFB, OFB, and
+CCM. Hence providing knowledge about these modes of operation under ARM
+architecture, for the very ﬁrst time in a public domain. Essentially, setting the
+frame for public discussion of implementation and optimisation. And grounding
+basis for implementation reference, available from the appendixes. In addition,
+the modes was discussed in the light of performance and operation.
+Finally this report introduced the Comb Scheduler to the ARM platform, al-
+lowing for multi-message processing. This optimisation, in practically terms,
+allowed for sequential processing at the same speed as for the parallelisable
+modes. This was illustrated in the context of the basic modes, as well as for
+the authenticated modes. Especially, the latter is crucial as the open-source
+but sequential CCM, showed performance similar to that of the parallelisable
+but patented OCB3. What is more, this analysis conducted, provided insights
+into the potential payload introduces by the algorithm. As explained this was
+accounting for as little as 15% when processing single-messages. But at just the
+presence of two messages the performance hit was close to zero.
+The intention of this thesis, was a stand-alone documentation, hence the theory
+behind the analysis and cryptographic means, was described in chapter 2 and
+3. Likewise, the experimental setup was clariﬁed allowing even the novel reader
+to conduct similar investigations.
+8.1
+Future work
+A essential point of discussion concerning future investigations on the ARMv8
+architecture would be to implement a kernel module, capable of providing ac-
+cess to the clock cycle counter.
+This would allow for much more conﬁdent
+investigation results, not only in this study but on basically every ARM re-
+lated experiments. Moreover, as previously touched upon, the related research
+==PAGE:65==
+8.1 Future work
+55
+mentioned in this thesis, builds on top of a time based counter as well. Thus,
+relating results is possible, however not very precise or conﬁdent. Furthermore,
+it would be of great interest to take the Comb scheduler to the iOS platform, in
+order to see its performance on a similar ARMv8 based SoC. Finally, the on-
+going Competition for Authenticated Encryption: Security, Applicability, and
+Robustness (CAESAR) has several proposals of inherently sequential nature, it
+would be interesting to illustrate the gain of using Comb on these contestants
+as well.
+Finally,it was shown that the NEON engine implements SHA1 as well as SHA2
+instructions. However, this thesis did only show their respective Latency and
+Throughput metrics. Hence, the usage of these intrinsics remains still untouched
+in the public domain, meaning that no one has documented their SHA mapping
+yet. Obviously SHA1 and 2 could be interesting to analyse in the setting of
+Comb. As shown these instructions was of quite diﬀerent nature compared to
+those of AES. Introducing latencies of 6 and throughput of 2 on single instruction
+level. Lastly, it would be interesting to implement the entire Comb Scheduler
+using highly optimised assembly.
+==PAGE:66==
+56
+Conclusion
+==PAGE:67==
+List of Acronyms
+NIST National Institute of Standards and Technology
+AES-NI AES New Instructions
+AES Advanced Encryption Standard
+SPN Substitution-permutation network
+s-box Substitution Box
+p-box Permutation Box
+ECB Electronic Code Book
+CBC Cipher Block Chaining
+CFB Cipher Feedback
+OFB Outpu Feedback
+CTR Counter mode
+CCM Counter mode with CBC-MAC
+GCM Galois/Counter Mode
+OCB Oﬀset Codebook Mode
+AEZ Easy Authenticated Encryption
+MAC Message Authentication Code
+CMAC Cipher-based Message Authentication Code
+==PAGE:68==
+58
+Bibliography
+OCB Oﬀset Codebook Mode
+XOR Exclusive-or
+cpb cycles per byte
+cc clock cycles
+AE Authenticated Encryption
+CAESAR Competition for Authenticated Encryption: Security, Applicability,
+and Robustness
+ARM ARM Limited
+RISC Reduced instruction set computing
+SIMD Advanced Single Instruction, multiple data
+SoC System on Chip
+==PAGE:69==
+Bibliography
+[BLT16]
+Andrey Bogdanov, Martin M. Lauridsen, and Elmar Tischhauser.
+Comb to pipeline: Fast software encryption revisited. Cryptology
+ePrint Archive, Report 2016/047, 2016. http://eprint.iacr.
+org/.
+[Cru14]
+Cynthia
+Crutchﬁeld.
+Implementing
+and
+optimizing
+encryp-
+tion algorithms for the armv8-a architecture.
+Presented to
+the faculty of the Department of Computer Science,
+Califor-
+nia State University, Sacramento, Committee Chair Ted Krovetz,
+2014.
+http://csus-dspace.calstate.edu/bitstream/
+handle/10211.3/131463/CRUTCHFIELD.pdf.
+[DM12]
+Terry Koziniec David Murray. The state of enterprise network traf-
+ﬁc in 2012.
+In Communications (APCC), 2012 18th Asia-Paciﬁc
+Conference on, pages 179–184. IEEE, 2012., 2012.
+[Dwo01]
+Morris Dworkin. Recommendation for block cipher modes of opera-
+tion: Methods and techniques. NIST Special Publication 800-38A,
+2001. Technical report, Gaithersburg, MD, United States.
+[Dwo02]
+Morris Dworkin. Recommendation for block cipher modes of oper-
+ation: The ccm mode for authentication and conﬁdentiality. NIST
+Special Publication 800-38A, 2002. Technical report, Gaithersburg,
+MD, United States.
+[Dwo07]
+Morris Dworkin. Recommendation for block cipher modes of oper-
+ation: Galois/counter mode (gcm) and gmac. NIST Special Publi-
+cation 800-38D, 2007. Technical report, Gaithersburg, MD, United
+States.
+==PAGE:70==
+60
+BIBLIOGRAPHY
+[Fer05]
+Niels
+Ferguson.
+Authentication
+weaknesses
+in
+gcm,
+2005.
+http://csrc.nist.gov/groups/ST/toolkit/BCM/
+documents/comments/CWC-GCM/Ferguson2.pdf.
+[GL15]
+Conrado P L1 Gouvêa and Julio2 López.
+Implementing gcm on
+armv8. Lecture Notes in Computer Science (including Subseries Lec-
+ture Notes in Artiﬁcial Intelligence and Lecture Notes in Bioinfor-
+matics) — 2015, Volume 9048, pp. 167-180, 2015. RSA Conference
+Cryptographers’ Track, CT-RSA 2015.
+[Jou06]
+Antoine Joux.
+Authentication failures in nist version of gcm,
+2006.
+http://csrc.nist.gov/groups/ST/toolkit/BCM/
+documents/Joux_comments.pdf.
+[KAZ10]
+Wajdi Feghali Patrick Fay Vinodh Gopal Jim Guilford Erdinc Oz-
+turk Gil Wolrich Kahraman Akdemir, Martin Dixon and Ronen Zo-
+har. Breakthrough aes performance with intel aes new instructions.
+Intel Corporation, 2010.
+[Kna16]
+Peter Knaggs.
+Arm assembly language programming.
+http://
+www.rigwit.co.uk/ARMBook/ARMBook.pdf, 2016. As a work
+in progress this book will contain errors.
+[KR11]
+L. Knudsen and M. J. B. Robshaw. The block cipher companion.
+Springer, 2011. pp. 65-93.
+[Lip14]
+Andrew
+Lipsman.
+Major
+mobile
+milestones
+in
+may:
+Apps
+now
+drive
+half
+of
+all
+time
+spent
+on
+digital.
+http://www.comscore.com/Insights/Blog/Major-Mobile-
+Milestones-in-May-Apps-Now-Drive-Half-of-All-Time-Spent-on-
+Digital, 2014. comScore Analytics.
+[Mil68]
+Robert B. Miller. Response time in man-computer conversational
+transactions. In Proceedings of the December 9-11, 1968, Fall Joint
+Computer Conference, Part I, AFIPS ’68 (Fall, part I), 1968. pages
+267– 277.
+[oST01]
+National Institute of Standards and Technology. Speciﬁcation for the
+advanced encryption standard (aes). Federal Information Process-
+ing Standards Publication 197, 2001. http://csrc.nist.gov/
+publications/fips/fips197/fips-197.pdf.
+[PMM93]
+Keith
+Bostic
+Peter
+M.
+McIlroy.
+Engineering
+radix
+sort.
+Computing
+Systems,
+Vol.
+6
+.
+No.
+1,
+1993.
+https:
+//www.usenix.org/legacy/publications/compsystems/
+1993/win_mcilroy.pdf.
+==PAGE:71==
+BIBLIOGRAPHY
+61
+[riE14]
+ARM Limited. Company 02557590 registered in England. Arm c
+language extensions release 2.0.
+http://infocenter.arm.com, 2014.
+http://infocenter.arm.com/help/topic/com.arm.doc.
+ihi0053c/IHI0053C_acle_2_0.pdf.
+[riE15a]
+ARM
+Limited.
+Company
+02557590
+registered
+in
+England.
+Arm
+cortex-a
+series:
+Programmer’s
+guide
+for
+armv8-a.
+http://infocenter.arm.com, 2015.
+http://infocenter.arm.
+com/help/topic/com.arm.doc.den0024a/DEN0024A_v8_
+architecture_PG.pdf.
+[riE15b]
+ARM Limited. Company 02557590 registered in England. Mobile
+computing - connecting us to each other, and our data. http://ir.
+arm.com/phoenix.zhtml?c=197211&p=irol-mobile, 2015.
+[SKCM91] George G. Robertson Stuart K. Card and Jock D. Mackinlay. The
+information visualizer, an information workspace. In Proceedings of
+the SIGCHI Conference on Human Factors in Computing Systems,
+1991. pages 181–186.
+[Sti06]
+Douglas R. Stinson. Cryptography : theory and practice. Chapman
+and Hall/CRC, 2006. pp. 73-78.
+[THC09]
+Ronald L. Rivest Cliﬀord Stein Thomas H. Cormen, Charles E. Leis-
+erson. Introduction to algorithms. Massachusetts Institute of Tech-
+nology, ISBN:978-0-262-53305-8, 2009. Page 197-200.
+[WX15]
+Vadnala Praveen Kumar Großschädl Johann Wang, Junwei; and Qi-
+uliang Xu. Higher-order masking in practice: A vector implementa-
+tion of masked aes for arm neon. Lecture Notes in Computer Science
+(including Subseries Lecture Notes in Artiﬁcial Intelligence and Lec-
+ture Notes in Bioinformatics) — 2015, Volume 9048, pp. 181-198,
+2015. RSA Conference Cryptographers’ Track, CT-RSA 2015.
+==PAGE:72==
+62
+BIBLIOGRAPHY
+==PAGE:73==
+Counter mode with
+CBC-MAC - C
+implementation
+uint8_t aes_cbc_mac_auth_flag(uint8_t M, uint8_t L){
+return (((L-1)<<5)|(((M-2)/2)<<2)|0);
+}
+Figure 1: The function generates the special authentication ﬂag of CCM, at
+byte position 0.
+uint8_t aes_ctr_counter_flag(uint8_t L){
+return (((L-1)<<5)|(0));
+}
+Figure 2: The function is responsible of generating the special CTR ﬂag, at
+byte position 0.
+==PAGE:74==
+64
+Counter mode with CBC-MAC - C implementation
+void create_aes_nonce_block(unsigned char *block, const unsigned char *
+nonce,
+uint8_t flag, uint32_t count){
+block[0] = flag;
+block[1] = nonce[1];
+block[2] = nonce[2];
+block[3] = nonce[3];
+block[4] = nonce[4];
+block[5] = nonce[5];
+block[6] = nonce[6];
+block[7] = nonce[7];
+block[8] = nonce[8];
+block[9] = nonce[9];
+block[10] = nonce[10];
+block[11] = nonce[11];
+block[12] = (count >> 24)
+& 0xFF;
+block[13] = (count >> 16)
+& 0xFF;
+block[14] = (count >> 8)
+& 0xFF;
+block[15] = (count >> 0)
+& 0xFF;
+}
+Figure 3: This function has two purposes. 1) Generating the header block of
+the Authentication tag, in that case, the ﬂag is the output from the
+ﬂag generation of ﬁg. 1, in this case the count is the message length.
+2) Generating and incrementing the CTR counter. In this case the
+count value is the incremented counter which is added to the block.
+void ctr_counter_generation_function(unsigned char *block, const
+unsigned char *nonce,
+uint8_t flag, int length){
+for (int i = 0; i < length; i += 16){
+create_aes_nonce_block(block+i, nonce, flag, i);
+}
+}
+Figure 4: This function pre-computes the CTR blocks used for encryption.
+uint8x16_t aes_enc_rnd(uint8x16_t block, uint8x16_t rndKey){
+return vaesmcq_u8(vaeseq_u8(block, rndKey));
+}
+Figure 5: The AES encryption round doing AddRoundKey + SubBytes +
+ShiftRows + MixColumns, in that order.
+==PAGE:75==
+65
+uint8x16_t aes_enc(uint8x16_t block, uint8x16_t *expkey){
+block = aes_enc_rnd(block, expkey[0]);
+block = aes_enc_rnd(block, expkey[1]);
+block = aes_enc_rnd(block, expkey[2]);
+block = aes_enc_rnd(block, expkey[3]);
+block = aes_enc_rnd(block, expkey[4]);
+block = aes_enc_rnd(block, expkey[5]);
+block = aes_enc_rnd(block, expkey[6]);
+block = aes_enc_rnd(block, expkey[7]);
+block = aes_enc_rnd(block, expkey[8]);
+block = vaeseq_u8(block, expkey[9]);
+return veorq_u8(block, expkey[10]);
+}
+Figure 6: A full AES-128 encryption.
+Note that a manual XOR operation
+is needed inorder to satisfy the last AddRoundKey. Further notice
+that this implementation excepts a fully expanded round-key set.
+uint8x16_t aes_cbc_mac(const unsigned char* auth_block,
+const unsigned char* in, int length, const char *expkey){
+uint8x16_t lastblock = {0};
+uint8x16_t block = veorq_u8(vld1q_u8(&((int8_t *)auth_block)[0]),
+lastblock);
+lastblock = aes_enc(block, (uint8x16_t *)expkey);
+for (int i = 0; i < length; i += 16){
+block = vld1q_u8(&((int8_t *)in)[i]);
+block = veorq_u8(block, lastblock);
+lastblock = aes_enc(block, (uint8x16_t *)expkey);
+}
+return lastblock;
+}
+Figure 7: The CBC-MAC implementation. The method uses the special gener-
+ated Authentication header block as IV, otherwise it executes similar
+to CBC however only outputting a single block at the very end.
+==PAGE:76==
+66
+Counter mode with CBC-MAC - C implementation
+void aes_ctr(const unsigned char* in, unsigned char *out,
+int length, const char* counter, const char *expkey){
+uint8x16_t
+block;
+for (int i = 0; i < length; i += 16){
+block = vld1q_u8(&((int8_t *)counter)[i+1]);
+block = aes_enc(block, (uint8x16_t *)expkey);
+block = veorq_u8(vld1q_u8(&((int8_t *)in)[i]), block);
+vst1q_u8(&((int8_t*)out)[i], block);
+}
+}
+Figure 8: AES CTR implementation. The method accepts a fully expanded
+CTR set, and executed by encrypting the CTR and XORing the
+plaintext with the result.
+void aes_ccm(uint8_t M, uint8_t L, uint32_t lm,
+const unsigned char *message,
+unsigned char *out,
+const unsigned char *nonce, unsigned char *counter,
+const unsigned char *expkey){
+unsigned char auth_block[16];
+uint8_t aflag = aes_cbc_mac_auth_flag(M, L);
+uint8_t cflag = aes_ctr_counter_flag(L);
+ctr_counter_generation_function(counter, nonce, cflag, lm);
+create_aes_nonce_block(auth_block, nonce, aflag, lm);
+uint8x16_t cbc_mac_tag = aes_cbc_mac(auth_block, message, lm, expkey)
+;
+aes_ctr(message, out, lm, counter, expkey);
+cbc_mac_tag = veorq_u8(cbc_mac_tag, vld1q_u8(&((int8_t *)counter)[0])
+);
+vst1q_u8(&((int8_t*)out)[lm], cbc_mac_tag);
+}
+Figure 9: The very CCM mode operator. This method is responsible of ini-
+tialising the entire CCM mode. Remark that the authentication tag
+is appended to the result.

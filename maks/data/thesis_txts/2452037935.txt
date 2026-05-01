@@ -1,0 +1,4413 @@
+==PAGE:1==
+Automated Location of the Left
+Ventricle in Computed
+Tomography Using Deep Learning
+Magnus Caspersen s172989
+Kongens Lyngby 2019
+==PAGE:2==
+Technical University of Denmark
+Department of Applied Mathematics and Computer Science
+Richard Petersens Plads, building 324,
+2800 Kongens Lyngby, Denmark
+Phone +45 4525 3031
+compute@compute.dtu.dk
+www.compute.dtu.dk
+==PAGE:3==
+Summary (English)
+The goal of this thesis is to develop a fully automatic algorithm for generating
+a short-axis tranformation of transversal 3D CT scans. With a short-axis image
+stack, Medviso AB’s software Segment can be used for automated left-ventricle
+segmentation.
+Manually transforming the transversal image stacks are time
+consuming. In addition it is prone to bias, injected by the doctor doing the
+manual annotation. An automated model would remove the bias, and allow
+for oﬄine batch processing of large quantities of images, such as the Swedish
+CArdioPulmonary bioImage Study (SCAPIS) data set which contains CT scans
+of more than 30,000 patients.
+The proposed solution consist of three independent convolutional neural net-
+works (CNN), and is split into two sequential phases.
+In phase 1, a binary
+classiﬁcation network is used to determine a suitable 2D slice from the 3D im-
+age stack. A suitable slice should clearly show the left-ventricle, such that three
+landmarks can be annotated. A diﬀerent CNN is used to predict the location of
+3 landmarks on the suitable 2D slice. Two points are annotated on the mitral-
+valve plane, and one at the apex of the left ventricle. From these points a general
+orientation of the left ventricle is computed in the (x, y) plane. Using this orien-
+tation an orthogonal 2D image is computed using Segment’s algorithms. Lastly,
+a third CNN is used to predict the location of 3 landmarks on the orthogonal
+image. With all 6 points, a 3D orientation of the heart can be calculated. The
+tranversal slices can then be transformed to follow this orientation, and the
+transformed slices are generated using interpolation.
+The proposed ﬁnal solution is implemented as a plugin to Segment. The solution
+perform on par with human annotation, when compared to the inter-observer
+variability between manual annotations by two independent doctors. The auto-
+matically transformed image stacks were also used for left-ventricle segmentation
+(using the implemented algorithm in Segment). The proposed model performed
+equally well in terms of End-Diastolic Volume (EDV) and Left Ventricular Mass
+==PAGE:4==
+ii
+(LVM) when compared with the inter-observer variability on the same metrics.
+In conclusion the proposed solution in this project allows for oﬄine processing
+of large quantities of 3D CT scans, such as the SCAPIS data set.
+==PAGE:5==
+Preface
+This thesis was written at The Department of Clinical Physiology at Lund
+University Hospital, Lund, Sweden, in fulﬁlment of the requirements for acquir-
+ing an M.Sc. in Mathematical Modelling and Computing from the Technical
+University of Denmark (DTU). The thesis proposes an automatic solution for
+transforming 3D CT transversal scans into 3D Short-Axis view scans, using deep
+learning and the medical image software Segment CMR, developed by Medviso
+AB. Having an automatic solution to this problem allows the research group
+at Lund Hospital to cost-free batch process large quantities of CT scans, that
+previously required manually annotation to generate the Short-Axis view.
+I would like to thank my external supervisor Einer Heiberg, and the rest of
+the Medviso team, for their help and assistance throughout the entire process.
+Having been part of the research group at the hospital made the entire pro-
+cess of developing the models, and writing the report, a very smooth and joyful
+experience. Knowing that my model will be implemented as part of the Seg-
+ment software has been a huge motivator for me personally. I would also like
+to thank my internal supervisor ASM Shihavuddin for his guidance and assis-
+tance throughout the project. Idea sharing and general feedback on proposed
+experiments has been valuable throughout the whole period.
+I hope you enjoy the read, and ﬁnd it as interesting as I did when I wrote it.
+Lund, 10-July-2019
+Magnus Caspersen s172989
+==PAGE:6==
+iv
+Preface
+==PAGE:7==
+Glossary
+ANN Artiﬁcial Neural Network
+CNN Convolutional neural network
+CT Computed Tomography
+EDV End-Diastolic Volume
+EF Ejection Fraction
+LV Left Ventricle, Left Ventricular
+LVM Left Ventricular Mass
+MAE Mean absolute error
+MR Magnetic Resonance
+ReLU Rectiﬁed Linear Unit
+ResNet Residual network
+RMSE Root-Mean-Squared-Error
+SAX Short-axis
+SCAPIS Swedish CArdioPulmonary bioImage Study
+SGDM Stochastic Gradient Descent Momentum
+WRN Wide Residual Network
+==PAGE:8==
+vi
+==PAGE:9==
+Contents
+Summary (English)
+i
+Preface
+iii
+Glossary
+v
+1
+Introduction
+1
+1.1
+Description and motivation
+. . . . . . . . . . . . . . . . . . . . .
+1
+1.2
+Goal of the project . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+1.2.1
+Proposed method . . . . . . . . . . . . . . . . . . . . . . .
+3
+1.3
+Related work . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4
+2
+Deep Learning Theory
+7
+2.1
+What is Artiﬁcial Neural Networks . . . . . . . . . . . . . . . . .
+7
+2.1.1
+Neurons . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+2.1.2
+Activation functions . . . . . . . . . . . . . . . . . . . . .
+9
+2.1.3
+Deep Neural Network
+. . . . . . . . . . . . . . . . . . . .
+11
+2.1.4
+Convolutional layers . . . . . . . . . . . . . . . . . . . . .
+13
+2.1.5
+Pooling layers . . . . . . . . . . . . . . . . . . . . . . . . .
+16
+2.1.6
+Residual networks
+. . . . . . . . . . . . . . . . . . . . . .
+16
+2.1.7
+Output layer
+. . . . . . . . . . . . . . . . . . . . . . . . .
+18
+2.2
+Training an ANN . . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+2.2.1
+Loss function . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+2.2.2
+Back propagation . . . . . . . . . . . . . . . . . . . . . . .
+22
+2.2.3
+Batch learning
+. . . . . . . . . . . . . . . . . . . . . . . .
+27
+2.2.4
+Batch normalization . . . . . . . . . . . . . . . . . . . . .
+28
+2.2.5
+Dropout . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+30
+2.3
+Training algorithms
+. . . . . . . . . . . . . . . . . . . . . . . . .
+31
+2.3.1
+Stochastic Gradient Descent Momentum (SGDM)
+. . . .
+31
+2.3.2
+AdaGrad
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+33
+2.3.3
+Root Mean Squared Propagation (RMSprop) . . . . . . .
+34
+2.3.4
+Adam . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+2.3.5
+Pitfalls of neural network optimization . . . . . . . . . . .
+37
+==PAGE:10==
+viii
+CONTENTS
+2.3.6
+Choosing an optimization algorithm . . . . . . . . . . . .
+39
+3
+Data
+41
+3.1
+DICOM format . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+41
+3.2
+Segment . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+42
+3.3
+Preprocessing . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+43
+4
+Experiments
+45
+4.1
+Inter-observer variability . . . . . . . . . . . . . . . . . . . . . . .
+46
+4.2
+First phase
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+46
+4.2.1
+Additional preprocessing . . . . . . . . . . . . . . . . . . .
+46
+4.2.2
+Normalization and generated points
+. . . . . . . . . . . .
+47
+4.2.3
+Deeper models
+. . . . . . . . . . . . . . . . . . . . . . . .
+48
+4.2.4
+Residual network . . . . . . . . . . . . . . . . . . . . . . .
+51
+4.2.5
+Transfer learning using VGG16, ResNet50 and ResNet101
+52
+4.2.6
+Using multiple 2D slices . . . . . . . . . . . . . . . . . . .
+56
+4.2.7
+Custom regression layer . . . . . . . . . . . . . . . . . . .
+56
+4.3
+Second phase . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+60
+4.3.1
+Deep network B, C and ResNet50
+. . . . . . . . . . . . .
+60
+5
+Results
+61
+5.1
+Inter-observer variability . . . . . . . . . . . . . . . . . . . . . . .
+61
+5.2
+Phase 1
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+62
+5.2.1
+Normalization and generated points
+. . . . . . . . . . . .
+62
+5.2.2
+Deeper networks . . . . . . . . . . . . . . . . . . . . . . .
+63
+5.2.3
+Residual network D
+. . . . . . . . . . . . . . . . . . . . .
+64
+5.2.4
+VGG16, ResNet50 and ResNet101
+. . . . . . . . . . . . .
+64
+5.2.5
+Using multiple 2D slices . . . . . . . . . . . . . . . . . . .
+65
+5.2.6
+Angular displacement loss function . . . . . . . . . . . . .
+66
+5.3
+Phase 2
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+67
+5.3.1
+Deeper network . . . . . . . . . . . . . . . . . . . . . . . .
+67
+5.3.2
+ResNet50 . . . . . . . . . . . . . . . . . . . . . . . . . . .
+68
+5.4
+Summary
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+69
+6
+Proposed Model
+71
+6.1
+Implementation . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+71
+6.2
+Inter-observer variability on transformed image stacks
+. . . . . .
+74
+6.3
+Evaluating ﬁrst iteration of proposed model . . . . . . . . . . . .
+76
+6.4
+Predicting a suitable slice . . . . . . . . . . . . . . . . . . . . . .
+79
+6.5
+Second iteration with slice prediction . . . . . . . . . . . . . . . .
+81
+6.6
+Combining data sets . . . . . . . . . . . . . . . . . . . . . . . . .
+83
+==PAGE:11==
+CONTENTS
+ix
+7
+Discussion
+85
+7.1
+Inter-observer variability . . . . . . . . . . . . . . . . . . . . . . .
+85
+7.2
+Landmark prediction . . . . . . . . . . . . . . . . . . . . . . . . .
+86
+7.3
+Proposed model . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+87
+7.4
+Reﬂection . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+88
+8
+Conclusion and future work
+89
+8.1
+Future work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+89
+Bibliography
+91
+Appendix
+95
+==PAGE:12==
+x
+CONTENTS
+==PAGE:13==
+Chapter 1
+Introduction
+This chapter provides an introduction to the project by ﬁrst describing the
+problem at hand, and the motivation behind this project. This is followed by
+the goal of this project, and the proposed method for achieving this goal. The
+section concludes with a look at related work within the ﬁeld medical image
+annotation.
+1.1
+Description and motivation
+This project is based on the Swedish CArdioPulmonary bioImage Study (SCAPIS)
+[1]. SCAPIS is a unique, cross-sectional study carried out in Sweden, involving
+30,000 patients between 50 −64 years of age. The goal is to develop a rich
+data set that includes medical imaging and various physiological tests. The vi-
+sion of SCAPIS is to be able to identify, diagnose, and treat, people who are
+prone to or aﬀected by diseases such as Chronic Obstructive Pulmonary Disease
+(COPD), stroke, cardiac arrest/heart attack and other diseases aﬀecting the
+cardiovascular system.
+At the time of writing, the manual pre-processing of the data set has begun. The
+data in this project consist of a subset of the SCAPIS study with approximately
+500 CT scans that has been analysed by a medical professional, using a total of
+6 points to generate a short-axis view (SAX) of the heart. Having the short-axis
+view of the heart facilitates better and easier left-ventricle (LV) segmentation
+and quantiﬁcation (volume and mass of LV), and is valuable in the diagnosing
+process, as well as for future research.
+==PAGE:14==
+2
+Introduction
+There are two main motivators for automating the analysis of the CT scans.
+The ﬁrst is to reduce the time it takes a medical expert to do the analysis.
+A complete manual annotation and segmentation of the LV takes even an ex-
+perienced physician 10 −20 minutes. This process requires the physician to
+manual annotate landmarks around the LV in multiple 2D slices. This method
+is accurate, but also prone to human error and bias, and also time consuming.
+Instead, software like Segment CT allows for semi-automatic annotation and
+segmentation of the LV. Here the physician has to do 10 −20 mouse clicks,
+and the process takes around 30 −60 seconds, depending on how familiar the
+physician is with the tools and the data. For large data sets like SCAPIS it is
+highly impractical to process the entire data set, even with the semi-automatic
+system. The entire data set would take 375 hours (assuming an average of 45
+seconds per case) to analyse using the semi-automatic method. This amounts to
+over two months of full time employment, assuming a physician only performs
+this task (which again is infeasible and expensive).
+The second motivator is to remove the variability between diﬀerent physicians’
+analysis. While the annotated landmarks used in this project are located near
+anatomical structures, the position of these points are subjective as there are no
+strict consensus as to where they should be annotated exactly. Therefore, two
+physicians will annotate the landmarks diﬀerently causing a subjective bias in
+the analysis. While the variation between the two annotations might not heavily
+impact the general outcome of the analysis, it is desirable to remove this type
+of bias to ensure a more objective annotation.
+Automating the process of generating the short-axis view would mean that the
+entire data set could be processed oﬄine, without the need for medical personnel
+to inspect each of the 30, 000 CT scans. In addition to reducing the processing
+time, if this method proves successful it could be applied to other pre-processing
+tasks of the SCAPIS data set, as well as automatic CT analysis in a clinical
+setting.
+1.2
+Goal of the project
+The goal of this project is to develop a model for fully automated annotation
+of the mitral-valve plane and apex in the left ventricle (LV) of the heart in 3D
+CT scans, for the creation of short-axis image stacks. While this is doable using
+medical image software such as Segment CT, automating this process remains
+a challenge.
+==PAGE:15==
+1.2 Goal of the project
+3
+1.2.1
+Proposed method
+The proposed method is to split the problem into two phases. For the ﬁrst phase
+a convolutional neural network is used to identify 3 landmarks on a single 2D
+slice from the transversal 3D CT stack (stack refers to the full 3D CT image
+that consist of multiple 2D slices). These landmarks are used in combination
+with algorithms developed by Medviso AB to create an orthogonal 2D image.
+The second phase then proceeds to use another neural network to identify 3
+landmarks on the orthogonal image.
+Using the 6 landmarks an orientation
+of the heart can be calculated, and the image stack can be transformed and
+interpolated to traverse along this orientation rather than the initial transversal
+orientation. A graphic explanation of the process is shown in Figure 1.1.
+(a) The initial image stack consist
+of transversal 2D slices that
+form a 3D image.
+(b) In the ﬁrst phase 3 points are
+annotated to generate an ori-
+entation (shown in yellow) in
+the (x, y)-plane.
+(c) An orthogonal image along the
+yellow line, and the z axis is
+generated. 3 points are anno-
+tated to get the z orientation.
+(d) Using the orientation found
+the
+image
+stack
+is
+trans-
+formed to traverse along the
+new orientation instead of the
+transversal orientation.
+Figure 1.1: Short-Axis transformation explained graphically.
+The proposed
+solution automatically annotate the landmarks (red points), which
+allows Segment to transform the image stack automatically.
+==PAGE:16==
+4
+Introduction
+To test the solution, the transformed image stacks were compared to image
+stacks that were transformed using manually annotated landmarks.
+1.3
+Related work
+While this project focuses on the very speciﬁc task of calculating the orienta-
+tion of the LV in the heart, automatic landmark detection in images has been
+researched extensively.
+J. Guo et al. developed a fully automatic model for registration of dense 3D
+facial images, using 17 automatically annotated landmarks [2]. The model uses
+a Principal Component Analysis (PCA) approach for annotating the landmarks,
+and achieved accurate annotations of the landmarks with an average root-mean-
+squared-error (RMSE) of 1.7 mm. J. Zhang et al. presented a two-stage task-
+oriented deep learning method for detecting large scale anatomical landmarks
+in 3D images, using limited training data [3]. The ﬁrst stage consist of a con-
+volutional neural network (CNN) that was trained on image patches from the
+training set. The purpose of the ﬁrst stage is to determine the image patch’s
+displacement to multiple landmarks. The second network builds upon the ﬁrst
+network by using the weights of the fully connected layers in the ﬁrst stage, as
+weights for convolutional layers with kernels of size 1 × 1 × 1. This allows the
+second network to take a full image as input and output the predicted location
+of the landmarks.
+The model outperformed several previous state-of-the-art
+methods at the time of writing.
+A. Suzani et al. presented an automatic model for localization, labelling and
+segmentation of vertebrae in MR images [4]. Intensity-based features from each
+voxel is used for training a feed-forward neural network to predict the relative
+distances of the possible labels with regards to that voxel. This is done for all
+voxels in the image, and aggregation technique is used predict the location of
+the diﬀerent vertebrae. The model had a mean annotation error of 3.0 mm, and
+correctly identiﬁed 100% of the vertebral bodies.
+C. Payer et al. proposed various CNN’s to automatically locate landmarks in
+X-ray images of hands [5]. The network were trained on X-ray images and the
+ground truth were heatmaps with Gaussians at the position of the landmarks.
+The U-net presented achieved state-of-the-art performances with a mean local-
+ization error of 0.87 ± 1.05 mm.
+Q. Tao et al. used an U-Net architecture to automatically fully quantify the LV
+in cine MR images (images steady in spatial location, but covering a full cardiac
+==PAGE:17==
+1.3 Related work
+5
+cycle) [6]. G. Luo et al. proposed a CNN for LV volume estimation from MR
+images [7]. Accurate estimations of the LV volume is vital for computing the
+ejection fraction (EF, fraction of blood in LV that is pumped out with each
+heartbeat), and thus eﬀective and eﬃcient methods are in high demand. The
+CNN outperformed previous state-of-the-art LV volume estimation methods.
+All of these papers suggests that deep learning could solve the problem addressed
+in this project.
+==PAGE:18==
+6
+Introduction
+==PAGE:19==
+Chapter 2
+Deep Learning Theory
+Deep Learning is a term that has gained so much traction and popularity in
+recent years, that anyone with the slightest interest in technology and IT have
+heard of it. This section introduces the theoretical foundation that lays ground
+for the large more complex deep neural networks. First, a brief introduction
+to Artiﬁcial Neural Network (ANN) is given. It is followed by an explanation
+of deep learning and the various structures that makes up today’s complex
+ANN. The concept of error back-propagation is described and motivated by
+an example. At last various optimizers used for training ANN’s are explained,
+along with a few pitfalls in regards to optimizing such a network.
+2.1
+What is Artiﬁcial Neural Networks
+The term Artiﬁcial Neural Networks stems from biology and describes the idea
+of a model that mimics the neural network in the human brain. Connected layers
+of neurons that pass signals forward and backwards to imitate the process of
+learning. These layers introduce a type of hierarchy that allows the model to
+learn by its exposure and adaption to the data it is fed.
+This architecture
+makes it possible for computers to learn concepts that are not guarded by a
+clear system of equations. As an example the task of identifying objects is an
+easy task for the human brain. Through the exposure to various objects in our
+life, humans learn to diﬀerentiate between a cat and dog, even though the higher
+levels of such a structure is similar (four legs, head, tail, fur, etc.). This task
+is immediately much harder for a computer to learn, and was one of the ﬁrst
+==PAGE:20==
+8
+Deep Learning Theory
+Figure 2.1: Simple ANN with an input layer, one hidden layer and an output
+layer.
+areas were ANN showed excellent results. By having a layered architecture, each
+layer builds upon simpler features from the previous layers. The ﬁrst layer is
+the input layer in which the data is loaded into the model. Typically the input
+layer will feed the data forward to a number of "hidden" layers, each consisting
+of varying numbers of nodes with associated weights. At the other end of the
+network, an output layer will receive the data from the last hidden layer and
+produce an output. Figure 2.1 shows a simple network with 3 input nodes, 1
+hidden layer with 4 nodes, and one node in the output layer.
+2.1.1
+Neurons
+The components in a network that does computation is called neurons or nodes
+(both of these terms will be used interchangeably in this project). A single node
+can get input data from one, multiple or all of the nodes in the previous layer,
+and each of these connections is assigned a weight. The input x1 and x2 is
+used in a weighted sum with weights w1, w2 and this sum is evaluated by the
+activation function f to produce the output Y . This process is shown in ﬁgure
+2.2.
+In the example above there are two input nodes, and a bias node with value
+1 and weight b. The bias node can be thought of as the constant b in a linear
+equation
+y = ax + b
+==PAGE:21==
+2.1 What is Artiﬁcial Neural Networks
+9
+Figure 2.2: Example of the computation done in a neuron in a simple feed
+forward network [8].
+that allow the line to shift up and down along the y axis. Similarly the bias
+node in a neuron allows the activation function to shift left or right, as shown
+in ﬁgure 2.3.
+-15
+-10
+-5
+0
+5
+10
+15
+-2
+-1.5
+-1
+-0.5
+0
+0.5
+1
+1.5
+2
+ArcTan with offset
+ArcTan(x+5)
+ArcTan(x)
+ArcTan(x-5)
+Figure 2.3: Visualization of the eﬀect of the bias node on the activation func-
+tion.
+2.1.2
+Activation functions
+The function f described above is the activation function which takes the
+weighted sum of the inputs and produces a single output. It should be non-
+linear, to capture non-linear behaviour, and diﬀerentiable, such that an error
+gradient in the training process can be computed. In table 2.1 an overview of
+some of the common activation functions are shown, and in ﬁgure 2.4 they are
+==PAGE:22==
+10
+Deep Learning Theory
+evaluated on the interval x ∈[−2, 2]. There is no guaranteed way to select the
+best activation function, though the default choice in modern neural networks
+tends to be the Rectiﬁed Linear Unit (ReLU). Note that while an activation
+should be diﬀerentiable, both ReLU and the binary step functions have non-
+diﬀerentiable points at x = 0. While this is problematic theoretically, ReLU
+has been found to be a very eﬀective activation function, due to its large and
+constant derivative (on half of its domain), and the complication of the non-
+diﬀerentiable point is typically handled in the software implementation of the
+activation function. As such, if evaluated at exactly zero (which likely happens
+due to rounding errors, and not that the true value is zero) it will return either
+0 or 1.
+Name
+Equation
+ArcTan
+f(x) = tan−1(x)
+Binary Step
+f(x) =
+(
+0,
+x < 0
+1,
+x ≥0
+Gaussian
+f(x) = e−x2
+Identity
+f(x) = x
+ReLU
+f(x) =
+(
+0,
+x < 0
+x,
+x ≥0
+Sigmoid
+1
+1+e−x
+Sinusoid
+f(x) = sin(x)
+SoftPlus
+f(x) = ln(1 + ex)
+TanH
+f(x) = ex−e−x
+ex+ex
+Table 2.1: Examples of activation functions.
+==PAGE:23==
+2.1 What is Artiﬁcial Neural Networks
+11
+-2
+0
+2
+-1
+0
+1
+ArcTan
+-2
+0
+2
+0
+0.5
+1
+Binary Step
+-2
+0
+2
+0
+0.5
+1
+Gaussian
+-2
+0
+2
+-2
+0
+2
+Identity
+-2
+0
+2
+0
+0.5
+1
+Sigmoid
+-2
+0
+2
+0
+1
+2
+ReLU
+-2
+0
+2
+-1
+0
+1
+TanH
+-2
+0
+2
+-1
+0
+1
+Sinusoid
+-2
+0
+2
+0
+1
+2
+SoftPlus
+Figure 2.4: 9 activation functions evaluated on the interval x ∈[−2, 2].
+2.1.3
+Deep Neural Network
+As the name indicates Deep Neural Networks refers to networks that have mul-
+tiple hidden layers. Essentially any network with more than 1 hidden layers
+can be considered deep, but it is still an area that is widely discussed. Some
+researchers refers to shallow networks of 16 layers, so the term deep networks
+remains very subjective.
+While it is generally believed that deeper networks outperforms shallow net-
+works, this theory is yet to be fully understood and proven. [9] showed how the
+accuracy on a speciﬁc task increased with depth, as seen in ﬁgure 2.5a. They also
+showed that other increases to the model size did not yield the same increase in
+accuracy as an increase in depth, shown in ﬁgure 2.5b. They speciﬁcally noted,
+in relation to ﬁgure 2.5b, that
+==PAGE:24==
+12
+Deep Learning Theory
+This suggests that using a deep model expresses an useful prefer-
+ence over the space of functions the model can learn. Speciﬁcally, it
+expresses a belief that the function should consist of many simpler
+functions composed together. This could result either in learning a
+representation that is composed in turn of simpler representations
+(e.g., corners deﬁned in terms of edges) or in learning a program
+with sequentially dependent steps (e.g., ﬁrst locate a set of objects,
+then segment them from each other, then recognize them).1
+This resonates well with what was described in section 2.1 about the layers
+building on simpler features from previous layers.
+(a) Increased accuracy as result of increased
+depth of the network (x-axis).
+(b) The legend indicates the depth of the net-
+work and which part of the layers (convo-
+lutional or fully connected) that was in-
+creased. The x-axis is scaled by 108.
+Figure 2.5: The left ﬁgure shows how increasing the depth led to improved accuracy
+in the task of transcribing multidigit numbers from photos of addresses.
+The right ﬁgure shows that the shallow models overﬁt at 2 −4 × 108
+parameters, where as the deeper model beneﬁts from the increase in
+parameters.
+Interestingly enough continuously adding more depth to a network is not guar-
+anteed to improve performance. Current research suggest that there are certain
+threshold, where the cost in computation of adding additional layers far out-
+numbers the beneﬁts of the additional layers. [10] showed that so called Wide
+Residual Networks (WRN, fewer layers but with greater width, more neurons in
+each layer) with 16 layers outperformed 1000+ layer networks in both accuracy
+and eﬃciency.
+Similarly, [11] showed that shallow nets can achieve performance, that was pre-
+viously only achievable with complex deep net architectures, by using what they
+call Mimic models. This means that a shallow network is trained on data that
+1[9], page 199
+==PAGE:25==
+2.1 What is Artiﬁcial Neural Networks
+13
+has been parsed through and classiﬁed by a proven deep model (on data sets
+such as CIFAR-102 [12] and TIMIT3 [13]). The shallow net learns the function
+that was learned by the larger more complex model, hence the name mimics.
+The mimic network with 1000 timers fewer weights were often as accurate as
+the deep network in the test cases, suggesting that the task, initially thought to
+be complex, might not be as complex and that network depth might not be the
+direct reason for good performance.
+There is no correct answer to when a network is deep, nor if adding additional
+layers will improve performance of a model (though the "deep" networks men-
+tioned in the references are more complex than the ones explored in this project).
+It is still an open area of research.
+2.1.4
+Convolutional layers
+So far the input to the networks has been thought of as a n-dimensional vector
+x = (x1, x2, . . . , xn)T .
+However when handling images, it is often desirable
+to feed an entire image to the network, rather than ﬂatten it to an 1D array.
+That way structure and information in local neighbourhoods are better retained
+within the model. This is also useful for other types of inputs that has a grid-like
+structure, such as time series (1D grid with multiple time samples).
+As the name indicate a convolutional layer employs the mathematical operator
+called convolution, rather than simple matrix multiplication. In mathematics
+the convolution operator is denoted with an asterisk ∗, and the convolution of
+function f(t) and g(t) to yield the third function s(t) is deﬁned as
+s(t) = (f ∗g)(t) =
+Z ∞
+−∞
+f(τ)g(t −τ)dτ
+(2.1)
+where t ∈R and s(t), g(t), f(t) : R →R.
+This operator is commutative,
+associative (also scalar associative), and distributive meaning that the following
+identities hold true
+f ∗g = g ∗f
+f ∗(g ∗h) = (f ∗g) ∗h
+α(f ∗g) = (αf) ∗g
+f ∗(g + h) = f ∗g + f ∗h.
+2Available at https://www.cs.toronto.edu/ kriz/cifar.html
+3Available at https://catalog.ldc.upenn.edu/LDC93S1
+==PAGE:26==
+14
+Deep Learning Theory
+When working with neural networks, this is discretized as t would be a discrete
+variable rather than continuous, leading to discrete convolution
+s(t) = (f ∗g)(t) =
+∞
+X
+i=−∞
+x(i)g(t −i).
+Within the ﬁeld of convolutional neural networks the function f is often refer-
+enced as the input, and g as the kernel. As the input to a network model is of
+ﬁnite size it is fair to assume that both f and g is zero everywhere but for the
+ﬁnite set that is our input data, making the inﬁnite sum above ﬁnite. It can be
+expanded to 2D easily for use with images. Let I be a 2D image and K a 2D
+kernel, the 2D convolution of I and K is then
+S(i, j) = (I ∗K)(i, j) =
+X
+m
+X
+n
+I(m, n)K(i −m, j −n)
+which can be rewritten (due to the commutativity property) as using the ﬂipped
+kernel
+S(i, j) = (K ∗I)(i, j) =
+X
+m
+X
+n
+I(i −m, j −n)K(m, n).
+Rather than implementing the convolution operator in a neural network, a
+closely related function is typically used.
+Cross-correlation is identical to
+convolution but without the kernel ﬂipping (thus it is not commutative), and
+is formally denoted by a star (⋆). In the example above the cross-correlation is
+deﬁned as
+S(i, j) = (K ⋆I)(i, j) =
+X
+m
+X
+n
+I(i + m, j + n)K(m, n).
+The two expressions are used interchangeably in the literature, though they
+are not exactly identical.
+However for all practical purposes (in regards to
+implementing convolutional networks) they are. If convolution is used either
+the input image or the kernel will be ﬂipped, which will just be reﬂected in the
+weights being ﬂipped to correct for this. In addition if the kernel is symmetric,
+the two operators are identical.
+Discrete convolution (as with images) is essentially dragging a small matrix (ker-
+nel) over the larger input image, doing summation of the element wise products,
+and storing the value in a new matrix (the convolution), see ﬁgure 2.6. The out-
+put matrix is often referred to as the feature map.
+In a neural network it is the kernel matrix that is estimated and updated in
+the training process.
+Typically a network would include multiple kernels in
+each convolutional layer. For instance if 20 kernels are used, 20 feature maps
+==PAGE:27==
+2.1 What is Artiﬁcial Neural Networks
+15
+1
+1
+0
+0
+0
+1
+0
+0
+0
+1
+0
+1
+0
+1
+1
+1
+0
+1
+1
+0
+1
+1
+1
+1
+1
+1
+0
+1
+0
+1
+0
+1
+0
+1
+(a) Input matrix (green) and kernel
+matrix (red).
+1·1 1·0 0·1 0
+0
+1·0 0·1 0·0 0
+1
+0·1 1·0 0·1 1
+1
+1
+0
+1
+1
+0
+1
+1
+1
+1
+1
+1
+(b) First step of convolution.
+1
+1·1 0·0 0·1 0
+1
+0·0 0·1 0·0 1
+01
+1·1 0·0 1·1 1
+1
+0
+1
+1
+0
+1
+1
+1
+1
+1
+1
+3
+(c) Second step convolution.
+1
+1
+0
+0
+0
+1
+0
+0
+0
+1
+0
+1
+0·1 1·0 1·1
+1
+0
+1·0 1·1 0·0
+1
+1
+1·1 1·0 1·1
+1
+3
+1
+4
+1
+3
+2
+5
+4
+(d) Last step convolution.
+Figure 2.6: Simple example of matrix convolution.
+will be produced. The number of kernels are referred to as the width of the
+convolutional layer. Note that the dimensions of the matrix has decreased. To
+avoid this one can add a padding of 0’s around the matrix, called zero-padding.
+That way the center of the kernel initiates in the top right corner of the input
+matrix, and dimensions are unchanged. If it is desired to reduce the dimensions,
+another way to do so is by varying the stride. Stride refers to the movement
+of the kernel, such that a stride of 1 simply moves the center of the kernel one
+pixel to the right. Using a stride of 2, the kernel would simply move 2 columns
+to the right instead of 1 in each iteration, and thus reduce the dimensions of the
+feature map.
+In the above example the input has only one channel, corresponding to a
+grayscale image. Most color images are stored in Red-Green-Blue format, which
+is a 3D array containing a 2D image for each of the three color channels. In this
+case the above process is carried out for each individual color channel to produce
+a temporary feature map for that channel. The three temporary feature maps
+are then summed together (with a bias term, if designed) to form a single ﬁnal
+2D feature map. In that sense, even though the image can be thought of as
+3D (due to the 3 color channels) each kernel is still 2D. This is the distinction
+between 2D and 3D convolution, in which the kernel size is 3D and slides along
+the image in all three directions, and will produce 3D feature maps.
+An obvious advantage of convolutional layers, compared to traditional neural
+networks, is the sparse connectivity. With a kernel size of 3 each output (part
+of the feature maps) is only aﬀected by the 9 pixels in the local neighbourhood,
+==PAGE:28==
+16
+Deep Learning Theory
+and not the entire input (unlike a fully connected layer). Thus far less param-
+eters need to be stored, which reduces the memory requirements. Additionally
+convolutional layers beneﬁt from parameter sharing. As the weights are as-
+sociated with the kernel and not the input data, the weights are shared in the
+computation of each feature map across the entire input domain. To illustrate
+the beneﬁt of parameter sharing consider an input image of size 32 × 32 × 3
+(3 is the RGB channels). Say the desired output is of size 32 × 32. By using
+a kernel of size 3 × 3 × 3, zero-padding and stride size 1 this can be achieved
+by using 3 · 3 · 3 = 27 weights. Using a fully connected layer it would require
+(32 · 32 · 3) · (32 · 32) = 3145728 ≈3.1 × 106 weights. Parameter sharing also
+means that the convolutional layer is equivariant. Equivariance means that if
+the input changes, the output changes equally, and f is equivariant to a function
+g if
+f(g(x)) = g(f(x)).
+After convolution the activation function is applied, typically ReLU for image
+processing.
+2.1.5
+Pooling layers
+Pooling layers are used in CNNs to reduce the dimensions of the input for
+subsequent layers. Passing the entire image through every layer would slow down
+the training process. Instead, a pooling operation is used, in which a kernel is
+used to evaluate a sub-region of the image and only output one value. In this
+sense it is similar to the convolutional kernel, though there are no weights to
+be learned. The most popular pooling operation is max pooling that selects the
+most dominant feature in the region, which is useful for object detection/image
+classiﬁcation. Average pooling uses the average value of the region. To reduce
+the dimensions of the input a stride of 2 is typically used (with zero padding).
+The dimensions of the input is then halved for each max pooling layer.
+2.1.6
+Residual networks
+Residual networks was introduced in 2015 [14] in an attempt to answer whether
+learning better networks was as simple as adding more layers. [15] and [16] both
+observed issues with deeper networks where the training error became saturated
+before beginning to degrade as depth of the network increased. This is referred
+to as the problem of degradation, and this is why blindly adding more layers to
+a network is not guaranteed to improve performance. [14] proved this with a
+==PAGE:29==
+2.1 What is Artiﬁcial Neural Networks
+17
+genius approach, where two networks are trained, a shallow and a deep. The
+ﬁrst part of the deep network is a copy of the shallow network, and the added
+layers are merely identity mappings (input is equal to output). The worst case
+scenario for the deep network should be that it perform as well as the shallower
+network. However, experiments showed that the training error of the deeper
+network was higher than for the shallow network. The current solvers are not
+able to ﬁnd solutions for the deeper network that perform on par with the
+shallower network.
+To address the degradation problem [14] implemented a network with residual
+learning blocks. Let H(x) denote the underlying mapping of a stack of non-
+linear layers in a network. Let F(x) be the mapping of the stack, but instead
+of directly optimizing for the underlying mapping H(x), it is mapped to the
+residual, F(x) := H(x)−x. Rearranging this gives F(x)+x, and the hypothesis
+is that it is easier to optimize this residual mapping than the original.
+Figure 2.7: Building block for residual learning4.
+This mapping can be implemented by using skip connections, as shown in ﬁgure
+2.7. The input to a stack of layers is fed to both the stack and an identity
+mapping.
+After the stack, the output of the stacked layers and the original
+input is summed. These extra connection adds no additional parameters to be
+trained.
+By introducing these skip connections, the previous problem with a shallow and
+deep network (consisting of the shallow and identical mapping layers), should
+be more easily optimized. If an identity mapping is the optimal solution for a
+layer, the skipped connection allows the optimizers to quickly drive the weights
+of the stacked layers to zero. [14] showed that using these skip connections with
+networks as deep as 1000 layers consistently decreased the training error, thus
+solving the issue of degradation (the test error was not better for the very deep
+networks as they overﬁtted to the training data).
+==PAGE:30==
+18
+Deep Learning Theory
+2.1.7
+Output layer
+The last layer of any ANN is the output layer.
+For classiﬁcation this layer
+would have a neuron for each of the K classes that the model is trained on.
+It is a fully connected layer such that all the neurons in the previous layer is
+connected to each of the neurons in the output layer. For regression problems
+a linear activation function is typically used as the output is unbounded. For
+classiﬁcation tasks the SoftMax function is the default choice, and its standard
+form is given by
+σ(z)j =
+ezj
+PK
+k=1 ezk ,
+for j = 1, . . . , K,
+z = (z1, . . . , zK).
+It forces the output to be in the range [0, 1]. When used in an ANN the input
+z can have larger dimensions than K, and it can be written as
+P(y = j|x) =
+exTwj
+PK
+k=1 exTwk
+where wj is the weight associated with neuron j that corresponds to class j and x
+is the output from the previous layer. It is easily seen that PK
+k=1 P(y = k|x) = 1,
+that is the probability of all classes sum to 1.
+2.2
+Training an ANN
+During the training process of an ANN the model is constantly solving an opti-
+mization problem. With each update to the weights the overall error committed
+by the network should decrease. This section explores what a loss function is,
+how back-propagation works, and why batch-normalization is a useful tool when
+training a network.
+2.2.1
+Loss function
+To evaluate the performance of the network during training a loss function is
+used. This is a measure of how well the network’s output match the ground
+==PAGE:31==
+2.2 Training an ANN
+19
+truth.
+Error measurements like mean-squared-error (MSE), root-mean-
+squared-error (RSME), mean-absolute-error (MAE),
+mean-squared-logarithmic-error (MSLE), absolute error (L1), sum of
+squared errors (L2), and cross-entropy are all possible loss functions that
+are used for various problems.
+For regression problems MSE is the default
+choice, as the best ﬁtting line is the line that minimizes the sum of the squared
+distances of each point to the regression line. For binary classiﬁcation problems
+cross-entropy tends to be the default choice, and for multi-class classiﬁcation
+the multi-class cross entropy. The mathematical equation for each of the loss
+functions above is shown in table 2.2. Yi is the true value of observation i and
+ˆYi is the predicted value.
+Name
+Equation
+MSE
+1
+N
+PN
+i=1(Yi −ˆYi)2
+RSME
+√
+MSE
+MAE
+1
+N
+PN
+i=1 |Yi −ˆYi|
+MSLE
+1
+N
+PN
+i=1
+
+log(Yi + 1) −log( ˆYi + 1)
+2
+L1
+PN
+i=1 |Yi −ˆYi|
+L2
+PN
+i=1(Yi −ˆYi)2
+Cross-Entropy
+−1
+N
+PN
+i=1
+h
+Yilog( ˆY ) + (1 −Yi)log(1 −ˆYi)
+i
+Table 2.2: Examples of loss functions.
+In most real life applications of ANN, a regularization term is included in the
+loss function. Similar to other machine learning models the regularization term
+helps reduce over-ﬁtting and increase how well the model generalizes. It can be
+thought of as a bias-variance trade oﬀ, where bias is the expected deviation from
+the true value of the function, and variance is the deviation from the expected
+value of a function that any sampling of data is likely to cause5. The MSE can
+be formulated as (for the proof see appendix 8.1)
+MSE = Bias(ˆθ)2 + Var(ˆθ).
+For a simple linear regression task, a model f(x) = c, where c is constant, has
+huge bias but zero variance. Likewise if we over-ﬁtted a high degree polynomial
+to the data one would achieve low bias but high variance, as the model would
+vary greatly depending on the sampled data used. It is this trade-oﬀbetween
+bias and variance that a regularization can improve to bring an overall decrease
+to the MSE.
+5page 127 [9].
+==PAGE:32==
+20
+Deep Learning Theory
+With a regularization term the function (often also referred to as objective
+function) can be described as
+J (θ; X, y) = L(θ; X, y) + αΩ(θ)
+where α ≥0 is a parameter that determines the strength of the regularization,
+Ωis the penalty function and L is the chosen loss function. It should be noted
+that typically the bias parameters are left unregularized, and only the weights
+of the inputs are regularized. A simple explanation for this is that an over-
+ﬁtting model typically involve a lot of curvature and the bias terms does not
+contribute to curvature. Likewise, regularizing the bias term can in worst case
+scenarios lead to under-ﬁtting. From here on θ refers to all parameters (weights
+and biases) and w only to the weights.
+A common choice for Ωis the L2 norm
+Ω(θ) = 1
+2||w||2
+2
+= 1
+2
+X
+i
+w2
+i
+or the L1 norm
+Ω(θ) = ||w||1
+=
+X
+i
+|wi|.
+The L2 norm has the beneﬁt that the optimization problem has an algebraic
+solution (as the gradient scales with the weights), which the L1 does not. On the
+other hand the L1 norm produces a sparse solution, where some of the weights
+will be 06. As an example of the diﬀerence between the two, let x = (1, ϵ) with
+ϵ > 0 and small. The L1 and L2 norms of x are
+||x||1 = 1 + ϵ
+||x||2
+2 = 1 + ϵ2
+As part of an optimization algorithm a coeﬃcient δ ≤ϵ is subtracted from x1
+or x2 respectively.
+||x −(0, δ)||1 = 1 −δ + ϵ
+||x −(δ, 0)||1 = 1 −δ + ϵ
+||x −(0, δ)||2
+2 = 1 −2ϵδ + ϵ2 + δ2
+||x −(δ, 0)||2
+2 = 1 −2δ + ϵ2 + δ2
+It is easily seen that for L2, penalizing the large term of x results in a large
+decrease in the norm.
+For L1 the change is the same.
+A similar intuitive
+6Ch. 7.1.2 in [9]
+==PAGE:33==
+2.2 Training an ANN
+21
+example can be made when inspecting the derivatives of the two functions in
+a simple 1D case, as seen in ﬁgure 2.8. Using a gradient descend to ﬁnd the
+minimum of the two functions, note that L1 has constant gradient towards the
+value of 0 (−1 or 1), regardless of the value of x, where as the gradient linearly
+decrease with the weight for L2. L2 still forces the weight towards zero, but
+as the weight decreases, so does the gradient. Thus for L2 the weight never
+reaches 0 (unless the step size coeﬃcient is so large that one step brings the
+weights directly to 0).
+-5
+0
+5
+-2
+0
+2
+4
+-4
+-2
+0
+2
+4
+-2
+0
+2
+4
+-5
+0
+5
+-2
+-1
+0
+1
+2
+-5
+0
+5
+-5
+0
+5
+Figure 2.8: L1(x), L2(x) and their derivatives.
+The optimization problem that is solved when training a network is then
+θ∗= arg min
+θ
+J (θ; X, y)
+(2.2)
+= arg min
+θ
+L(θ; X, y) + αΩ(θ)
+(2.3)
+where J is the objective function, L is the speciﬁed loss function, α is the
+regularization coeﬃcient, and Ωis the regularization norm. Note that while
+similar to a pure optimization problem, optimization in neural networks diﬀers
+slightly. In the above scenario, the goal is actually to minimize the loss function
+L, rather than the objective function J .
+==PAGE:34==
+22
+Deep Learning Theory
+2.2.2
+Back propagation
+Back propagation is the process of feeding the error of a training step backwards
+through the network, such that each layer can correct its weights to minimize
+the fraction of the error it is responsible for. This is doable as the derivatives
+are decomposable, such that the error stemming from each neuron and weight
+can be computed and updated. The process is best explained with an example.
+Consider a network consisting of 2 inputs, 2 hidden layers with 2 neurons in
+each, one output node, biases and randomly initialised weights, as shown in
+ﬁgure 2.9. Let the activation function be ReLU in the hidden layers, and for the
+output node the linear activation function. The true function that the network
+should attempt to model is
+f(x1, x2) = 2x2
+1 + x2
+2
+such that for the input x = (2, 3) the ground truth is f(x) = t = 2·22 +32 = 17.
+Figure 2.9: Example network for calculating back propagation.
+Forward pass and error:
+First the forward pass is calculated. Let H1,in be the input to node H1, H1,out be
+the output of node H1, and so forth for H2 to H4 and Y1 (the numbers reported
+==PAGE:35==
+2.2 Training an ANN
+23
+is rounded, but the unrounded values are used in the actual calculations).
+H1,in = I1w1 + I2w2 + B1w3 = 2 · 0.2 + 3 · 0.3 + 1 · 0.4
+= 1.7
+H2,in = I1w4 + I2w5 + B1w6 = 2 · 0.6 + 3 · 0.3 + 1 · 0.8
+= 2.9
+H1,out = Max(0, H1,in)
+= 1.7
+H2,out = Max(0, H2,in)
+= 2.9
+H3,in = H1,outw7 + H2,outw8 + B2w9 = 1.7 · 0.4 + 2.9 · 0.3 + 1 · 0.25
+= 1.8
+H4,in = H1,outw10 + H2,outw11 + B2w12 = 1.7 · 0.5 + 2.9 · 0.4 + 1 · 0.7
+= 2.7
+H3,out = Max(0, H3,in)
+= 1.8
+H4,out = Max(0, H4,in)
+= 2.7
+Yin = H3,outw13 + H4,outw14 + B3w15 = 1.8 · 0.6 + 2.71 · 0.5 + 1 · 0.4
+= 2.8
+Yout = Yin
+= 2.8
+Note that in the example the input and output are identical due to the activation
+function. If a diﬀerent function, such as the sigmoid, was used the input and
+output of the neurons would vary. The same goes for the output node, where
+SoftMax would produce diﬀerent output (the linear function is used as this is a
+regression example, and thus the output should not be bounded by 0 or 1). The
+reason for including the terms will become apparent when the back propagation
+steps are computed. Let the error function be MSE, which gives the error
+E = (t −Yout)2 = (17 −2.835)2 = 200.6.
+Updating weights between output and last hidden layer:
+It is now of interest to determine how much a change to the output would
+decrease the error. The derivative of the error with regards to the output is
+calculated as
+∂E
+∂Yout
+=
+∂
+∂Yout
+(t −Yout)2
+(2.4)
+= 2Yout −2t = 2 · 2.8 −2 · 17 = −28.3.
+(2.5)
+That is the change in error that an increase by 1 to the output would cause. Next
+the derivative of the output of Y with regards to the input of Y is calculated
+to be 1 (as the output activation is just the linear function). The derivative of
+the input to Y with regards to the weights connected to the nodes in the last
+==PAGE:36==
+24
+Deep Learning Theory
+hidden layer can likewise be computed
+∂Yin
+∂w13
+=
+∂
+∂w13
+(H3,outw13 + H4,outw14 + B3w15) = H3,out
+∂Yin
+∂w14
+=
+∂
+∂w14
+(H3,outw13 + H4,outw14 + B3w15) = H4,out
+∂Yin
+∂w15
+=
+∂
+∂w15
+(H3,outw13 + H4,outw14 + B3w15) = B3
+Now the derivative of the error with regards to the weights w13, w14, w15 can
+be computed using the chain rule
+∂E
+∂w13
+=
+∂E
+∂Yout
+· ∂Yout
+∂Yin
+· ∂Yin
+∂w13
+= −28.3 · 1 · 1.8
+= −51.0
+∂E
+∂w14
+=
+∂E
+∂Yout
+· ∂Yout
+∂Yin
+· ∂Yin
+∂w14
+= −28.3 · 1 · 2.7
+= −76.8
+∂E
+∂w15
+=
+∂E
+∂Yout
+· ∂Yout
+∂Yin
+· ∂Yin
+∂w15
+= −28.3 · 1 · 1
+= −28.3
+Using a gradient descent method the new weights are given by
+w13 →w13 −η ∂E
+∂w13
+w14 →w14 −η ∂E
+∂w14
+w15 →w15 −η ∂E
+∂w15
+where η is the learning rate. Using η = 0.01 the new weights become
+wnew
+13
+= 0.6 −0.01 · (−51.0) = 1.1
+wnew
+14
+= 0.5 −0.01 · (−76.8) = 1.2
+wnew
+15
+= 0.4 −0.01 · (−28.3) = 0.6.
+Updating weights between the two hidden layers:
+Next the weights w7, . . . , w12 can be updated. Using the chain rule
+∂E
+∂w7
+=
+∂E
+∂Yout
+∂Yout
+∂Yin
+∂Yin
+∂H3,out
+∂H3,out
+∂H3,in
+∂H3,in
+∂w7
+.
+==PAGE:37==
+2.2 Training an ANN
+25
+Some of these terms have already been computed and can be reused.
+The
+missing terms are calculated
+∂Yin
+∂H3,out
+=
+∂
+∂H3,out
+(H3,outw13 + H4,outw14 + B3w15) = w13 = 0.6
+∂H3,out
+∂H3,in
+=
+(
+0,
+H3,in ≤0
+1,
+H3,in > 0
+∂H3,in
+∂w7
+=
+∂
+∂w7
+(H1,outw7 + H2,outw8 + B2w9) = H1,out = 1.7.
+Note that the term ∂H3,out
+∂H3,in is simply the derivative of the activation function,
+in this case ReLU. The derivative of the error with regards to w7 can now be
+calculated to be
+∂E
+∂w7
+= −28.3 · 1 · 0.6 · 1 · 1.7 = −28.9.
+The same calculations can be made for w8 to w12 which yield
+∂E
+∂w8
+= −28.3 · 1 · 0.6 · 1 · 2.9 = −49.3
+∂E
+∂w9
+= −28.3 · 1 · 0.6 · 1 · 1 = −17.0
+∂E
+∂w10
+= −28.3 · 1 · 0.5 · 1 · 1.7 = −24.1
+∂E
+∂w11
+= −28.3 · 1 · 0.5 · 1 · 2.9 = −41.1
+∂E
+∂w12
+= −28.3 · 1 · 0.5 · 1 · 1 = −14.2.
+The updated weights are
+wnew
+7
+= 0.4 −0.01 · (−28.9) = 0.69
+wnew
+8
+= 0.3 −0.01 · (−49.3) = 0.79
+wnew
+9
+= 0.25 −0.01 · (−17.0) = 0.42
+wnew
+10
+= 0.5 −0.01 · (−24.1) = 0.74
+wnew
+11
+= 0.4 −0.01 · (−41.1) = 0.81
+wnew
+12
+= 0.7 −0.01 · (−14.2) = 0.84.
+==PAGE:38==
+26
+Deep Learning Theory
+Updating weights between ﬁrst hidden layer and inputs:
+The last weights to be updated are the weights between the input layer and the
+ﬁrst hidden layer, w1-w6. However, the output of H1 aﬀects both H3 and H4
+and thus the error stemming from both of these has to be accounted for. The
+equation for w1 becomes
+∂E
+∂w1
+=
+∂E
+∂H1,out
+∂H1,out
+∂H1,in
+∂H1,in
+∂w1
+.
+The ﬁrst term is the rate of change in error as a function of the output of H1,
+which as mentioned aﬀects both H3 and H4, and is therefore a sum. It can be
+derived as
+∂E
+∂H1,out
+=
+∂E
+∂Yout
+∂Yout
+∂Yin
+∂Yin
+∂H3,out
+∂H3,out
+∂H3,in
+∂H3,in
+∂H1,out
++
+∂E
+∂Yout
+∂Yout
+∂Yin
+∂Yin
+∂H4,out
+∂H4,out
+∂H4,in
+∂H4,in
+∂H1,out
+.
+In the given example the values of the above term is found for H1 and H2,
+∂E
+∂H1,out
+= −28.3 · 1 · 0.6 · 1 · 0.4 −28.3 · 1 · 0.5 · 1 · 0.5
+= −13.9
+∂E
+∂H2,out
+= −28.3 · 1 · 0.6 · 1 · 0.3 −28.3 · 1 · 0.5 · 1 · 0.4
+= −10.7.
+The update to weights w1-w6 can now be computed, and are found to be
+∂E
+∂w1
+= −13.9 · 1 · 2
+= −27.8
+∂E
+∂w2
+= −13.9 · 1 · 3
+= −41.7
+∂E
+∂w3
+= −13.9 · 1 · 1
+= −13.9
+∂E
+∂w4
+= −10.7 · 1 · 2
+= −21.4
+∂E
+∂w5
+= −10.7 · 1 · 3
+= −32.1
+∂E
+∂w6
+= −10.7 · 1 · 1
+= −10.7
+==PAGE:39==
+2.2 Training an ANN
+27
+which leads to the new weights
+wnew
+1
+= 0.2 −0.01 · (−27.8) = 0.48
+wnew
+2
+= 0.3 −0.01 · (−41.7) = 0.72
+wnew
+3
+= 0.4 −0.01 · (−13.9) = 0.54
+wnew
+4
+= 0.6 −0.01 · (−21.4) = 0.81
+wnew
+5
+= 0.3 −0.01 · (−32.1) = 0.62
+wnew
+6
+= 0.8 −0.01 · (−10.7) = 0.91.
+Passing the input through the network again yields
+H1,in = I1w1 + I2w2 + B1w3 = 2 · 0.48 + 3 · 0.72 + 1 · 0.54
+= 3.7
+H2,in = I1w4 + I2w5 + B1w6 = 2 · 0.81 + 3 · 0.62 + 1 · 0.91
+= 4.4
+H1,out = Max(0, H1,in)
+= 1.7
+H2,out = Max(0, H2,in)
+= 2.9
+H3,in = H1,outw7 + H2,outw8 + B2w9 = 1.7 · 0.69 + 2.9 · 0.79 + 1 · 0.42
+= 6.4
+H4,in = H1,outw10 + H2,outw11 + B2w12 = 1.7 · 0.74 + 2.9 · 0.81 + 1 · 0.84
+= 7.1
+H3,out = Max(0, H3,in)
+= 6.4
+H4,out = Max(0, H4,in)
+= 7.1
+Yin = H3,outw13 + H4,outw14 + B3w15 = 1.8 · 1.1 + 2.71 · 1.2 + 1 · 0.6
+= 16.2
+Yout = Yin
+= 16.2
+which gives an error of
+E = (t −Yout)2 = (17 −16.2)2 = 0.64.
+2.2.3
+Batch learning
+In the above example a single input was processed, the error was back prop-
+agated, and the weights were updated. This means that the gradient descend
+might take a step in a sub-optimal direction, in comparison to the overall gradi-
+ent of the entire data set (if the data point is an outlier). This type of training
+is called Stochastic learning, due to the random element of processing each
+observation alone. While it might seem bad to have this stochastic element it
+can actually be beneﬁcial. If the solution space is highly non-convex with lots
+of local minima and saddle points, the stochastic training allows the model to
+escape these local minima due to the noisy gradients. The downside is that it
+typically requires the training to loop through the data set a large number of
+times.
+==PAGE:40==
+28
+Deep Learning Theory
+A diﬀerent method is to process the entire data set before updating the weights,
+which is called Batch learning. The change to each weight is calculated for every
+observation in the training set, accumulated and then updated. This way a single
+observation will not send the gradient in a sub-optimal direction. However this
+method is more likely to be stuck in local minima, which is troublesome for
+complex non-convex problems. Similarly batch training is not eﬃcient, as the
+entire data set has to be fed through the network in order to do a single weight
+update.
+The default option is to use Mini Batch learning. The data set is sub sampled
+into smaller batches which are then processed like the full batch method. This
+introduces a level of noise that can help escape local minima, while remaining
+more eﬃcient than regular batch learning. It is especially notable in the early
+stages of training, where the gradients of the diﬀerent batches will tend to point
+in the same direction (as the weights are initialized randomly). Thus computing
+an update on 1/100’th part of the training data is more eﬃcient than computing
+it on the entire data set.
+[17] showed that mini-batch sizes of 2 < m < 32 was preferred for the CIFAR-10
+data set, and 16 < m < 64 on the CIFAR-100 data set. While this research
+suggest that using mini batches in that range is superior, a thorough mathe-
+matical understanding of the eﬀect of mini batch size is still to be discovered,
+and like the majority of the theory in this ﬁeld, the general consensus is based
+on observed performance and what has worked previously.
+2.2.4
+Batch normalization
+To understand why normalization of inputs is beneﬁcial, consider the simple case
+where all input variables are positive. The weights for a given node is updated
+with a value that is proportional to the error at that node and the input vector.
+However if the input is all of the same sign, all of the weights either increase or
+decrease together. This produces a zig-zag path towards the optimal weights,
+which is slower and less eﬃcient than a more direct path. An intuitive example
+of this is shown in ﬁgure 2.10.
+==PAGE:41==
+2.2 Training an ANN
+29
+Figure 2.10: Left:
+without normalization the path towards the optimal
+weights is a zig-zag path.
+Right: with normalized input the
+optimal weights can found more eﬃciently.
+Batch normalization is essentially normalizing the input to an activation func-
+tion in a given layer, using the mean and variance of that speciﬁc batch (which
+assumes all batches comes from an identical distribution, which is a fair assump-
+tion in most, if not all cases). Two new parameters γ and β are trained in the
+batch normalization layer. In ﬁgure 2.11 the proposed algorithm for batch nor-
+malization in [18] is shown. Note that the input is normalized with regards to
+its own dimension (and not across the entire input space). Whether the batch
+normalization should be applied before or after the non-linear activation func-
+tion is still an open topic of research. The initial paper, [18], suggested applying
+batch normalization before activation, but arguments for the applying it after
+can be made. One simple argument for doing it after is when using the ReLU
+activation function. By shifting the input to be zero centered the input will be
+truncated by the ReLU function, as any negative values will be 0.
+Figure 2.11: Batch normalization with the learnable parameters γ and β.
+==PAGE:42==
+30
+Deep Learning Theory
+The problem can also be described by a term called internal covariate shift.
+If the distribution of the input to a layer li changes throughout the training
+process (as the weights in previous layers are updated, the distribution of the
+output is typically shifted) the alterations made to the weights in li are not
+guaranteed to reduce the loss function for this layer. Thus reducing the internal
+covariate shift would be a way to obtain quicker learning. [18] achieved matching
+performance on the ImageNet classiﬁcation task with only 7% of the previously
+required training steps, by using batch normalization.
+It should however be noted that the exact reason why batch normalization work
+is not yet fully understood. [19] shows that it might not be stabilizing the input
+distributions of the various layers, that makes batch normalization such a great
+tool. Rather it suggests that it makes the optimization landscape signiﬁcantly
+smoother. By having a smoother optimization landscape the gradients are more
+predictive and larger learning rates can be used, which in turn speeds up the
+learning process.
+2.2.5
+Dropout
+Another popular technique for improving the performance of ANN is using
+Dropout layers [20, 21].
+Dropout simply means that a subset of the neu-
+rons in a training stage of a given layer is ignored, to help reduce over-ﬁtting
+and better generalization. The idea is shown in ﬁgure 2.12.
+Figure 2.12: Left: Standard neural network. Right: Neural network with
+dropout.
+==PAGE:43==
+2.3 Training algorithms
+31
+By ignoring a fraction of nodes from a given layer during a training iteration,
+the idea of a "diﬀerent" model is introduced. This forces the layer to learn more
+"robust" features. In some cases layers will adapt to correct for mistakes made
+in previous layers, which introduces co-dependency between neurons, which typ-
+ically can’t be generalized when tested on test data. By using dropout this is
+reduced as the conﬁguration of the layers "change" between each training iter-
+ation. The fraction of nodes that are retained can vary, but typically a value
+between 0.5 and 0.8 is used for hidden layers and typically > 0.8 for the input
+layers.
+2.3
+Training algorithms
+Diﬀerent algorithms for updating weights exist and determining which is supe-
+rior for a given problem is a complex task. In this section the 4 most common
+and widely used methods are examined. They are all modiﬁcations to the tra-
+ditional gradient descent method used in the example in section 2.2.2. The ﬁrst
+optimizer is a ﬁrst-order method as only the gradient of the loss function is
+used, where as the last 3 all use the second order derivative of the loss function
+and are as such second-order methods. It should be noted that the examples
+are used to show the diﬀerence, but they do not fairly represent the general
+performance diﬀerences between the methods.
+2.3.1
+Stochastic Gradient Descent Momentum (SGDM)
+This algorithm adds a momentum term to the regular gradient decent method.
+Regular Stochastic Gradient Descent updates weights without any regards for
+the previous updates done. SGDM uses a fraction of the previous weight updates
+in every new update. It does so by keeping an update vector, v, for each weight.
+The update to weight wi for iteration t is then given by
+V (t)
+i
+= βV (t−1) + η ∂E
+∂wi
+w(t)
+i
+= w(t−1)
+i
+−V (t)
+i
+where η is learning rate and β is momentum.
+If a gradient is much larger in one dimension than in another, a SGD optimizer
+tends to oscillate back and forth across the dimension with more curvature, or it
+can get stuck at the bottom which results in slow convergence. The two methods
+are shown in ﬁgure 2.13 with η = 0.01 and β = 0.9. Note that the ﬁrst step
+==PAGE:44==
+32
+Deep Learning Theory
+is identical, as v0 = 0, but afterwards SGDM maintains its momentum, in the
+same way that a ball rolling in the valley would. An intuitive way of viewing
+the two methods is that SGD can be thought of as dropping the ball, letting it
+run for a small period of time (η), and then stopping it, before putting it down
+at the same spot again and continuing like this. When the ball is put down near
+the bottom of the ravine, it won’t roll very fast, hence the slow convergence.
+SGDM is the same scenario, but instead of picking the ball up and resetting its
+velocity the ball maintains it momentum7.
+Figure 2.13: Stochastic Gradient Descent with (red) and without (black) mo-
+mentum. The global minima is shown with a blue star, and every
+second iteration is numerated.
+7See [22] for a detailed explanation of why momentum works and when it is beneﬁcial.
+==PAGE:45==
+2.3 Training algorithms
+33
+2.3.2
+AdaGrad
+AdaGrad diﬀers from SGDM in that it uses Adaptive Learning Rates.
+Instead of assigning an overall learning rate for a model, each weight has its
+own adaptive learning rate which is scaled by all the previous squared values
+of its gradients.
+This scaling allows the parameters with small gradients to
+increase their learning rate, and vice versa for parameters with large gradients.
+The update step for weight wi at iteration t becomes
+r(t)
+i
+= r(t−1)
+i
++
+ ∂E
+∂wi
+2
+w(t)
+i
+= w(t−1)
+i
+−
+η
+ϵ +
+q
+r(t)
+i
+· ∂E
+∂wi
+where ϵ is a constant added for numerical stability, typically of the order 10−7
+[9]. The adaptive learning rate allows the model to initiate with much higher
+learning rates than regular SGD models. In ﬁgure 2.14 AdaGrad and SGD is
+plotted after 20 iterations. SGD has a ﬁxed learning rate of η = 0.01, where as
+the responsive learning rate of AdaGrad allows an initial rate of η = 0.2. On
+simple convex problems like this AdaGrad outperforms SGD, however it is not
+guaranteed to be equally successful for more deep neural networks, as adaption
+is based on the entire history of gradients. This could lead to excessive decreases
+to the learning rate in the early stages of training, which could be troublesome
+for problems in which the solution space is non-convex (which is most real
+problems).
+==PAGE:46==
+34
+Deep Learning Theory
+Figure 2.14: SGD (black) with ﬁxed learning rate η = 0.01 and AdaGrad (red)
+with initial learning rate of 0.2.
+2.3.3
+Root Mean Squared Propagation (RMSprop)
+RMSprop addresses the issue that AdaGrad faces when the solution space is
+non-convex by using an exponentially decaying average to limit how much of
+the gradient history is used. This is done by introducing a term ρ which is the
+decay rate. An update to weight wi at iteration t is then
+r(t)
+i
+= r(t−1)
+i
+ρ + (1 −ρ)
+ ∂E
+∂wi
+2
+w(t)
+i
+= w(t−1)
+i
+−
+η
+ϵ +
+q
+r(t)
+i
+· ∂E
+∂wi
+where ϵ is the numerical constant for stability, η is the initial learning rate,
+and ρ is the decay rate. This allows the optimizer to speed up convergence if a
+locally convex area is found, without being too limited by the extreme history of
+the gradient as in AdaGrad. While the performance of AdaGrad and RMSprop
+==PAGE:47==
+2.3 Training algorithms
+35
+on the simple convex case is indistinguishable, a more complex problem shows
+RMSprop advantages. Consider Beale’s function
+f(x, y) = (1.5 −x + xy)2 + (2.25 −x + xy2)2 + (2.625 −x + xy3)2,
+−4.5 ≤x, y ≤4.5.
+In ﬁgure 2.15 the progress after 180 iterations is shown with initial learning rate
+of η = 0.1. The strength of using a decaying average of the squared gradient is
+clear, as early steep gradients does not equally restrain convergence of RMSprop.
+While the center area of the domain looks ﬂat it is highly non-convex (and
+only due to the scale of the z-axis, appears to be ﬂat), and with a diﬀerent
+starting point both algorithms fail to converge to the global minima. Notice
+how the momentum build up in SGDM, due to steep gradients initially, throws
+the optimizer far oﬀcourse.
+Figure 2.15: The decaying average of the gradients of RMSprop greatly im-
+proves the convergence on Beale’s function after 180 iterations.
+==PAGE:48==
+36
+Deep Learning Theory
+2.3.4
+Adam
+Adam is another adaptive learning rate optimization algorithm that is widely
+used today, which combines elements from RMSprop and SGDM. The name
+stems from "Adaptive Moments" and refers to the estimations of the ﬁrst and
+second order moments of the objective function (with exponential decay rates
+ρ1 and ρ2). An update to weight wi at iteration t is given by
+s = ρ1s + (1 −ρ1) ∂E
+∂wi
+r = ρ2r + (1 −ρ2)
+ ∂E
+∂wi
+2
+ˆs =
+s
+1 −ρt
+1
+ˆr =
+r
+1 −ρ2
+2
+w(t)
+i
+= w(t−1)
+i
+−η
+ˆs
+√
+ˆr + ϵ
+.
+Adam tends to have smaller bias than RMSprop in the second order moment (r)
+in the early stages, as it includes a correction step to account for the initialization
+of s and r at 0.
+Adam is considered robust in regards to the values of the
+hyper parameters and similarly to RMSprop and AdaGrad it performs well on
+problems with sparse gradients due to the adaptive learning rate. In ﬁgure 2.16
+all 4 optimizers are shown after 3500 iterations on Beale’s function. SGDM gets
+stuck in a local minima and AdaGrad gets stuck due to very steep gradients,
+forcing a large decrease in the learning rate which reduces the convergence rate
+dramatically. While RMSprop converges to the global minima fastest it remains
+oscillating around the minima, where as Adam convergences to the minima
+without oscillations.
+==PAGE:49==
+2.3 Training algorithms
+37
+Figure 2.16: Performance of the 4 optimizers after 3500 iterations on Beale’s
+function.
+2.3.5
+Pitfalls of neural network optimization
+Non-convex optimization is in itself a complex problem that is not fully solved,
+and might never be. Other Machine Learning models typically attempt to only
+optimize convex problems by carefully constructing the object function and
+constraint such that it is a convex problem.
+Unfortunately this is typically
+infeasible for training neural networks, and while the object function for a neural
+network might be convex, the domain on which this function is evaluated very
+rarely is.
+A problem that is prevalent in both convex and non-convex optimization is ill-
+conditioning of the Hessian matrix H8. Ill-conditioned matrices has a large
+ratio between the smallest and largest eigenvalue. This can be problematic for
+ﬁrst-order methods as it typically forces a zig-zag path, rather than a more
+direct path (similar to the example in ﬁgure 2.10). Second-order methods are
+typically not heavily impacted by this unless H is very ill-conditioned.
+For non-convex problems local minima are also a potential hazard. Local min-
+ima is guaranteed to exist in neural networks as these models suﬀers from the
+models identiﬁablity problem [9]. If a model can rule out all but one set of
+8Ch. 8.2 in [9]
+==PAGE:50==
+38
+Deep Learning Theory
+parameters, given a suﬃciently large data set, the model is said to be identi-
+ﬁable. In a neural network one could swap the input weights for unit i with
+the weights for unit j and do the same for the output weights. The result is a
+slightly diﬀerent set of parameters, yet the result of the network would be the
+same. This issue of non-identiﬁability causes neural networks to have a large
+number of local minima, however as all these local minima results in the same
+value in the object function they do not constitute a problem. Local minima
+are only problematic if their cost function value is high (much higher than the
+global minima), and thus typically the issue becomes ﬁnding a local minima
+that has a suﬃciently small cost value.
+Saddle points are another type of critical points that can cause problems for
+an optimizer. [23] argues that saddle points are much more prevalent in high
+dimensions than in low dimensions. The reasoning is that for a local minima
+the Hessian will have only positive eigenvalues, for a maxima only negative
+eigenvalues, and for a saddle point the eigenvalues will be both positive and
+negative. Thus for high dimensions it becomes exponentially unlikely that all
+eigenvalues have the same sign, thus making saddle points far more prevalent
+in high dimensions than local minima.
+Another issue of gradient descent optimization methods is the issue of vanishing
+gradients.
+A lot of the traditional activation functions that were ﬁrst used
+with neural networks suﬀered from this issue. The hyperbolic tangent function
+as example has derivatives in the range (0, 1), which in deep networks will be
+multiplied several times as the error back propagates through the network. This
+led to vanishing gradients, meaning that the early layers trained very slowly.
+This is also one of the reasons that ReLU has become a popular choice for
+activation, as it’s derivative is always 0 or 1. On the other hand this function
+suﬀers from the issue of dead neurons, as a 0 gradient would result in no update
+to the given weight. Adaptions to ReLU such as Leaky ReLU and Parametric
+ReLU can handle this issue by altering the function slightly so the derivative is
+positive yet very small on the left hand side of the function.
+Similarly to vanishing gradients, exploding gradients constitutes a problem for
+gradient descent methods. For deep networks the solution space will more often
+than not contain steep regions where gradients will be very large.
+A single
+gradient descent step could throw the parameters far oﬀits trajectory and erode
+the optimization results reached up to that point. As mentioned earlier various
+method can be used to reduce the impact of this issue such as adaptive learning
+rates. A similar technique called gradient clipping reduces a step if it exceeds
+a certain limit. Exploding gradients can be spotted by examining the validation
+error during training. If the loss function ﬂuctuates rapidly between iterations it
+could suggest that there are issues with large gradients, and additional measures
+for reducing this might be necessary.
+==PAGE:51==
+2.3 Training algorithms
+39
+2.3.6
+Choosing an optimization algorithm
+There exist various other models than the ones presented here and to decide
+which to use is not trivial. As shown above the diﬀerent methods can perform
+well on diﬀerent problems.
+For most problems it is fair to assume that the
+solution space is non-convex (especially for deep networks) and thus a method
+with adaptive learning rate, such as Adam, might be superior. It also beneﬁts
+from not requiring parameter tuning of the learning rate, as this is done auto-
+matically. Depending on which coding language is used for creating the model,
+there might be some natural limitations on which optimizers that are available.
+Matlab’s toolbox only use Adam, RMSprop and SGDM at the time of writing,
+where as Keras (python library) also includes AdaDelta, AdaMax, and Nadam
+(all adaptions of the mentioned methods).
+==PAGE:52==
+40
+Deep Learning Theory
+==PAGE:53==
+Chapter 3
+Data
+The data used in this report stems from the aforementioned data set SCAPIS.
+This section touches on the format of the data, the software Segment CT that
+is used for annotation of landmarks, the preprocessing done prior to training
+the networks, and examples of observations that constitute the data set.
+3.1
+DICOM format
+DICOM is an abbreviation of Digital Imaging and Communications in Medicine
+and is the international standard format for storing, processing, and transfer-
+ing medical image ﬁles. DICOM is a complex format, and ﬁles can contain a
+lot of information such as patient ID, study ID, scanner information, settings,
+time and date, modality, location, medical information (treatment information,
+medication, anatomical measurements, etc.) and more. It was developed by
+American College of Radiology (ACR) and National Electrical Manufacturers
+Association (NEMA) [24] who formed a standard committee in 1983 to help
+radiologists, physicians and the equipment vendors work towards a more ben-
+eﬁcial standard. At that time it was hard for anyone but the manufacturer to
+print and decode the images generated by the systems. In 1985 the committee
+released ACR-NEMA 300 which was the predecessor to DICOM. In 1993 the
+ﬁrst version of DICOM was released, and since it has gradually expanded to
+cover all varieties of medical images and has become the standard format for
+manufacturers as well.
+==PAGE:54==
+42
+Data
+3.2
+Segment
+Specialized equipment and software, such as Segment [25], is required to read DI-
+COM ﬁles. Segment allows for manual and semi-automatic analysis of medical
+images. Segment is also capable of anonymizing data such that no regulations
+or conﬁdentiality standards are violated. In Figure 3.1a an overview of the user
+interface of Segment is shown, and in Figure 3.1b the interface for manual anno-
+tation of landmarks is shown. The software was used by medical professionals
+to annotate the landmarks used in this project. If the proposed solution for this
+project proves accurate, it could easily be implemented as a feature in Segment.
+(a) User interface.
+(b) Interface for manually annotate landmarks re-
+quired for transforming the images and seg-
+menting the left ventricle.
+Figure 3.1: Screenshots of the software Segment developed by Medviso AB,
+Lund, Sweden.
+==PAGE:55==
+3.3 Preprocessing
+43
+3.3
+Preprocessing
+The full data set of 477 3D CT stacks was stored in individual .mat ﬁles. Each
+ﬁle consisted of the image as numeric array, the professionally annotated land-
+marks as (x, y) coordinate pairs, and the index of the slice that the annotations
+was made on. The ﬁrst phase of the solution requires only this one 2D slice. A
+Matlab script was written to extract and store all 2D slices and annotations in
+a single .mat ﬁle. The pixel values was stored as class uint8 and the coordinate
+values for the ground truth as class single.
+The second phase required an orthogonal image that could be generated using
+the 3D stack and algorithms developed by Medviso AB. The dimensions of
+the orthogonal images varies drastically, as the algorithm uses the landmarks
+as a cut-oﬀpoint, such that irrelevant parts of the 3D stack is left out. The
+built-in Matlab function imresize was used to resize the images to dimensions
+640 × 426, which was the dimensions of the largest orthogonal image, and the
+scaling factor between the original and target dimensions was used to recalculate
+the landmarks on the orthogonal resized image. This step was incorporated into
+the preprocessing script. The result was a single .mat ﬁle that when loaded into
+Matlab revealed a struct object with the following structure
+– data_struct, 1 × 477 struct
+– name, name of ﬁle
+– slice_no, slice number from 3D stack
+– Img, struct containing the image and ground truth values
+– img, image as numerical single array, 512 × 512
+– truth, struct containg ground truth with/without generated points
+– wGenPoints, 2D array containing (x, y) coordinates of gen-
+erated points, 2 × 27
+– origPoints, 2D array containing (x, y) coordinates of orig-
+inal points, 2 × 3
+– orthImg, struct containing the orthogonal image and ground truth
+values
+– img, image as numerical single array, 640 × 426
+– truth, struct containg ground truth with/without generated points
+– wGenPoints, 2D array containing (x, y) coordinates of gen-
+erated points, 2 × 27
+– origPoints, 2D array containing (x, y) coordinates of orig-
+inal points, 2 × 3
+==PAGE:56==
+44
+Data
+The landmarks were sorted such that the ﬁrst coordinate pair always corre-
+sponded to the same point.
+Segment stores the landmarks in the order the
+doctor annotates, so this step is needed to ensure the training data is correct.
+Random permutations was then used to generate the training, validation and
+test sets, of sizes 350 (73.4%), 50 (10.5%), and 77 (16.1%) respectively. In Fig-
+ure 3.2 an example of the process of transforming and generating the Short-Axis
+stack is explained.
+Annotated points
+New orientation
+(a) Example of a 2D slice with man-
+ually annotated landmarks shown
+in red.
+Annotated points
+New orientation
+(b) Example of the orthogonal 2D
+slice for 3.2a.
+Figure 3.2: The two phases of the manual transformation of a transversal im-
+age stack. The red points in 3.2a are used to generate the blue
+line. An orthogonal image along this axis, and the z axis is then
+generated using the entire 3D image stack and interpolation (using
+the software Segment). The orthogonal image is shown in 3.2b,
+with the 3 points manually annotated on the image shown in red.
+Using these 6 points, a general orientation of the LV can be found,
+and the entire 3D stack can be transformed, such that the images
+traverse along this orientation instead of the original transversal
+orientation (downwards from the neck).
+==PAGE:57==
+Chapter 4
+Experiments
+Neural networks as a ﬁeld of research is at an interesting point, in the sense
+that there exists a lot of methods/structures that are considered to be eﬃcient
+or performing well, yet there are relatively few mathematical proofs for why
+these methods are advantageous. Researchers have tried numerous variations of
+network structures, depths, activation functions, optimizers etc., and the ones
+that tend to generalize the best to other problems/areas become the default
+choice. Thus deciding on a structure prior to having tested diﬀerent ones is
+almost guaranteed to produce a sub-optimal network.
+For this project a strategy of trial-and-error was applied to identify a suitable
+network structure.
+As described in Section 1.3 ANN has been used and re-
+searched extensively within the medical ﬁeld, and inspiration was found in the
+related works. This section begins with describing the inter-oberserver variabil-
+ity that serves as a benchmark for evaluating the performance of the networks.
+An explanation of the additional preprocessing steps used prior to training the
+networks are given, before various experiments with diﬀerent network structures
+are explained. This include networks of varying depth and width, transfer learn-
+ing using well-documented architectures, and a custom loss function. Lastly
+experiments with augmented training data is explained. The networks for the
+two phases of the problem is presented sequentially. The performance of the
+diﬀerent networks are shown in Section 5.
+==PAGE:58==
+46
+Experiments
+4.1
+Inter-observer variability
+To better evaluate the performance of the networks it is vital to have benchmark
+measurements. Inter-observer variability describes the variation between obser-
+vations done by diﬀerent observers, and is an important aspect of all medical re-
+search. If two doctors measure/observe very diﬀerently on the same object/case
+the inter-observer variability is large, and if their measurements/observations
+are very similar it is low. To test the inter-observer variability of annotating the
+3 points in CT images, 12 observations has been annotated by two independent
+medical professionals. By measuring the diﬀerence between the coordinates of
+each annotation on the same observation, the inter-observer variability can be
+estimated, and used as a benchmark for the networks. The Root-Mean-Squared-
+Error (RMSE) is used as the error metric, see Section 5.
+4.2
+First phase
+The networks in this section only revolves around the initial phase of locating
+the landmarks on the original transversal slice.
+Unless stated otherwise all
+networks are trained using 15 epochs, a mini batch size of 15, initial learning
+rate of 0.0001 and trained using the Adam optimizer.
+4.2.1
+Additional preprocessing
+The ﬁrst step of preprocessing was to generate additional points on a straight
+line between the two points on the mitral-valve plane, and from the apex point
+along the orthogonal line segment. The idea was to force the network to better
+learn the importance of the line spanned between the two points, and the line
+connecting it to the apex point, rather than solely the location of each point.
+Simple linear regression could then be used to ﬁnd the optimal line through the
+predicted points of the network. Generating these points is easily done using
+trigonometry as the points spanning the lines are given. The implementation is
+shown in appendix B. The data set with generated points then has 54 ground
+truth values ((x, y) values of each of the 27 points), and without the generated
+points there are 6 ground truth values. In addition to generating new points
+the training data was also normalized to enhance the anatomical structures
+in the images. After normalization the borders/edges in the image are much
+clearer. The normalization was done by subtracting the mean and dividing by
+the standard deviation. The image was then multiplied by 255 and converted
+==PAGE:59==
+4.2 First phase
+47
+to class uint8 to reduce the memory required per image. uint8 transform its
+input to an unsigned 1 byte integer in the range [0, 255]. An example of the
+originally annotated points, the generated points and the normalization is shown
+in Figure 4.1.
+Generated points
+Annotated points
+(a) Generated points shown in red and
+original points in blue.
+Generated points
+Annotated points
+(b) Normalized training image.
+Figure 4.1: Example of training image with and without normalization. The
+red points were generated to help the network identify the mitral-
+valve plane.
+4.2.2
+Normalization and generated points
+The ﬁrst network, A, was built to test whether normalizing the images and
+generating additional points improve the models. A network structure with 7
+convolutional layers with kernels of size (3, 3) and ReLU activation was used to
+test this. For testing if the generated points increased performance, the output
+layer had 6 and 54 units respectively for each 2D coordinate of the 3 and 27
+points respectively. An overview of the structure is shown in Figure 4.2.
+==PAGE:60==
+48
+Experiments
+Figure 4.2: Structure of network A for experimenting with normalization and
+generated points.
+The ﬁrst two numbers in the convolution block refer to the kernel size, and the
+third is the number of feature maps produced. All convolutions are done using
+zero padding and stride size 1. All max pools uses a kernel size 3 × 3 with
+stride 2. This stride size is used to half the spatial resolution for each max pool
+operation. BN refers to batch normalization and is carried out after every ReLU
+activation.
+4.2.3
+Deeper models
+To try and improve the accuracy of the predictions, deeper models with stacked
+layers of convolutions, and multiple fully connected layers is explored. The ﬁrst
+==PAGE:61==
+4.2 First phase
+49
+network, B, is inspired by the successful VGG16 network [26] that performed
+multi-class classiﬁcation (1000 classes) on the ImageNet data set [27]. Network
+C has a similar structure to B, but with additional stacks of convolutional layers.
+The structure of both networks are shown in Table 4.3.
+==PAGE:62==
+50
+Experiments
+Figure 4.3: Architecture of the two deeper networks B and C.
+(a) Network B
+(b) Network C
+==PAGE:63==
+4.2 First phase
+51
+4.2.4
+Residual network
+Residual networks were introduced in Section 2.1.6, with skip connections be-
+tween certain layers to attempt to solve the issue of degradation of training error
+for deep networks. A simple residual network was constructed, network D, to
+test if the residual blocks would lead to a lower error. The network consist of 5
+residual blocks, the ﬁrst 3 consist of two convolutions, and the last 2 uses three
+convolutions. The number of feature maps in the residual blocks increases from
+128 in the ﬁrst to 1024 in the last. The skip connection uses 1 × 1 convolution,
+to ensure the number of feature maps are consistent in the addition layer. After
+the ﬁnal residual block 3 fully connected layers with 1000, 1000, 6 nodes are
+used respectively. The structure of network D is shown in Figure 4.4, and the
+residual blocks are shown in Figure 4.5.
+Figure 4.4: Shallow residual network D.
+==PAGE:64==
+52
+Experiments
+(a) Residual block A.
+(b) Residual block B.
+Figure 4.5: Architecture of the residual blocks A and B in network D.
+4.2.5
+Transfer learning using VGG16, ResNet50 and ResNet101
+Transfer learning using the VGG16 [26], ResNet50 and ResNet101 [14] networks
+were tested, as these has proven successful on other image tasks.
+Transfer
+learning refers to using a pre-trained network and retraining it on a diﬀerent
+dataset. All three networks are pretrained on 1 million training images and can
+classify images into 1000 diﬀerent categories. By using the pretrained model
+the weights of the network is initialized with the weights that are likely to be
+more optimal than purely random weights, which can lead to faster learning
+by the network. The network is ﬁne-tuned by training on the training data for
+this project. The images used for these experiments are 512 × 512 and in grey
+scale, where as the ImageNet images are 224×224×3 and in RGB format, thus
+in color. The input layer is modiﬁed to ﬁt the dimension of the training data
+in this dataset, and the output layers are changed from classiﬁcation layers to
+regression layers.
+The structure of the modiﬁed VGG16 is shown in Figure 4.6. VGG16 does not
+use batch normalization in any layers.
+==PAGE:65==
+4.2 First phase
+53
+Figure 4.6: Modiﬁed VGG16 network.
+ResNet50 consist of 16 stacks with 3 convolutional layers in each, and skip
+connections for each stack (as described in Section 2.1.6). The ﬁrst two con-
+volutional layers in each stack is followed by batch normalization and ReLU
+==PAGE:66==
+54
+Experiments
+activation. The third activation function is applied after the addition of the in-
+put from the skip connection. The architecture is shown in Figure 4.7, and the
+residual blocks are shown in Figure 4.8. ResNet101 has the same architecture
+as ResNet50, but with 23 residual blocks of type E instead of 6.
+Figure 4.7: Structure of ResNet50.
+==PAGE:67==
+4.2 First phase
+55
+(a) Residual block C.
+(b) Residual block D.
+(c) Residual block E.
+(d) Residual block F.
+Figure 4.8: Architecture of the residual blocks C-F used in ResNet50.
+These experiments serve as a benchmark to test if the networks presented in this
+report perform better than "oﬀthe shelf" networks. Due to memory constraints
+the number of nodes in the fully connected layers are reduced from 4096 (in the
+original architecture) to 2048 for the VGG16 network.
+==PAGE:68==
+56
+Experiments
+4.2.6
+Using multiple 2D slices
+In an attempt to better the performance of the networks, additional transversal
+slices were extracted from the original data set. Using additional slices might
+provide the network with more information that allows it to improve its accuracy.
+Each slice is separated by roughly 0.3 mm which means slices directly above and
+below the annotated slice are very similar, and strongly correlated. Thus 3 slices
+above and below the annotated slice are extracted with a step size of 5 slices.
+As an example imagine for one 3D image stack the annotated slice is number
+230. Then slices [215, 220, 225, 230, 235, 240, 245] are extracted and stored as a
+new data set. Network B and ResNet50 was tested using 3 and 7 slices in total.
+4.2.7
+Custom regression layer
+The ﬁrst 2 landmarks correspond to the points that deﬁne the mitral-valve plane,
+that is the plane separating the left atrium and the left ventricle. Accurate
+annotation of this plane is important as the algorithms used for transforming
+the image stack (in Segment) depends on it to correctly transform the stack
+and segment the left ventricle.
+The metric used for training and evaluating
+the networks are Root-Mean-Squared-Error and is a measure of how far each
+point is from its ground true value.
+This means that two predictions could
+have equal RMSE, even though one of the predictions would lead to a better
+transformation due to the orientation of the line spanned by the two points. A
+visual representation of the problem is shown in Figure 4.9.
+==PAGE:69==
+4.2 First phase
+57
+Figure 4.9: While the two predictions (red and blue) have the same RMSE,
+the angular diﬀerence between the lines spanned and the ground
+truth are very diﬀerent. Ideally the predicted line is parallel to
+the ground truth line, and thus while both predictions have equal
+RMSE the red points are actually a better prediction than the
+blue.
+To try and reduce this angular displacement a custom regression layer was cre-
+ated. The idea was to use two weights, w1 and w2, in the objective function. w1
+is a weight for the regular RMSE term, and w2 is a weight for a term describing
+the angular displacement between the ground truth and the prediction. The
+objective function is then deﬁned as
+L(θ) = w1 · RMSE(θ) + w2 · γ
+where θ is the current set of parameters for the network and γ is the angular
+displacement between the vectors spanned between the ground truth points and
+the predicted points. The angle between two 3D vectors (v1, v2) can be derived
+as
+θ = atan2 (||v1 × v2||, v1 · v2)
+where θ is the angle in radians, || ·|| is the Euclidean norm, · is the dot product,
+× is the cross product, and atan2 is the Four-quadrant inverse tangent [28]. The
+==PAGE:70==
+58
+Experiments
+implementation is shown in appendix C. In order to deﬁne a custom regression
+layer for Matlab, the derivatives with regards to the x and y coordinates of each
+point constituting the two vectors are required. This is accomplished using a
+simple forward diﬀerence approximation
+f ′(x) = f(x + h) −f(x)
+h
+where h is set to 1e −6. The full implementation of the custom regression layer
+is shown in appendix D.
+4.2.7.1
+Augmented training data
+One key aspect of this project is the size of the data set. 350 images is a small
+data sample to train a network, even though the variation between the images
+are small compared to data sets like ImageNet [27]. One way to increase the size
+of the data set is by using augmentation methods. By rotating and scaling the
+images slightly one could generate additional images. Note that while this does
+increase the size of the data set, it is not guaranteed to have a large impact on the
+accuracy. A lot of the variation within the images are preserved through rotation
+and scaling, and thus these new images are not equally impactful compared to
+having additional real training data.
+To test if using augmented training data improve the networks, a Matlab func-
+tion for rotating, scaling and translating the images was created. It randomly ro-
+tates the image ±maxRot°, applies a scaling factor in the range [1−maxScale, 1+
+maxScale], and translates the image ±maxTrans pixels in both the x and y di-
+rection. The implementation is shown in appendix E.
+In Figure 4.10 two examples of the augmented training data is shown.
+The
+arguments were set to
+maxRot = 20°
+maxScale = 0.1
+maxTrans = 3.
+==PAGE:71==
+4.2 First phase
+59
+(a) Real training image.
+(b) Augmented training image.
+(c) Real training image.
+(d) Augmented training image.
+Figure 4.10: Examples of augmented training data. A random rotation, scal-
+ing and translation is applied to the images and the annotated
+points to increase the size of the training dataset.
+Network structure B and ResNet50 were used for these experiments and were
+trained on a data set containing 5600 augmented images.
+==PAGE:72==
+60
+Experiments
+4.3
+Second phase
+The second phase of the solution focuses on the orthogonal images.
+The ﬁ-
+nal solution aims to use the optimal network from phase one to identify three
+landmarks, use these landmarks to generate the orthogonal image, and use the
+optimal network from phase two to identify the three landmarks on the orthog-
+onal images.
+4.3.1
+Deep network B, C and ResNet50
+The input size of network B, C, and ResNet50 are modiﬁed for the orthogonal
+images (640 × 426) and trained, using the same hyper parameters as in phase
+1. The image augmenter was used to train ResNet50 on 5600 images with max
+rotation of ±20°, scaling factor [0.9, 1.1] and max translation of ±3.
+==PAGE:73==
+Chapter 5
+Results
+In this section the results of the experiments outlined in the Section 4 is pre-
+sented and discussed.
+The measure of accuracy is Root-Mean-Squared-Error
+(RMSE), unless stated otherwise, and is calculated over the entire test set. The
+formula is
+RMSE =
+1
+Ntest
+Ntest
+X
+i
+ PM
+j (Ti,j −Yi,j)2
+M
+! 1
+2
+where Ntest is the number of test observations, M is the number of outputs (54
+with generated points and 6 without), Ti,j is the ground truth of output j in
+test case i, and similarly Yi,j is the predicted value by the network.
+5.1
+Inter-observer variability
+The inter-observer variability is calculated as RMSE using the diﬀerence between
+the two expert annotations on the 12 available observations. The result was
+RMSE = 10.39 ± 3.23.
+This measure serves as a benchmark for evaluating the networks and comparing
+them with the manual annotation process. Note that it was not possible to
+compute the inter-observer variability on the annotations in phase 2, since the
+orthogonal image depends on the annotations made in phase 1. Therefore the
+above metric serves as a benchmark for both phases.
+==PAGE:74==
+62
+Results
+5.2
+Phase 1
+This section reports the results of the networks tested for phase 1 of annotating
+3 points on a single 2D slices from the transversal 3D CT stack.
+5.2.1
+Normalization and generated points
+The results of normalizing the input data is shown Table 5.1, together with the
+network trained on the data containing generated points (which is trained on the
+normalized images). Normalizing the input, or using the generated points, does
+not appear to improve the performance of the networks. The three networks all
+overﬁt slightly to the training data.
+Model
+RMSE
+Test
+RMSE
+Validation
+RMSE
+Training
+A - Regular
+19.72 ± 8.83
+20.26 ± 10.00
+15.64 ± 6.27
+A - Normalized
+19.26 ± 10.21
+17.64 ± 6.81
+14.31 ± 6.05
+A - Gen. points
+20.70 ± 10.32
+19.80 ± 8.23
+16.80 ± 7.54
+Table 5.1: RMSE for experiment with normalized input on network A.
+Figure 5.1: Test examples of the networks trained on normalized and regular
+input images (plotted on the regular images).
+The predictions
+from the networks are very similar.
+==PAGE:75==
+5.2 Phase 1
+63
+Figure 5.2: Example of predictions with and without generated points shown
+on normalized images.
+5.2.2
+Deeper networks
+The test, validation and training error of the networks B and C from Section
+4.2.3 is shown in Table 5.2.
+In Figure 5.3 the predictions by networks are
+shown for the same cases as Figure 5.2. Predictions by network B has improved
+signiﬁcantly on the left case, though the apex point is still very inaccurate. In
+accordance with the RMSE values, network C performs worse than B in both
+cases.
+Model
+RMSE
+Test
+RMSE
+Validation
+RMSE
+Training
+B
+14.25 ± 5.87
+14.38 ± 5.54
+10.65 ± 4.71
+C
+22.78 ± 8.98
+22.42 ± 9.10
+21.14 ± 8.26
+Table 5.2: RMSE for the deeper networks.
+==PAGE:76==
+64
+Results
+True points
+Predicted points - B
+Predicted points - C
+True points
+Predicted points - B
+Predicted points - C
+Figure 5.3: Predictions by network B and C.
+5.2.3
+Residual network D
+The results are shown in Table 5.3. The performance is on par with the deep
+network B, but it should be noted that the residual network only use approxi-
+mately a third of the memory required for the deeper networks.
+Model
+RMSE
+Test
+RMSE
+Validation
+RMSE
+Training
+D
+15.70 ± 6.02
+16.01 ± 6.02
+12.82 ± 4.70
+Table 5.3: RMSE for residual network D.
+5.2.4
+VGG16, ResNet50 and ResNet101
+The results of the modiﬁed versions of VGG16, ResNet50 and ResNet101 is
+shown in Table 5.4. Both of the residual networks perform well on the test set,
+but also overﬁts signiﬁcantly to the training data.
+==PAGE:77==
+5.2 Phase 1
+65
+Model
+RMSE
+Test
+RMSE
+Validation
+RMSE
+Training
+VGG16
+23.35 ± 7.70
+23.56 ± 6.61
+22.07 ± 5.79
+ResNet50
+12.61 ± 5.60
+12.52 ± 4.62
+4.16 ± 1.61
+ResNet101
+12.04 ± 4.96
+11.08 ± 5.27
+3.53 ± 1.52
+Table 5.4: RMSE for VGG16, ResNet50 and ResNet101.
+In Figure 5.4 the predictions by ResNet50 and VGG16 is shown (ResNet101 is
+left out as it was almost identical to ResNet50’s prediction). ResNet50’s pre-
+dictions are similar to network B’s in both cases, and VGG16 does not perform
+very well.
+True points
+ResNet50
+VGG16
+True points
+ResNet50
+VGG16
+Figure 5.4: VGG16 and ResNet50’s predictions on the same test cases as
+shown in Figure 5.2.
+5.2.5
+Using multiple 2D slices
+The results of using multiple 2D slices are shown in Table 5.5. Using additional
+slices does not improve the performance of the networks.
+==PAGE:78==
+66
+Results
+Model
+RMSE
+Test
+RMSE
+Validation
+RMSE
+Training
+B - 3 slices
+15.45 ± 7.54
+13.43 ± 5.46
+7.74 ± 3.05
+ResNet50 - 3 slices
+13.19 ± 6.58
+12.79 ± 6.36
+4.69 ± 2.26
+ResNet50 - 7 slices
+12.98 ± 6.18
+11.40 ± 5.45
+4.25 ± 1.85
+Table 5.5: RMSE for networks using multiple 2D slices as input.
+5.2.6
+Angular displacement loss function
+The results of using the custom loss function that weighs the angular displace-
+ment, as described in Section 4.2.7, are shown in Table 5.6. w1 is set to 1, and
+w2 is varied between 10 and 2000. The angular displacement is given in degrees.
+The custom loss function does not improve the performance of the networks.
+The test error remains around 16 and w2 does not actually decrease the angular
+displacement. The is likely due to the custom loss function dragging the param-
+eters towards a sub-optimal area of the solution space. Adding the constraint on
+the angular displacement thus prevents the model from ﬁnding a more optimal
+set of parameters.
+Model
+RMSE
+Test
+RMSE
+Validation
+RMSE
+Training
+Avg. angular
+displacement
+Degrees
+B - w2 = 10
+16.44 ± 7.12
+17.10 ± 6.44
+12.84 ± 4.34
+4.89 ± 4.54
+B - w2 = 50
+15.70 ± 8.29
+16.38 ± 6.09
+9.65 ± 4.54
+5.18 ± 4.01
+B - w2 = 100
+16.36 ± 10.41
+14.91 ± 5.01
+11.12 ± 4.20
+6.13 ± 3.85
+B - w2 = 500
+15.61 ± 8.21
+15.79 ± 5.71
+12.37 ± 5.49
+4.71 ± 3.46
+B - w2 = 2000
+20.59 ± 11.06
+20.52 ± 10.07
+18.17 ± 12.60
+6.31 ± 4.11
+Table 5.6: RMSE for models using custom loss function weighing in the angu-
+lar displacement.
+5.2.6.1
+Augmented training data
+The results of using augmented training data is shown in Table 5.7. Using an
+augmented training set improved the performance of both networks.
+==PAGE:79==
+5.3 Phase 2
+67
+Model
+RMSE
+Test
+RMSE
+Validation
+RMSE
+Training
+B - 5600 images
+12.96 ± 5.82
+13.18 ± 5.01
+3.66 ± 1.42
+ResNet50 - 5600 images
+11.02 ± 5.09
+10.62 ± 4.60
+1.78 ± 0.86
+Table 5.7: RMSE for models trained on augmented training data.
+5.3
+Phase 2
+This section presents the results of the networks used for phase 2 of the problem,
+in which 3 landmarks are annotated on the orthogonal image. Only networks
+B, C and ResNet’s are explored for phase 2.
+5.3.1
+Deeper network
+The error of the deep networks B and C is shown in Table 5.8. Examples of
+good and bad test cases are shown in Figure 5.5. The two networks perform
+equally well, but network C overﬁts less than network B which is desirable.
+Model
+RMSE
+Test
+RMSE
+Validation
+RMSE
+Training
+B
+14.14 ± 5.64
+14.70 ± 6.41
+8.42 ± 2.89
+C
+14.91 ± 6.52
+15.67 ± 7.72
+12.27 ± 5.06
+Table 5.8: RMSE of network B and C in phase 2.
+==PAGE:80==
+68
+Results
+True points
+Predicted points - B
+Predicted points - C
+(a) Inaccurate prediction.
+True points
+Predicted points - B
+Predicted points - C
+(b) Accurate prediction
+Figure 5.5: Two test cases with ground truth and predicted values for network
+B in phase 2.
+5.3.2
+ResNet50
+Results of the ResNet50 network with and without augmented training data is
+shown in Table 5.9. The network trained on augmented images performs very
+well and shows an RMSE lower than the inter-observer variability. In Figure
+5.9 the predictions are shown on the same test cases as Figure 5.5.
+Model
+RMSE
+Test
+RMSE
+Validation
+RMSE
+Training
+ResNet50
+12.36 ± 5.53
+12.19 ± 6.86
+4.20 ± 1.60
+ResNet50 - 5600 images
+10.34 ± 4.01
+10.61 ± 5.24
+3.64 ± 1.21
+Table 5.9: RMSE of ResNet50 for phase 2.
+==PAGE:81==
+5.4 Summary
+69
+True points
+ResNet50
+ResNet50 - 5600 training data
+(a) Inaccurate prediction.
+True points
+ResNet50
+ResNet50 - 5600 training data
+(b) Accurate prediction
+Figure 5.6: Predictions by ResNet50.
+5.4
+Summary
+In Table 5.10 a summary of all the networks tested are shown. The networks
+with ∗was trained using a single Nvidia Quadro P5000 16GB GPU. The rest
+of the networks was trained using two Nvidia Titan RTX 24 GB GPUs, and
+trained using Matlab’s parallel pool option. This explains the drastically better
+training times for the networks without an ∗. The two networks selected for
+implementation in a ﬁnal model is shown in bold.
+==PAGE:82==
+70
+Results
+Phase 1
+Network
+RMSE
+Test
+RMSE
+Validation
+RMSE
+Training
+Size of
+.mat ﬁle
+Training time
+A
+19.72 ± 8.83
+20.26 ± 10.00
+15.64 ± 6.27
+32.5 MB
+5 min ∗
+A - Normalized
+19.26 ± 10.21
+17.64 ± 6.81
+14.31 ± 6.05
+32.6 MB
+5 min ∗
+A - Gen. points
+20.70 ± 10.32
+19.80 ± 8.23
+16.80 ± 7.54
+34.0 MB
+5 min ∗
+B
+14.25 ± 5.87
+14.38 ± 5.54
+10.65 ± 4.71
+1.39 GB
+1 hour ∗
+C
+22.78 ± 8.98
+22.42 ± 9.10
+21.14 ± 8.26
+1.19 GB
+5 hours ∗
+D
+15.70 ± 6.02
+16.01 ± 6.02
+12.82 ± 4.70
+0.46 GB
+1.5 hours ∗
+VGG16
+23.35 ± 7.70
+23.56 ± 6.61
+22.07 ± 5.79
+1.10 GB
+5 min
+ResNet50
+12.61 ± 5.60
+12.52 ± 4.62
+4.16 ± 1.61
+0.21 GB
+7.5 min
+ResNet101
+12.04 ± 4.96
+11.08 ± 5.27
+3.53 ± 1.52
+0.29 GB
+14 min
+ResNet50 - 5600 images
+10.51 ± 4.52
+10.22 ± 3.97
+3.66 ± 1.40
+0.21 GB
+1.5 hours
+B - 5600 images
+12.96 ± 5.82
+13.18 ± 5.01
+3.66 ± 1.42
+1.39 GB
+17.5 hours ∗
+B - 3 slices
+15.45 ± 7.54
+13.43 ± 5.46
+7.74 ± 3.05
+1.40 GB
+7 min
+ResNet50 - 3 slices
+13.19 ± 6.58
+12.79 ± 6.36
+4.69 ± 2.26
+0.21 GB
+7 min
+ResNet50 - 7 slices
+12.98 ± 6.18
+11.40 ± 5.45
+4.25 ± 1.85
+0.22 GB
+8 min
+B - w2 = 10
+16.44 ± 7.12
+17.10 ± 6.44
+12.84 ± 4.34
+1.40 GB
+7 min
+B - w2 = 50
+15.70 ± 8.29
+16.38 ± 6.09
+9.65 ± 4.54
+1.40 GB
+7 min
+B - w2 = 100
+16.36 ± 10.41
+14.91 ± 5.01
+11.12 ± 4.20
+1.40 GB
+7 min
+B - w2 = 500
+15.61 ± 8.21
+15.79 ± 5.71
+12.37 ± 5.49
+1.40 GB
+7 min
+B - w2 = 2000
+20.59 ± 11.06
+20.52 ± 10.07
+18.17 ± 12.60
+1.40 GB
+7 min
+Phase 2
+B
+14.14 ± 5.64
+14.70 ± 6.41
+8.42 ± 2.89
+1.50 GB
+7 min
+C
+14.91 ± 6.52
+15.67 ± 7.72
+12.27 ± 5.06
+1.2 GB
+1.5 hours
+ResNet50
+12.36 ± 5.53
+12.19 ± 6.86
+4.20 ± 1.60
+0.21 GB
+8 min
+ResNet50 - 5600 images
+10.34 ± 4.01
+10.61 ± 5.24
+3.64 ± 1.21
+0.21 GB
+2 hours
+Table 5.10: Summary of all experiments.
+==PAGE:83==
+Chapter 6
+Proposed Model
+This section describes the proposed model that combines two networks from
+phase 1 and 2 to automate the process of generating the short-axis transforma-
+tion of a full 3D CT image stack.
+6.1
+Implementation
+The ResNet50 networks were chosen for the implementation of the proposed
+model. They performed very well and required the least amount of memory as
+an additional beneﬁt. A matlab plugin for the Segment software was developed.
+The implementation allows for manual use of the solution and batch-processing
+for automatic transformation of multiple ﬁles.
+The implementation utilizes the global data structures SET, NO, DATA which
+stems from Segment. When an image stack is loaded from a .mat/.dicom ﬁle
+into Segment the images and information is stored in SET. The networks are
+loaded outside of the function and stored in the global variables net_p1 and
+net_p2 for phase 1 and 2 respectively. A ﬂow chart of the solution is shown
+Figure 6.1 and the implementation is shown in Appendix F.
+==PAGE:84==
+72
+Proposed Model
+Figure 6.1: Flow chart of the proposed automatic model.
+The proposed model creates a transformed image stack that can be used with
+Segment’s LV algorithm to segment and measure the volume of the left ventricle.
+An example of a transformed image with segmentation is shown in Figure 6.2.
+Segment’s algorithms determines the End-Diastolic Volume (EDV) which is a
+measure of the volume of blood in the left ventricle before systole. Diastole is the
+part of the cardiac cycle in which the left ventricle expands and ﬁlls with blood,
+and systole is the part in which the blood is pumped out of the left ventricle.
+Segment’s algorithms also calculates the Left Ventricle Mass (LVM) which is
+computed by calculating the volume diﬀerence between the epicardium (green)
+and the endocardium (red) segmentation as seen in Figure 6.2. The diﬀerence
+is then multiplied by a constant to convert to mass.
+==PAGE:85==
+6.1 Implementation
+73
+(a) Slice 48.
+(b) Slice 44.
+(c) Slice 40.
+(d) Slice 24.
+Figure 6.2: Various 2D slices from the transformed image stack, showing the
+left ventricle segmentation performed by Segment’s algorithms.
+The red and green lines are the endocardium and epicardium seg-
+mentations respectively. The bottom right image shows the last
+slice before the left ventricle becomes the left atrium, which is
+where the segmentation algorithm stops. The entire transformed
+image stack consist of 54 2D slices in total. The ﬁrst slices are
+interpolated above the heart, and each slices then progress along
+the short-axis towards the apex of the heart, and slightly beyond.
+These measures are used to quantitatively evaluate the performance of the pro-
+posed model. Due to the way the segmentation algorithm works, the trans-
+formed image stacks can vary in size and number of slices, and thus it is not
+==PAGE:86==
+74
+Proposed Model
+suﬃcient to compare how each slice diﬀers between a ground truth annotation
+and an automatic annotation.
+6.2
+Inter-observer variability on transformed im-
+age stacks
+In order to evaluate the performance of the automated solution the inter-observer
+variability is measured on the metrics EDV, LVM and slice number. 200 3D im-
+age stacks were manually annotated by two diﬀerent medical professionals and
+the resulting transformations were compared. Note that the doctors were free
+to choose which slice they preferred, and more often than not chose diﬀerent
+slices. This can lead to a signiﬁcantly diﬀerent transformations and thus dif-
+ferent segmentations. By automating the process of annotating the landmarks,
+this bias in the transformation is erradicated.
+The Mean Absolute Error (MAE) of EDV, LVM, and the diﬀerences in chosen
+slices, are shown in Table 6.1 for 200 observations annotated by two diﬀerent
+doctors.
+Metric
+MAE
+EDV
+5.24 ± 4.39 mL
+LVM
+6.56 ± 5.80 g
+Slice diﬀ.
+18 ± 14
+Table 6.1: Inter-observer variability between two doctors’ manually trans-
+formed image stacks.
+In Figure 6.3 the ﬁrst phase of the two cases with the largest diﬀerence in
+EDV is shown. The large diﬀerences in the location of the landmarks and the
+diﬀerence of the slices being used initiates this bias (the term bias is used, as it
+is the subjective opinion of the doctor that decides the location of the points).
+In Figure 6.4 and 6.3 the orthogonal images are shown with the annotated
+points. While the images look very similar the location of the landmarks do
+diﬀer signiﬁcantly. Coupled with the diﬀerences from phase 1 this lead to the
+large diﬀerence in EDV.
+==PAGE:87==
+6.2 Inter-observer variability on transformed image stacks
+75
+Observer 1
+Observer 2
+(a) EDV diﬀerence = 24.8 mL, slice dif-
+ference = 9.
+Observer 1
+Observer 2
+(b) EDV diﬀerence = 21.9 mL, slice dif-
+ference = 10.
+Figure 6.3: The two cases where the EDV diﬀerence between the two doctors’
+annotations are largest.
+(a) Orthogonal image for observer 1.
+(b) Orthogonal image for observer 2.
+Figure 6.4: Phase 2 two of the annotation process for the case with the largest
+inter-observer variability (Figure 6.3a.
+==PAGE:88==
+76
+Proposed Model
+6.3
+Evaluating ﬁrst iteration of proposed model
+The ﬁrst iteration of the proposed model uses the middle slice of the image stack.
+While this is a simple method it is likely to introduce errors in the resulting
+transformation.
+The training set used for developing the networks (used in
+phase 1 and 2) was trained only on the slices selected by the doctors, and these
+were not the middle slice at all times. For certain image stacks the left ventricle
+is barely visible in the middle stack, and thus the predictions from the networks
+are worse, leading to a worse total transformation. This implementation was
+tested on the test data set with 77 observations. Each observation had a ground
+truth EDV and LVM value that was determined using the transformation done
+with manually annotated landmarks. These values were compared to the values
+determined from using the proposed automatic solution presented above. The
+mean of EDV and LVM for the ground truth observations, and MAE between
+ground truth and the automated solution, is shown in Table 6.2.
+Metric
+Mean value
+Ground truth
+MAE
+EDV
+117.22 ± 33.23 mL
+9.13 ± 14.36 mL
+LVM
+98.04 ± 30.86 mL
+6.42 ± 5.22 g
+Slice diﬀ.
+218.94 ± 36.64
+10.90 ± 15.55
+Table 6.2: Error metrics for the ﬁrst iteration of the automated solution.
+To shed some light on the issues with the model, the observations with the largest
+error is inspected.
+The largest error stem from a poor-quality observation,
+shown in Figure 6.5. The second largest case is interesting, because while the
+image quality also falls below average, the predictions in phase 1 is very far
+behind the real mitral-valve plane, as seen in Figure 6.7. The predictions by
+the network in phase 2 are good, as seen in Figure 6.8. However, the points
+being annotated far behind the ground truth points in phase 1 means, that the
+segmentation algorithms assumes this is where the mitral-valve plane is located.
+This results in the ground truth transformed image stack having 27 slices used
+in the segmentation, and in the automatically transformed image stack 32 slices
+are used. This aﬀects the calculation of the EDV and produces a larger value
+for the automated image stack, hence the large error. These two cases were the
+most extreme, and a plot of all the residuals is shown in Figure 6.6.
+==PAGE:89==
+6.3 Evaluating ﬁrst iteration of proposed model
+77
+(a) The image quality is very low. The
+contrasts are very small, and the
+image also appears to be shifted
+to the right, such that part of the
+heart is missing in the image.
+(b) Due to the poor image quality the
+segmentation algorithm struggles
+to segment the left ventricle.
+In
+the shown slice it even segments
+outside the anatomical structure
+of the heart.
+Figure 6.5: The largest error in the test set stems from an observation with
+very low quality. The absolute error on the EDV between ground
+truth and the automated model was 120.00 mL.
+0
+10
+20
+30
+40
+50
+60
+70
+80
+-60
+-40
+-20
+0
+20
+40
+60
+80
+100
+120
+140
+Error = 120.00
+Error = -42.57
+Figure 6.6: EDV residuals on the test set with 77 observations. The two worst
+cases are high-lighted.
+==PAGE:90==
+78
+Proposed Model
+Figure 6.7: The absolute error on the EDV between ground truth and the
+automated model was 42.57 mL. The network in phase 1 performs
+poorly on this test case leading to an overall bad performance.
+(a) Ground truth points on orthogonal
+image.
+(b) Predicted points on orthogonal
+image.
+Figure 6.8: The second network performs well, but cannot make up for the
+error commited in phase 1.
+==PAGE:91==
+6.4 Predicting a suitable slice
+79
+6.4
+Predicting a suitable slice
+One way to try and improve the model is to ensure that a suitable slice is used
+for predicting the points in phase 1. A suitable slice should be similar to the
+slices that the network (in phase 1) was trained on, and as such stem from the
+same theoretical distribution. In the perfect world, the only variance between
+the images should be the variance caused by the diﬀering anatomical structures,
+and not due to the slices being selected for annotation.
+To try and predict a suitable slice, a new data set was constructed. For a single
+3D stack the ground truth slice (used for annotation) ±15 slices on each side,
+was labelled Good, and the rest was labelled as Bad. Every other slice of the 201
+middle slices was then stored for training a network to do binary classiﬁcation.
+This labelling can be described with the following equations
+Good = {T ± 2 · i : 0 ≤i ≤7}
+Bad = {T ± 2 · i : 8 ≤i ≤50}
+where T is the ground truth slice number, and Good/Bad is the set of slices
+labelled Good and Bad respectively. As an example imagine a 3D image stack
+used slice 230 for the manual annotation. The classes Good and Bad then consists
+of the slices
+Good = {i : i is even , 216 ≤i ≤244}
+Bad = {i : i is even , 130 ≤i ≤214 and 246 ≤i ≤330}.
+Using this formula a data set of 47571 slices was constructed. It was split into
+a training, validation and hold-out test sets with splits of
+Training = 40, 000
+(84.1%)
+Validation = 2, 571
+(5.4%)
+Test = 5, 000
+(10.5%).
+Note that the training set is skewed towards the Bad class, as class Good only
+constitutes ∼15% of the slices. Generally this is far from ideal as the network
+is taught the bias that exists in the training data. There are ways to deal with
+this by either augmenting the training data, down-sampling the Bad class or use
+a custom loss function that penalizes selecting the Bad class. Fortunately the
+way this network is used in the solution provides excellent results, so improving
+the network further would not aﬀect the outcome of the solution greatly.
+A network with the ResNet50 architecture was trained for doing the binary
+classiﬁcation of slices. The images was resized to dimensions of 128 × 128, a
+==PAGE:92==
+80
+Proposed Model
+mini batch size of 32, 15 epochs and the Adam optimizer was used for training
+the network. Matlab’s classiﬁcation layer uses cross-entropy loss by default. In
+Figure 6.9 the confusion matrix on the test set is shown.
+Bad
+Good
+Target Class
+Bad
+Good
+Output Class
+ Confusion Matrix
+4193
+83.9%
+69
+1.4%
+98.4%
+1.6%
+76
+1.5%
+662
+13.2%
+89.7%
+10.3%
+98.2%
+1.8%
+90.6%
+9.4%
+97.1%
+2.9%
+Figure 6.9: Confusion matrix for slice classiﬁcation CNN.
+Over all the network performs very well with high accuracy (97.1%), low false-
+positive (1.6%), and reasonably high Precision (90.6%) and Recall (89.7%). The
+false-negative rate is slightly higher (10.3%), but this is not a big concern due to
+the way the network is used. The network is implemented in the proposed solu-
+tion in a function PredictSlice, shown in appendix G. This function predicts
+the class of each of the middle 50% of the slices in the 3D image stack. It uses
+the mean slice number of the images that are classiﬁed as Good, which turns
+out to be very close to the ground truth slice. The function was tested on the
+test data set with 77 observations. The results are very good with a mean error
+of 2.22 slices. The error is the mean absolute error between the predicted slice
+and the ground truth slice. When inspected, two cases had very large errors,
+and drastically impacted the mean error and standard deviation. The ﬁrst case
+has a ground truth value of slice 215. The networks predicts 42 slices in total as
+==PAGE:93==
+6.5 Second iteration with slice prediction
+81
+Good. The ﬁrst 29 is ranging from [202 −230] with a mean value of 216, which
+yields an error of 1. Unfortunately the network also predicts 13 slices from the
+range [320 −345] as being Good. These false-positives impacts the mean slice
+number (for this observation) heavily, bringing the mean prediction up to slice
+252 and the error up to 37. The second largest error in the test set is 30 and
+stems from the low-quality case shown in Figure 6.5.
+6.5
+Second iteration with slice prediction
+Using the new network to predict a suitable slice, the automated solution was
+tested again on the test data. The results are shown in Table 6.3. It shows an
+improvement on predictions of the EDV and LVM, and a large improvement
+on the predicted slices.
+The performance is on par with the inter-observer
+variability, and suggests that this model could be used to automate the process
+of annotation and short-axis transformation.
+Metric
+Mean value
+Ground truth
+MAE
+EDV
+117.15 ± 33.44 mL
+5.95 ± 7.27 mL
+LVM
+98.96 ± 29.96 mL
+4.54 ± 4.88 g
+Slice diﬀ.
+216.71 ± 22.32
+2.22 ± 5.41
+Table 6.3: Error metrics for proposed solution using a network for predicting
+a suitable slice.
+The residuals of the predicted EDV is shown in Figure 6.11. Interestingly the
+new iteration performs a lot better on the worst-case scenario before, with a
+new EDV error of 28.79 making it the third worst case. The largest EDV error
+(41.67) stem from the same observation as in Figure 6.7, and the second largest
+error (36.29) was the case with third largest error in the ﬁrst iteration. The
+predicted points for this case is shown in Figure 6.10, and all the residuals are
+plotted in 6.11.
+==PAGE:94==
+82
+Proposed Model
+True points
+Predicted points
+Figure 6.10: Observation causing the second largest EDV error in the test
+set. The network predicts the points to be in front of the ground
+truth, which causes the algorithm to segment a smaller part of
+the left-ventricle, leading to a much lower EDV value.
+0
+10
+20
+30
+40
+50
+60
+70
+80
+-50
+-40
+-30
+-20
+-10
+0
+10
+20
+30
+40
+Error = -41.67
+Error = 36.29
+Error = 28.79
+Figure 6.11: EDV residual plot for the second iteration on the test set.
+==PAGE:95==
+6.6 Combining data sets
+83
+6.6
+Combining data sets
+To ensure the best possible model was handed over to Medviso AB for full im-
+plementation in Segment, the 200 observations used to determine inter-observer
+variability, was combined with the original dataset of 477 observations. This
+produced a dataset of 676 (the poor quality observation was removed), which
+was split into training, validation and test in the following way
+Training = 550 obs. = 81.4%
+Validation = 26 obs. = 3.9%
+Test = 100 obs. = 14.8%
+ResNet50 was trained on this data set for 15 epochs.
+In addition the data
+augmenter was used to generate a training set of 4400 images, with max rotation
+±20°, scaling factor in the range [0.9, 1.1], and a max translation of ±3 in both
+directions. Another data set with 35200 images, max rotation of ±60°, scaling
+factor [0.75, 1.25] and max translation of ±8 was created. ResNet50 was trained
+using the augmented data sets and 10 epochs. The results are shown in Table
+6.4. The networks performs better and better, and using 35, 200 augmented
+images causes the networks to outperform the inter-observer variability on the
+annotations. The networks trained on 35, 200 images are implemented in the last
+iteration of the automated model. The results are shown in Table 6.5. The ﬁnal
+iteration of the model predicts both EDV and LVM with a lower MAE than the
+inter-observer diﬀerence over 200 observations. However, these numbers might
+be positively inﬂated due to the way the training data is constructed. Combining
+the two data sets meant having two identical observations with diﬀering ground
+truth values. As the test set is sampled randomly there will be observations that
+exist in both the training and test set. Though the training set is augmented
+with rotation, scaling and translation, the images are still highly correlated and
+are likely to aﬀect the test performance positively.
+Network
+RMSE
+Test
+RMSE
+Validation
+RMSE
+Training
+Phase 1
+11.53 ± 4.53
+11.38 ± 4.93
+3.93 ± 1.70
+Phase 2
+12.41 ± 5.46
+12.37 ± 4.54
+4.70 ± 3.41
+Phase 1 - 4400 obs.
+10.44 ± 4.08
+9.64 ± 3.74
+4.47 ± 1.71
+Phase 2 - 4400 obs.
+11.03 ± 5.35
+11.24 ± 3.85
+4.92 ± 1.77
+Phase 1 - 35200 obs.
+9.68 ± 3.45
+9.48 ± 3.89
+2.92 ± 1.32
+Phase 2 - 35200 obs.
+10.37 ± 4.59
+9.87 ± 4.01
+3.80 ± 1.12
+Table 6.4: RMSE of ResNet50 trained on the combined data set.
+==PAGE:96==
+84
+Proposed Model
+Metric
+Mean value
+Ground truth
+MAE
+EDV
+116.66 ± 28.70 mL
+4.40 ± 3.50 mL
+LVM
+94.79 ± 26.77 mL
+4.48 ± 6.12 g
+Slice diﬀ.
+216.04 ± 55.09
+3.92 ± 6.35
+Table 6.5: Error metrics for ﬁnal iteration of the automatic model. The auto-
+matic model has a lower error on both EDV and LVM, compared
+to the inter-observer variability caused by the biased annotations
+of two doctors.
+==PAGE:97==
+Chapter 7
+Discussion
+In this section some of the results, the proposed model and general reﬂections
+regarding the problem and project is discussed.
+7.1
+Inter-observer variability
+In Figure 7.1 examples of inter-observer variability is shown.
+Upon further
+inspection of the data set used for the inter-observer variability, observer 2 (blue
+stars) tends to annotate slightly outside the clear anatomical structure of the
+left ventricle, where as observer 1 (red stars) generally annotates the landmark
+on the borders. This is an example of the human bias from manual annotation,
+which alone is a motivator for automating the annotation process.
+==PAGE:98==
+86
+Discussion
+Observer 1
+Observer 2
+Observer 1
+Observer 2
+Figure 7.1: Examples of the inter-observer variability on 2 observations.
+7.2
+Landmark prediction
+ResNet50 was the method of choice due to its performance and relative simplic-
+ity. Matlab has a pretrained version of ResNet50 which made it very easy to
+modify it to ﬁt the data in this project.
+For all the networks, the validation and training error converged rather quickly,
+which explains why most networks only trained for 10 epochs. In Figure 7.2
+the training progress of ResNet50 for phase 2 on 35,200 augmented images is
+shown. The validation error very quickly converges to its ﬁnal value making
+additional epochs unnecessary. Note that the RMSE reported by Matlab does
+not take into account the number of outputs. In order to compare the networks
+in Section 5.2.1, where the outputs vary from 6 to 54, the RMSE from Matlab
+is not usable, and thus the RMSE deﬁned in Section 5 is used instead.
+==PAGE:99==
+7.3 Proposed model
+87
+Figure 7.2: Matlab’s visualization of the training progress for ResNet50
+trained on 35,200 augmented images for phase 2.
+It is worth noting that the deeper network C performed poorly compared to
+the shallower network B. This shows that increasing depth does not necessar-
+ily improve performance (as [11] and [10] also showed). The results of all the
+experiments also suggest that a residual structure is superior to a pure convolu-
+tional network. None of the convolutional networks could compete on accuracy
+or memory requirements with the residual networks.
+7.3
+Proposed model
+The last iteration of the proposed model (trained on the combined data set) per-
+forms very well. Compared to the inter-observer variability, the proposed model
+reduced the error with ∼16% for EDV and ∼32% for LVM. As mentioned,
+this metric is likely to be slightly inﬂated by the conﬂicting training and test
+set, explained in Section 6.6. The proposed model takes 9 seconds on average to
+run (on a regular work station), and generates the short-axis image stack. The
+segmentation algorithm can then be used, which takes ∼7 seconds. This means
+that the proposed solution reduces the time it takes to process a single case by
+∼62% (45 seconds for the previous semi-automatic method), and it the process
+does not require manual annotation. In addition, the subjective bias from the
+doctors is eradicated.
+==PAGE:100==
+88
+Discussion
+Provided that the subset of data used in this project is a fair representation of
+the entire SCAPIS data set, the proposed model would allow the entire data
+set to be processed oﬄine, without manual annotation, saving both time and
+money. However, it should be noted that the system should be monitored to
+some degree. This could be done with manual inspection of screenshots, which
+on median takes 7 seconds per case 1.
+7.4
+Reﬂection
+As previously mentioned, the work presented in this report is very much the
+result of a trial-and-error methodology. This is due to the fact that neural net-
+works in general have low explainability. It is often hard to determine exactly
+why a certain architecture performs well on any given problem. In hindsight,
+transfer learning could have been examined earlier in the project instead of
+testing various homemade networks.
+This might have allowed for additional
+network structures to be tested such as InceptionNet or GoogleNet. This brings
+up the question of when is a model good enough?
+Because the neural net-
+works have such low explainability it is hard to reason why a certain change
+would greatly inﬂuence a network’s performance. Using an exhaustive hyper
+parameter search method is also infeasible as there inﬁnite number of network
+conﬁgurations. Similarly, the experiments with augmented training data could
+be extended to train the networks on an even larger data set. In this project it
+has been a constant balance between improving the model, limiting the training
+time and the time-constraint of the project (as is the case with all research).
+1Unpublished paper, Lund Cardiac MR group.
+==PAGE:101==
+Chapter 8
+Conclusion and future work
+SCAPIS is a Swedish data set containing information of more than 30,000 pa-
+tients, including 3D CT images. Speciﬁcally for research in cardiovascular dis-
+eases, the heart and the left ventricle plays a key role. Medviso AB has devel-
+oped an image software that allows for manual annotation of landmarks on the
+left ventricle, short-axis transformation and LV segmentation, which yield key
+anatomical measures such as End-Diastolic Volume and Left-Ventricle-Mass.
+Manually annotating landmarks is a costly and time consuming procedure, that
+also introduces bias from the doctors.
+This project proposes an automatic model for annotating and transforming 3D
+CT scans. It is build as a plug-in to Segment, and allows for single ﬁle and
+batch processing. The proposed solution utilizes 3 independent convolutional
+neural networks, all based on the ResNet50 architecture. The automatic model
+performs on par with the manual transformations, when measured on the inter-
+observer variability on metrics like EDV and LVM. The last iteration of the
+proposed model outperformed the human inter-observer variability signiﬁcantly,
+but is also likely to be positively inﬂated due to conﬂicting training and test
+sets. An additional beneﬁt to the automated model is eradicating the subjective
+bias from the doctors, leading to the inter-observer variability.
+8.1
+Future work
+There are two primary directions in which future research can build upon this
+project and solution. The ﬁrst is to try and improve the accuracy of the networks
+==PAGE:102==
+90
+Conclusion and future work
+used in the proposed solution. The work presented in this project is the result
+of a trial-and-error approach, and while extensive experiments were carried out,
+there are additional experiments that could be tested in order to improve the
+networks used.
+This mainly revolves around varying the architecture of the
+networks and testing architectures that has proven successful for other image
+related tasks. Another way of improving the networks would be to acquire ad-
+ditional training data of the same format as used in this project, and preferably
+with annotations from various doctors, to ensure a better generalization of the
+networks.
+The other approach would be to rethink the problem and attack it from a dif-
+ferent perspective. This could be to use the entire 3D stack to do fully semantic
+segmentation of the left ventricle. Doing this would require a substantial amount
+of preprocessing, as the data required for training such a network is very diﬀerent
+to the data used in this network.
+==PAGE:103==
+Bibliography
+[1] “Scapis homepage,” http://scapis.se/, accessed: 2019-02-06.
+[2] J. Guo, X. Mei, and K. Tang, “Automatic landmark annotation and dense
+correspondence registration for 3d human facial images,” BMC bioinfor-
+matics, vol. 14, no. 1, p. 232, 2013.
+[3] J. Zhang, M. Liu, and D. Shen, “Detecting anatomical landmarks from
+limited medical imaging data using two-stage task-oriented deep neural
+networks,” IEEE Transactions on Image Processing, vol. 26, no. 10, pp.
+4753–4764, 2017.
+[4] A. Suzani, A. Rasoulian, A. Seitel, S. Fels, R. N. Rohling, and P. Abolmae-
+sumi, “Deep learning for automatic localization, identiﬁcation, and segmen-
+tation of vertebral bodies in volumetric mr images,” in Medical Imaging
+2015: Image-Guided Procedures, Robotic Interventions, and Modeling, vol.
+9415.
+International Society for Optics and Photonics, 2015, p. 941514.
+[5] C. Payer, D. Štern, H. Bischof, and M. Urschler, “Regressing heatmaps for
+multiple landmark localization using cnns,” in International Conference on
+Medical Image Computing and Computer-Assisted Intervention.
+Springer,
+2016, pp. 230–238.
+[6] Q. Tao, W. Yan, Y. Wang, E. H. Paiman, D. P. Shamonin, P. Garg, S. Plein,
+L. Huang, L. Xia, M. Sramko et al., “Deep learning–based method for fully
+automatic quantiﬁcation of left ventricle function from cine mr images: a
+multivendor, multicenter study,” Radiology, vol. 290, no. 1, pp. 81–88, 2018.
+[7] G. Luo, S. Dong, K. Wang, W. Zuo, S. Cao, and H. Zhang, “Multi-views
+fusion cnn for left ventricular volumes estimation on cardiac mr images,”
+IEEE Transactions on Biomedical Engineering, vol. 65, no. 9, pp. 1924–
+1934, 2018.
+[8] “Quick intro to neural networks,”
+https://ujjwalkarn.me/2016/08/09/
+quick-intro-neural-networks/, accessed: 2019-02-18.
+==PAGE:104==
+92
+BIBLIOGRAPHY
+[9] I. Goodfellow, Y. Bengio, and A. Courville, Deep Learning.
+MIT Press,
+2016, http://www.deeplearningbook.org.
+[10] S. Zagoruyko and N. Komodakis, “Wide residual networks,” arXiv preprint
+arXiv:1605.07146, 2016.
+[11] J. Ba and R. Caruana, “Do deep nets really need to be deep?” pp. 2654–
+2662, 2014.
+[12] A. Krizhevsky and G. Hinton, “Learning multiple layers of features from
+tiny images,” Citeseer, Tech. Rep., 2009.
+[13] J. S. Garofolo, L. F. Lamel, W. M. Fisher, J. G. Fiscus, D. S. Pallett, and
+N. L. Dahlgren, “Darpa timit acoustic phonetic continuous speech corpus
+cdrom,” 1993.
+[14] K. He, X. Zhang, S. Ren, and J. Sun, “Deep residual learning for image
+recognition,” in Proceedings of the IEEE conference on computer vision
+and pattern recognition, 2016, pp. 770–778.
+[15] K. He and J. Sun, “Convolutional neural networks at constrained time
+cost,” in Proceedings of the IEEE conference on computer vision and pattern
+recognition, 2015, pp. 5353–5360.
+[16] R. K. Srivastava, K. Greﬀ, and J. Schmidhuber, “Highway networks,” arXiv
+preprint arXiv:1505.00387, 2015.
+[17] D. Masters and C. Luschi, “Revisiting small batch training for deep
+neural networks,” CoRR, vol. abs/1804.07612, 2018. [Online]. Available:
+http://arxiv.org/abs/1804.07612
+[18] S. Ioﬀe and C. Szegedy, “Batch normalization:
+Accelerating deep net-
+work training by reducing internal covariate shift,”
+arXiv preprint
+arXiv:1502.03167, 2015.
+[19] S. Santurkar, D. Tsipras, A. Ilyas, and A. Madry, “How does batch nor-
+malization help optimization?(no, it is not about internal covariate shift),”
+arXiv preprint arXiv:1805.11604, 2018.
+[20] G.
+E.
+Hinton,
+N.
+Srivastava,
+A.
+Krizhevsky,
+I.
+Sutskever,
+and
+R.
+Salakhutdinov,
+“Improving
+neural
+networks
+by
+preventing
+co-
+adaptation of feature detectors,” CoRR, vol. abs/1207.0580, 2012. [Online].
+Available: http://arxiv.org/abs/1207.0580
+[21] N. Srivastava, G. Hinton, A. Krizhevsky, I. Sutskever, and R. Salakhutdi-
+nov, “Dropout: A simple way to prevent neural networks from overﬁtting,”
+Journal of Machine Learning Research, vol. 15, pp. 1929–1958, 2014.
+[Online]. Available: http://jmlr.org/papers/v15/srivastava14a.html
+==PAGE:105==
+BIBLIOGRAPHY
+93
+[22] G. Goh, “Why momentum really works,” Distill, 2017. [Online]. Available:
+http://distill.pub/2017/momentum
+[23] Y. N. Dauphin, R. Pascanu, C. Gulcehre, K. Cho, S. Ganguli, and Y. Ben-
+gio, “Identifying and attacking the saddle point problem in high-dimensional
+non-convex optimization,” in Advances in neural information processing
+systems, 2014, pp. 2933–2941.
+[24] “Dicom standard committee,” https://www.dicomstandard.org/, accessed:
+2019-03-20.
+[25] H. et al, “Segment ct,” BMC, MI, Lund, Sweden, Tech. Rep., 2010.
+[26] K. Simonyan and A. Zisserman, “Very deep convolutional networks for
+large-scale image recognition,” arXiv preprint arXiv:1409.1556, 2014.
+[27] J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L. Fei-Fei, “ImageNet:
+A Large-Scale Hierarchical Image Database,” in CVPR09, 2009.
+[28] “Four-quadrant inverse tangent,” https://se.mathworks.com/help/matlab/
+ref/atan2.html#buct8h0-4, accessed: 2019-07-01.
+==PAGE:106==
+94
+BIBLIOGRAPHY
+==PAGE:107==
+Appendix
+A.
+Proof of bias-variance relationship. MSE of an estimator ˆθ, with true unknown
+parameter θ, is deﬁned as
+MSE(ˆθ) = E
+h
+(ˆθ −θ)2i
+.
+The following augmentation yield
+MSE(ˆθ) = E
+h
+(ˆθ −E[ˆθ] + E[ˆθ] −θ)2i
+= E
+h
+(ˆθ −E[ˆθ])2 + 2(ˆθ −E[ˆθ]) + (E[ˆθ] −θ)2i
+= E
+h
+(ˆθ −E[ˆθ])2i
++ E
+h
+2(ˆθ −E[ˆθ])(E[ˆθ] −θ)
+i
++ E
+h
+(E[ˆθ] −θ)2i
+.
+Since E[ˆθ] −θ = constant and E[ˆθ] = constant it follows that
+MSE(ˆθ) = E
+h
+(ˆθ −E[ˆθ])2i
++ 2
+
+E[ˆθ] −θ
+
+E
+h
+ˆθ −E[ˆθ]
+i
++
+
+E[ˆθ] −θ
+2
+= E
+h
+(ˆθ −E[ˆθ])2i
++ 2
+
+E[ˆθ] −θ
+ 
+E[ˆθ] −E[ˆθ]
+
++
+
+E[ˆθ] −θ
+2
+= E
+h
+(ˆθ −E[ˆθ])2i
++
+
+E[ˆθ] −θ
+2
+The ﬁrst term is exactly the variance of ˆθ and the second term is the squared
+bias of ˆθ with regards to θ. Thus
+MSE(ˆθ) = Var(ˆθ) + Bias(ˆθ, θ)2
+==PAGE:108==
+96
+Appendix
+Note that if one made the assumption that the ground truth values ti, used
+in determining ˆθ, included noise (as would be the case in almost any real life
+measurement/experiment) such that ti(xi) = f(xi) + ϵ, where f(x) is the true
+function that the network is trying to learn and E[ϵ] = 0, then an additional
+term of Var(ϵ) would be included in the formula (this representation is often
+found in the literature). The total mean-squared-error is then
+MSE(ˆθ) = Var(ˆθ) + Bias(ˆθ, θ)2 + Var(ϵ).
+B.
+Functionality for generating new points along the mitral plane and the orthog-
+onal line segment.
+1
+function [xmitr,ymitr,xorth,yorth] = ...
+GeneratePointsOnAxis(xpoints,ypoints,num_points1,num_points2)
+2
+%%%
+Generate points along the mitral plan, and points along the
+3
+%%%
+orthogonal line segment out to the apex point.
+4
+%%%
+Input:
+5
+%%%
+'xpoints'
+: vector of x-coordinates. x1,x2 are mitral points.
+6
+%%%
+x3 is apex point.
+7
+%%%
+'ypoints'
+: vector of y-coordinates. y1,y2 are mitral points.
+8
+%%%
+y3 is apex point.
+9
+%%%
+'num_points1' : number of points along mitral plane.
+10
+%%%
+'num_points2' : number of points along orthogonal line segment.
+11
+%%%
+12
+%%%
+Output:
+13
+%%%
+'xmitr'
+: x-coordinates for points along mitral line.
+14
+%%%
+First element is the first point in 'xpoints'.
+15
+%%%
+Last element is the second point in 'xpoints'.
+16
+%%%
+'ymitr'
+: y-coordinates for points along mitral line.
+17
+%%%
+First element is the first point in 'ypoints'.
+18
+%%%
+Last element is the second point in 'ypoints'.
+19
+%%%
+'xorth'
+: x-coordinates for points along orthogonal line.
+20
+%%%
+First element is the 3rd point in 'xpoints' ...
+(apex point).
+21
+%%%
+Last element is the orthogonal point.
+22
+%%%
+'yorth'
+: y-coordinates for points along orthogonal line.
+23
+24
+xmitr = zeros(1,num_points1);
+25
+ymitr = zeros(1,num_points1);
+26
+xorth = zeros(1,num_points2);
+27
+yorth = zeros(1,num_points2);
+28
+29
+for i=1:num_points1
+30
+xmitr(i+1)=(xpoints(2)*i+xpoints(1)*(num_points1-i))/(num_points1);
+31
+ymitr(i+1)=(ypoints(2)*i+ypoints(1)*(num_points1-i))/(num_points1);
+32
+end
+33
+34
+% Generate point on mitral axis that is orthogonal to apex point
+35
+k = ((ypoints(2)-ypoints(1)) * (xpoints(3)-xpoints(1)) - ...
+(xpoints(2)-xpoints(1)) * ...
+==PAGE:109==
+97
+36
+(ypoints(3)-ypoints(1))) / ((ypoints(2)-ypoints(1))^2 + ...
+(xpoints(2)-xpoints(1))^2);
+37
+38
+x4 = xpoints(3) - k * (ypoints(2)-ypoints(1));
+39
+y4 = ypoints(3) + k * (xpoints(2)-xpoints(1));
+40
+41
+for i=1:num_points2
+42
+xorth(i+1)=(x4*i+xpoints(3)*(num_points2-i))/(num_points2);
+43
+yorth(i+1)=(y4*i+ypoints(3)*(num_points2-i))/(num_points2);
+44
+end
+45
+xmitr(1) = xpoints(1); xmitr(end) = xpoints(2);
+46
+ymitr(1) = ypoints(1); ymitr(end) = ypoints(2);
+47
+xorth(1) = xpoints(3);
+48
+yorth(1) = ypoints(3);
+49
+end
+C.
+Function for calculating angle between two vectors.
+Table 1: Matlab function for calculating angular displacement between two
+vectors
+1
+function angular = AngularDisplacement(vec1,vec2)
+2
+a = [vec1',0]; b = [vec2',0];
+3
+tmp = cross(a,b);
+4
+angular = atan2(norm(tmp),dot([vec1],[vec2]));
+5
+end
+D.
+Custom regression layer using angular displacement between the ground truth
+and the predicted points.
+1
+classdef myRegLayer_AngularDisplacement < nnet.layer.RegressionLayer
+2
+3
+properties
+4
+% (Optional) Layer properties.
+5
+w1
+6
+w2
+7
+% Layer properties go here.
+8
+end
+9
+==PAGE:110==
+98
+Appendix
+10
+methods
+11
+function layer = myRegLayer_AngularDisplacement(name,w1,w2)
+12
+% (Optional) Create a myRegressionLayer.
+13
+layer.Name = name
+14
+layer.Description = "Regression layer with parallelity for 54 ...
+coordinates";
+15
+layer.w1
+= w1;
+16
+layer.w2
+= w2;
+17
+end
+18
+19
+function loss = forwardLoss(layer, Y1, T1)
+20
+% Return the loss between the predictions Y and the
+21
+% training targets T.
+22
+%
+23
+% Inputs:
+24
+%
+layer - Output layer
+25
+%
+Y
+? Predictions made by network
+26
+%
+T
+? Training targets
+27
+%
+28
+% Output:
+29
+%
+loss
+- Loss between Y and T
+30
+w1
+= layer.w1;
+31
+w2
+= layer.w2;
+32
+Y
+= Y1; T = T1;
+33
+N
+= size(Y,4);
+34
+35
+36
+37
+if ndims(Y) == 3
+38
+Y
+= reshape(Y,[size(Y,3),1]);
+39
+T
+= reshape(T,[size(T,3),1]);
+40
+% Truth Vector
+41
+vec_T
+= [T(4)-T(2);T(3)-T(1)];
+42
+% Prediction Vector
+43
+vec_Y
+= [Y(4)-Y(2);Y(3)-Y(1)];
+44
+45
+angulardisp = AngularDisplacement(vec_T,vec_Y);
+46
+47
+loss
+= w1/2*1/6*sum((T-Y).^2) + w2*angulardisp;
+48
+elseif ndims(Y) == 4
+49
+Y
+= reshape(Y,[size(Y,3),size(Y,4)]);
+50
+T
+= reshape(T,[size(T,3),size(T,4)]);
+51
+angulardisp = zeros(1,size(Y,4),'like',Y1);
+52
+for i = 1:N
+53
+% Truth Vector
+54
+vec_T
+= [T(4,i)-T(2,i);T(3,i)-T(1,i)];
+55
+% Prediction Vector
+56
+vec_Y
+= [Y(4,i)-Y(2,i);Y(3,i)-Y(1,i)];
+57
+58
+angulardisp(i) = AngularDisplacement(vec_T,vec_Y);
+59
+60
+end
+61
+loss = w1/(2*N)*sum(1/6*sum((T-Y).^2),2) + ...
+62
+w2*sum(angulardisp);
+63
+end
+64
+65
+end
+66
+67
+function dLdY = backwardLoss(layer, Y1, T1)
+68
+% Backward propagate the derivative of the loss function.
+69
+%
+70
+% Inputs:
+71
+%
+layer - Output layer
+72
+%
+Y
+? Predictions made by network
+73
+%
+T
+? Training targets
+==PAGE:111==
+99
+74
+%
+75
+% Output:
+76
+%
+dLdY
+- Derivative of the loss with respect to the
+77
+%
+predictions Y
+78
+79
+Y
+= Y1; T = T1;
+80
+R = size(Y,3);
+81
+N = size(Y,4);
+82
+w1 = layer.w1;
+83
+w2 = layer.w2;
+84
+h
+= 0.000001;
+85
+if ndims(Y1) == 3
+86
+dLdY
+= zeros(size(Y),'like',Y1);
+87
+88
+Y
+= reshape(Y,[size(Y,3),1]);
+89
+T
+= reshape(T,[size(T,3),1]);
+90
+91
+% Truth Vector
+92
+vec_T
+= [T(4)-T(2);T(3)-T(1)];
+93
+% Prediction Vector
+94
+vec_Y
+= [Y(4)-Y(2);Y(3)-Y(1)];
+95
+96
+derivs
+= zeros(1,4,'like',Y1);
+97
+derivs(1) = (AngularDisplacement([vec_Y(1);vec_Y(2)+h],...
+98
+vec_T)-AngularDisplacement(vec_T,vec_Y))/h;
+99
+derivs(3) = (AngularDisplacement([vec_Y(1);vec_Y(2)+h],...
+100
+vec_T)-AngularDisplacement(vec_T,vec_Y))/h;
+101
+derivs(2) = (AngularDisplacement([vec_Y(1)+h;vec_Y(2)],...
+102
+vec_T)-AngularDisplacement(vec_T,vec_Y))/h;
+103
+derivs(4) = (AngularDisplacement([vec_Y(1)+h;vec_Y(2)],...
+104
+vec_T)-AngularDisplacement(vec_T,vec_Y))/h;
+105
+106
+dLdY(1,1,:) = w1/6*(Y-T);
+107
+dLdY(1,1,1) = dLdY(1,1,1) + w2*derivs(1);
+108
+dLdY(1,1,2) = dLdY(1,1,2) + w2*derivs(2);
+109
+dLdY(1,1,3) = dLdY(1,1,3) + w2*derivs(3);
+110
+dLdY(1,1,4) = dLdY(1,1,4) + w2*derivs(4);
+111
+112
+elseif ndims(Y) == 4
+113
+114
+dLdY
+= zeros(size(Y),'like',Y1);
+115
+Y
+= reshape(Y,[size(Y,3),size(Y,4)]);
+116
+T
+= reshape(T,[size(T,3),size(T,4)]);
+117
+derivs
+= zeros(4,N,'like',Y1);
+118
+for i = 1:N
+119
+% Truth Vector
+120
+vec_T
+= [T(4,i)-T(2,i);T(3,i)-T(1,i)];
+121
+% Prediction Vector
+122
+vec_Y
+= [Y(4,i)-Y(2,i);Y(3,i)-Y(1,i)];
+123
+124
+125
+derivs(1,i) = (AngularDisplacement([vec_Y(1);...
+126
+vec_Y(2)+h],vec_T)-AngularDisplacement(vec_T,...
+127
+vec_Y))/h;
+128
+derivs(3,i) = (AngularDisplacement([vec_Y(1);...
+129
+vec_Y(2)+h],vec_T)-AngularDisplacement(vec_T,...
+130
+vec_Y))/h;
+131
+derivs(2,i) = (AngularDisplacement([vec_Y(1)+h;...
+132
+vec_Y(2)],vec_T)-AngularDisplacement(vec_T,...
+133
+vec_Y))/h;
+134
+derivs(4,i) = (AngularDisplacement([vec_Y(1)+h;...
+135
+vec_Y(2)],vec_T)-AngularDisplacement(vec_T,...
+136
+vec_Y))/h;
+137
+138
+end
+==PAGE:112==
+100
+Appendix
+139
+dLdY(1,1,:,:) = w1./(N*6)*(Y-T);
+140
+for i = 1:N
+141
+dLdY(1,1,1,i) = dLdY(1,1,1,i) - w2*derivs(1,i);
+142
+dLdY(1,1,2,i) = dLdY(1,1,2,i) - w2*derivs(2,i);
+143
+dLdY(1,1,3,i) = dLdY(1,1,3,i) + w2*derivs(3,i);
+144
+dLdY(1,1,4,i) = dLdY(1,1,4,i) + w2*derivs(4,i);
+145
+end
+146
+end
+147
+148
+end
+149
+end
+150
+end
+E.
+Function for augmenting training images and the location of the landmarks to
+generate synthetic training data.
+1
+function [augimg, augpoints] = ...
+ImageAugmenter(img,points,maxRot,maxScale,maxTrans)
+2
+% Image center
+3
+ImCenterA = (size(img)/2)';
+4
+% Sample rotation
+5
+rot = randi([-maxRot,maxRot]);
+6
+RotMatrix = [cosd(rot) -sind(rot); sind(rot) cosd(rot)];
+7
+% Sample scale
+8
+scale = randi([10000-(maxScale*10000),10000+(maxScale*10000)])/10000;
+9
+% Sample translation
+10
+trans_x = randi([-maxTrans,maxTrans]);
+11
+trans_y = randi([-maxTrans,maxTrans]);
+12
+13
+augimg = uint8(imresize(img,scale,'OutputSize',size(img)));
+14
+augimg = uint8(imrotate(augimg,rot,'nearest','crop'));
+15
+16
+% Image center after aug.
+17
+ImCenterB = (size(augimg )/2)';
+18
+19
+p1 = [points(1);points(2)]*scale;
+20
+p2 = [points(3);points(4)]*scale;
+21
+p3 = [points(5);points(6)]*scale;
+22
+23
+% Rotate points
+24
+rotP1 = (RotMatrix*(p1-ImCenterA)+ImCenterB);
+25
+rotP2 = (RotMatrix*(p2-ImCenterA)+ImCenterB);
+26
+rotP3 = (RotMatrix*(p3-ImCenterA)+ImCenterB);
+27
+28
+% Translate image
+29
+augimg = uint8(imtranslate(augimg,[trans_x,trans_y],'FillValues',0));
+30
+31
+augpoints = [rotP1(1)+trans_y,rotP1(2)+trans_x,rotP2(1)+trans_y,...
+32
+rotP2(2)+trans_x,rotP3(1)+trans_y,rotP3(2)+trans_x];
+33
+end
+==PAGE:113==
+101
+F.
+Implementation of the proposed solution for use with the Segment software.
+==PAGE:114==
+102
+Appendix
+1
+function AutoGenerateSax(set_no)
+2
+global SET NO DATA net_p1 net_p2 net_p0
+3
+4
+wb = mywaitbarstart(2+SET(set_no).TSize,'Loading Networks',0);
+5
+normImgStack = uint8(ct.NormalizeImgStack(SET(set_no).IM)*255);
+6
+if isequal(net_p0,[])
+7
+net_p0 = load("+ct\ResNet50_p0.mat"); net_p0 = net_p0.net;
+8
+end
+9
+if isequal(net_p1,[])
+10
+net_p1 = load("+ct\ResNet50_p1.mat"); net_p1 = net_p1.net;
+11
+end
+12
+if isequal(net_p2,[])
+13
+net_p2 = load("+ct\ResNet50_p2.mat"); net_p2 = net_p2.net2;
+14
+end
+15
+wb = mywaitbarupdate(wb,'Predicting Points - Phase 1');
+16
+%%% Begin Automatic Short-Axis view generation and LV Segmentation.
+17
+%%% Predicts the most suitable slice, and use that for annotation.
+18
+delz = ct.PredictSlice(set_no,normImgStack);
+19
+% delz =
+round(size(SET(set_no).IM,4)/2);
+20
+normImg = normImgStack(:,:,delz);
+21
+pred_p1 = double(net_p1.predict(normImg));
+22
+23
+% Store predictions in setstruct
+24
+if pred_p1(3) > pred_p1(1)
+25
+SET(set_no).CT.avx = [pred_p1(3),pred_p1(1)];
+26
+SET(set_no).CT.avy = [pred_p1(4),pred_p1(2)];
+27
+else
+28
+SET(set_no).CT.avx = [pred_p1(1),pred_p1(3)];
+29
+SET(set_no).CT.avy = [pred_p1(2),pred_p1(4)];
+30
+end
+31
+SET(set_no).CT.apexx = pred_p1(5);
+32
+SET(set_no).CT.apexy = pred_p1(6);
+33
+SET(set_no).CT.delz = delz;
+34
+SET(set_no).CT.RVpulmix = nan;
+35
+SET(set_no).CT.RVpulmiy = nan;
+36
+SET(set_no).CT.RVpulmiz = nan;
+37
+wb = mywaitbarupdate(wb,'Generating Orthogonal Image');
+38
+[orth_img,orthimageorientation,orthimageposition] = ...
+ct.GenerateOrthogonalImageWithNewPoints(set_no);
+39
+orth_img(isnan(orth_img)) = 0;
+40
+41
+% Store scaling factor
+42
+x_scale = size(orth_img,1)/640;
+43
+y_scale = size(orth_img,2)/426;
+44
+45
+% Resize image to fit network 2
+46
+orth_img = imresize(orth_img,[640,426]);
+47
+48
+% Normalize
+49
+norm_orth_img = uint8(ct.NormalizeImg(orth_img)*255);
+50
+wb = mywaitbarupdate(wb,'Predicting points - Phase 2');
+51
+pred_p2 = net_p2.predict(norm_orth_img);
+52
+53
+if pred_p2(3) > pred_p1(1)
+54
+SET(set_no).CT.orthavx = double([pred_p2(3),pred_p2(1)]*x_scale);
+55
+SET(set_no).CT.orthavy = double([pred_p2(4),pred_p2(2)]*y_scale);
+56
+else
+57
+SET(set_no).CT.orthavx = double([pred_p2(1),pred_p2(3)]*x_scale);
+58
+SET(set_no).CT.orthavy = double([pred_p2(2),pred_p2(4)]*y_scale);
+59
+end
+60
+SET(set_no).CT.orthapexx = double(pred_p2(5)*x_scale);
+61
+SET(set_no).CT.orthapexy = double(pred_p2(6)*y_scale);
+62
+63
+SET(set_no).CT.orthimageorientation = orthimageorientation;
+64
+SET(set_no).CT.orthimageposition = orthimageposition;
+65
+66
+newno = numel(SET)+1;
+67
+SET(set_no).CT.generatedsaxno = newno;
+68
+wb = mywaitbarupdate(wb,'Generating SAX stack');
+69
+ct.imagestacksct('AutoGenerateSax_Callback',true,set_no)
+70
+mywaitbarclose(wb);
+71
+end
+==PAGE:115==
+103
+G.
+Implementation for ﬁnding suitable slice.
+1
+function slice_no = PredictSlice(set_no,normImgStack)
+2
+global SET net_p0
+3
+% Number of slices
+4
+N = size(normImgStack,3);
+5
+% Resize and reshape to fit network
+6
+images = imresize(normImgStack,[128,128]);
+7
+images = reshape(images,[128 128 1 N]);
+8
+% Only predict on the middle 50 % of slices
+9
+lower_idx = round(N*0.25);
+10
+upper_idx = round(N*0.75);
+11
+prediction = net_p0.classify(images(:,:,1,lower_idx:upper_idx));
+12
+slices = find(prediction == "Good");
+13
+if slices
+14
+slice_no = round(mean(slices))+ lower_idx;
+15
+else
+16
+disp("Couldn't find suitable slice using network. Will take middle ...
+slice!")
+17
+slice_no = round(N/2);
+18
+end

@@ -1,0 +1,2877 @@
+==PAGE:1==
+M.Sc. Thesis
+Master of Science in Engineering
+Displacement Mapping
+in Deferred Shading
+Parallax Shadows in Tessellation Displacement
+Riccardo Loggini (s151002)
+Kongens Lyngby 2017
+==PAGE:2==
+DTU Compute
+Department of Applied Mathematics and Computer Science
+Technical University of Denmark
+Matematiktorvet
+Building 303B
+2800 Kongens Lyngby, Denmark
+Phone +45 4525 3031
+compute@compute.dtu.dk
+www.compute.dtu.dk
+==PAGE:3==
+Summary
+GPU tessellation displacement mapping is increasing its popularity in real-time ap-
+plications. This adds to the already available Per-Pixel displacement mapping tech-
+niques that focus on fragment calculations instead. Each approach has its own ad-
+vantages and drawbacks which leads also to different use cases.
+In this area, tessellation has its own limits when dealing with shadow maps: efficient
+shadow mapping algorithms can not fully handle small displacement, producing ex-
+aggerate shadowing effects.
+This thesis wants to explore the available GPU displacement mapping techniques
+and find a shadowing hybrid solution that can take advantage from different ways of
+thinking, both in terms of performance and visual result.
+There is a comparison between the Per-Vertex tessellation displacement mapping and
+the Per-Pixel parallax occlusion mapping, to enlighten their advantages and draw-
+backs, performance and visual result one versus the other.
+To improve parallax occlusion mapping, self soft shadows are generated with a similar
+algorithm.
+To improve tessellation displacement mapping, screen space ambient occlusion and
+shadow mapping have been implemented.
+As last step, there is a merging of the two techniques: using parallax self soft shad-
+owing into tessellation displacement mapping.
+This was possible because there is a direct mapping between the per-vertex texture
+displacement to the parallax mapping domain, the texture tangent space.
+The merging showed a good outcome. Parallax shadows are much more precise than
+a common shadow mapping pass, require less computational time and they can be
+used to supply shadows even for the smallest displacement detail on a tessellation
+displacement surface.
+This hybrid technique can be a viable solution to achieve a higher level of detail for
+tessellated surfaces dynamic shadows in a game like environment.
+==PAGE:4==
+ii
+==PAGE:5==
+Preface
+This Master’s thesis was prepared at the department of Applied Mathematics and
+Computer Science at the Technical University of Denmark in fulfillment of the re-
+quirements for acquiring a Master’s degree in Digital Media Engineering.
+Kongens Lyngby, July 14, 2017
+Riccardo Loggini (s151002)
+==PAGE:6==
+iv
+==PAGE:7==
+Acknowledgements
+This thesis is dedicated to my parents Teresa and Giancarlo who supported me both
+financially and emotionally during all my student years.
+I thank professor Jeppe Revall Frisvad and his inspiring passion for computer graphics,
+for the guidance during this project.
+I thank Joey de Vries for the precious introduction material related to many real-time
+graphics topics.
+In the end I thank DTU for these two years of great experience.
+==PAGE:8==
+vi
+==PAGE:9==
+Contents
+Summary
+i
+Preface
+iii
+Acknowledgements
+v
+Contents
+vii
+1
+Introduction
+1
+1.1
+Related Work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+2
+Theory
+3
+2.1
+A Deferred Pipeline
+. . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4
+2.2
+Per-pixel Displacement Mapping
+. . . . . . . . . . . . . . . . . . . . .
+10
+2.3
+Tessellation Displacement Mapping . . . . . . . . . . . . . . . . . . . .
+18
+2.4
+Screen Space Ambient Occlusion
+. . . . . . . . . . . . . . . . . . . . .
+22
+2.5
+Omnidirectional Shadow Mapping
+. . . . . . . . . . . . . . . . . . . .
+24
+3
+System Design
+27
+3.1
+Deferred Shader . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+28
+3.2
+Per-pixel Displacement Mapping
+. . . . . . . . . . . . . . . . . . . . .
+30
+3.3
+Tessellation Displacement Mapping . . . . . . . . . . . . . . . . . . . .
+34
+3.4
+Screen Space Ambient Occlusion
+. . . . . . . . . . . . . . . . . . . . .
+43
+3.5
+Omnidirectional Shadow Mapping
+. . . . . . . . . . . . . . . . . . . .
+49
+4
+Results
+53
+4.1
+Used Software and Hardware
+. . . . . . . . . . . . . . . . . . . . . . .
+54
+4.2
+Parallax Occlusion Mapping . . . . . . . . . . . . . . . . . . . . . . . .
+55
+4.3
+Tessellation Displacement Mapping . . . . . . . . . . . . . . . . . . . .
+61
+4.4
+Omni-directional Shadow Maps . . . . . . . . . . . . . . . . . . . . . .
+64
+4.5
+Parallax Shadows in Tessellation Displacement Mapping . . . . . . . .
+67
+5
+Conclusion
+73
+A Leftover Details
+75
+==PAGE:10==
+viii
+Contents
+A.1 From NDC to Clip coordinates . . . . . . . . . . . . . . . . . . . . . .
+77
+A.2 SSAO: refining the sample kernel . . . . . . . . . . . . . . . . . . . . .
+79
+B Geometric Concepts
+81
+B.1
+Transformation Matrices . . . . . . . . . . . . . . . . . . . . . . . . . .
+82
+B.2
+Normal Matrix . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+84
+B.3
+Geometry Spaces and Coordinates
+. . . . . . . . . . . . . . . . . . . .
+86
+B.4
+Reflection vector . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+88
+B.5
+Gram–Schmidt process . . . . . . . . . . . . . . . . . . . . . . . . . . .
+90
+B.6
+Tangent Space and the TBN Matrix . . . . . . . . . . . . . . . . . . .
+92
+Bibliography
+95
+==PAGE:11==
+CHAPTER 1
+Introduction
+Adding geometric details to surfaces can be easier using displacement maps.
+Displacement maps are grey scale textures applied to meshes that define an offset
+value for each surface point.
+Just think at the advantages for an artist to use displacement maps: they can use
+all their brushes directly to paint in texture to define exactly how the displacement
+should look like.
+The render programmer can then decide the level of detail, so the precision in follow-
+ing the displacement maps values.
+There are two families of algorithms to implement displacement mapping:
+• Per-Pixel: approach that is based on texture offsetting to give the viewer a
+sense of depth
+• Per-Vertex: approach that relies on enhance the surface geometry complexity
+to then change its geometric shape
+From one side Per-Pixel methods, like the Parallax Occlusion Mapping implemented
+in this project, are able to generate self soft shadows (here called Parallax Shadows)
+even for the smaller displacement detail described in the displacement map.
+From the other side, Per-Vertex methods can rely on all the algorithms based on
+geometry that are used also for the non-displaced models, for example screen space
+ambient occlusion and shadow maps.
+Unfortunately, efficient shadow maps usually suffer from loss of precision for smaller
+geometric details.
+Since tessellation displaced surfaces are using the same input data of parallax map-
+ping to generate the displacement, it is still possible to use the parallax shadows
+algorithm underneath.
+This will allow to use tessellation displacement and still having precise dynamic shad-
+ows on the newly displaced geometry at a fair computational time.
+==PAGE:12==
+2
+1 Introduction
+1.1
+Related Work
+Displacement mapping, introduced by Cook [Coo84], was born as an improvement
+over bump mapping [Bli78] to overcome the issue of view-point dependency over the
+quality of result.
+The proposed solution was modifying the underlying surface geometry, based on grey
+scale textures (called height maps) values.
+These per-vertex based approaches became famous in the offline domain like described
+in Pharr [PH96] and Heidrich [HS98] papers. These methods present low performance
+in the current programmable GPU and they are not suitable for real-time applications
+due to their computational costs.
+The idea of combining displacement mapping with texture lookups was proposed by
+Patterson, who called his method as inverse displacement mapping [PHL91], after
+named per-pixel displacement by the subsequent papers, for its different approach
+focused in pixel shader calculations.
+One of the significant disadvantages of per-pixel approaches is the lack of correct ob-
+ject silhouettes since these techniques do not modify the actual geometry. Accurate
+silhouettes can be generated by using prismatic voxel shell volume as Wang proposes
+in [Wan+04] or by encoding the surface curvature information with quadric surfaces,
+like Oliveira and Policarpo describe [OP05].
+Natalya Tatarchuk [Tat06] presents parallax occlusion mapping, a per-pixel ray trac-
+ing algorithm still used in today games [Pol14]. She also presents a way to render self
+soft shadows, that in this report will be addressed as Parallax Shadows.
+Still, parallax mapping approaches will produce severe aliasing and excessive flat-
+tening at steep viewing angles: these are two drawbacks that are common to all
+commonly used per-pixel approaches at the time of writing this report.
+Per-Vertex Displacement came to fashion again in recent years with the introduction
+of the tessellation stage in the programmable pipeline of the most common consumer
+grade real-time graphics API available [Tat08].
+At that time, geometry tessellation was already a case of study from a decade: Doggett
+and Hirche [DH00] proposed one of the first attempt to take advantage of the par-
+allel nature of GPU to render vertex displacement directly on it (using the pixel
+pipelines). Umenhoffer and Szirmay-Kalos [SU08] make an extensive overview of the
+most famous per-pixel displacement methods comparing results with per-vertex dis-
+placement. They come to the conclusion that vertex displacement, thanks to the
+progressive hardware capabilities, is becoming the more viable displacement mapping
+solution for its visual output to performance ratio. In this context, tessellation dis-
+placement mapping is still a fairly new approach in applications like games [Bur15]
+and more optimization is needed. Usually techniques like shadow mapping do not
+consider small displacement features because of quality of result over performance
+reasons.
+==PAGE:13==
+CHAPTER 2
+Theory
+This chapter will describe most of the mathematical tools and concepts used for the
+project.
+==PAGE:14==
+4
+2 Theory
+2.1
+A Deferred Pipeline
+Displacement mapping finds many use cases into modern video games, real-time ap-
+plications that runs with the many consumer-grade graphics cards currently available.
+In this environment, I chose to use deferred shading, a very common graphics pipeline
+used in many of the recent video games like GTA V [Cou15].
+When we talk about deferred rendering, we roughly divide the rendering pipeline
+in a first geometry pass followed by a lighting pass. This means first retrieving all
+the inputs (depth, normals, albedo color, specular intensity and possibly others) for
+lighting calculations in a per pixel manner, stored in the so called G-buffer, and only
+later render the scene. Considering the 3D objects included in our view frustum, the
+deferred algorithm can be summarized with the following pseudocode, as suggested
+by Policarpo and Fonseca in their tutorial [Pol+05].
+1 for each object do
+2
+G-buffer = lighting properties of object;
+3 for each light do
+4
+framebuffer += light_model(G-buffer,light);
+Listing 2.1: Deferred rendering approach pseudocode.
+The rendering complexity can be seen as O (num_objects + num_lights). It has to
+be taken into account that the complexity will be heavily influenced by rendering reso-
+lution (e.g. how many pixel we are shading) because again, only the visible fragments
+(the ones that will compose the final screen image) will be subject to light calculation.
+This brings to consider the timing as O (screen_resolution ∗num_lights).
+The fact of computing light contribution only on the finally visible fragments is a
+major advantage compared to a forward pipeline where rendered fragments are some-
+times discarded.
+It has to be stated though that nowadays the average forward renderer engine adopts
+occlusion culling and early z-test to minimize overdraw.
+The general deferred shading pipeline can be seen in Figure 2.1 and the relative
+screens example Figure 2.2.
+• Geometry Stage: its primary function is to fill the G-buffer using models
+meshes data.
+G-buffer is a collection of screen sized textures. Each texture contain a different
+information of the visible geometry (e.g. positions, normals, color) for further
+light calculation.
+• Lighting Stage: it is mainly used to calculate light contributions for each
+visible geometry position.
+All the pixels that will be visible in the final render will be the result of single
+light calculations using the corresponding pixels in the G-buffer’ screen sized
+==PAGE:15==
+2.1 A Deferred Pipeline
+5
+Figure 2.1: Deferred shading pipeline scheme.
+textures.
+This process is known as ”per-pixel” lighting.
+2.1.1
+Lighting
+This study focused on point lights as the only type of light source.
+A point light source emanates the same amount of light in every possible space direc-
+tion.
+Light contribution will be calculated for each visible screen space point (in a so called
+”per-pixel” manner) using the Phong reflection model, as described in chapter 6 of
+[Hug14].
+Light calculation is the sum of three contributions: ambient, specular and diffuse
+components.
+In my case I am using a lighting model based on the Phong one, called WPF re-
+flectance model and the following list will describe its components.
+• Ambient Reflection: This component is the most crude approximation of
+light scattered and bounced by all the other surrounding surfaces into the cur-
+rent one. It is represented by a constant amount of light addition as seen in
+(2.1), where Ia is color/intensity of the scene’s ambient light(RGB vector), ka
+the efficiency factor of the material to show ambient light and Cd is the innate
+(the diffuse, the proper) material color.
+amb = Ia ka Cd
+(2.1)
+• Diffuse Reflection: the direct light contribution to the material, computed
+with Lambert’s cosine rule, as seen in Figure 2.3(a).
+The brightness of the reflected light is only dependent on how directly the inci-
+dent light hits the surface.
+==PAGE:16==
+6
+2 Theory
+(a) Positions
+(b) Normals
+(c) Diffuse
+(d) Specular
+(e) Lit Result
+Figure 2.2: Example of G-buffer content (the first 4 screens) and the corresponding
+lighting stage result.
+==PAGE:17==
+2.1 A Deferred Pipeline
+7
+Be ⃗l light to visible position direction, ⃗n surface normal, θ the angle between
+−⃗l and ⃗n, Id color/intensity of the light and Cd is the innate (the diffuse, the
+proper) material color, then the diffuse contribution to light can be expressed
+with (2.2).
+diff = Id Cd max {cos (θ), 0}
+(2.2)
+The last term can be explained if we think to the case when θ < 0.
+In this situation the light is behind the surface and so the diffuse contribution
+needs to be zero.
+• Specular Reflection: the specular highlight that shiny materials show, which
+is a brighter version of the material diffuse color.
+The formula is (2.3) and, as we can see, it is view point dependent (a difference
+with the diffuse component).
+spec = Id ks [cos(δ)]s
+(2.3)
+With reference to Figure 2.3(b), δ is the angle between reflect direction ⃗r and
+the view direction ⃗v, so cos(δ) = ⃗r · ⃗v.
+The reflection vector ⃗r is obtained as described in Appendix B.4 thanks to the
+rule of angle of incidence θl is equal to angle of reflection θr.
+The term cos(δ) ensures that specular effect is stronger when we approach the
+situation where the view direction ⃗v is parallel to the reflection direction ⃗r.
+The Specular Exponent s controls the specular component ”drop-off” rate,
+so how fast the specular highlights will fade out.
+For very shiny surfaces (like plastic) this exponent value goes between 100 and
+1000.
+The whole generalized formula for the WPF model, considering only point lights, can
+be seen in (2.4) to calculate light on a visible position p.
+lightp = amb +
+∑
+light
+i
+diff (i) +
+∑
+light
+i
+spec (i)
+= (Ia ka Cd) + Id
+∑
+light
+i
+[Cd ∗max {cos θ, 0} + ks (cos δ)s]
+(2.4)
+Note that in real cases there are more efficient implementations which uses different
+approach to measure δ, like the Blinn-Phong model, described in [Hug14].
+2.1.1.1
+Attenuation and volume bounds
+In reality, the light reflected from an observed point P of distance d from the light
+source L, is quadratically inverse to d2.
+==PAGE:18==
+8
+2 Theory
+(a) Diffuse Reflection
+(b) Specular Reflection
+Figure 2.3: Diffuse and specular reflection reference schemes.
+We can model this effect to give a ”radial falloff” to point lights by using an inverse
+quadratic function of d, as showed in (2.5).
+att =
+1
+a2d2 + a1d + a0
+(2.5)
+⃗a = [a2, a1, a0] are the quadratic, linear and constant attenuation terms. ⃗a will lower
+the light intensity proportionally to d = ||L −P||.
+The attenuation factor would be theoretically applied to every light calculation on
+the visible geometry.
+When d is reasonably big there might be the case where the calculated light contri-
+bution is too small to be noticed and it might be not worth the calculation time.
+Let’s consider ε →0+ as the minimum intensity value we accept for the attenuated
+light intensity, then we can write (2.6) to find the radius (or range) R.
+attR ∗Imax = ε
+a2R2 + a1R + a0 = Imax
+1
+ε
+a2R2 + a1R + a0 −Imax
+1
+ε = 0
+⇒R =
+−a1 +
+√
+a2
+1 −4a2
+(
+a0 −Imax
+ε
+)
+2a2
+(2.6)
+The range R will delimit the spherical effectiveness volume bounds for a certain
+point light.
+==PAGE:19==
+2.1 A Deferred Pipeline
+9
+Each time we are going to calculate a point light contribution from L to the visible
+position P, we will first check if d = ||L −P|| < R.
+Figure 2.4: Point light radial falloff example and range of effectiveness. Courtesy
+of Unity3D.
+==PAGE:20==
+10
+2 Theory
+2.2
+Per-pixel Displacement Mapping
+There is a type of displacement mapping that relies exclusively on fragment calcula-
+tion.
+In this way the initial geometry of the displaced surface will remain the same (or it
+will change slightly) and a sense of depth is created based on the height map.
+This kind of displacement technique can be seen as an ”optical illusion”: what it
+does in practice is put an offset to the visible textures in clever ways that will fake
+geometry displacements in gain of performance.
+A visual representation of this concept can be seen in Figure 2.5 where S is the vis-
+ible surface from the view position. The surface contains multiple information for
+each tangent coordinate pair (u, v) such as diffuse color, specular intensity, normal
+direction but, most of all, the displacement value h (u, v) .
+An extensive study of the various kinds of per-pixel displacement is done by Umen-
+hoffer and Szirmay-Kalos in [SU08].
+We can distinguish the different algorithms in families based on the accuracy they
+have to find the intersection point B between the view ray and the height map, as
+shown in Figure 2.5.
+• Non-iterative methods: this family of algorithms is the most approximate
+and the computationally fastest.
+Figure 2.5: Principle of per-pixel displacement mapping: the viewer looking at the
+surface S would normally get visual information from S (A) but he will
+receive S (B) instead. The choice of B is based on the intersection of
+the view ray with the surface displacement function h .
+==PAGE:21==
+2.2 Per-pixel Displacement Mapping
+11
+These algorithms require at most one additional texture sample after the view
+ray first hits the surface.
+The visual sense of depth is good for small displacements but bad otherwise.
+The most successful example of this family is normal mapping that has been a
+solid solution to simulate small displacements for decades.
+An example of a bad visual result can be seen with parallax mapping in Fig-
+ure 2.6. This is explained in detail in Section 2.2.1.
+• Iterative methods: this subset of per-pixel displacement algorithms relies on
+multiple texture lookups done with ray marching steps. They achieve the best
+visual result at the expense of computational time and handling additional data.
+– Unsafe iterative: these methods use different kinds of ray marching (e.g.
+forward steps or linear search) along the view ray but we can never be
+sure to hit the nearest displacement intersection to the viewer, as shown
+in Figure 2.8.
+A positive side is that we can shorten the ray marching step (or use other
+checks in the case of linear search) to decrease the number of hit errors
+but again, we will never be sure to avoid a displacement thinner than the
+chosen step.
+An example of this category is the steep parallax mapping, explained in
+Section 2.2.2.
+– Safe iterative: this subset of methods will ensure the view ray to get the
+first intersection between the view ray and the displacement function.
+These algorithms are also the most expensive in the per-pixel displacement
+spectrum and they often rely on additional, precomputed, spatial data.
+An example of this category is the so called sphere tracing method, de-
+scribed in the NVIDIA GPU Gems 2 book [Woo05], that uses sphere trac-
+ing to sample 3D textures.
+• Hybrid: in this last group of per-pixel displacement methods there is a switch
+of algorithm approach when we have enough reasons to think that the solution
+for the first ray-hit is in a fairly small interval.
+The hybrid methods are the best in terms of visual result vs. performance.
+An example is the parallax occlusion mapping described in Section 2.2.2 with
+starts with ray-marching and then finds the averaged solution by linear inter-
+polation.
+2.2.1
+Parallax Mapping
+The basic parallax mapping technique is a non-iterative per-pixel method that can
+lead to bad visual results, as you can see in Figure 2.7.
+The idea behind it is shown in Figure 2.6: the ray intersection is taken always with
+the bottom plane of the displacement domain.
+==PAGE:22==
+12
+2 Theory
+Figure 2.6: Basic parallax mapping algorithm concept in tangent space: the point
+B is chosen based on the intersection of the view ray with the bottom
+of the displacement domain.
+This big approximation leads to a good result only when the view angle with the
+surface is minimal, that means looking at the surface in a spot that is exactly in front
+of the viewer.
+In this particular example the visual error will be relevant because the wanted inter-
+section (red dot) corresponds to a height value that is approximately one third of the
+sampled one in B.
+In real use cases, parallax mapping result is adjusted with clever methods by taking
+in consideration the height value in B over the total or its normal direction. These
+adjustments are made without adding additional samples to the surface S textures.
+More informations are found in the article by Umenhoffer and Szirmay-Kalos in
+[SU08].
+We are interested to find point B x and y coordinates in tangent space, because those
+are also the (u, v) coordinates to sample the surface S. Let’s suppose we are working
+on a planar surface S.
+The first step is find view direction ⃗p in tangent space relative to the surface S which
+is possible by calculating the TBN change of basis matrix which has been extensively
+discussed in Appendix B.6. Calculation of ⃗p is shown in (2.7) with reference to Fig-
+ure 2.6. To find A and V in tangent space, we will need the relative positions in world
+space Aworld and Vworld. The TBN matrix I am using transforms coordinates from
+tangent space to world space, so calculating A and V in tangent space will require
+to use the inverse of the TBN. Since T,B and N are unit length vectors forming a
+==PAGE:23==
+2.2 Per-pixel Displacement Mapping
+13
+Figure 2.7: Basic parallax mapping algorithm result: its result is particularly wrong
+when there are big height differences in the displacement map, such as
+bricks coming out from a wall.
+The result is appropriate only in the center area of the surface where
+the view vector is almost perpendicular with the surface normal .
+base, the TBN will have the inverse matrix equal to the transpose.
+Atangent = [TBN]T Aworld
+Vtangent =]TBN]T Vworld
+⃗p =
+Atangent −Vtangent
+∥Atangent −Vtangent∥
+(2.7)
+For the view ray in tangent space to go from point A to the bottom of the displace-
+ment plane it is going to decrease its z coordinate by hmax.
+Naming B′ the intersection of view ray with the bottom plane, its x and y coordinates
+in tangent space are the same ones of B, the point that we are looking for, because
+the surface S is plane and parallel to the bottom surface for hypothesis.
+Considering ⃗p = (px, py, pz), A = (Ax, Ay, Az) and B = (Bx, By, Bz), all referencing
+to the surface tangent space, we can write (2.8).
+Az + t′ pz = Az −hmax
+⇒t′ pz = −hmax
+⇒t′ = −hmax/pz
+(2.8)
+==PAGE:24==
+14
+2 Theory
+With the view line parameter value t′ it is possible to calculate x and y tangent space
+coordinates of B as in (2.9).
+Bx = B′
+x = Ax + t′ px
+By = B′
+y = Ay + t′ py
+(2.9)
+As said before, with Bx and By it is possible to sample surface S to get all the
+information for light computation, such as albedo, normal direction, specular intensity
+and of course displaced position from the height map.
+2.2.2
+Parallax Occlusion Mapping
+Parallax occlusion mapping is a hybrid per-pixel displacement approach.
+It starts with ray marching along the view ray in surface tangent space and it uses a
+linear interpolation to improve the initial result.
+The first part of the algorithm is also known as Steep Parallax Mapping, an unsafe
+iterative method that relies exclusively on ray marching.
+Its concept can be seen in Figure 2.8: the height map h is iteratively sampled i times
+at positions ti until condition (2.11) is met.
+We can start by defining the vector ⃗l = (lx, ly, lz), which is obtained by choosing a
+marching step length ls in direction of ⃗p from (2.7).
+We can then define ⃗l as (2.10).
+⃗l = ls ⃗p
+(2.10)
+The length of ⃗l will grow at fixed rate for each iteration i until condition (2.11) is
+met, which means the view ray sample i is under the displaced surface h (ti) and the
+ray intersection relies on the view ray between the sample i and the sample i −1.
+h (ti) > h (bi)
+(2.11)
+The visual result of this first phase of parallax occlusion can be seen in Figure 2.9.
+Although it produces a much better result than the basic parallax mapping, some
+noticeable artifacts are still present like the layered effect on all the displaced surface.
+This is due to taking texture samples at fixed steps, and it can be attenuated by
+lowering the ray marching step length ls. Obviously the smaller the step is, the more
+computational time is required.
+The second phase of the parallax occlusion algorithm consists in a linear interpola-
+tion between the last iteration height value and its previous.
+The process is shown in Figure 2.10.
+Let ti the point found in the first phase and ti−1 the point from its previous ray
+marching step, then we can further approximate the intersection as shown in (2.12).
+==PAGE:25==
+2.2 Per-pixel Displacement Mapping
+15
+Figure 2.8: An example of how a unsafe iterative ray-marching method can miss
+the first displacement intersection and return the second one.
+In this example four iterations were necessary to find an intersection.
+∆i = h (bi) −h (ti)
+∆i−1 = h (bi−1) −h (ti−1)
+wB =
+∆i
+∆i + ∆i−1
+B′ = (1 −wB) bi + wB bi−1
+(2.12)
+With reference to Figure 2.10, B′ has the same x and y tangent space coordinates
+as B, its projection to the visible surface S, and that is all we need to sample the
+textures attached to S for light calculation.
+The result after the interpolation can be seen in Figure 2.11.
+2.2.3
+Ray-traced self shadows
+With the same ray approach of parallax mapping is possible to compute self shadow-
+ing.
+For every position calculated with parallax mapping, we can also calculate a shadow
+==PAGE:26==
+16
+2 Theory
+Figure 2.9: Steep parallax mapping example. The displacements show a character-
+istic layered effect.
+Figure 2.10: Second phase of parallax occlusion: interpolation between the last two
+ray marching steps.
+==PAGE:27==
+2.2 Per-pixel Displacement Mapping
+17
+(a) Steep Parallax
+(b) Parallax Occlusion
+Figure 2.11: First and second phase results of parallax occlusion.
+factor considering the ray between the point light and the intersection point B with
+the heightmap, as Figure 2.12 shows. There kind of shadows are more accurate than
+shadow mapping but they are also generally more expensive, because a ray is traced
+for each visible position.
+The explanation of the implemented algorithm can be found in Section 3.2.0.1.
+Figure 2.12: Tangent space parallax shadow calculation: if the ray between the
+intersection point with height map and the light position is occluded,
+then a shadow factor will be calculated.
+==PAGE:28==
+18
+2 Theory
+2.3
+Tessellation Displacement Mapping
+The common conception of displacement mapping often refers to a per-vertex ap-
+proach, where the geometry vertex positions are displaced from their initial values to
+add more details to the model.
+Notice that with this method, displacement will be applied to all the surface vertices
+and the more vertices we will use, the more details we will be able to achieve.
+The overall process can be resumed in two steps:
+• Tessellation: the parametric surface geometry gets a higher complexity by
+decomposing the initial shape in multiple smaller sub-shapes (that will all end
+up being triangles before the rasterization stage) as can be seen in Figure 2.14.
+• Vertex Displacement: once we have enough geometric complexity in the
+surface we can displace the vertices based on height (or displacement) map
+values, as shown in (2.13).
+Given the position of a parametric surface ⃗S (u, v) function of its texture coordinates,
+⃗nS its normal texture (or equivalently the vertex normal at coordinates (u, v)), h (u, v)
+the surface heightmap, the displaced surface ⃗S′ (u, v) can be represented as in (2.13).
+⃗S′ (u, v) = ⃗S (u, v) + h (u, v) ⃗nS (u, v)
+(2.13)
+This approach has become more famous in the recent years and this led to find new
+solutions to implement it efficiently.
+The bottleneck of this approach relies into bandwidth between the processing units
+and the assets on the graphics card, handling a lot of vertex data, as mentioned in
+Figure 2.13: Example of hardware tessellation, courtesy of Codeflow [Boe10].
+==PAGE:29==
+2.3 Tessellation Displacement Mapping
+19
+Figure 2.14: Reference displacement scheme for (2.13).
+[Nie+16].
+2.3.1
+The Tessellation Stage
+Around 2006 ATI introduced the tessellation stage with the XBOX360 game console
+(Direct3D 11) [Tat08], and NVIDIA quickly followed up with 400 GPU series [NVI08].
+OpenGL present equivalent features from version 4 [Khr].
+Since I have used OpenGL for the implementation, I will refer to the structure and
+nomenclature of it Figure 2.15 but Direct3D has an equivalent setup. As we can see
+from Figure 2.15, the tessellation stage is made up of three parts: control, tessellation,
+evaluation.
+• Control Stage: this is a programmable stage (usually set up by a shader) that
+receives the input from the vertex shader and it is responsible for two tasks:
+setting up the tessellation engine parameters and defining the vertex data that
+will be sent as input of the evaluation stage. This is also where a level of detail
+(LOD) mechanic can be applied to the tessellation.
+• Tessellation Engine: this is a fixed function, configurable in the control stage.
+Here the previous geometry in the pipeline will be broken in smaller primitives
+(points, lines or triangles) per-vertex data. This data will be given as input to
+the evaluation stage.
+• Evaluation Stage: this programmable stage (controlled by a shader) receives
+the new vertex data generated by the tessellation engine and it will be responsi-
+==PAGE:30==
+20
+2 Theory
+Figure 2.15: Tessellation stage structure.
+Courtesy of Victor Bushong.
+ble to send the complete per-vertex attributes to the rest of the pipeline. This
+is also the stage where vertex displacement happens.
+After the evaluation stage, the geometry has been tessellated and displaced, ready to
+pass trough geometry shader or directly to shape assembly and then rasterization.
+More implementation details are present in Section 3.3.
+2.3.2
+Screen Space LOD
+When using hardware tessellation, most of the time it includes a level of detail
+(LOD) algorithm acted in the tessellation control shader.
+These algorithm will apply a different level of subdivision to the polygons based on
+some criteria, with the purpose of lowering the number of geometry subdivisions made
+when it is not needed.
+In the most common case, specifically when using a perspective projection, we want
+a higher level of detail (more tessellation) to the geometry near the viewer and less
+on the far distance. This happens because less pixel of the screen will be dedicated
+to draw far geometry.
+I will bring one of the simplest algorithms of this genre that is based on the screen
+space edge length of each tessellated polygon.
+Let’s take a quad as the polygon that will be subject to tessellation. The first step
+we do is calculate the length of its edges in screen space.
+Let P1,win and P2,win be positions, in window space, of the vertices defining the quad
+edge ei. Let li be the screen space length of the quad edge ei, we can assign the
+tessellation factor tf (ei) as described in (2.14).
+==PAGE:31==
+2.3 Tessellation Displacement Mapping
+21
+Figure 2.16: Screen space LOD example: e2 corresponds to one tessellation factor
+unit while e1 corresponds to three units.
+li = ∥P2,win −P1,win∥
+ti = li
+tf
+(2.14)
+In the example of Figure 2.16, the edge e2 has l2 ∼= tf that means it will not be
+subdivided in subsegments during the tessellation. Meanwhile for e1 we have l1 ∼=
+3 ∗tf ⇒t1 ∼= 3 so during the tessellation process e1 will be subdivided in 3 smaller
+segments.
+==PAGE:32==
+22
+2 Theory
+2.4
+Screen Space Ambient Occlusion
+Up to this moment the illumination model that has been used includes a constant
+function as contribution of ambient light.
+We can improve the ambient term by adding an effect called Screen Space Ambient
+Occlusion (SSAO), able to add soft shadows inside creases, holes and surfaces that
+are close to each other.
+The SSAO final result is a factor in the range [0, 1] that will be applied to the final
+ambient component in the shading equation for each pixel render.
+The core concept behind my implementation is to examine each visible space point
+position and determine how much that point is occluded (e.g. hidden by other sur-
+faces).
+2.4.1
+The Samples Kernel
+How to determine how occluded a visible point position is? This is the first question
+to implement an SSAO effect and of course the answer varies from one implementa-
+tion to another.
+In my case the answer is conceptually building an hemisphere centered on the point
+position and oriented toward the point normal. This hemisphere will in most of the
+cases intersect the surrounding geometry. The percentage of volume that relies inside
+other geometries will compose the amount of ambient occlusion for the center point.
+In a computer graphics environment this concept is of course subject to discretization
+and the area will be represented by sample points randomly placed inside the hemi-
+sphere. Given a point position P in the visible space, it is possible to summarize the
+occlusion factor with
+occlusionFactor (P) = 1 −samplesInsideSurroundingGeometry (P)
+totalSamples (P)
+Figure 2.17: Samples hemispheres of two visible point locations. The one on the
+left is not intersecting any geometry so the ambient occlusion factor
+value will be one (courtesy of learnopengl.com).
+==PAGE:33==
+2.4 Screen Space Ambient Occlusion
+23
+The samples will be generated and stored in memory in tangent space and in a
+unitary radius hemisphere. The general sample tangent space coordinates are shown
+in equation (2.15).
+s′
+r =
+
+
+xr
+yr
+zr
+
+=
+
+
+rand(−1, 1)
+rand(−1, 1)
+rand(0, 1)
+
+
+sr = rand(0, 1) s′r
+∥s′r∥
+(2.15)
+A different sample kernel will be created for each visible position we saved into the
+G-buffer. At render time, the kernel will be transformed from tangent to world space,
+centered on the pixel G-buffer position, scaled by the chosen kernel radius and ori-
+ented toward the pixel G-buffer normal. We will then retrieve the sample’s window
+coordinates in order to compare their depth with the depth of the visible pixels in
+the G-buffer having their same window coordinates.
+If a sample depth will be greater than depth of the visible position in its same coor-
+dinates, then the sample is occluded.
+Let s be the sample in tangent space of equation (2.15), Pworld the pixel G-buffer
+position in world space, TBN the matrix to rotate the kernel from tangent space to
+world space and direct it toward the G-buffer normal, Mproj the projection transfor-
+mation matrix, sn the rotated sample in world space, wc the fourth coordinate of a
+sample position in clip space, R the kernel radius.
+The series of transformations made to s at render time is described in (2.16).
+snormwin is the sample in normalized window coordinates (with the x and y coordi-
+nates still in range [0, 1], without respectively multiply by pixel columns and rows
+number) and this is useful to compare directly in texture coordinates when we deal
+with screen-sized textures, which is frequent considering for example that this project
+is based on deferred shading.
+⃗sn =TBN⃗s
+⃗sworld =Pworld + R⃗sn
+⃗sNDC = (Mproj ⃗sworld) /wc
+⃗snormwin =1
+2 (⃗sNDC + 1)
+(2.16)
+The result obtained by SSAO can be tweaked with respect to the number of samples
+that we use and the radius for our hemisphere kernel.
+Important to notice is that the size of the scene has an impact on the final factor
+because it is strictly related to the radius (and consequently number of samples) that
+we use.
+Implementation details will be described in the system design chapter Section 3.4.
+==PAGE:34==
+24
+2 Theory
+2.5
+Omnidirectional Shadow Mapping
+Shadow mapping allows to create dynamic shadows in our scene.
+Ominidirectional Shadow Mapping is one way to implement shadow maps for point
+lights, which radiate light in every possible direction.
+In this project it can be useful to enrich the per-vertex geometry visual output.
+The related algorithms are based on the scene geometry.
+An example of shadow mapping can be seen in Figure 2.18.
+Shadow mapping is
+generally divided in two stages:
+• Generate the shadowmap: the shadowmap is a grey scale texture that stores
+depth information from the light point of view, as seen in Figure 2.19.
+This texture is commonly filled by using the window depth buffer data (which
+is a non-linearized variable because it is usually given in NDC coordinates).
+We will eventually use the distance from light position to geometry in world
+space instead of depth buffer data to have a linear variable.
+The omnidirectional shadow map will need to fill all the 6 faces of a cubemap
+in this manner to provide data for a point light.
+• Shadow algorithm: having depth from point light allow us to compare it with
+the distance between point light and each visible position as seen in Figure 2.20.
+Figure 2.18: Omnidirectional Shadowmaps example (green for debugging pur-
+poses).
+==PAGE:35==
+2.5 Omnidirectional Shadow Mapping
+25
+Referring to Figure 2.20, if the condition ||A −L|| > d is met, then the point A
+will be in shadow and we can (for example) decrease the overall light contribu-
+tion into it.
+More details and implementation are given in Section 3.5.
+Figure 2.19: First stage of shadow mapping: the distance from light to the sur-
+rounding geometry (commonly seen as depth) will be stored in a grey
+scale texture called shadowmap.
+==PAGE:36==
+26
+2 Theory
+Figure 2.20: Second stage of shadow mapping: an algorithm will compare depth
+sampled from depthmap with the distance of the point light L from
+the visible point A.
+==PAGE:37==
+CHAPTER 3
+System Design
+==PAGE:38==
+28
+3 System Design
+3.1
+Deferred Shader
+This section implements the theory of Section 2.1.1, and describes the light calcu-
+lation acted in the deferred shader lighting stage by Algorithm 1, with reference to
+Figure 3.1.
+Algorithm 1 Light calculation in lighting stage fragment shader
+1: Given: (x, y, z) normalized screen space coordinates, world space view position V
+2: Given: G-buffer’ screen sized textures of positions, normals and diffuse+specular
+components of visible geometry respectively Tp, Tn, Tds
+3: Given: set of point lights pLights= {li} with each li having a series of parameters,
+light attenuation quadratic, linear and constant components l.[a2, a1, a0], light
+radious of effectiveness l.r, light world position l.pos ∈ℜ3, light diffuse color l.Id
+4: Given: ambient light color Ia, surface material ambient light effectiveness coeffi-
+cient ka and material specular exponent s
+5: ⃗p ←sample Tp at (x, y)
+6: ⃗n ←sample Tn at (x, y)
+7: ⃗Cd ←[sample Tds at (x, y)].rgb
+8: ⃗ks ←[sample Tds at (x, y)].a
+9: ⃗v ←(V −⃗p)/||V −⃗p||
+10: C ←0
+11: for l in pLights do
+12:
+d ←||l.pos −⃗p||
+13:
+if d < l.r then
+14:
+⃗l ←(l.pos −⃗p)/d
+15:
+⃗r ←⃗l −2(⃗l · ⃗n)⃗n
+16:
+cos δ ←⃗v · ⃗r
+17:
+cos θ ←⃗n · −⃗l
+18:
+att←1/(l.a2 ∗d2 + l.a1 ∗d + l.a0)
+19:
+C ←C+att∗Id ∗[Cd ∗max(cos θ, 0) + ks ∗(cos δ)s]
+20:
+end if
+21: end for
+22: return C + Ia ∗ka ∗Cd
+==PAGE:39==
+3.1 Deferred Shader
+29
+Figure 3.1: Reference image for light contribution in Algorithm 1.
+==PAGE:40==
+30
+3 System Design
+3.2
+Per-pixel Displacement Mapping
+To represent the per-pixel displacement mapping, the Parallax Occlusion mapping
+has been chosen for the implementation, as one of the best trade-offs between quality
+of result and performance.
+The essential purpose of parallax mapping (and so parallax occlusion) is to displace
+the texture coordinates of each observed point on the surface A as we were looking
+at B to create a sense of depth.
+The pseudocode in Algorithm 2 explains how to get the tangent space coordinates of
+B, with reference to Figure 3.2.
+As explained in the theory section Section 2.2.2, the algorithm starts with a ray
+marching from the visible position A on the geometric surface and when the step
+point b is lower than the corresponding sampled heightmap value h, an interpolation
+between the last two ray steps is made in order to find the texOffset value and so
+calculate the position of B.
+3.2.0.1
+Self Soft Shadows
+Parallax mapping concept can be also applied to generate self shadows based on
+heightmap, as shown in Figure 3.3.
+When we apply parallax mapping and obtain the intersection point B with the
+heightmap, we can cast a ray from B to the light position L and check if this ray gets
+occluded by the heightmap values.
+To compute the ray marching steps, the algorithm calculates the intersection AL of
+the light ray with the geometry surface, based on the equation of the ray, as shown
+Figure 3.2: Parallax Occlusion Mapping algorithm scheme in tangent space.
+==PAGE:41==
+3.2 Per-pixel Displacement Mapping
+31
+Algorithm 2 Parallax Occlusion Mapping
+1: Given: tangent space observed point A, tantent space view position V , heightmap
+texture Th, ray-marching step length pstep
+2: ⃗nv ←(A −V )/||A −V ||
+3: ⃗p ←⃗nv ∗pstep
+4: b ←A
+5: h ←sample Th at b.xy
+6: while b.z > h do
+7:
+b ←b + ⃗p
+8:
+h ←sample Th at b.xy
+9: end while
+10: bprev ←b −⃗p
+11: hprev ←sample Th at bprev.xy
+12: ∆←b.z −h
+13: ∆prev ←bprev.z −hprev
+14: w ←
+∆
+∆−∆prev
+15: intersection←w ∗bprev + (1 −w) ∗b
+16: intersection.z ←sample Th at intersection.xy
+17: return intersection
+Figure 3.3: Tangent space ray traced self shadows in parallax mapping.
+==PAGE:42==
+32
+3 System Design
+in (3.1).
+We find AL with the property of the tangent space, which gives each point on the
+geometric surface z coordinate equal to zero.
+B.z + t (L.z −B.z) = AL.z = 0
+⇒t′ =
+−B.z
+L.z −B.z
+AL = B + t′ (L −B)
+(3.1)
+When in Algorithm 3 we verify that a visible point is in shadow, we also compute
+a ratio to generate smooth shadow transition, based on how high and how far the
+occlusion is from the visible position B.
+Let’s say we have a ray marching step point b and its relative sampled height h from
+the heightmap, then we can compute its shadow factor with (3.2).
+∆=
+h −b
+∥b −B∥
+(3.2)
+We will take the biggest value of ∆among all the corresponding values of b: this
+factor represents the amount of shadow for the visible position B.
+We see that the shadow factor will be higher if the displacement height h is bigger
+than the ray marching step b z coordinate.
+The factor is also reduced based on how far the ray point b is from the visible position
+B.
+If h is lower than the sample b, we are not interested in the corresponding ∆because
+it means the ray is higher than the displacement in that moment.
+The algorithm returns 1 −∆to be directly multiplied by the light contribution for
+the visible position B.
+One further optimization to the algorithm would be calculate shadow only for the
+visible points B who have the normal direction facing the direction of the light towards
+B. We can express this condition with (3.3).
+⃗
+nB · (B −L) > 0
+(3.3)
+==PAGE:43==
+3.2 Per-pixel Displacement Mapping
+33
+Algorithm 3 Parallax Shadow Factor calculation
+1: Given: tangent space light position L, tangent space view ray intersection B
+with heightmap sampled from Th, number of light ray samples nsteps to calculate
+shadow softness
+2: Initialize: ∆←0, b ←B
+3: t ←−B.z/(L.z −B.z)
+4: Al ←B + t ∗(L −B)
+5: ⃗p ←(Al −B)/nsteps
+6: for nsteps do
+7:
+b ←b + ⃗p
+8:
+h ←sample Th at b.xy
+9:
+∆new ←h −b
+10:
+∆new ←∆new/||b −B||
+11:
+if ∆new > ∆then
+12:
+∆←∆new
+13:
+end if
+14: end for
+15: return 1 −∆
+==PAGE:44==
+34
+3 System Design
+3.3
+Tessellation Displacement Mapping
+Tessellation is a powerful tool that requires to know how to be used properly.
+As stated in [Nie+16] tessellation can decrease the rendering factor by 6 times com-
+pared with using the traditional index and vertex buffers.
+On the other hand, if the tessellation factor to apply is low (around 1) the perfor-
+mance can be even 5 times slower than the traditional methods.
+The key advantage of tessellation is that input polygons are directly processed by the
+GPU streaming multi-processors without requiring additional global memory access
+to withdraw additional vertex data and this minimizes the memory I/O.
+A more detailed version of the tessellation stage can be seen in Figure 3.4.
+3.3.1
+Control Stage
+This is the first part of the tessellation stage, it is programmable and it receives the
+input from the vertex shader.
+In most of the cases this stage is controlled by the Tessellation Control Shader
+(TCS) but tessellation can be done without it by setting parameters at CPU time.
+The TCS can be resumed with the following:
+• Input: as stated before, the TCS will receive vertex data from the vertex shader,
+but in form of Patches.
+Patches are rendering primitives that represents the polygon unit in which the
+tessellation will take place. They are composed of a set of vertices that take
+the name of Control Points. TCS will run once for each control point of each
+Figure 3.4: The Tessellation stage in OpenGL 4, courtesy of [SWH15].
+==PAGE:45==
+3.3 Tessellation Displacement Mapping
+35
+patch.
+There is a maximum number of control points that we can use for our patches
+but that number is at least 32.
+• Function: the main function of the TCS is setting the tessellation parameters
+for the tessellation engine. This can of course change based on user defined
+conditions and it is where we can set a Level of Detail (LOD) mechanic in
+our tessellation (more details in Section 3.3.1.1).
+At the beginning of the TCS we will also have to specify the desired number
+of control points for our patches and the type of tessellation we want to apply
+(next section Section 3.3.2 will talk about that).
+• Output: other than tessellation settings, we will send the patch control points
+attributes (normals, colors, etc.) that will be received as input by the evaluation
+stage Section 3.3.3 , that means we can also change them on the fly.
+3.3.1.1
+Screen Space Level of Detail
+When using GPU tessellation is is possible to apply a level of detail mechanic to in-
+crease performance: visible geometry far away will be tessellated less than geometry
+near the point of view.
+It is possible to implement such algorithm in the tessellation control shader where we
+set the directive for the tessellation engine such as the inner and outer tessellation
+levels.
+The general form of LOD that has been implemented can be seen in Algorithm 4 with
+a possible reference to figure Figure 2.16.
+Each edge of the quad patch will be tessellated (subdivided) in smaller segments
+based on its length in screen space: the bigger the segment appears on the screen,
+the more is near the viewer and so the more it will be tessellated.
+It has to be stated that this algorithm is quite basic and contains limitations: just
+think to the case where the patch is near the viewer but one edge is in line with the
+view direction. In this case the the edge will appear very small on the screen (a point
+if exactly aligned with the view direction) and a very small tessellation level will be
+applied to it.
+A further refinement that complicates the algorithm a bit, is presented in [Bus15]
+where the edges will be tessellated based on their screen spaced length as if they were
+always perpendicular to the view direction, but here is omitted for simplicity.
+3.3.2
+Tessellation Engine
+The tessellation engine is only configurable (by the TCS) and not programmable.
+It will receive patches data from the TCS and it will generate per-vertex data based
+==PAGE:46==
+36
+3 System Design
+Algorithm 4 Level of Detail in Tessellation Control Shader
+1: Given: patch vertex index I = {0, 1, 2, 3}, model-view-projection matrix MV P ∈
+ℜ4 × ℜ4, local space patch vertex positions {pi|i ∈I}, screen pixel width and
+height spix = [pixelWidth, pixelHeight] ⊂(ℵ+)2, level of detail factor fLOD ∈ℜ.
+2: if invocationID = 0 then
+3:
+for i in I do
+4:
+pi_clip ←MV P ∗pi
+5:
+pi_NDC ←pi_clip.w
+6:
+pi_win ←(pi_NDC.xy + 1) ∗(spix ∗0.5)
+7:
+end for
+8:
+for i in I do
+9:
+ei ←
+pi_win −p(i+1)mod4_win
+ /fLOD
+10:
+end for
+11:
+outerTessLevel ←[e0, e1, e2, e3]
+12:
+innerTessLevel ←[(e0 + e3)/2, (e1 + e2)/2]
+13: end if
+on the tessellation settings. This data will be passed to the evaluation stage (Sec-
+tion 3.3.3) as an input.
+There are two types of tessellation settings that the engine will use to generate the
+new vertex data: Outer and Inner Tessellation Levels. The former is used to
+define in how many sub-segments the edges of the patch will be subdivided into, while
+the latter defines the amount of subdivision that will happen inside the patch area.
+In OpenGL 4 specifically, there are three tessellation modes available and this
+choice will also change the type of output vertex data received by the TES.
+• Quads: the patch will be tessellated into smaller quadrilaterals (quads). Each
+quad will be then represented with a couple of triangles since triangle is the
+only convex polygon accepted by the rasterizer.For this mode we can set four
+outer tessellation levels (one for each edge) and two for the inner tessellation.
+The generated output for each new vertex will consist into the two corresponding
+quadrilateral barycentric coordinates. Since this mode is the one that has been
+used for the implementation, a complete overview is in Section 3.3.2.1.
+• Triangles: the patch will be split into smaller triangles based on the tessel-
+lation levels set in the TCS. For this mode we can set three different outer
+tessellation levels (one for each triangle edge) and one inner tessellation level.
+The generated output for each new vertex will be the three barycentric coordi-
+nates relative to the relative triangle control points.
+• Isolines: the patch will be interpreted with line primitives. Based on the (u, v)
+texture space, lines primitives will be created with constant v coordinates. Each
+line will be broken into subsegments along the u direction. For this mode the
+tessellation levels include only two outer values: the first for the number of lines
+==PAGE:47==
+3.3 Tessellation Displacement Mapping
+37
+and the second for the number of subdivisions for each line.
+The output will be primitive line segments.
+3.3.2.1
+Quad Tessellation Mode
+Most of 3D artists use quadrilateral polygons to make their models and this is due to
+animation and light calculation purposes [Plu14].
+Applying tessellation on these models gives the best result if the base tessellation unit
+patch is a quad, and that led to have an entire mode dedicated to it.
+We again specify that even with using quad tessellation, each polygon will be subdi-
+vided in smaller triangles, to be able to get drawn by the GPU.
+The tessellation engine uses an algorithm to compute the position of all the new ver-
+tices and some (but not all) of the edges connecting them [Khr].
+The quad tessellation works with a total of six tessellation float parameters: four
+outer tessellation levels (one for each quad edge) and two for the inner tessel-
+lation complexity.
+From now on we will refer to their abbreviations ”outer levels” and ”inner levels”.
+The algorithm is divided in two steps: building concentric rings and adding rings con-
+nections. The first step, building concentric rings can be summarized as it follows:
+1. Remove the most degenerate case: if all tessellation levels values are 1.0 nothing
+will get tessellated and the quad will be translated into two triangles.
+2. If one inner level is 1.0 and at least one outer level is greater than 1.0, then
+the inner level will be approximated to 2.0 and this will ensure that if any
+tessellation happens, we will have at least one new vertex inside the original
+patch.
+Quad
+Triangle
+Isoline
+Figure 3.5: Tessellation modes in OpenGL 4 courtesy of [SWH15] .
+==PAGE:48==
+38
+3 System Design
+3. The patch edges will be subdivided based on inner levels (note: inner and not
+outer for now). The first inner level will be applied to both horizontal edges
+and the second one will be applied to both vertical.
+4. Build a concentric inner quad: we place the new four vertices based on the
+vertices position of the outer quad.
+To place each new vertex, we take the nearest vertices to the corners of the
+outer quad and find the intersection of traced perpendicular lines to the edges
+of the outer quad.
+With the same manner, perpendicular lines are traced passing by the remaining
+vertices of the outer quad and the intersection with the inner quad will determine
+the position of the rest of the vertices.
+This step is visually explained in Figure 3.6.
+5. Repeat the subdivision of step 3) with the new concentric inner quad.
+6. Repeat step 4) with the new concentric inner quad now considered as the outer
+quad.
+Repeat the above process until at least one of these two conditions are met:
+• One or both vertical and horizontal sides have only one segment: the
+resulting quad will be the inner most quad.
+• One or both vertical and horizontal sides have exactly two segments: the
+inner most quad (ring) is degenerate. This means that instead of a
+quad, our inner most shape will be a horizontal or vertical segment or just
+a point. A point happens when both vertical and horizontal sides have
+only one segment.
+Figure 3.6: Step 4 of quad tessellation first part: the outer ring is subdivided based
+on inner tessellation levels, then an inner ring is created (left) and later
+all the other inner ring vertices based on perpendicular lines intersec-
+tions.
+==PAGE:49==
+3.3 Tessellation Displacement Mapping
+39
+Figure 3.7: Step 6 of quad tessellation first part: possible outcomes.
+From left to right: normal ring, degenerate segment and degenerate
+vertex.
+Courtesy of Khronos group.
+7. Discard the outer most subdivision (of our original quad patch) and subdivide
+the four edges using the four outer levels.
+The second part of the algorithm is used to build ring connections between the
+just generated loops of vertices and edges.
+This will set down a general layout for the sub quads that will compose our tessellated
+geometry.
+It is important to specify that some of the final edges will be missing in this algorithm,
+but this is because the rest of the edges are implementation dependent, so we can not
+be sure where they will be put in the final geometry.
+The second part of the algorithm just ensures the following:
+• The area of the quad will be completely covered by the generated triangulation
+• No part of the area will be covered more than once
+• Rings inside connections are guaranteed to exist
+• Each ring corner is guaranteed to have connections to the two vertices of the
+previous ring that generated it. Similarly, each other vertex of the inner ring
+is guaranteed to have a connection with the vertex on the previous ring that
+generated it.
+When the algorithm finishes, all the new vertex data will be available in form of local
+coordinates relative to the patch that contains them.
+The vertex data output from the tessellator engine will be passed to the evaluation
+stage in form of normalized 2D coordinates (similar to texture coordinates) based on
+the initial quad patch that contains them.
+==PAGE:50==
+40
+3 System Design
+(a) After First Part
+(b) After Second Part
+Figure 3.8: Quad tessellation algorithm result after the first part and after the sec-
+ond one. Note that the result of the second part is only one of the
+possible because some vertex connections are implementation depen-
+dent. Outer tessellation values: 4, 2, 9 and 3. Inner tessellation values:
+6 and 7.Courtesy of khronos group.
+Note that this format happens because of quad tessellation, because if we were going
+to use triangle tessellation (for example) we would have received the three barycentric
+coordinates relative to the triangle patch).
+3.3.3
+Evaluation Stage
+This is the last stage of tessellation and it is programmable using a shader, normally
+called Tessellation Evaluation Shader (TES).
+This shader can be also seen as a second vertex shader, but this time including all
+the vertices output from the tessellator engine.
+• Input: The TES will receive two distinct input: all the per-vertex attributes
+belonging to the initial patch that was then tessellated, and per-vertex local
+coordinates of the newly generated vertices.
+These coordinates refers to the patch that originated the vertices.
+All the per vertex attributes from the original patch will be available as well.
+• Function:It will be responsible for generating all the per vertex attributes that
+will be passed to the geometry shader if present or to the shape assembly.
+Most of the time these attributes are generated by interpolation, using the
+barycentric coordinates (in case of triangle tessellation) or normal 2D coordi-
+==PAGE:51==
+3.3 Tessellation Displacement Mapping
+41
+nates (when using quad tessellation) received by the tessellator engine.
+This is also where displacement mapping occurs.
+• Output: the output will be the per-vertex data of all the new and old vertices
+3.3.3.1
+Vertex Displacement
+Vertex displacement can be done in the tessellation evaluation shader when we have
+all the new vertex data at our disposal.
+This vertex data needs to be calculated first, because the tessellator engine will pro-
+duce only 2D normalized coordinates based on the initial patch that has been tessel-
+lated, as shown in Figure 3.9.
+Calculation of attributes is usually made by interpolation, and in the case of quad
+tessellation, three interpolations are needed for every vertex attribute.
+The pseudocode of the whole evaluation shader for quad tessellation is in Algorithm 5,
+that will run once for every generated vertex after the tessellation.
+Figure 3.9: Calculation of vertex attributes for vertices generated by quad tessel-
+lation. The tessellator engine will produce normalized 2D coordinates
+based on patch vertices, then to find the interpolated attributes in v,
+two first interpolations are made to find v′ and v′′ along the horizontal
+axis, then a third interpolation is made between v′ and v′′ along the
+vertical cooridinate.
+==PAGE:52==
+42
+3 System Design
+Algorithm 5 Tessellation Evaluation Shader with Vertex Displacement
+1: Given: set of vertex attributes A = {position, normal, diffuse, . . . aj}, current
+TES iteration vertex v, 2D normalized coordinates of v relative to the quad patch
+tessCoords ∈[0, 1] ⊂ℜ2, heightmap texture for current patch Th, patch vertices
+[v1, v2, v3, v4], displacement scale factor fdisp ∈ℜ
+2: for aj in A do
+3:
+partial1 ←linearInterpolation(aj[v0], aj[v1], tessCoords.x)
+4:
+partial2 ←linearInterpolation(aj[v2], aj[v3], tessCoords.x)
+5:
+aj[v] ←linearInterpolation(partial1, partial2, tessCoords.y)
+6: end for
+7: h ←sample Th at tessCoords
+8: position[v] ←position[v] + normal[v] ∗h ∗fdisp
+==PAGE:53==
+3.4 Screen Space Ambient Occlusion
+43
+3.4
+Screen Space Ambient Occlusion
+The Ambient Occlusion needs to be computed before the light calculation and to be
+precise it finds a place between the deferred geometry and lighting pass.
+My implementation is composed by two passes: an ambient occlusion calculation and
+a blurring post-process, as Figure 3.10 shows.
+The first pass will calculate the ambient occlusion factor along with a noise factor
+that will be corrected using a simple blur effect.
+The whole implementation is subject to various performance improving methods
+and differs from the theory description in some ways.
+• Single samples kernel: The theory section states that the samples kernel will
+be calculated for each pixel G-buffer position, but it will not.
+Only one sample kernel will be created (client side) and used for each position
+after getting randomly rotated.
+• Random kernel rotations: The random kernel rotations can be saved into
+a screen-sized texture to be available in the fragment shader on a per-pixel
+manner.
+Another optimization that we can do at this point is to create only a small
+amount of random rotations and then use them as a pattern to repeat on all
+over the texture.
+• Correcting Artifacts: Due to the optimizations we made in the previous
+points, the first occlusion render result will appear with a ”pixelated” pattern.
+We solve this problem by blurring the overall result.
+The blur filter that was used is a very simple one and can have negative sides,
+but this will be discussed later.
+Figure 3.10: Extended deferred shading pipeline with the inclusion of SSAO passes.
+==PAGE:54==
+44
+3 System Design
+3.4.1
+Building the Samples Kernel
+We already discussed with equation (2.15) the general shape of the samples that form
+a kernel. Each sample will be generated and stored in tangent space within a unitary
+radius hemisphere oriented toward the positive z-axis.
+Only at render time the samples will be scaled based on the chosen kernel radius and
+placed in the proper window coordinates.
+As listed in Section 3.4, the kernel random rotations are also computed and saved
+for each pixel in tangent space.
+A random rotation ⃗nr is represented by an euclidean direction as can be seen in equa-
+tion (3.4).
+⃗nr
+
+
+
+xr = rand(−1, 1)
+yr = rand(−1, 1)
+zr = rand(−1, 1)
+(3.4)
+This direction will be subject to the Gram-Schmidt process to generate a vector T
+orthogonal to the corresponding G-buffer normal N (saved in world space). Then we
+can define a change of basis matrix TBN to transform our samples from tangent to
+world space. Those samples will be randomly rotated because T is random. TBN
+will be built per each pixel as illustrated in (3.5).
+N = sampled normal from the G-buffer
+T = Gram-Schmidt(⃗nr, N)
+B =
+N × T
+∥N × T∥
+TBN = ⟨T, B, N⟩
+(3.5)
+A full description of the Gram-Schmidt process can be found in Appendix B.5 and
+the function definition relative to (3.5) is at (3.6).
+Gram-Schmidt( ⃗nr, N) =
+⃗nr −N ( ⃗nr · N)
+∥⃗nr −N ( ⃗nr · N)∥
+(3.6)
+A visual representation of the TBN matrix construction for each visible point position
+P is shown in Figure 3.11.
+As mentioned before, a small pattern of random rotations will be repeated on a
+screen-sized space, to have a random rotation available for each pixel.
+3.4.2
+SSAO Shader
+The first pass of the SSAO shader computes the occlusion factor for each pixel in the
+G-buffer.
+The input values are
+==PAGE:55==
+3.4 Screen Space Ambient Occlusion
+45
+Figure 3.11: TBN matrix construction for the visible point position P, to transform
+the samples hemisphere from tangent to world space.
+N is the geometry normal in world space relative to the position P.
+Figure 3.12: Concept behind the TBN matrix: transformation from tangent to
+world space.
+==PAGE:56==
+46
+3 System Design
+• per-pixel depth values
+• per-pixel normal values
+• samples kernel
+• random rotations texture
+The output value is only the SSAO factor for each screen pixel (stored in a color
+buffer texture).
+For each screen pixel, all the steps in this phase can be summarized with Algorithm 6.
+Algorithm 6 Pixel Shader for the SSAO pass
+1: Given:
+(x, y, z) pixel window coordinates (z is depth),Td G-buffer depth
+texture,Tn G-buffer normal texture in view space, S = {s1, . . . , sk} kernel
+samples,r kernel radius,Trot texture of random kernel rotations,Mproj projection
+matrix.
+2: P ←sample Td at (x, y) and transform to view space
+3: N ←sample Tn at (x, y)
+4: T ←sample Trot at (x, y)
+5: T ←T −N (T · N) / ∥T −N (T · N)∥
+▷Gram–Schmidt process on T with N
+6: B ←N × T/ ∥N × T∥
+▷Bitangent computation
+7: TBN ←3 × 3 matrix using T,B and N as columns
+8: occlusion ←0
+9: for s ∈S do
+10:
+s ←P + (TBN · s) ∗r
+▷s from tangent to view space
+11:
+s ←(Mproj · s) /wc
+▷s from view to NDC space
+12:
+(x′, y′, z′) ←0.5 ∗s + 0.5
+▷s from NDC to normalized window space
+13:
+d ←sample Td at (x′, y′)
+14:
+if d < z′ then
+▷current sample position is occluded
+15:
+contribution ←min
+(
+r
+∥z−d∥, 1
+)
+16:
+occlusion ←occlusion + contribution
+17:
+end if
+18: end for
+19: occlusion ←occlusion/k
+20: return occlusion
+The TBN (Tangent, Bitangent, Normal) matrix is a change of basis matrix and
+was used to transform the sample direction, on the unitary hemisphere kernel, from
+local tangent space to world space.
+Tangent direction is computed with the Gram–Schmidt process applied to the random
+rotation to be orthogonal to the sampled normal direction.
+The resulting vector lays on the plane defined by the normal and the random rotation,
+==PAGE:57==
+3.4 Screen Space Ambient Occlusion
+47
+it is normalized and orthogonal to the normal.
+A more detailed description of the Gram–Schmidt process is fount at Appendix B.5.
+Another detail of Algorithm 6 is the contribution variable, that increment the occlu-
+sion factor based on the sample distance from the kernel center. If depth difference
+between the occluded sample kernel center is bigger than the kernel radius, the occlu-
+sion contribution will decrease and for longer distances tend to zero. This function
+avoid unnecessary effect along objects borders.
+In Algorithm 6 a detail has been omitted which is handling the case when, calculat-
+ing a sample position from tangent to window space, the coordinates fall outside the
+window space ([0, 1] × [0, 1]). This leads to sampling unpredictable values from the
+depth textures assigned to d and it leads to a wrong calculation of occlusion factors
+along the screen borders. For this reason is important to check if each sample window
+position is pertinent before proceeding with the relative occlusion calculation. The
+result can be seen in Figure 3.13.
+3.4.3
+Blur shader
+After computing the SSAO scaling factor per pixel, we can observe that the result
+is presented with a ”pixelated” pattern. This is due to the optimizations we made
+(using the same samples kernel and random rotations as a repeated pattern).
+My implementation is correcting these artifact by using a simple blur post process
+pass.
+Be c (x, y) the occlusion factor computed for the pixel at (x, y) window space coordi-
+Figure 3.13: First pass result in the SSAO pipeline (courtesy of learnopengl.com).
+==PAGE:58==
+48
+3 System Design
+nates, computed in the previous pass. The expression (3.7) summarizes the blurring
+done for each pixel.
+c′ (x, y) = 1
+25
+2
+∑
+i=−2
+2
+∑
+j=−2
+c (x + i, y + j)
+(3.7)
+An example of the final SSAO factor result can be seen in Figure 3.14.
+This simple blur filter is computationally fast but its biggest drawback can be recog-
+nized when rendering sharp edges, where the occlusion should have a solid appearance
+but it will be shown soft instead.
+A smarter (but more expensive) blur filter would be the so called ”bilateral filter”
+suggested in the Hands on Real-time Graphics book [Bær+16].
+Figure 3.14: Second pass result in the SSAO pipeline (courtesy of learnopengl.com).
+==PAGE:59==
+3.5 Omnidirectional Shadow Mapping
+49
+3.5
+Omnidirectional Shadow Mapping
+Shadowmapping begins by generating the depth map from the light point of view.
+In the case of omnidirectional shadowmaps we will need to render six different depth
+maps to fill a cubemap centered in the point light position.
+A way to do it is by using the geometry shader as shown in Algorithm 7 which de-
+creases the amount of code to write by a lot but, since it runs on the geometry shader,
+it might not be the most efficient way to do it.
+An important note is that before running Algorithm 7 the system needs to know that
+the render target or the depth texture is our cube map.
+Algorithm 7 Geometry Shader to generate Shadow Cube Map
+1: Given: vector of six view-projection matrices sV P (one for each cube map face),
+input data from previous stage gl_in (from either vertex or tessellation shaders)
+containing position in world space
+2: Given: vector of layers of our render target gl_layer (system variable), setting
+variable gl_Position for the current vertex position (system variable)
+3: for face = 0 to 5 do
+4:
+gl_layer ←face
+5:
+for vertex = 0 to 2 do
+6:
+v_pos ←gl_in[vertex].position
+7:
+gl_Position ←sV P[face] ∗v_pos
+8:
+EmitV ertex()
+9:
+end for
+10:
+EmitPrimitive()
+11: end for
+As you may already know, geometry shader runs once for each primitive of chosen
+type.
+In our case we are handling triangles and for each triangle we will generate 6 different
+output triangles, one in each cube map face.
+For each face we proceed as follow:
+• directing the system to draw into the current cube map face
+• transform the triangle geometry from world into clip space relative to the cube
+map face we are rendering into
+• generate vertices and emit each primitive triangle for the shape assembly and
+later rasterization
+When we have the shadow cubemap at our disposal we can use it to produce
+shadows.
+==PAGE:60==
+50
+3 System Design
+The algorithm is usually placed where light calculation happens. In the case of a
+deferred pipeline, this happens in the lighting stage fragment shader.
+The shadow map algorithm will produce a coefficient that will be applied to the whole
+light contribution, lowering its intensity.
+Such proceedings can be seen in Algorithm 8 and Figure 3.15 refers to it.
+The algorithm is using Percentage-Closer filtering as shown in Figure 3.16.
+For the visible point A, multiple samples are taken around it and the light occlusion
+is performed for each of them.
+The number of samples in shadow over the total number of samples will determine
+the shadow factor to apply to A.
+This feature allows to achieve soft shadows.
+Figure 3.15: Omnidirectional shadows computation: the distance from light posi-
+tion L to the visible point is A is computed and compared to the value
+sampled from the shadow cube map in direction c = A −L.
+If the sampled depth is smaller than ||A −L|| then the point A is in
+shadow..
+==PAGE:61==
+3.5 Omnidirectional Shadow Mapping
+51
+Algorithm 8 Omnidirectional Shadows
+1: Given: world space visible point position A, desired number of samples nsamples
+around the visible point, vector of random directions vecnd[nsamples] around A,
+shadow cube map Tcd of distance values stored in world space, light position L
+in world space,
+2: Initialize: ∆sh ←1/nsamples
+3: for i = 0 to nsamples −1 do
+4:
+zl ←(A + ⃗nd[i] ∗rs) −L
+5:
+c ←sample Tcd at zl
+6:
+if ||zl|| > c then
+7:
+fsh ←fsh + ∆sh
+8:
+end if
+9: end for
+Figure 3.16: Percentage-closer Filtering to achieve soft shadows: in the figure, 5
+samples are taken around A and 3 of them are in shadow. This will
+bring to a shadow factor of 3/5 for A.
+==PAGE:62==
+52
+==PAGE:63==
+CHAPTER 4
+Results
+==PAGE:64==
+54
+4 Results
+4.1
+Used Software and Hardware
+The hardware that has been used for these tests is my laptop from late 2015.
+• Laptop MSI PX60
+– OS: Windows 10
+– Graphics adapter: NVIDIA GeForce GTX 950M - 2048 MB
+– Processor: Intel Core i7-5700HQ 2.7 GHz
+• Screen resolution: 1600x900 pixels
+• Graphics API: OpenGL 4
+• Programming language: C++11
+==PAGE:65==
+4.2 Parallax Occlusion Mapping
+55
+4.2
+Parallax Occlusion Mapping
+Parallax Occlusion Mapping represents the Per-Pixel displacement methods and three
+visual results are included in Figure 4.1 where you can see a floor composed by 15x15
+quads.
+I chose 100 as the number of parallax layers, that means having a ray-marching step
+of ||⃗p|| = 1/100 = 0.01 in an unitary depth space. This setting has been chosen to
+show the maximum level of detail tested in this session.
+The first thing to notice is the quality of result depends on the angle between the
+view direction and the surface normal: the more we look to the horizon, the worse
+the depth effect will look.
+As a result Figure 4.1(c) will have the lowest accuracy, giving a sense of depth only
+in the center region near the view position.
+The best visual result is given in Figure 4.1(a) where the view direction is almost
+parallel to the surface normal.
+This angle dependency is mainly due to the ray marching step precision: the bigger
+the angle, the more chances we have to miss the ray intersection with the height map
+displacement.
+Light calculation is ”almost correct” in the sense that it should be done in tangent
+space while in the test it has been done in world space without accounting the position
+displacement. It will give a slight difference in lighting applied to the surface but not
+so much.
+This was because of the deferred shading pipeline: once we arrive at light calculation,
+we lose all the geometry information of the objects in the scene, including tangent
+space transformation matrix, other than the data stored in the G-buffer.
+Visual feedback showed that the optimal amount of parallax layers is 30 for the
+current resolution (1600x900) and settings, meaning that a higher value will have a
+less noticeable effect and could not be worth the calculation.
+One of the biggest drawbacks of Per-Pixel displacement is that it can not directly
+interact with geometry based algorithms such as screen space ambient occlusion or
+shadow mapping. To make those work we would need to implement some additional
+process to extract the geometry data when those algorithm face per-pixel displaced
+surfaces.
+Overall parallax occlusion mapping is a light weight approach to give the sense of
+Parallax Layers Number
+Ray-marching Step Size
+Geometry Stage Time (ms/frame)
+10
+0.1
+3.21
+25
+0.04
+4.69
+50
+0.02
+5
+75
+0.013
+6.88
+100
+0.01
+7.29
+Table 4.1: Parallax Occlusion Mapping performance.
+==PAGE:66==
+56
+4 Results
+(a) 80 degrees view direction to surface normal
+(b) 40 degrees view direction to surface normal
+(c) 20 degrees view direction to surface normal
+Figure 4.1: Different viewing angles in Parallax Occlusion Mapping.
+==PAGE:67==
+4.2 Parallax Occlusion Mapping
+57
+Figure 4.2: Parallax Occlusion performance.
+depth to surfaces.
+We still have to take in mind that it remains an approximation with its limitations
+on visual result precision.
+4.2.1
+Parallax Shadows
+Parallax Shadows use the same ray-marching algorithm concept of parallax mapping
+and they can produce soft self shadowing, as seen in Figure 4.3.
+As it was happening for the parallax occlusion mapping case, parallax shadows visual
+precision also depends on the angle between the view direction, that in this case be-
+comes the light point of view, and the surface normal.
+If the light is too close to the surface, parallax shadows will fade in the longer distance
+because in those cases is easier to miss the height map displacement to calculate the
+shadow contribution.
+The more shadow samples we use and the more accurate our shadows will be when
+the light ray forms a big angle with the surface normal.
+If the light rays forms short angles with the surface normal, there are no real advan-
+tages in using many shadow samples.
+Figure 4.4 shows the parallax shadows computation time together with parallax
+occlusion set on a fixed layer number of 30.
+==PAGE:68==
+58
+4 Results
+(a) Lit with parallax shadows
+(b) Lit without parallax shadows
+(c) Albedo G-buffer content with parallax shadows applied
+Figure 4.3: Different viewing angles in Parallax Occlusion Mapping.
+==PAGE:69==
+4.2 Parallax Occlusion Mapping
+59
+Geometry Stage Time (ms/frame)
+Shadow Samples Number
+Parallax Occlusion Mapping
+Parallax Shadows
+Total
+10
+4.8
+1.08
+5.88
+20
+4.8
+1.87
+6.67
+30
+4.8
+2.73
+7.53
+40
+4.8
+3.94
+8.74
+50
+4.8
+5.15
+9.95
+Table 4.2: Parallax Shadows in Parallax Occlusion Mapping performance for one
+point light.
+Figure 4.4: Shadows in Parallax Occlusion performance.
+==PAGE:70==
+60
+4 Results
+From visual output, 30 shadow samples would give already more than satisfying re-
+sults, that together with parallax occlusion would spend 7, 53 milliseconds per frame.
+30 shadow samples is a medium value, suitable for relatively small intensity point
+lights.
+This comes because when the light rays bend too much with the surface normal, shad-
+ows will start to produce artifacts but in those situations the current point is too far
+from the point light so an inaccurate shadow will be no problem.
+==PAGE:71==
+4.3 Tessellation Displacement Mapping
+61
+4.3
+Tessellation Displacement Mapping
+Tessellation Displacement Mapping represented the per-Vertex displacement family
+of algorithms.
+An example of visual result is placed in Figure 4.5 where we can see the lit frame
+and its corresponding wireframe view. The whole floor counts around 500 thousand
+triangles generated by tessellation.
+It has to be stated that only one draw call has been used for the render in the figure
+and the following tests.
+Draw calls number increment will have a negative influence on tessellation perfor-
+mance.
+Figure 4.6 enlight the time increase for different triangles amounts. Tessellation has
+a linear increase but the computation time will already be relevant for smaller primi-
+tives amounts.
+In the performance count the implemented screen space level of detail (Screen LOD)
+played a big role in giving a satisfying visual result and still maintaining the number
+of primitives relatively low.
+Tessellation can be a valid method to produce more
+primitive for displacement mapping, but it has to be used wisely only where it is
+needed: we can consider 100 thousand primitives as the threshold after which it will
+be useful to use tessellation, otherwise it will be better to stick with the default vertex
+attributes upload to have the optimal performance.
+Geometry Stage Time (ms/frame)
+Thousands of Generated Primitives
+0.6
+8
+1.6
+100
+3.4
+250
+6.1
+500
+8.8
+750
+12.6
+1000
+Table 4.3: Tessellation Displacement performance.
+==PAGE:72==
+62
+4 Results
+(a) Lit tessellated terrain
+(b) Wireframe tessellated terrain
+Figure 4.5: Tessellation displacement mapping result.
+==PAGE:73==
+4.3 Tessellation Displacement Mapping
+63
+Figure 4.6: Tessellation Displacement performance.
+==PAGE:74==
+64
+4 Results
+4.4
+Omni-directional Shadow Maps
+Omni-directional shadow maps supply shadows for point light so they need to provide
+depth data in all the possible directions in 3d space.
+To do that this technique uses a ”shadow” depth cube map that is updated each
+frame and this cost a lot more on time than a directional light shadow map, for the
+fact that we need to render depth for 6 times (once for each cube map face).
+An example of this technique is shown in Figure 4.7 where the first screen shows the
+result when we also use tessellation to render the depth cube map faces.
+The second and third image are the debug views of the first one, respectively when
+using and when not using tessellation in the cube map creation.
+As we can already imagine, the timing difference between Figure 4.7(b) and Fig-
+ure 4.7(c) is really noticeable, as described in Table 4.4.
+A big factor in this performance comparison is the fact that we need to render 6 faces
+of the cubemap so the time growth is around 6 (maybe optimized to 4) times slower
+than a single depth texture render.
+Omni-directional shadow maps are a viable solution when we want dynamic shadows
+for a point light, but it would not work good on performance if also using tessellation
+to generate the shadow cube map faces.
+Figure 4.8 shows proof of tessellation being really heavy on performance when used
+in this type of shadow mapping technique and as we can see from Figure 4.7(b) it
+can not produce an accurate result either.
+This brings to consider this shadow mapping technique to generate shadows for all
+the geometry in the scene (like the character in the example screens) without using
+tessellation.
+It will be not the best choice for small displacement mapping features like the ground
+pebbles.
+Triangles quantity (thousands units)
+Shadow Cube Map creation (ms/frame)
+non-tessellated
+tessellated
+non-tessellated
+tessellated
+19
+60
+0.32
+1
+19
+100
+0.32
+1.7
+19
+200
+0.32
+6.6
+19
+300
+0.32
+13.2
+19
+400
+0.32
+44.2
+Table 4.4: Omni-directional shadow cube map creation performance.
+==PAGE:75==
+4.4 Omni-directional Shadow Maps
+65
+(a) Lit tessellated shadow map result
+(b) Debug view of tessellated shadow map contribution
+(c) Debug view of non-tessellated shadow map contribution
+Figure 4.7: Omni-directional shadow maps visual results.
+==PAGE:76==
+66
+4 Results
+Figure 4.8: Omni-directional shadow maps performance with using tessellation at
+different levels.
+==PAGE:77==
+4.5 Parallax Shadows in Tessellation Displacement Mapping
+67
+4.5
+Parallax Shadows in Tessellation Displacement
+Mapping
+This last section shows the final results of this thesis: using parallax shadows in tes-
+sellated surfaces.
+Before the discussion, it is important to specify that Screen Space Ambient Occlusion
+effect is present in most of the per-pixel tessellation screens. It has not been tested
+independently because it resulted as a nice to have feature. No further development
+has been done on it rather than the base implementation. It will enhance the visual
+shadow result to a fairly big computational price that can be considered around 18
+milliseconds per frame.
+Figure 4.9(a) shows the final merge: a tessellated floor with self shadowing given by
+parallax shadows and the human model shadow given by shadow mapping without
+the use of tessellation.
+This is the best visual result of shadows achieved in this thesis.
+To visually compare this result, Figure 4.9(b) shows the scene without parallax shad-
+ows and Figure 4.9(c) shows the result by only using shadow maps but with tessella-
+tion active.
+This last result gives a worse performance compared to Figure 4.9(a) both in terms
+of visual output and computational time.
+Figure 4.10 results shows that the tessellation factor will have less influence on
+parallax shadow generation with growing number of triangles.
+Handling 600 thousands tessellated triangles gives a slight increase in parallax shad-
+ows computation time, when changing shadow samples quantity.
+This is a direct conclusion of the fact that, since parallax shadows time grows with
+the number of screen pixels it has to render, having a highly tessellated surface will
+make more triangles correspond to the same fragment, and the shadow computation
+time to remain almost constant.
+shows a last performance comparison by using tessellated shadow maps versus using
+the hybrid solution with parallax shadows.
+In real use cases I strongly doubt that tessellation would be ever considered for shadow
+map creation, but it was still worth comparing to have a sense of measure.
+The tessellated geometry used for the test scene is composed by 300 thousands trian-
+gles and it was maintained static. By using a high number of shadow samples like
+50, the required total time will be still lower than using a tessellated shadow map
+solution.
+As a tested solution, a number of 25 shadow samples showed a good compromise for
+the visual result.
+==PAGE:78==
+68
+4 Results
+(a) Parallax shadows + non tessellated shadow mapping in tessellation dis-
+placement
+(b) Only non tessellated shadow mapping
+(c) Only tessellated shadow mapping
+Figure 4.9: Final results of parallax shadows versus tessellated shadows in tessel-
+lated displacement.
+==PAGE:79==
+4.5 Parallax Shadows in Tessellation Displacement Mapping
+69
+Geometry Stage time (ms/frame)
+Parallax
+Shad-
+ows
+samples
+(units)
+Triangles
+quan-
+tity
+(thousand
+units)
+Parallax
+Shad-
+ows
+Geometry
+Total
+10
+100K
+1.01
+1.75
+2.76
+20
+100K
+2.25
+1.75
+4
+30
+100K
+3.35
+1.75
+5.1
+40
+100K
+4.55
+1.75
+6.3
+50
+100K
+5.75
+1.75
+7.5
+10
+300K
+1.53
+5.53
+7.06
+20
+300K
+3.71
+5.53
+9.24
+30
+300K
+5.98
+5.53
+11.51
+40
+300K
+8.19
+5.53
+13.72
+50
+300K
+10.39
+5.53
+15.92
+10
+600K
+1.59
+7.24
+8.83
+20
+600K
+3.79
+7.24
+11.03
+30
+600K
+6.12
+7.24
+13.36
+40
+600K
+8.37
+7.24
+15.61
+50
+600K
+10.66
+7.24
+17.9
+Table 4.5: Parallax Shadows in Tessellated Geometry performance.
+==PAGE:80==
+70
+4 Results
+Figure 4.10: Parallax shadows in tessellation displacement performance.
+==PAGE:81==
+4.5 Parallax Shadows in Tessellation Displacement Mapping
+71
+Figure 4.11: Shadow maps using tessellation versus parallax shadows hybrid solu-
+tion.
+==PAGE:82==
+72
+==PAGE:83==
+CHAPTER 5
+Conclusion
+Parallax occlusion shadows were able to well integrate into tessellated displacement
+mapping.
+This technique allows to generate precise soft self shadows for the tessellated displace-
+ments, still being able to integrate additional geometry based algorithms, like screen
+space ambient occlusion and shadow mapping.
+This technique is giving a good result both in terms of visual output and in perfor-
+mance, compared to the only use of shadow mapping.
+Using tessellation to create omni-directional shadow maps showed much worse compu-
+tation timing and it is an option that would not be able to compete against parallax
+shadows.
+Parallax shadowing still have its drawbacks in precision: the angle between the sur-
+face normal and the light ray direction will influence the visual outcome. The bigger
+the angle, the more shadow samples will be needed to have a correct shadowing.
+This should not be a problem for low intensity point lights that aim to light displaced
+surfaces only when the light rays have a slight angle with the surface normal.
+Ultimately, shadow mapping and parallax shadows can be combined together: shadow
+maps are generated for all the scene geometry without using tessellation, while par-
+allax shadows will provide self soft shadowing for the tessellated models.
+I expect this shadow technique to be useful in use cases like games but only as an
+optional feature rather than a default one, because it still add a level of computation
+that might be reserved to the higher level of detail.
+==PAGE:84==
+74
+==PAGE:85==
+APPENDIX A
+Leftover Details
+A.0.1
+Reconstructing Position from Depth
+Light calculation made for a point in space generally requires the world or view po-
+sition of the point, so going back from NDC to world or view coordinates is a more
+frequent operation rather than NDC to clip coordinates transformation.
+In a deferred pipeline this information can be stored in a screen size buffer, meaning
+save a 3D position for each pixel we are going to render.
+This process can be optimized a lot by only saving the depth from the point NDC
+coordinates and later compute view position with it.
+Depth is a scalar and it can be stored on a single buffer channel (out of four) instead
+of three requested for an euclidean position (x, y, z). This change of data often brings
+to save the use of a buffer, such as storing normal and depth of points in the same
+buffer (three channels for the normal and one for depth).
+This depth can be obtained using either depth buffer values or from the point world
+position itself, as Pettineo describes in his article [Pet09].
+Depth can be retrieved in many ways, depending on the target coordinate space and
+precision we want to achieve.
+In any case, we start by finding the position’s Normalized Device Coordinates.
+Let us assume that we have the window coordinates of the pixel where our point has
+been projected, so the first operation is transforming the x and y Window Coodinates
+to Normalized Device Coordinates (NDC) coordinates. The operation is described in
+(A.1) with W and H the number of pixels columns and rows in our window View-
+port. xw , yw and zw are window space coordinates and zw is usually available by
+the system only if depth buffer is being used (as it happens in OpenGL).
+xNDC = 2 xw
+W −1
+yNDC = 2 yw
+H −1
+zNDC = 2 zw −1
+(A.1)
+For a general transformation overview, it is possible to consult the Hands on Real-time
+Graphics book [Bær+16].
+==PAGE:86==
+76
+A Leftover Details
+A.0.1.1
+From NDC to Eye(View) coordinates
+When light contribution is calculated, it is usually done in world or view space. For
+this reason the conversion from NDC to view coordinates is more common than NDC
+to clip coordinates.
+It is possible to convert from window directly to view coordinates with the following
+equation
+Mproj
+−1
+
+
+xc
+yc
+zc
+wc
+
+
+NDC
+=
+
+
+αxv
+αyv
+αzv
+α
+
+⇒1
+α
+
+
+αxv
+αyv
+αzv
+α
+
+=
+
+
+xv
+yv
+zv
+1
+
+
+view
+where the α factor is due to skipping the inverse W-divide step.
+==PAGE:87==
+A.1 From NDC to Clip coordinates
+77
+A.1
+From NDC to Clip coordinates
+The relation that ties NDC to Clip space is
+
+
+x
+y
+z
+1
+
+
+NDC
+=
+1
+wc
+
+
+xc
+yc
+zc
+wc
+
+
+clip
+that means our goal is to find the fourth clip space component wc in order to execute
+the inverse W-divide operation, as described in the OpenGL wiki[khr16].
+Let’s consider the relation between clip and view space to focus on how wc is found.
+
+
+xc
+yc
+zc
+wc
+
+
+clip
+= Mproj
+
+
+xv
+yv
+zv
+1
+
+
+view
+where Mproj is the projection matrix.
+At this point we make the assumption that the projection matrix we are using is in
+the form
+Mproj =
+
+
+- row
+1 -
+- row
+2 -
+0
+0
+T1
+T2
+0
+0
+E1
+0
+
+
+and this is not a big limitation, since this form is a common case, like the perspective
+projection matrix used for this project (more details in the appendix).
+The fourth component in clip coordinates wc is found from the dot product of the
+projection matrix fourth row with the point view coordinates. Naming respectively
+PNDC , Pc , Pv the NDC, clip, view coordinates of a point position P, we can write
+wc =
+[0
+0
+E1
+0]
+· Pv
+=E1 zv
+a simplification that brings to be interested only in zv. In order to find it, the clip
+space z component can be helpful since it is a linear combination that involves only
+the z and w component of the view space coordinates. That is helped from the fact
+that wv = 1 for common convention.
+PNDC = Pc
+E1 zv
+⇒zNDC =
+zc
+E1 zv
+= T1 ∗zv + T2 ∗wv
+E1 zv
+= T1 ∗zv + T2
+E1 zv
+==PAGE:88==
+78
+A Leftover Details
+Now the last equation is implicit in respect of zv and the other values are known. It
+is finally possible to compute wc
+zNDC −T1
+E1
+=
+T2
+E1 zv
+⇒zv =
+T2
+E1 zNDC −T1
+⇒wc =
+T2
+zNDC −T1
+E1
+==PAGE:89==
+A.2 SSAO: refining the sample kernel
+79
+A.2
+SSAO: refining the sample kernel
+Since now the samples positions have been considered randomly placed in all over
+the hemisphere. The fact is that we want more precision near the point position,
+so one thing we can do is to move all the samples toward the center with a linear
+interpolation. The interpolation will weight each sample based on their sample list
+index: the samples with smaller list index will be attracted more towards the origin
+despite their initial position (whether previously near or far from the origin).
+Be s′ (i) the previously obtained sample at index i in an array of n elements, lmin the
+minimum scale factor given to the position. The final stored sample position s (i) is
+computed with equation (A.2).
+s (i) = s′ (i)
+[
+lmin +
+( i
+n
+)2
+(1 −lmin)
+]
+(A.2)
+A visual representation of the scaled samples can be seen in figure Figure A.1 and
+compared to figure Figure 2.17.
+Figure A.1: On the left the graph of sample index (0 to n) vs. distance from the ker-
+nel center (lmin to 1). On the right, samples hemispheres with random
+samples positions that have been scaled. (courtesy of learnopengl.com).
+==PAGE:90==
+80
+==PAGE:91==
+APPENDIX B
+Geometric Concepts
+Will follow a list of geometric definitions of concepts that have been used to write
+this report.
+==PAGE:92==
+82
+B Geometric Concepts
+B.1
+Transformation Matrices
+B.1.1
+Rotation
+The rotation of a position in euclidean space around an axis [Rx, Ry, Rz] of an angle
+θ can be achieved by multiplication with the matrix (B.1).
+
+
+cos θ + Rx
+2 (1 −cos θ)
+RxRy (1 −cos θ) −Rz sin θ
+RxRz (1 −cos θ) + Ry sin θ
+0
+RxRy (1 −cos θ) + Rz sin θ
+cos θ + Ry
+2 (1 −cos θ)
+RyRz (1 −cos θ) −Rx sin θ
+0
+RxRz (1 −cos θ) −Ry sin θ
+RzRy (1 −cos θ) + Rx sin θ
+cos θ + Rz
+2 (1 −cos θ)
+0
+0
+0
+0
+1
+
+
+(B.1)
+Rotation matrices are always orthogonal so its transpose matrix is also its inverse.
+B.1.2
+Translation and Scale
+Translation and scaling of a position in the 3D space can be achieved by multiplica-
+tion with the matrix (B.2), where:
+• the position will be scaled along the x,y and z axis by Sx,Sy and Sz
+• the position will be translated along the x,y and z axis by Tx,Ty and Tz
+
+
+Sx
+0
+0
+Tx
+0
+Sy
+0
+Ty
+0
+0
+Sz
+Tz
+0
+0
+0
+1
+
+
+(B.2)
+When Sx,Sy and Sz have the same value we say that we are applying an uniform
+scaling.
+Uniform scales are not orthogonal, but they are direction preserving so re-normalizing
+after a uniform scale will give you the same normal.
+B.1.3
+Projection
+Projection matrix is conceptually used to project 3D data into a 2D plane.
+Different projection transformation exist but here only one case will be listed because
+it is the only one used for this project: perspective projection.
+Perspective projection will also scale the geometry to give a visual sense of depth, as
+you can see in Figure B.1.
+The 3D bounding volume defined by the projection is commonly called view frus-
+tum and in the case of perspective projection it is a pyramid section.
+It is important to notice that the perspective projection applies a non-uniform scale
+to the w-coordinate, in particular the more far from the camera a visible vertex is,
+==PAGE:93==
+B.1 Transformation Matrices
+83
+Figure B.1: View frustum for the perspective projection (courtesy of Uttam
+Khanal).
+the higher the w-coordinate becomes.
+That implies the 3D clip coordinate system will not be linearand we will have a lot
+more depth (z-coordinate value) precision near the view point rather than far away.
+Vertical and horizontal straight lines before the perspective projection will still appear
+straight after it.
+The transformation matrix for the perspective projection Mproj can be seen in (B.3)
+where A is the aspect ratio, n and f are the near and far plane distances from the
+origin (that in view space corresponds to the view position) and α is the field of view.
+Mproj =
+
+
+1
+A cot α
+2
+0
+0
+0
+0
+cot α
+2
+0
+0
+0
+0
+n+f
+n−f
+2nf
+n−f
+0
+0
+−1
+0
+
+
+(B.3)
+More details can be found in the book [Bær+16].
+==PAGE:94==
+84
+B Geometric Concepts
+B.2
+Normal Matrix
+If a change of transformation matrix is composed by uniform scales, rotations and
+translations it can be also used on vertex normals or other direction vectors.
+The case is different if a transformation matrix contains non-uniform scale transfor-
+mations (e.g. shear).
+Turns out that for the normals the matrix to apply is Mn in (B.4).
+M = transformation matrix
+Mr = UpperLeft3x3 (M)
+Mn =
+[
+Mr
+−1]T
+(B.4)
+We are considering the upper left 3x3 sub-matrix Mr because it is where the rotation
+resides in a transformation matrix.
+To explain the result at (B.4) let’s consider the plane geometry case in Figure B.2
+where the V segment, delimited by P1 and P2, along with the segment normal N are
+subject to a non-uniform scaling by the multiplication with respectively Mp and Mn.
+We can define V ′,P1
+′ , P2
+′ and N ′ as the resulting values from the transformation, as
+listed in (B.5).
+V = P1 −P2
+V ′ = Mp V
+N ′ = Mn N
+(B.5)
+One property remains between before and after the transformation which is the or-
+thogonality between V ,N and V ′,N ′ that in vector multiplication is expressed in (B.6)
+Figure B.2: Non-uniform scaling in plane geometry.
+==PAGE:95==
+B.2 Normal Matrix
+85
+where the last passage is due to the property of transpose of matrix product.
+N ′ · V ′ = 0
+⇒(N ′)T V ′ = 0
+⇒(Mn N)T (Mp V ) = 0
+⇒N T Mn
+T Mp V = 0
+(B.6)
+Since N and V are orthogonal, an interpretation with vector products brings N T V =
+0 so the last equation of (B.6) is satisfied only if Mn
+T MP = In where In is the identity
+matrix. Lastly we arrive to the final conclusion with (B.7).
+Mn
+T MP = In
+⇒Mn
+T = In MP
+−1
+⇒Mn
+T = MP
+−1
+⇒Mn =
+[
+MP
+−1]T
+(B.7)
+==PAGE:96==
+86
+B Geometric Concepts
+B.3
+Geometry Spaces and Coordinates
+The thesis refers to a series of geometry spaces which are commonly used in a real-
+time graphics environment. The used names are particularly common in the OpenGL
+domain. The geometry spaces pipeline that was used for this thesis can be seen in
+Figure B.3 and will follow a brief description of all stages.
+• Local Coordinates: also known as model or object coordinates refers to the
+geometry space that is proper to a set of models stored in a single file.
+That means when we load any set of models from a single file, all its vertices
+spatial attributes are intended to be in local coordinates.
+• World Coordinates: refers to the world space, where all the models spatial
+data is stored relative to a fixed common origin.
+The transition between local to world coordinates can be composed by transla-
+tions, rotations and scaling transformations.
+• View Coordinates: refers to the view space, also called eye or camera space.
+This geometry space can be interpreted as viewing the scene from a camera
+placed somewhere in the world space.
+Aside from interpretation, this space is obtained by translating and rotating all
+the geometry in world space around the origin to match the position and the
+orientation of the camera.
+This comes handy if we decide to have more than one camera in our scene,
+so every camera will have its own view matrix and changing camera is only a
+matter of changing view transformation.
+Figure B.3: Geometry Spaces pipeline that has been used for the thesis project
+(courtesy of Silicon Graphics).
+==PAGE:97==
+B.3 Geometry Spaces and Coordinates
+87
+• Clip Coordinates: define a 3D volume in front of the camera that will be con-
+sidered for rendering. All the geometry outside this volume will be ”clipped”
+(discarded) by the system at the beginning of rasterization stage: each vertex
+will proceed further in the pipeline only if it satisfies the relation (B.8) where
+[xclip, yclip, zclip, wclip] is the vertex position in clip coordinates.
+−wclip < xclip, yclip, zclip < wclip
+(B.8)
+Conceptually, clip coordinates refers to the first space where 3D geometry has
+been ”projected” into the 2D domain screen, like taking a photo.
+The transformation from view to clip coordinates is made by a projection matrix,
+described in Appendix B.1.3.
+OpenGL rasterizer expects the vertices positions to be in clip space, then it will
+execute the further transformations by itself.
+• Normalized Device Coordinates (NDC): is obtained by performing the so
+called perspective divide operation, shown in (B.9).
+
+
+x
+y
+z
+1
+
+
+NDC
+= 1
+wc
+
+
+xc
+yc
+zc
+wc
+
+
+clip
+(B.9)
+• Window Coordinates: are obtained with (B.10) where W and H are respec-
+tively the number of columns and rows of screen pixels that we are rendering.
+
+
+x
+y
+z
+
+
+w
+=
+
+
+W
+xNDC +1
+2
+H
+yNDC +1
+2
+zNDC +1
+2
+
+
+(B.10)
+The (x, y) subdomain represent the pixel locations on the screen while the z
+still refers to depth from near to far plane but in a normalized range [0, 1]. The
+variables are taken from the ViewPort settings and in OpenGL they can be
+edited with the function glViewport.
+==PAGE:98==
+88
+B Geometric Concepts
+B.4
+Reflection vector
+To calculate specular reflection light contribution I used the reflection vector, an ideal
+abstraction to determine the direction of light when reflected by a surface.
+The reflection vector can be expressed by (B.11) with reference to Figure B.4, where ⃗l
+is the direction from the light position to the observed point, ⃗r is the reflection vector
+and ⃗n is the surface normal.
+⃗r = ⃗l −2
+(
+⃗l · ⃗n
+)
+⃗n
+(B.11)
+To understand (B.11) we have to take into account a particular hypothesis which
+is (B.12) derived by physics properties (more details in chapter 1.13.3 of [Hug14]).
+θr = θl
+(B.12)
+If we decompose ⃗l in its projection and orthogonal projection on ⃗n, respectively proj⃗n⃗l
+and ortho⃗n⃗l we can write (B.13)
+⃗l = proj⃗n⃗l + ortho⃗n⃗l
+=
+(
+⃗l · ⃗n
+)
+⃗n +
+[
+⃗l −
+(
+⃗l · ⃗n
+)
+⃗n
+]
+(B.13)
+Figure B.4: Reflection vector ⃗r given incoming light direction ⃗l and the surface
+normal ⃗n.
+==PAGE:99==
+B.4 Reflection vector
+89
+Now looking at Figure B.4 we can notice the equalities in (B.14).
+proj⃗n⃗r = −proj⃗n⃗l
+ortho⃗n⃗r = ortho⃗n⃗l
+(B.14)
+With those equalities we can derive ⃗r as shown in (B.15).
+⃗r = proj⃗n⃗r + ortho⃗n⃗r
+= −proj⃗n⃗l + ortho⃗n⃗l
+(B.15)
+We then arrive to (B.11) by substitution.
+==PAGE:100==
+90
+B Geometric Concepts
+B.5
+Gram–Schmidt process
+Gram–Schmidt process is used to orthogonalize vector basis and in this project it was
+applied on the two-dimensional domain.
+Suppose we start with a two-dimesional non-orthogonal basis { ⃗u1, ⃗v2} where ⃗u1 has
+already unit length. To orthonormalize ⃗v2 with ⃗u1 we can define the function listed
+in (B.16) and based on Figure B.5. The result will be the orthogonal basis { ⃗u1, ⃗u2}.
+Gram-Schmidt (⃗v2, ⃗u1) =
+⃗v2 −⃗u1 (⃗v2 · ⃗u1)
+∥⃗v2 −⃗u1 (⃗v2 · ⃗u1)∥= ⃗u2
+(B.16)
+To understand the meaning of it we can start by decomposing ⃗v2 with the parallel
+⃗x2 and perpendicular ⃗y2 vectors to ⃗u1 as seen in (B.17).
+⃗v2 = ⃗x2 + ⃗y2
+⇒⃗y2 = ⃗v2 −⃗x2
+= ⃗v2 −ProjU1 (⃗v2)
+(B.17)
+We are interested to find ⃗y2 because its direction is ⃗u2. To calculate ⃗y2 we need the
+projection of ⃗v2 into the one-dimensional space ⃗U1 relative to the basis {u1}.
+The properties of orthogonal basis facilitate the calculation of ProjU1 shown in (B.18).
+ProjU1 (⃗v2) = (⃗v2 · ⃗u1) ⃗u1
+(B.18)
+To arrive at the initial listed result in (B.16) there is only the need to normalize ⃗y2
+as (B.19) reports.
+⃗u2 =
+⃗y2
+∥⃗y2∥
+(B.19)
+Remember that the newly obtained orthogonal basis can be easily extended to the
+three-dimensional domain { ⃗u1, ⃗u2, ⃗u3} using the normalized cross product, as shown
+Figure B.5:
+Gram-Shmidt process in two dimensions to orthogonalize the basis
+{ ⃗u1, ⃗v2} into { ⃗u1, ⃗u2} .
+==PAGE:101==
+B.5 Gram–Schmidt process
+91
+in (B.20).
+⃗u3 =
+⃗u1 × ⃗u2
+∥⃗u1 × ⃗u2∥
+(B.20)
+==PAGE:102==
+92
+B Geometric Concepts
+B.6
+Tangent Space and the TBN Matrix
+It often happens to have the need of handling geometry concepts relative to a sur-
+face, where variables are expressed in a basis that relies on surface directions and/or
+texture coordinate applied to that.
+This space is also known as Tangent Space and there is often the need to have
+a change of basis from it to the commonly used ones (e.g. object, world and view
+spaces).
+The change of basis matrix used for this operation is called TBN Matrix because
+it is defined using the orthonormal vectors: Tangent T, Bitangent (or Binormal) B
+and Normal N as the matrix columns.
+TBN = ⟨Tangent, Bitangent, Normal⟩
+In the general case, we start having a surface S (u, v) with defined texture 2D coor-
+dinates (u, v) ∈[0, 1]2 ⊂ℜ2.
+It is possible to do a linear parametrization from the texture space (u, v) to tangent
+space of surface S by defining the Tangent direction T going toward the increment of
+the first texture coordinate u along S and, in a similar manner, defining the Bitangent
+direction B toward the second texture coordinate v.
+To complete the base, the Normal vector N is considered as the normal direction of
+the surface S on each considered coordinate, as described in (B.21).
+Figure B.6 shows the transition from texture to tangent space.
+T =∂S/∂u
+B =∂S/∂v
+N = ⃗nS (u, v)
+(B.21)
+Notice that if the surface is flat, like a plane section, we will have the same TBN
+matrix for all the surface points, but this does not happen frequently and usually the
+TBN matrix is computed per triangle and assigned to each vertex.
+It is important to specify that in real situations where we handle non-flat surfaces,
+vertices are often shared by two or more triangles. In those cases the vertices get
+the average of the independently calculated tangent, bitangent and normals of each
+triangle that shares them.
+Luckily for the beginner programmer, the most famous model loaders have options
+to automatically calculate the TBN matrix for each triangle on the loaded meshes.
+We usually have at our disposal the normal at a particular point on the each trian-
+gle surface, obtained either by vertex normals interpolation or by a normal map (for
+example).
+In order to determine the Tangent and Bitangent vectors we can have a better look
+at the situation with Figure B.7.
+Be (ui, vi) the 2D texture coordinate for the vertex position Pi of the triangle in
+Figure B.7. The difference (∆uj, ∆vj) is calculated from the texture coordinates of
+==PAGE:103==
+B.6 Tangent Space and the TBN Matrix
+93
+Figure B.6: Mapping from Parametric Texture Space to Cartesian Tangent Space.
+Figure B.7: Mapping from UV to Tangent space.
+==PAGE:104==
+94
+B Geometric Concepts
+the two vertices delimiting the edge Ej as defined in (B.22).
+
+
+
+
+
+E1 = P2 −P1
+∆u1 = u2 −u1
+∆v1 = v2 −v1
+
+
+
+
+
+E2 = P3 −P2
+∆u2 = u3 −u2
+∆v2 = v3 −v2
+(B.22)
+We then can write the relations in (B.23).
+E1 = ∆u1 T + ∆v1 B
+E2 = ∆u2 T + ∆v2 B
+(B.23)
+The system described in (B.23) can be written in form of matrix multiplication as
+shown in (B.24), to easily find T and B.
+The texture coordinates difference matrix inversion is possible because it is a non-
+singular square matrix, since its determinant is not zero.
+This conclusion comes
+because its rows are linearly independent due to corresponding to two different edges
+of a triangle.
+[E1
+E2
+]
+=
+[∆u1
+∆v1
+∆u2
+∆v2
+] [T
+B
+]
+⇒
+[T
+B
+]
+=
+[∆u1
+∆v1
+∆u2
+∆v2
+]−1 [E1
+E2
+]
+=
+1
+∆u1∆v2 −∆u2∆v1
+[ ∆v2
+−∆v1
+−∆u2
+∆u1
+] [E1
+E2
+]
+(B.24)
+Notice that we do not have to calculate both Tangent and Bitangent with (B.24) be-
+cause we know that Tangent, Bitangent and Normal form a basis and are orthogonal
+one to each other.
+That is the reason why, once having the Normal and the Tangent (for example), it is
+possible to use the vector cross product and find the Bitangent as shown in (B.25).
+B =
+N × T
+∥N × T∥
+(B.25)
+==PAGE:105==
+Bibliography
+[Bær+16]
+Andreas Bærentzen et al. Hands on Real-Time Graphics. 2016.
+[Bli78]
+James F Blinn. “Simulation of wrinkled surfaces”. In: SIGGRAPH. 1978.
+[Boe10]
+Florian Boesch. OpenGL 4 Tessellation. 2010. url: http://codeflow.
+org/entries/2010/nov/07/opengl-4-tessellation/.
+[Bur15]
+Steve Burke. Defining Tessellation and Its Impact on Game Graphics.
+2015. url: http://www.gamersnexus.net/guides/1936- what- is-
+tessellation-game-graphics.
+[Bus15]
+Victor Bush. Tessellated terrain with dynamic LOD. 2015. url: http:
+//victorbush.com/2015/01/tessellated-terrain/.
+[Coo84]
+Robert L Cook. “Shade trees”. In: SIGGRAPH. 1984.
+[Cou15]
+Adrian Courrèges. GTA V - Graphics Study. 2015. url: http://www.
+adriancourreges.com/blog/2015/11/02/gta-v-graphics-study/.
+[DH00]
+Michael C Doggett and Johannes Hirche. “Adaptive View Dependent
+Tessellation of Displacement Maps”. In: Workshop on Graphics Hardware.
+2000.
+[HS98]
+Wolfgang Heidrich and Hans-Peter Seidel. “Ray-tracing Procedural Dis-
+placement Shaders”. In: Graphics Interface. 1998.
+[Hug14]
+et al. Hughes J.F. Computer graphics. Principles and practice. 3ed. AW,
+2014. isbn: 9780321399526. url: http://gen.lib.rus.ec/book/index.
+php?md5=F464CD0043EB5336AA0543FE20A0561B.
+[Khr]
+Khronos Group. OpenGL Tessellation. url: https://www.khronos.org/
+opengl/wiki/Tessellation.
+[khr16]
+khronos. Compute eye space from window space. 2016. url: https://www.
+khronos.org/opengl/wiki/Compute_eye_space_from_window_space.
+[Nie+16]
+M Niebner et al. “Real-Time Rendering Techniques with Hardware Tes-
+sellation”. In: Computer Graphics Forum 35.1 (2016), pages 113–137. doi:
+10.1111/cgf.12714. url: http://dx.doi.org.proxy.findit.dtu.
+dk/10.1111/cgf.12714.
+[NVI08]
+NVIDIA. DirectX 11 Tessellation. 2008. url: http://www.nvidia.com/
+object/tessellation.html.
+==PAGE:106==
+96
+Bibliography
+[OP05]
+Manuel M Oliveira and Fabio Policarpo. “An Efficient Representation for
+Surface Details”. In: 2005.
+[Pet09]
+Matt Pettineo. Reconstructing position from depth. 2009. url: https://
+mynameismjp.wordpress.com/2009/03/10/reconstructing-position-
+from-depth/.
+[PH96]
+Matt Pharr and Pat Hanrahan. “Geometry Caching for Ray-Tracing Dis-
+placement Maps”. In: Rendering Techniques. 1996.
+[PHL91]
+John W Patterson, Stuart G Hoggar, and J R Logie. “Inverse Displace-
+ment Mapping”. In: Comput. Graph. Forum 10 (1991), pages 129–139.
+[Plu14]
+Pluralsight. Why Are Ngons and Triangles so Bad? 2014. url: https:
+//www.pluralsight.com/blog/film-games/ngons-triangles-bad.
+[Pol+05]
+Fabio Policarpo et al. “Deferred Shading Tutorial”. In: 2005.
+[Pol14]
+Polycount. Parallax Mapping in Games. 2014. url: http://wiki.polycount.
+com/wiki/Parallax_Map.
+[SU08]
+L Szirmay-Kalos and T Umenhoffer. “Displacement Mapping on the GPU
+- State of the Art”. In: Computer Graphics Forum 27.1 (2008).
+[SWH15]
+Graham Sellers, Richard S Wright, and Nicholas Haemel. OpenGL Super-
+bible: Comprehensive Tutorial and Reference. 7th. Addison-Wesley Pro-
+fessional, 2015. isbn: 0672337479, 9780672337475.
+[Tat06]
+Natalya Tatarchuk. “Practical Parallax Occlusion Mapping with Approxi-
+mate Soft Shadows for Detailed Surface Rendering”. In: ACM SIGGRAPH
+2006 Courses. SIGGRAPH ’06. New York, NY, USA: ACM, 2006, pages 81–
+112. isbn: 1-59593-364-6. doi: 10.1145/1185657.1185830. url: http:
+//doi.acm.org/10.1145/1185657.1185830.
+[Tat08]
+Natalya Tatarchuk. Advanced Topics in GPU Tessellation. Technical re-
+port. 2008. url: https://developer.amd.com/wordpress/media/
+2013/01/Tatarchuk-Tessellation-Gamefest2008.pdf.
+[Wan+04]
+Xi Wang et al. “Generalized Displacement Maps”. In: Rendering Tech-
+niques. 2004.
+[Woo05]
+Cliff (University of Virginia) Woolley. GPU Gems 2. Volume 2. 2005. isbn:
+0321335597. url: http://http.developer.nvidia.com/GPUGems2/
+gpugems2_chapter08.html.

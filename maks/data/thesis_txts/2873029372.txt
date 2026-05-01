@@ -1,0 +1,1939 @@
+==PAGE:1==
+Control Variates for Variance Reduction
+in Score-Based Generative Models
+Oliver Kinch
+s183980@student.dtu.dk
+DTU Compute
+==PAGE:2==
+Acknowledgements
+I would like to thank my supervisor Jes Frellsen for introducing me to this project and
+connecting me with Paul Jeha. I am very grateful to Paul Jeha for taking the time
+to discuss this project with me on a weekly basis and providing me with this valuable
+research experience.
+The author acknowledges the use of generative AI tools for assistance with text rephrasing
+and editing.
+==PAGE:3==
+Abstract
+We investigate control variates to reduce the high variance that hinders
+optimization in score-based models. We explore approaches using Taylor
+expansions, normalizing flows, and the Stein operator. The Taylor expansion
+approach achieves substantial variance reduction on a toy dataset, but shows
+diminishing returns on MNIST and no effect on CIFAR-10. Higher-order
+Taylor expansions provide no performance improvement over the zeroth-order
+approach. Normalizing flows prove unsuitable as control variates due to un-
+known likelihood expectations during training and the difficulty of making flows
+dependent on score model parameters. While the Taylor control variates show
+diminishing performance on larger models, the Stein control variates demon-
+strate the opposite scaling pattern, performing better as model size increases.
+The Stein control variates performs well on MNIST, achieving significantly
+lower FID scores than the Taylor control variates throughout training, but
+shows limited effectiveness on CIFAR-10. For the Stein approaches, the Stein-
+NN method proves most promising due to its greater modeling flexibility, as it
+can be easily configured through neural network hyperparameters, unlike the
+Stein-Taylor method which is constrained by the computational cost of high-
+order derivatives. We find that a learned scalar regression coefficient performs
+on par with the analytically optimal coefficients for most experiments, and
+suggest neural network modeling as a potential middle ground between the
+high-variance analytical approach and the low-variance learned scalar.
+I
+==PAGE:4==
+Contents
+1 Introduction . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 1
+2 Score-Based Generative Modeling . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 2
+2.1 Score Matching . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 2
+2.1.1 Denoising Score Matching . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 2
+3 Control Variates . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 3
+3.1 Variance Analysis and Optimal Coefficients . . . . . . . . . . . . . . . . . . . . . . . . . 3
+3.2 Application to Score Model Training . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+3.3 Control Variates for Gradient Variance Reduction . . . . . . . . . . . . . . . . . . 4
+4 Taylor Control Variate . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 5
+4.1 Mathematical Preliminaries . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 5
+4.1.1 Taylor Expansion of the Score Model . . . . . . . . . . . . . . . . . . . . . . . . 5
+4.1.2 Moments of Standard Gaussian Random Vectors . . . . . . . . . . . . . 5
+4.1.3 Expected Value of Gaussian Perturbed Taylor Expansions . . . 5
+4.2 Control Variate on the Training Objective’s Gradients . . . . . . . . . . . . . . 5
+4.3 Deriving the Taylor Control Variate on the Training Objective . . . . . 6
+4.4 Equivalence Between Objective and Gradient Control Variates . . . . . 8
+4.5 Computing the Taylor Control Variate in Practice . . . . . . . . . . . . . . . . . . 8
+4.5.1 Detailed Derivation* . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 9
+4.6 Experiments . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 10
+4.6.1 Toy Data . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 10
+4.6.2 MNIST and CIFAR-10 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13
+5 Flow Control Variate . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 18
+5.1 Normalizing Flow Preliminaries . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 18
+5.2 Flow as a Control Variate . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 18
+6 Jet Control Variate . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 19
+6.1 The Faà di Bruno Formula . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 19
+6.1.1 Tensor Notation to Multi-index Notation* . . . . . . . . . . . . . . . . . . 19
+6.1.2 Automatic Differentiation* . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 20
+6.1.3 Deriving the Faà di Bruno Formula . . . . . . . . . . . . . . . . . . . . . . . . . 21
+6.2 Constructing Taylor Control Variates using jax.experimental.jet . 23
+6.3 Regression Coefficients for the Jet Control Variate . . . . . . . . . . . . . . . . 23
+6.4. Experiments . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+6.4.1. Toy Data . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+6.4.2. MNIST . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+7 Stein Control Variate . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+7.1 The Stein Operator . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27
+7.1.1 Skilling-Hutchinson Trace Estimation . . . . . . . . . . . . . . . . . . . . . . . 27
+7.2 Stein Control Variate Methods . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27
+7.2.1 Stein-Taylor . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+7.2.2 Stein-NN . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+7.3 Experiments . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+II
+==PAGE:5==
+7.3.1 Toy Data . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+7.3.2 MNIST . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 30
+7.3.3 CIFAR-10 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+8 Conclusion . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 35
+9 Bibliography . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 37
+A Taylor Control Variate . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 38
+A.1 Variance Reduction Results with 𝛽loss . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 38
+A.2 MNIST Sample Comparison for 𝑘= 0 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 38
+A.3 CIFAR-10 Sample Comparison for 𝑘= 1 . . . . . . . . . . . . . . . . . . . . . . . . . . 39
+B Jet Control Variate . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 40
+B.1 Variance Reduction Results with 𝛽loss . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 40
+B.2 Variance Reduction Results with 𝜷learn . . . . . . . . . . . . . . . . . . . . . . . . . . . . 40
+B.3 𝛽loss Values During Training on Toy Data . . . . . . . . . . . . . . . . . . . . . . . . . . 40
+C Stein Control Variate . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 41
+C.1 Stein-Taylor Variance Reduction Results for 𝑘= 0 and 𝑘= 2 . . . . . . 41
+C.2 Stein Samples Comparison for 𝛽learn . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 42
+C.3 Stein-Taylor FID Scores for 𝑘= 0, 1, 2 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 42
+C.4 Stein Cifar-10 Sample Comparison for 𝛽learn . . . . . . . . . . . . . . . . . . . . . . . 43
+D Experiment Details . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 43
+D.1 Score Model Training . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 43
+D.2 Annealed Langevin Hyperparameters . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 43
+D.3 Experimental Setup . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 44
+D.4 Stein-NN Model Hyperparameters . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 44
+III
+==PAGE:6==
+Introduction
+1 Introduction
+In generative modeling, we have several methods to model unknown data distributions.
+Approaches such as variational auto-encoders (VAEs), energy-based models (EBMs), and
+normalizing flows all aim to maximize the log-likelihood of the data. However, trying to
+maximize the log-likelihood gives each method significant limitations: VAEs optimize a loose
+lower bound, EBMs tackle the challenge of partition function estimation, which is required to
+normalize the energy-based density, and normalizing flows need specialized invertible architec-
+tures. Score-based generative modeling offers an alternative approach that learns the gradient
+of the log-density (known as the score) instead of the density itself. The goal of this approach
+is to learn the score, which can subsequently be used to generate samples from the data
+distribution. Unfortunately, this approach faces the challenge that the score objective exhibits
+high variance, which hinders optimization (Song & Kingma, 2021). To address this variance
+problem, control variates offer a promising solution. Control variates for score-based modeling
+were first introduced by (Wang et al., 2020), who used a 0th order Taylor polynomial of the
+score objective as a control variate. (Jeha et al., 2024) then generalized Wang’s approach by
+deriving the control variate for an arbitrary order Taylor polynomial. Their work has shown the
+effectiveness of control variates for low-dimensional data, but also showcases limitations of the
+method for high-dimensional data, suggesting that more expressive control variates are needed.
+This work builds on top of these contributions. In Section 4, the work by (Jeha et al., 2024)
+is presented including additional experiments. In Section 5, we explore using a normalizing
+flow as a control variate. In Section 6, we explore how we can use the Faà di Bruno formula
+to easily construct higher-order control variates, based on the general Taylor control variate
+formula derived by (Jeha et al., 2024). Finally, in Section 7, we investigate the Stein Operator
+to construct control variates, which addresses a key limitation inherent in the Taylor-based
+approach.
+1
+==PAGE:7==
+Score-Based Generative Modeling
+2 Score-Based Generative Modeling
+The goal of generative modeling is to sample new data points from complex, high-dimensional
+distributions such as 𝑝data(𝒙). However, directly sampling from such distributions is generally
+intractable. Langevin dynamics provides a solution to this problem by generating samples from
+a target distribution using only the score function ∇𝒙log 𝑝(𝒙), without requiring knowledge of
+the distribution itself. Given a fixed step size 𝜀 and starting from an initial sample 𝒙0 drawn
+from some prior distribution, the Langevin dynamics update rule is
+𝒙𝑡= 𝒙𝑡−1 + 𝜀
+2∇𝒙log 𝑝(𝒙𝑡−1) + √𝜀𝒛𝑡,
+1.
+where 𝒛𝑡∼𝒩(𝟎, 𝑰) (Song & Ermon, 2020). The distribution of 𝒙𝑡 converges to the data
+distribution as 𝑡→∞ and 𝜀→0. In practice, we don’t know the true score ∇𝒙log 𝑝data(𝒙), so
+we must learn to approximate it. This is the goal of score matching.
+2.1 Score Matching
+Following the methodology described in (Song & Ermon, 2020), we consider a dataset consisting
+of 𝑖.𝑖.𝑑. samples {𝒙𝑖∈ℝ𝐷}
+𝑁
+{𝑖=1} drawn from an unknown data distribution 𝑝data(𝒙). To approx-
+imate the score, we employ a neural network 𝒔𝜽: ℝ𝐷→ℝ𝐷 parameterized by 𝜽. The score
+matching objective is
+1
+2𝔼𝑝data[‖∇𝒙log 𝑝data(𝒙) −𝒔𝜽(𝒙)‖2
+2].
+2.
+However, this objective is intractable since we cannot directly evaluate ∇𝒙log 𝑝data(𝒙).
+2.1.1 Denoising Score Matching
+The denoising score matching approach instead considers a noisy version of the data
+1
+2𝔼𝑞𝜎(̃𝒙| 𝒙)𝑝data(𝒙)[‖∇̃𝒙log 𝑞𝜎(̃𝒙| 𝒙) −𝒔𝜽(̃𝒙)‖2
+2],
+3.
+where ̃𝒙= 𝒙+ 𝜎𝒛 for 𝒛∼𝒩(𝟎, 𝑰), such that 𝑞𝜎(̃𝒙| 𝒙) is a conditional Gaussian distribution
+given by
+𝑞𝜎(̃𝒙| 𝒙) =
+1
+(2𝜋𝜎2)
+𝐷
+2 exp(−‖̃𝒙−𝒙‖2
+2
+2𝜎2
+).
+4.
+Taking the logarithm of this conditional distribution
+log 𝑞𝜎(̃𝒙| 𝒙) = −𝐷
+2 log(2𝜋𝜎2) −‖̃𝒙−𝒙‖2
+2
+2𝜎2
+,
+5.
+and computing the gradient with respect to ̃𝒙 we find
+∇̃𝒙log 𝑞𝜎(̃𝒙| 𝒙) = −̃𝒙−𝒙
+𝜎2
+= −𝜎𝒛
+𝜎2 = −𝒛
+𝜎.
+6.
+Substituting back into the denoising score matching objective we have
+1
+2𝔼𝑞𝜎(̃𝒙| 𝒙)𝑝data(𝒙)[‖𝒛
+𝜎+ 𝒔𝜽(𝒙+ 𝜎𝒛)‖2
+2],
+7.
+and define 𝐿𝜽(𝑧, 𝒙, 𝜎) = 1
+2 ‖ 𝒛
+𝜎+ 𝒔𝜽(𝒙+ 𝜎𝒛)‖2 as the loss function. In practice, we train over
+multiple noise scales using the following objective
+2
+==PAGE:8==
+Control Variates
+ℒ𝜽(𝑧, 𝒙, Σ) = 𝔼𝜎∼𝒰(Σ)𝔼𝑝data(𝒙)𝔼𝒛∼𝒩(𝟎,𝑰𝐷)[𝜆(𝜎)𝐿𝜽(𝑧, 𝒙, 𝜎)].
+8.
+Here, Σ = {𝜎𝑖}𝑁
+𝑖=1 represents an increasing geometric sequence of noise levels, 𝜎∼𝒰(Σ) denotes
+uniform sampling from this sequence, and 𝜆 is a positive weighting function that ensures
+𝜆(𝜎)𝐿𝜽(𝒛, 𝒙, 𝜎) maintains approximately constant magnitude across different noise levels (Jeha
+et al., 2024). While this training objective is practical to implement, it raises a fundamental
+question about the relationship between the learned score and the true data score, particularly
+in the limit of small noise.
+2.1.1.1 Small Noise Limit
+When optimizing the denoising score matching objective, the optimal score model will approx-
+imate the score of the noisy data distribution rather than the true data score. To obtain a
+good approximation, we need the noise to be as small as possible. However, reducing the noise
+introduces numerical challenges (Song & Kingma, 2021). To see this mathematically, consider
+the objective for a finite training set of size 𝑁
+1
+2𝑁∑
+𝑁
+𝑖=1
+‖𝒛(𝑖)
+𝜎+ 𝒔𝜽(𝒙(𝑖) + 𝜎𝒛(𝑖))‖2
+2.
+9.
+The first-order Taylor expansion of the score function is
+𝒔𝜽(𝒙+ 𝜎𝒛) ≈𝒔𝜽(𝒙) + 𝜎∇𝒙𝒔𝜽(𝒙)𝒛,
+10.
+and substituting this into the training objective yields
+1
+2𝑁∑
+𝑁
+𝑖=1
+‖𝒛(𝑖)
+𝜎+ 𝒔𝜽(𝒙(𝑖)) + 𝜎∇𝒙𝒔𝜽(𝒙(𝑖))𝒛(𝑖)‖2
+2.
+11.
+By expanding the squared norm and retaining only terms with negative powers of 𝜎, we obtain
+1
+2𝑁∑
+𝑁
+𝑖=1
+[2
+𝜎(𝒛(𝑖))
+𝑇𝒔𝜽(𝒙(𝑖)) + ‖𝒛(𝑖)‖2
+2
+𝜎2
+] + 𝑐.
+12.
+This reveals a problem: while taking 𝜎→0 brings us closer to the true data distribution, it
+also causes the variance to grow unbounded due to division by 𝜎 and 𝜎2, making optimization
+challenging (Song & Kingma, 2021). This variance problem motivates our work. We investigate
+how control variates can be employed to reduce the variance of gradient estimates, so that we
+can learn score models more efficiently.
+3 Control Variates
+Control variates reduce Monte Carlo variance by leveraging correlated functions with known
+expectations (Owen, 2013). For a control variate function 𝐶(𝒛) with known expectation 𝛾=
+𝔼𝒛[𝐶(𝒛)], we can construct the control variate estimator
+̂𝜇CV,𝛽= 1
+𝑁∑
+𝑁
+𝑖=1
+[𝐿(𝒛𝑖) −𝛽𝐶(𝒛𝑖)] + 𝛽𝛾.
+13.
+This estimator remains unbiased for any value of the regression coefficient 𝛽, which controls
+the scale of the control variate.
+3.1 Variance Analysis and Optimal Coefficients
+The variance of the control variate estimator is given by
+3
+==PAGE:9==
+Control Variates
+Variance Analysis and Optimal Coefficients
+Var(̂𝜇CV,𝛽) = 1
+𝑁(Var(𝐿(𝒛)) −2𝛽Cov(𝐿(𝒛), 𝐶(𝒛)) + 𝛽2 Var(𝐶(𝒛))).
+14.
+Differentiating with respect to 𝛽 and setting to zero yields the optimal coefficient
+𝛽opt = Cov(𝐿(𝒛), 𝐶(𝒛))
+Var(𝐶(𝒛))
+.
+15.
+Substituting 𝛽opt reduces the variance to
+Var(̂𝜇CV,𝛽opt) = 1
+𝑁Var(𝐿(𝒛))(1 −Corr(𝐿(𝒛), 𝐶(𝒛))2).
+16.
+This shows that the variance reduction is determined by the squared correlation coefficient
+Corr(𝐿(𝒛), 𝐶(𝒛))2: higher correlation between the loss and control variate yields greater variance
+reduction. Equation 15 shows that 𝛽opt = 1 when the control variate perfectly approximates
+the loss, and 𝛽opt = 0 when there is no correlation. The magnitude of the optimal regression
+coefficient therefore serves as a measure of how well our control variate approximates the loss.
+3.2 Application to Score Model Training
+To address the high variance in the denoising score matching objective, we introduce a control
+variate. The resulting estimator is given by
+̂
+ℒCV,𝛽= 1
+𝑁∑
+𝑁
+𝑖=1
+[𝐿𝜽(𝒛𝑖, 𝒙𝑖, 𝜎𝑖) −𝛽𝐶𝜽(𝒛𝑖, 𝒙𝑖, 𝜎𝑖)] + 𝛽𝔼[𝐶𝜽].
+17.
+Crucially, the control variate 𝐶𝜽 must depend on the score model parameters 𝜽 to reduce the
+variance of the gradients.
+3.3 Control Variates for Gradient Variance Reduction
+Our control variate approach differs from the traditional setting in an important way: while
+we apply a control variate to a Monte Carlo estimate (our objective function), what ultimately
+matters for optimization is reducing the variance of the gradients, not the variance of the
+objective itself. This distinction is critical because only parameter-dependent control variates
+will be able to influence the gradients. Consider the gradient of our control variate estimator
+𝜕𝜽̂
+ℒCV,𝛽= 1
+𝑁∑
+𝑁
+𝑖=1
+[𝜕𝜽𝐿𝜽(𝒛𝑖, 𝒙𝑖, 𝜎𝑖) −𝛽𝜕𝜽𝐶(𝒛𝑖, 𝒙𝑖, 𝜎𝑖)] + 𝛽𝜕𝜽𝔼[𝐶].
+18.
+If the control variate does not depend on 𝜽, then 𝜕𝜽𝐶= 0 and 𝜕𝜽𝔼[𝐶] = 0, meaning that the
+gradient of our control variate estimator reduces to the standard gradient estimator
+𝜕𝜽̂
+ℒCV,𝛽= 1
+𝑁∑
+𝑁
+𝑖=1
+𝜕𝜽𝐿𝜽(𝒛𝑖, 𝒙𝑖, 𝜎𝑖).
+19.
+To quantify the effectiveness of our control variates, we measure the variance reduction ratio
+𝜌𝛽= Var(𝜕𝜽𝐿𝜽−𝛽𝜕𝜽𝐶𝜽)
+Var(𝜕𝜽𝐿𝜽)
+.
+20.
+In the following sections, we explore several control variate designs that explicitly depend on
+the score model parameters.
+4
+==PAGE:10==
+Taylor Control Variate
+4 Taylor Control Variate
+This section builds upon the Taylor expansion-based control variates introduced in (Jeha et al.,
+2024). We present their key results and extend with additional experiments.
+4.1 Mathematical Preliminaries
+We begin by presenting the mathematical preliminaries required for the control variate con-
+struction.
+4.1.1 Taylor Expansion of the Score Model
+Using multi-index notation, the Taylor expansion of the score model is
+𝑇𝑘
+𝑠,𝒙(𝒙+ 𝒛) = ∑
+|𝜶| ≤𝑘
+𝒛𝜶
+𝜶! 𝜕𝜶𝑠(𝒙),
+21.
+where 𝑘 is the order of the expansion, 𝒙 is the expansion point, and 𝒛 is the perturbation. In
+multi-index notation we have 𝒛𝜶= 𝑧𝛼1
+1
+× ⋯× 𝑧𝛼𝑑
+𝑑, 𝜕𝜶= 𝜕𝛼1
+1 ⋯𝜕𝛼𝑑
+𝑑, and |𝜶| = 𝛼1 + ⋯+ 𝛼𝑑.
+4.1.2 Moments of Standard Gaussian Random Vectors
+For standard Gaussian random vectors, the moments follow a specific pattern (Winkelbauer,
+2014)
+𝔼[𝒛𝜶] = 𝛿𝜶= {0
+if |𝜶| = 2𝑝+ 1
+∏𝑖𝜔𝛼𝑖if |𝜶| = 2𝑝
+𝜔𝛼𝑖= {
+0
+if 𝛼𝑖= 2𝑝𝑖+ 1
+(2𝑝𝑖)!
+2𝑝𝑖𝑝𝑖! if 𝛼𝑖= 2𝑝𝑖
+.
+22.
+For mixed moments involving additional factors of 𝒛, we can compute expectations component-
+wise as
+𝔼[𝒛𝜶𝒛] = (𝔼[𝒛𝜶𝑧1], ⋯, 𝔼[𝒛𝜶𝑧𝑑])𝑇,
+23.
+where each component is given by 𝔼[𝒛𝜶𝑧𝑘] = ∏𝑖𝜔𝛼𝑖+𝛿𝑖𝑘 with 𝛿𝑖𝑘 being the Kronecker delta.
+4.1.3 Expected Value of Gaussian Perturbed Taylor Expansions
+For Taylor expansions evaluated at points perturbed by a standard Gaussian vectors, the
+expectation is given by
+𝔼𝒛[𝑇𝑘
+𝑠,𝒙(𝒙+ 𝒛)] =
+∑
+|𝜶| ≤𝑘
+|𝜶| =2𝑝
+𝛿𝜶
+𝜶!𝜕𝜶𝑠(𝒙).
+24.
+We leverage these results to derive a control variate.
+4.2 Control Variate on the Training Objective’s Gradients
+We can now derive the Taylor control variate for the training objective’s gradients. Taking the
+gradient of the training objective and approximating the score model with a Taylor expansion,
+we obtain
+5
+==PAGE:11==
+Taylor Control Variate
+Control Variate on the Training Objective’s Gradients
+𝜕𝜽𝐿𝜽(𝒛, 𝒙, 𝜎) = (𝒛
+𝜎+ 𝑠𝜽(𝒙+ 𝜎𝒛))
+𝑇
+𝜕𝜽𝑠𝜽(𝒙+ 𝜎𝒛)
+≈𝐺𝑘(𝒛, 𝒙, 𝜎) = (𝒛
+𝜎+ 𝑇𝑘
+𝑠𝜽,𝒙(𝒙+ 𝜎𝒛))
+𝑇
+𝑇𝑘
+𝜕𝜽𝑠𝜽,𝒙(𝒙+ 𝜎𝒛)
+=
+(
+(
+(𝒛
+𝜎+ ∑
+|𝜶| ≤𝑘
+𝜎|𝜶|
+𝜶! 𝒛𝜶𝜕𝜶𝑠𝜽(𝒙)
+)
+)
+)
+𝑇
+(
+(
+( ∑
+|𝝆| ≤𝑘
+𝜎|𝝆|
+𝝆! 𝒛𝝆𝜕𝝆𝜕𝜽𝑠𝜽(𝒙)
+)
+)
+)
+= ∑
+|𝝆| ≤𝑘
+𝜎|𝝆|
+𝝆! 𝒛𝝆𝒛𝑇𝜕𝝆𝜕𝜽𝑠𝜽(𝒙) + ∑
+|𝜶| ≤𝑘
+|𝝆| ≤𝑘
+𝜎|𝜶| + |𝝆|
+𝜶!𝝆!
+𝒛𝜶+𝝆𝑠𝜽(𝒙)𝑇𝜕𝝆𝜕𝜽𝑠𝜽(𝒙).
+25.
+Taking the expectation of this quantity with respect to the perturbation 𝒛 we obtain
+𝔼𝒛[𝐺𝑘(𝒛, 𝒙, 𝜎)] = ∑
+|𝝆| ≤𝑘
+𝜎|𝝆| −1
+𝝆!
+𝔼[𝒛𝝆𝒛]𝑇𝜕𝝆𝜕𝜽𝑠𝜽(𝒙)
++ ∑
+|𝜶| ≤𝑘
+|𝝆| ≤𝑘
+𝜎|𝜶| + |𝝆|
+𝜶!𝝆!
+𝛿𝜶+𝝆𝜕𝜶𝑠𝜽(𝒙)𝑇𝜕𝝆𝜕𝜽𝑠𝜽(𝒙).
+26.
+We then define the control variate
+𝐶𝑘
+𝑔,𝜽(𝒛, 𝒙, 𝜎) = 𝐺𝑘(𝒛, 𝒙, 𝜎) −𝔼𝒛[𝐺𝑘(𝒛, 𝒙, 𝜎)]
+= ∑
+|𝝆| ≤𝑘
+𝜎|𝝆| −1
+𝝆!
+(𝒛𝝆𝒛−𝔼[𝒛𝝆𝒛])𝑇𝜕𝝆𝜕𝜽𝑠𝜽(𝒙)
++ ∑
+|𝜶| ≤𝑘
+|𝝆| ≤𝑘
+𝜎|𝜶| + |𝝆|
+𝜶!𝝆!
+(𝒛𝜶+𝝆−𝛿𝜶+𝝆)𝜕𝜶𝑠𝜽(𝒙)𝑇𝜕𝝆𝜕𝜽𝑠𝜽(𝒙),
+27.
+which by construction satisfies 𝔼[𝐶𝑘
+𝜽(𝒛, 𝒙, 𝜎)] = 0. If we set 𝑘= 0, we recover the gradient of
+the objective’s control variate derived by (Wang et al., 2020), which suggests an equivalence
+between the control variate on the training objective and on the gradients (Jeha et al., 2024).
+4.3 Deriving the Taylor Control Variate on the Training Objective
+We now derive the control variate for the training objective
+6
+==PAGE:12==
+Taylor Control Variate
+Deriving the Taylor Control Variate on the Training Objective
+𝐿𝜽(𝒛, 𝒙, 𝜎) = 1
+2‖𝒛
+𝜎+ 𝑠𝜽(𝒙+ 𝜎𝒛)‖2
+= 1
+2‖𝒛
+𝜎‖2 + 1
+2‖𝑠𝜽(𝒙+ 𝜎𝒛)‖2 + ⟨𝒛
+𝜎, 𝑠𝜽(𝒙+ 𝜎𝒛)⟩
+≈𝐿𝑘
+𝜽(𝒛, 𝒙, 𝜎) = 1
+2‖𝒛
+𝜎‖2 + 1
+2‖𝑇𝑘
+𝑠𝜽,𝒙(𝒙+ 𝜎𝒛)‖2 + ⟨𝒛
+𝜎, 𝑇𝑘
+𝑠𝜽,𝒙(𝒙+ 𝜎𝒛)⟩
+= 1
+2⟨∑
+|𝜶| ≤𝑘
+𝜎|𝜶|
+𝜶! 𝒛𝜶𝜕𝜶𝑠𝜽(𝒙), ∑
+|𝝆| ≤𝑘
+𝜎|𝝆|
+𝝆! 𝒛𝝆𝜕𝝆𝑠𝜽(𝒙)⟩
++⟨𝒛
+𝜎, ∑
+|𝜶| ≤𝑘
+𝜎|𝜶|
+𝜶! 𝒛𝜶𝜕𝜶𝑠𝜽(𝒙)⟩
+= 1
+2‖𝒛
+𝜎‖2 + 1
+2 ∑
+|𝜶| ≤𝑘
+|𝝆| ≤𝑘
+𝜎|𝜶| + |𝝆|
+𝜶!𝝆!
+𝒛𝜶+𝝆𝜕𝜶𝑠𝜽(𝒙)𝜕𝝆𝑠𝜽(𝒙)
++ ∑
+|𝜶| ≤𝑘
+𝜎|𝜶| −1
+𝜶!
+𝒛𝜶𝒛𝑇𝜕𝜶𝑠𝜽(𝒙).
+28.
+Taking the expectation of this quantity with respect to the perturbation 𝒛 we obtain
+𝔼𝒛[𝐿𝑘
+𝜽(𝒛, 𝒙, 𝜎)] =
+1
+2𝜎2 𝔼⟦|𝒛‖2]
++1
+2 ∑
+|𝜶| ≤𝑘
+|𝝆| ≤𝑘
+𝜎|𝜶| + |𝝆|
+𝜶!𝝆!
+𝔼[𝒛𝜶+𝝆]𝜕𝜶𝑠𝜽(𝒙)𝑇𝜕𝝆𝑠𝜽(𝒙)
++ ∑
+|𝜶| ≤𝑘
+𝜎|𝜶| −1
+𝜶!
+𝔼[𝒛𝜶𝒛𝑇]𝜕𝜶𝑠𝜽(𝒙)
+=
+𝑑
+2𝜎2 + 1
+2 ∑
+|𝜶| ≤𝑘
+|𝝆| ≤𝑘
+𝜎|𝜶| + |𝝆|
+𝜶!𝝆!
+𝛿𝜶+𝝆𝜕𝜶𝑠𝜽(𝒙)𝑇𝜕𝝆𝑠𝜽(𝒙)
++ ∑
+|𝜶| ≤𝑘
+𝜎|𝜶| −1
+𝜶!
+𝔼[𝒛𝜶𝒛𝑇]𝜕𝜶𝑠𝜽(𝒙),
+29.
+where 𝑑 is the dimensionality of 𝒛. We can then define the control variate
+𝐶𝑘
+𝜽(𝒛, 𝒙, 𝜎) = 𝐿𝑘
+𝜽(𝒛, 𝒙, 𝜎) −𝔼𝒛[𝐿𝑘
+𝜽(𝒛, 𝒙, 𝜎)]
+= ‖𝒛‖2 −𝑑
+2𝜎2
++ 1
+2 ∑
+|𝜶| ≤𝑘
+|𝝆| ≤𝑘
+𝜎|𝜶| + |𝝆|
+𝜶!𝝆!
+(𝒛𝜶+𝝆−𝛿𝜶+𝝆)𝜕𝜶𝑠𝜽(𝒙)𝑇𝜕𝝆𝑠𝜽(𝒙)
++ ∑
+|𝜶| ≤𝑘
+𝜎|𝜶| −1
+𝜶!
+(𝒛𝜶𝒛𝑇−𝔼[𝒛𝜶𝒛])𝜕𝜶𝑠𝜽(𝒙),
+30.
+which by construction satisfies 𝔼[𝐶𝑘
+𝜽(𝒛, 𝒙, 𝜎)] = 0. In the following, we will show an equivalence
+between the control variate on the objective and the gradients, which will be useful for practical
+computation.
+7
+==PAGE:13==
+Taylor Control Variate
+Deriving the Taylor Control Variate on the Training Objective
+4.4 Equivalence Between Objective and Gradient Control Variates
+Let 𝐶𝑘
+𝜽(𝒛, 𝒙, 𝜎) be the control variate on the training objective and 𝐶𝑘
+𝑔,𝜽(𝒛, 𝒙, 𝜎) the control
+variate on the training objective’s gradient. We then have the equality
+𝜕𝜽𝐶𝑘
+𝜽(𝒛, 𝒙, 𝜎) = 𝐶𝑘
+𝑔,𝜽(𝒛, 𝒙, 𝜎).
+31.
+The proof is given by
+𝜕𝜽𝐶𝑘
+𝜽(𝒛, 𝒙, 𝜎) = 0 + 1
+2 ∑
+|𝜶| ≤𝑘
+|𝝆| ≤𝑘
+𝜎|𝜶| + |𝝆|
+𝜶!𝝆!
+(𝒛𝜶+𝝆−𝛿𝜶+𝝆)𝜕𝜽(𝜕𝜶𝑠𝜽(𝒙)𝑇𝜕𝝆𝑠𝜽(𝒙))
++ ∑
+|𝜶| ≤𝑘
+𝜎|𝜶| −1
+𝜶!
+(𝒛𝜶𝒛−𝔼[𝒛𝜶𝒛])𝑇𝜕𝜽𝜕𝜶𝑠𝜽(𝒙)
+= 1
+2 ∑
+|𝜶| ≤𝑘
+|𝝆| ≤𝑘
+𝜎|𝜶| + |𝝆|
+𝜶!𝝆!
+(𝒛𝜶+𝝆−𝛿𝜶+𝝆)(𝜕𝜶𝜕𝜽𝑠𝜽(𝒙)𝑇𝜕𝝆𝑠𝜽(𝒙) + 𝜕𝜶𝑠𝜽(𝒙)𝑇𝜕𝝆𝜕𝜽𝑠𝜽(𝒙))
++ ∑
+|𝜶| ≤𝑘
+𝜎|𝜶| −1
+𝜶!
+(𝒛𝜶𝒛−𝔼[𝒛𝜶𝒛])𝑇𝜕𝜶𝜕𝜽𝑠𝜽(𝒙)
+= ∑
+|𝜶| ≤𝑘
+|𝝆| ≤𝑘
+𝜎|𝜶| + |𝝆|
+𝜶!𝝆!
+(𝒛𝜶+𝝆−𝛿𝜶+𝝆)(𝜕𝜶𝜕𝜽𝑠𝜽(𝒙)𝑇𝜕𝝆𝑠𝜽(𝒙))
++ ∑
+|𝜶| ≤𝑘
+𝜎|𝜶| −1
+𝜶!
+(𝒛𝜶𝒛−𝔼[𝒛𝜶𝒛])𝑇𝜕𝜶𝜕𝜽𝑠𝜽(𝒙)
+= 𝐶𝑘
+𝑔,𝜽(𝒛, 𝒙, 𝜎).
+32.
+This explains why (Wang et al., 2020) observed benefits when using this control variate
+with 𝑘= 0. However, there is an important caveat: the optimal regression coefficient for the
+objective’s control variate differs from that of the gradients. Since this coefficient determines the
+effectiveness of the control variate, controlling the objective does not automatically guarantee
+control of the gradient variance (Jeha et al., 2024). Computing the regression coefficient for
+the training objective is computationally inexpensive, requiring only a batch of loss values. In
+contrast, computing the regression coefficient for the gradients is computationally expensive, as
+it necessitates gradient batches that consume substantial memory. These computational chal-
+lenges motivate us to investigate whether we can simply learn the regression coefficient to avoid
+the memory-intensive gradient batch computations. We will explore this in the experiments.
+4.5 Computing the Taylor Control Variate in Practice
+Given the equivalence established in Equation 31, we can formulate our practical approach as
+follows: rather than directly computing the control variate on the gradients, we compute the
+control variate on the training objective and then apply automatic differentiation to obtain the
+gradient control variate. For the case 𝑘= 1, the control variate on the training objective takes
+the form
+𝐶1
+𝜽(𝒛, 𝒙, 𝜎) = ‖𝒛‖2 −𝑑
+2𝜎2
++ 𝒛𝑇
+𝜎𝑠𝜽(𝒙) + 𝒛𝑇(𝒛𝑇𝜕𝑠𝜽(𝒙)) −Tr(𝜕𝑠𝜽(𝒙))
++𝜎𝑠𝜽(𝒙)𝑇(𝒛𝑇𝜕𝑠𝜽(𝒙)) + 𝜎2
+2 (‖𝒛𝑇𝜕𝑠𝜽(𝒙)‖2 −‖𝜕𝑠𝜽(𝒙)‖2
+𝐹).
+33.
+8
+==PAGE:14==
+Taylor Control Variate
+Computing the Taylor Control Variate in Practice
+We will evaluate the effectiveness of the Taylor control variate for orders 𝑘= 0 and 𝑘= 1 in
+our experimental analysis. The next section provides a detailed derivation of Equation 33 from
+the general control variate formula.
+4.5.1 Detailed Derivation*
+Equation 33 is derived by setting 𝑘= 1 in the general control variate expression from Equa-
+tion 30. When 𝑘= 1, the multi-index 𝜶 can be either the zero vector or a standard basis vector:
+• Case 𝜶= 𝟎
+‣ |𝜶| = 0
+‣ 𝜕𝜶 is the identity operator
+‣ 𝒛𝜶= 1
+• Case 𝜶= 𝒆𝑖 (the 𝑖-th standard basis vector)
+‣ |𝜶| = 1
+‣ 𝜕𝜶=
+𝜕
+𝜕𝑥𝑖
+‣ 𝒛𝜶= 𝑧𝑖.
+These results will be used repeatedly in the following analysis.
+4.5.1.1 Analysis of the Double Sum Term
+For the double sum
+1
+2 ∑
+|𝜶| ≤1
+|𝝆| ≤1
+𝜎|𝜶| + |𝝆|
+𝜶!𝝆!
+(𝒛𝜶+𝝆−𝛿𝜶+𝝆)𝜕𝜶𝑠𝜽(𝒙)𝑇𝜕𝝆𝑠𝜽(𝒙),
+34.
+we need to consider the following 3 cases:
+• Case 1: 𝜶= 𝟎, 𝝆= 𝟎
+No contribution as 1
+2(1 −1)𝑠𝜽(𝒙)𝑇𝑠𝜽(𝒙) = 0.
+• Case 2: 𝜶= 𝟎, 𝝆= 𝒆𝑖 and 𝜶= 𝒆𝑖, 𝝆= 𝟎
+These symmetric cases combine to give 𝜎𝑠𝜽(𝒙)𝑇(𝒛𝑇𝜕𝑠𝜽(𝒙)).
+• Case 3: 𝜶= 𝒆𝑖, 𝝆= 𝒆𝑗
+We have |𝜶| + |𝝆| = 2, so the coefficient is 
+𝜎2
+1!⋅1! = 𝜎2. We have 𝒛𝜶+𝝆= 𝑧𝑖𝑧𝑗 and 𝛿𝜶+𝝆=
+𝔼[𝑧𝑖𝑧𝑗] = 𝛿𝑖𝑗. Each term therefore contributes
+𝜎2
+2 (𝑧𝑖𝑧𝑗−𝛿𝑖𝑗)𝜕𝑥𝑖𝑠𝜽(𝒙)𝑇𝜕𝑥𝑗𝑠𝜽(𝒙).
+35.
+Summing over all pairs (𝑖, 𝑗) we have
+𝜎2
+2 ∑
+𝑑
+𝑖,𝑗=1
+(𝑧𝑖𝑧𝑗−𝛿𝑖𝑗)𝜕𝑥𝑖𝑠𝜽(𝒙)𝑇𝜕𝑥𝑗𝑠𝜽(𝒙).
+36.
+Splitting the sum, we obtain two parts, where the first part is
+∑
+𝑑
+𝑖,𝑗=1
+𝑧𝑖𝑧𝑗𝜕𝑥𝑖𝑠𝜽(𝒙)𝑇𝜕𝑥𝑗𝑠𝜽(𝒙) = ‖𝒛𝑇𝜕𝑠𝜽(𝒙)‖2,
+37.
+9
+==PAGE:15==
+Taylor Control Variate
+Analysis of the Double Sum Term
+and the second part is
+∑
+𝑑
+𝑖,𝑗=1
+𝛿𝑖𝑗𝜕𝑥𝑖𝑠𝜽(𝒙)𝑇𝜕𝑥𝑗𝑠𝜽(𝒙) = ‖𝜕𝑠𝜽(𝒙)‖2
+𝐹.
+38.
+Therefore, case 3 contributes
+𝜎2
+2 (‖𝒛𝑇𝜕𝑠𝜽(𝒙)‖2 −‖𝜕𝑠𝜽(𝒙)‖2
+𝐹).
+39.
+4.5.1.2 Analysis of the Single Sum Term
+For the single sum
+∑
+|𝜶| ≤1
+𝜎|𝜶| −1
+𝜶!
+(𝒛𝜶𝒛−𝔼[𝒛𝜶𝒛])𝑇𝜕𝜶𝑠𝜽(𝒙),
+40.
+we have a term for 𝜶= 0 and the terms for 𝜶= 𝒆𝑖. For 𝜶= 0, we have 𝒛𝑇
+𝜎𝑠𝜽(𝒙), and for 𝜶=
+𝒆𝑖 we have
+(𝒛𝜶𝒛−𝔼[𝒛𝜶𝒛])𝑇𝜕𝜶𝑠𝜽(𝒙) = (𝑧𝑖𝒛−𝔼[𝑧𝑖𝒛])𝜕𝑥𝑖𝑠𝜽(𝒙).
+41.
+Summing over all 𝑖 we have
+∑
+𝑑
+𝑖=1
+(𝑧𝑖𝒛−𝒆𝑖)𝑇𝜕𝑥𝑖𝑠𝜽(𝒙) = 𝒛𝑇(𝒛𝑇𝜕𝑠𝜽(𝒙)) −Tr(𝜕𝑠𝜽(𝒙)),
+42.
+where we have used that 𝔼[𝑧𝑖𝒛] = 𝒆𝑖. The trace term arises because ∑𝑑
+𝑖=1 𝒆𝑖𝜕𝑥𝑖𝑠𝜽(𝒙) extracts the
+diagonal elements of the Jacobian matrix. Combining all these contributions with the constant
+term from Equation 30 yields the complete first-order Taylor control variate expression given
+in Equation 33.
+4.6 Experiments
+We evaluate the Taylor control variate’s effectiveness in reducing gradient variance for three
+different regression coefficients:
+• 𝛽loss: The analytical optimal regression coefficient on the loss as given in Equation 15.
+• 𝜷grad: Again the analytically optimal regression coefficient, but now computed in the gradient
+space. Note that this yields a vector of weights, one for each parameter in the model. We
+denote the scalar 𝛽grad as the average of this vector.
+• 𝛽learn: A single scalar parameter learned by minimizing the variance of the control variate
+estimator.
+We evaluate the Taylor control variate’s performance across three datasets of increasing com-
+plexity: a simple toy dataset where we can directly measure variance reduction ratios, followed
+by MNIST and CIFAR-10 where we use FID scores to evaluate the performance.
+4.6.1 Toy Data
+We evaluate the effectiveness of the Taylor control variate on a simple toy dataset consisting of
+a mixture of two Gaussians
+𝑝(𝒙) = 1
+5𝒩(𝒙; 𝟓, 𝑰) + 4
+5𝒩(𝒙; −𝟓, 𝑰).
+43.
+10
+==PAGE:16==
+Taylor Control Variate
+Toy Data
+The dataset is visualized in Figure 4.1.
+Figure 4.1: Toy dataset consisting of a mixture of two Gaussians as defined in Equation 43.
+On this simple toy dataset, we can easily compute batched gradients and thus directly evaluate
+the variance reduction ratios. Figure 4.2 shows the variance reduction ratios for various MLP
+score models using the Taylor control variate, comparing the 𝜷grad and 𝛽learn regression coeffi-
+cient methods for 𝑘= 0 and 𝑘= 1. Results for 𝛽loss, which are nearly identical to those for 𝛽learn,
+are shown in Figure A.1.
+(a) 𝜷grad, 𝑘= 0
+(b) 𝛽learn, 𝑘= 0
+(c) 𝜷grad, 𝑘= 1
+(d) 𝛽learn, 𝑘= 1
+Figure 4.2: Variance reduction ratios for 𝜷grad and 𝛽learn on the toy dataset. Lower ratios indicate
+better performance, and numbers in parentheses show parameter counts.
+The experiments demonstrate substantial variance reduction on this simple toy dataset,
+but effectiveness diminishes as model complexity increases. Deeper architectures consistently
+11
+==PAGE:17==
+Taylor Control Variate
+Toy Data
+underperform compared to wider counterparts with similar parameter counts, suggesting that
+Taylor expansions struggle to capture the nonlinearity of deeper networks. Increasing the
+Taylor expansion order from 0 to 1 does not improve performance. This motivates the need
+for even higher-order Taylor expansions or alternative control variate strategies. Additionally,
+𝜷grad performs notably worse than 𝛽learn and 𝛽loss, which is contrary to theoretical expectations.
+Figure 4.3 shows the regression coefficient magnitudes for different methods for an MLP with
+width 128 and depth 2.
+(a) 𝛽grad, 𝑘= 0
+(b) 𝛽loss, 𝑘= 0
+(c) 𝛽learn, 𝑘= 0
+(d) 𝛽grad, 𝑘= 1
+(e) 𝛽loss, 𝑘= 1
+(f) 𝛽learn, 𝑘= 1
+Figure 4.3: Regression coefficient values during training for an MLP with width 128 and depth 2.
+The results reveal that 𝛽learn converges to values similar to 𝛽loss, explaining their comparable
+variance reduction performance. In contrast, 𝜷grad exhibits slightly larger magnitudes on
+average, which has a notably negative impact on the variance reduction ratios in Figure 4.2.
+Figure 4.4 displays the regression coefficients for an MLP with width 377 and depth 15.
+(a) 𝛽grad, 𝑘= 0
+(b) 𝛽loss, 𝑘= 0
+(c) 𝛽learn, 𝑘= 0
+(d) 𝛽grad, 𝑘= 1
+(e) 𝛽loss, 𝑘= 1
+(f) 𝛽learn, 𝑘= 1
+Figure 4.4: Regression coefficient values during training for an MLP with width 377 and depth
+15.
+The regression coefficients remain similar for both 𝑘= 0 and 𝑘= 1, indicating limited benefit
+from higher-order expansions. The learned coefficient 𝛽learn again converges to values similar to
+𝛽loss, while 𝛽grad is about half as large. This difference in coefficient magnitude directly impacts
+performance: 𝜷grad achieves variance reduction ratios around 0.7, compared to 0.4-0.5 for both
+𝛽loss and 𝛽learn, confirming that coefficient magnitude significantly affects control variate effec-
+12
+==PAGE:18==
+Taylor Control Variate
+Toy Data
+tiveness. While (Jeha et al., 2024) previously demonstrated these variance reduction patterns,
+our key contribution is showing that learning the regression coefficient achieves comparable
+variance reduction to the analytically computed coefficients. This finding motivates the appli-
+cation of learned coefficients to more complex datasets, which we explore in the following section.
+4.6.2 MNIST and CIFAR-10
+For more complex datasets like MNIST and CIFAR-10, we use a RefineNet (Lin et al., 2016)
+architecture with 8M parameters as our score model. Computing variance reduction ratios here
+is too memory intensive, so instead we use the Fréchet Inception Distance (FID) (Heusel et al.,
+2017) as our primary metric. For completeness, we provide a brief description of this metric in
+the following section, which readers familiar with FID may skip.
+4.6.2.1 Fréchet Inception Distance*
+The Fréchet Inception Distance is a widely used metric for evaluating the quality of generated
+images. It measures the distance between the distributions of real and generated images in
+the feature space of a pre-trained neural network. While originally defined using an Inception
+network, FID can be computed using any feature-extracting model. Given real images 𝒙𝑟 and
+generated images 𝒙𝑔, FID is computed as
+FID = ‖𝝁𝑟−𝝁𝑔‖2 + tr(𝚺𝑟+ 𝚺𝑔−2(𝚺𝑟𝚺𝑔)
+1
+2),
+44.
+where 𝝁𝑟, 𝝁𝑔 are the means and 𝚺𝑟, 𝚺𝑔 are the covariance matrices of the feature representations
+for real and generated images, respectively. Lower FID scores indicate better generation quality,
+as they correspond to smaller distances between the real and generated distributions. We use
+this MNIST classifier and this CIFAR-10 ConvNet as feature extractors.
+4.6.2.2 MNIST
+Figure 4.5 shows FID scores during training for the different regression coefficient methods and
+the baseline (no control variate) on MNIST.
+(a) 𝑘= 0
+(b) 𝑘= 1
+Figure 4.5: FID scores for the different regression coefficient methods and the baseline on
+MNIST.
+All three regression coefficient methods achieve comparable performance and outperform the
+baseline. The ability to learn the regression coefficient is particularly encouraging, as it
+offers significant computational advantages over computing analytically optimal coefficients,
+especially 𝜷grad. Figure 4.6 compares order 0 and 1 for each regression coefficient method.
+13
+==PAGE:19==
+Taylor Control Variate
+MNIST
+(a) 𝜷grad
+(b) 𝛽loss
+(c) 𝛽learn
+Figure 4.6: Comparison of FID scores across different orders for each regression coefficient
+method on MNIST.
+For 𝛽loss and 𝛽learn, order 1 performs worse than order 0 in early training, suggesting that higher-
+order terms may introduce additional noise without providing significant benefits. For 𝜷grad,
+both orders perform similarly. Figure 4.7 shows the regression coefficient values for each method
+using orders 0 and 1.
+(a) 𝛽grad
+(b) 𝛽loss
+(c) 𝛽learn
+Figure 4.7: Regression coefficient values during training for the different methods on MNIST.
+For all methods, the regression coefficients remain close to zero, indicating that the Taylor
+control variate poorly approximates the loss landscape. Nevertheless, Figure 4.8 demonstrates
+that the control variates still provide benefits over the baseline. Since 𝛽grad is an average and
+𝛽learn is updated with a small learning rate, the greater fluctuation observed in 𝛽loss is expected.
+Figure 4.8 shows generated samples at epochs 1, 3, 5, and 20 for each method using order 1.
+Order 0 results are shown in Figure A.2.
+14
+==PAGE:20==
+Taylor Control Variate
+MNIST
+(a) 𝜷grad
+(b) 𝛽loss
+(c) 𝛽learn
+(d) No CV
+Figure 4.8: Generated MNIST samples at epochs 1, 3, 5, and 20 comparing the baseline and
+the regression coefficient methods for 𝑘= 1.
+At epoch 20, the baseline samples are clearly inferior to those generated with control variates.
+Notably, when using control variates, recognizable MNIST-like samples emerge as early as epoch
+5, which is not the case without a control variate.
+4.6.2.3 CIFAR-10
+Figure 4.9 shows the FID scores during training for the different regression coefficient methods
+and the baseline on CIFAR-10. We have no results for 𝜷grad on CIFAR-10 as it is too memory
+intensive to compute.
+15
+==PAGE:21==
+Taylor Control Variate
+CIFAR-10
+(a) 𝑘= 0
+(b) 𝑘= 1
+Figure 4.9: FID scores for the different regression coefficient methods and the baseline on
+CIFAR-10.
+We do not observe the same positive impact from the control variate on CIFAR-10 as we
+did on MNIST. Although order 0 control variates yield slightly lower FID scores in the final
+epochs, overall learning remains poor, with the highest FID scores occurring early in training.
+This lack of convergence is likely due to the increased complexity of CIFAR-10. Adjustments
+such as reducing the learning rate, increasing batch size, or adding data augmentation could
+potentially improve performance. While these aspects have not been the focus here, they may
+be necessary to fully realize the control variate’s benefits on more complex datasets. Despite
+these challenges, learning the regression coefficient consistently yields lower FID variance than
+using the analytically computed optimal coefficient. Figure 4.10 shows the regression coefficient
+values for the different methods on CIFAR-10.
+(a) 𝛽loss
+(b) 𝛽learn
+Figure 4.10: Regression coefficient values on CIFAR-10 for 𝑘= 0 and 𝑘= 1.
+The regression coefficients for both methods approach zero, indicating that the control variate
+does not approximate the loss landscape well. Figure 4.11 shows generated CIFAR-10 samples
+at epochs 1, 5, 10, and 20 comparing the baseline and the different regression coefficient methods
+for 𝑘= 0. The results for 𝑘= 1 are shown in Figure A.3.
+16
+==PAGE:22==
+Taylor Control Variate
+CIFAR-10
+(a) 𝛽loss
+(b) 𝛽learn
+(c) No CV
+Figure 4.11: Generated CIFAR-10 samples at epochs 1, 5, 10, and 20 comparing the baseline
+and the regression coefficient methods for 𝑘= 0.
+The goal was not to achieve high-quality CIFAR-10 samples within just 20 epochs, but rather
+to investigate whether the Taylor control variate improves sample quality during training.
+However, based on these results, we cannot conclude that the control variate offers such an
+advantage. At epoch 10, some samples generated with 𝛽loss appear indistinguishable from noise,
+further strengthening our conclusion that learning the regression coefficient provides greater
+stability than using the analytically optimal coefficient. At epoch 20, the baseline model
+produces multiple samples that still resemble noise, which is consistent with the FID plot, where
+the baseline is seen to diverge more than the models using a control variate. In Section 6, we
+introduce a method for efficiently constructing Taylor control variates of arbitrary order and
+17
+==PAGE:23==
+Flow Control Variate
+investigate whether higher orders can yield better results. Before that, we examine the flow
+control variate.
+5 Flow Control Variate
+(Müller et al., 2020) demonstrates how normalizing flows can serve as control variates for Monte
+Carlo variance reduction. This work inspired (Jeha et al., 2024) to explore learned regression
+coefficients and serves as a foundational reference for our investigation into learning control
+variates. While ultimately proving challenging to adapt to score-based modeling, it motivated
+the approaches we explore in this thesis. We therefore provide a brief overview of the approach
+and discuss implementation challenges. Following their notation, we first describe normalizing
+flow basics before examining their control variate application.
+5.1 Normalizing Flow Preliminaries
+Normalizing flows are invertible transformations that enable flexible modeling of complex
+probability distributions. A normalizing flow consists of a composition of 𝐿 bijective functions
+𝒉= ℎ𝐿∘ℎ𝐿−1 ∘… ∘ℎ1, where each ℎ𝑖 is a differentiable and invertible mapping. Since each
+component is bijective, the entire composition 𝒉: 𝑿→𝑿′ is also bijective. The transformation
+of probability densities follows the change-of-variables formula
+𝑝𝑿′(𝒙′) = 𝑝𝑿(𝒙) · | det(𝜕𝒉(𝒙)
+𝜕𝒙𝑇)|−1,
+45.
+where 𝑝𝑿 and 𝑝𝑿′ are the probability densities before and after transformation, 𝒙 is the input,
+𝒙′ = 𝒉(𝒙) is the transformed output, and (𝜕𝒉(𝒙)
+𝜕𝒙𝑇) denotes the Jacobian matrix of 𝒉 evaluated
+at 𝒙. For a sequence of 𝐿 transformations, the chain rule gives us the product of Jacobian
+determinants
+𝐽(𝒙) = ∏
+𝐿
+𝑖=1
+| det(𝜕ℎ𝑖(𝒙𝑖)
+𝜕𝒙𝑇
+𝑖
+)|,
+46.
+where 𝒙1 = 𝒙 and each subsequent 𝒙𝑖+1 = ℎ𝑖(𝒙𝑖). Each factor represents the absolute Jacobian
+determinant of the 𝑖-th transformation. A main research question in the field of normalizing
+flows is how to choose the transformation functions ℎ𝑖 to maximize the expressiveness of the
+model while maintaining the bijectivity and differentiability required for the change-of-variables
+formula to hold. The final transformed variable ̃𝒙= 𝒉(𝒙) resides in the latent space ℒ. Its
+probability density relates to the original distribution through
+𝑝ℒ(̃𝒙) = 𝑝𝑿(𝒙)
+𝐽(𝒙) .
+47.
+In practice, we typically choose the latent distribution 𝑝ℒ(̃𝒙) to be a simple, tractable distri-
+bution such as the standard normal distribution, making sampling and density evaluation
+straightforward.
+5.2 Flow as a Control Variate
+The main idea of (Müller et al., 2020) is to use a normalizing flow to model the shape of the
+control variate
+̃𝑔(𝒙; 𝝋, 𝜽) ≔𝑝𝑿(𝒙; 𝝋, 𝜽) = 𝑝ℒ(̃𝒙) · 𝐽(𝒙; 𝝋, 𝜽),
+48.
+18
+==PAGE:24==
+Jet Control Variate
+where 𝝋 represents the parameters of the normalizing flow and 𝜽 represents the parameters
+of the score model. ̃𝑔(𝒙; 𝝋, 𝜽) is a normalized probability density function, scaled by a learned
+integral value 𝐺. This gives us the control variate estimator
+̂
+ℒCV,𝛽= 1
+𝑁∑
+𝑁
+𝑖=1
+[𝐿𝜽(𝒛𝑖, 𝒙𝑖, 𝜎𝑖) −𝛽𝐺̃𝑔(𝒙𝑖; 𝝋, 𝜽)] + 𝛽𝐺𝔼[̃𝑔(𝒙; 𝝋, 𝜽)].
+49.
+If we train the flow and score model simultaneously, with the flow being trained via maximum
+likelihood, the flow’s likelihood values increase throughout training. Since the expected likeli-
+hood is unknown during training, we cannot construct an unbiased control variate estimator
+using this approach. A key difference from (Müller et al., 2020) is that their method reduces
+Monte Carlo variance, while we need to reduce gradient variance with respect to a Monte
+Carlo estimate, which requires the flow to depend on score model parameters. To achieve this
+parameter dependence, one could concatenate the score model activations to the flow input.
+However, this approach appeared ad hoc and not the appropriate direction for our work.
+Therefore, we decided to focus on alternative control variate methods better suited for gradient
+variance reduction in score model training.
+6 Jet Control Variate
+In Section 4, we derived control variates using Taylor expansions of orders 𝑘= 0 and 𝑘= 1.
+Although we derived a general formula for control variates of an arbitrary order in Equation 28,
+practical computation becomes increasingly difficult for higher orders. As demonstrated in
+Section 4.5, even the 𝑘= 1 case requires significant algebraic manipulation. To overcome this
+challenge, we leverage the Python package jax.experimental.jet, which uses the Faà di Bruno
+formula to efficiently compute higher-order derivatives. In the following sections, we derive this
+formula and show how it enables easier construction of higher-order Taylor control variates.
+6.1 The Faà di Bruno Formula
+Following the notation in (Johnson et al., 2022), the Taylor expansion of a function 𝒇 with
+perturbation vector 𝒗 is given by
+𝒇(𝒙+ 𝒗) ≈𝒇(𝒙) + 𝜕𝒇(𝒙)[𝒗] + 1
+2!𝜕2𝒇(𝒙)[𝒗, 𝒗] + ⋯+ 1
+𝐾!𝜕𝐾𝒇(𝒙)[𝒗, ⋯, 𝒗].
+50.
+When using the same perturbation vector repeatedly, as in Equation 50, we can achieve
+computational savings compared to the general case where each perturbation vector is distinct
+𝜕𝑘𝒇(𝒙)[𝒗1, 𝒗2, ⋯, 𝒗𝑘] = 𝜕𝑘𝒇(𝒙)[⊗𝑖∈[𝑘] 𝒗𝑖].
+51.
+6.1.1 Tensor Notation to Multi-index Notation*
+To establish the connection between the tensor notation used in (Johnson et al., 2022) and the
+multi-index notation from Section 4, we demonstrate their equivalence with explicit examples.
+For a scalar function 𝑓 and 𝒙∈ℝ2, the first-order derivative in tensor notation expands as
+19
+==PAGE:25==
+Jet Control Variate
+Tensor Notation to Multi-index Notation*
+𝜕𝑓(𝒙)[𝒗] = (𝜕𝑓(𝒙)
+𝜕𝑥1
+𝜕𝑓(𝒙)
+𝜕𝑥2 ) ⋅(𝑣1
+𝑣2
+)
+= 𝜕𝑓(𝒙)
+𝜕𝑥1
+𝑣1 + 𝜕𝑓(𝒙)
+𝜕𝑥2
+𝑣2
+= 𝜕𝑓(𝒙)𝒗[1,0] + 𝜕𝑓(𝒙)𝒗[0,1]
+= ∑
+|𝛼|=1
+𝒗𝛼𝜕𝛼𝑓(𝒙).
+52.
+For the second-order derivative, we have
+1
+2𝜕2𝑓(𝒙)[𝒗, 𝒗] = 1
+2𝜕2𝑓(𝒙)[𝒗⊗𝒗]
+= 1
+2(𝜕2𝑓(𝒙)
+𝜕𝑥2
+1
+𝜕2𝑓(𝒙)
+𝜕𝑥1𝜕𝑥2
+𝜕2𝑓(𝒙)
+𝜕𝑥2𝜕𝑥1
+𝜕2𝑓(𝒙)
+𝜕𝑥2
+2 )
+(
+(
+(
+(
+(
+(
+( 𝑣2
+1
+𝑣1𝑣2
+𝑣2𝑣1
+𝑣2
+2 )
+)
+)
+)
+)
+)
+)
+= 1
+2
+𝜕2𝑓(𝒙)
+𝜕𝑥2
+1
+𝑣2
+1 + 𝜕2𝑓(𝒙)
+𝜕𝑥1𝜕𝑥2
+𝑣1𝑣2 + 1
+2
+𝜕2𝑓(𝒙)
+𝜕𝑥2
+2
+𝑣2
+2
+= 1
+2𝜕[2,0]𝑓(𝒙)𝒗[2,0] + 𝜕[1,1]𝑓(𝒙)𝒗[1,1] + 1
+2𝜕[0,2]𝑓(𝒙)𝒗[0,2]
+= ∑
+|𝛼|=2
+𝒗𝛼
+𝛼! 𝜕𝛼𝑓(𝒙).
+53.
+This equivalence demonstrates that both notational systems capture the same mathematical
+structure. We will use the tensor notation in the following to keep consistency with (Johnson
+et al., 2022).
+6.1.2 Automatic Differentiation*
+Automatic differentiation is about function composition and is a core concept for understanding
+the Faà di Bruno formula. Based on the work by (Baydin et al., 2015), we can understand reverse
+mode automatic differentiation as a generalized form of backpropagation, where derivatives
+propagate backward from outputs to inputs. This approach associates each intermediate variable
+𝑣𝑖 with an adjoint value
+𝑣𝑖= 𝜕𝑦𝑗
+𝜕𝑣𝑖
+.
+54.
+This adjoint represents how sensitive a particular output 𝑦𝑗 is to changes in the intermediate
+variable 𝑣𝑖. In traditional backpropagation used in neural networks, 𝑦 typically represents a loss
+function. As (Baydin et al., 2015) explain, reverse mode AD operates in two sequential phases:
+1. Forward Phase: The function is evaluated normally, computing all intermediate values 𝑣𝑖
+while simultaneously recording the computational dependencies in a graph structure.
+2. Reverse Phase: The system propagates adjoints 𝑣𝑖 backward through the computational
+graph, from outputs toward inputs.
+Table 6.1 illustrates the complete process for evaluating 𝑦= 𝑓(𝑥1, 𝑥2) = ln(𝑥1) + 𝑥1𝑥2 −sin(𝑥2)
+at (𝑥1, 𝑥2) = (2, 5).
+20
+==PAGE:26==
+Jet Control Variate
+Automatic Differentiation*
+Forward Primal Trace
+Value
+Reverse Adjoint (Deriv-
+ative) Trace
+Value
+𝑣−1 = 𝑥1
+2
+𝑥1 = 𝑣−1
+5.5
+𝑣0 = 𝑥2
+5
+𝑥2 = 𝑣0
+1.716
+𝑣1 = ln 𝑣−1
+ln 2
+𝑣−1 = 𝑣1
+𝜕𝑣1
+𝜕𝑣−1 + 𝑣2
+𝜕𝑣2
+𝜕𝑣−1
+𝑣1 ⋅
+1
+𝑣−1 + 𝑣2 ⋅𝑣0 = 5.5
+𝑣2 = 𝑣−1 × 𝑣0
+2 × 5 = 10
+𝑣0 = 𝑣2
+𝜕𝑣2
+𝜕𝑣0 + 𝑣3
+𝜕𝑣3
+𝜕𝑣0
+𝑣2 × 𝑣−1 + 𝑣3 ×
+cos 𝑣0 = 1.716
+𝑣3 = sin 𝑣0
+sin 5
+𝑣1 = 𝑣4
+𝜕𝑣4
+𝜕𝑣1
+𝑣4 × 1 = 1
+𝑣4 = 𝑣1 + 𝑣2
+0.693 + 10
+𝑣2 = 𝑣4
+𝜕𝑣4
+𝜕𝑣2
+𝑣4 × 1 = 1
+𝑣5 = 𝑣4 −𝑣3
+10.693 + 0.959
+𝑣3 = 𝑣5
+𝜕𝑣5
+𝜕𝑣3
+𝑣5 × (−1) = −1
+𝑦= 𝑣5
+11.652
+𝑣4 = 𝑣5
+𝜕𝑣5
+𝜕𝑣4
+𝑣5 × 1 = 1
+𝑣5 = 𝑦𝜕𝑦
+𝜕𝑣5
+1
+Table 6.1: Adapted from (Baydin et al., 2015). The example shows reverse mode AD computing
+both partial derivatives in a single pass.
+The left side shows the forward computation of the function value, while the right side demon-
+strates the reverse accumulation of derivatives. For any intermediate variable 𝑣𝑖 that affects the
+output through multiple paths, its total contribution follows the chain rule. For example, for
+variable 𝑣0 that affects 𝑦 through variables 𝑣2 and 𝑣3, its total derivative is given by
+𝜕𝑦
+𝜕𝑣0
+= 𝜕𝑦
+𝜕𝑣2
+𝜕𝑣2
+𝜕𝑣0
++ 𝜕𝑦
+𝜕𝑣3
+𝜕𝑣3
+𝜕𝑣0
+,
+55.
+or using adjoint notation we have
+𝑣0 = 𝑣2
+𝜕𝑣2
+𝜕𝑣0
++ 𝑣3
+𝜕𝑣3
+𝜕𝑣0
+.
+56.
+The reverse phase begins with 𝑣5 = 𝑦= 𝜕𝑦
+𝜕𝑦= 1 and works backward, ultimately yielding the
+derivatives 𝜕𝑦
+𝜕𝑥1 = 𝑥1 = 5.5 and 𝜕𝑦
+𝜕𝑥2 = 𝑥2 = 1.716 in a single reverse pass. The naïve approach
+to higher-order differentiation is to repeatedly compose the differentiation operation until the
+desired order is achieved, e.g., by applying automatic differentiation to the adjoint values.
+However, this nested-derivative approach suffers from a computational blowup that is expo-
+nential in the order of differentiation. In the following section, we examine the Faà di Bruno
+formula, which enables us to compute higher-order derivatives in a more efficient manner.
+6.1.3 Deriving the Faà di Bruno Formula
+As automatic differentiation is about function composition, we need to understand how to
+express the derivatives 𝜕𝑘𝒇(𝒙)[𝒗1, ⋯, 𝒗𝑘] in terms of derivatives of the component functions 𝒈
+and 𝒉. Let’s examine the derivatives for increasing orders. For 𝑘= 1 we have
+𝜕𝒇(𝒙)[𝒗1] = 𝜕𝒈(𝒉(𝒙))[𝜕𝒉(𝒙)[𝒗1]],
+57.
+for 𝑘= 2 we have
+𝜕2𝒇(𝒙)[𝒗1, 𝒗2] = 𝜕2𝒈(𝒉(𝒙))[𝜕𝒉(𝒙)[𝒗1], 𝜕𝒉(𝒙)[𝒗2]] + 𝜕𝒈(𝒉(𝒙))[𝜕2𝒉(𝒙)[𝒗1, 𝒗2]],
+58.
+and for 𝑘= 3 we have
+21
+==PAGE:27==
+Jet Control Variate
+Deriving the Faà di Bruno Formula
+𝜕3𝒇(𝒙)[𝒗1, 𝒗2, 𝒗3] = 𝜕3𝒈(𝒉(𝒙))[𝜕𝒉(𝒙)[𝒗1], 𝜕𝒉(𝒙)[𝒗2], 𝜕𝒉(𝒙)[𝒗3]]
++𝜕2𝒈(𝒉(𝒙))[𝜕2𝒉(𝒙)[𝒗1, 𝒗2], 𝜕𝒉(𝒙)[𝒗3]]
++𝜕2𝒈(𝒉(𝒙))[𝜕𝒉(𝒙)[𝒗1], 𝜕2𝒉(𝒙)[𝒗2, 𝒗3]]
++𝜕2𝒈(𝒉(𝒙))[𝜕2𝒉(𝒙)[𝒗1, 𝒗3], 𝜕𝒉(𝒙)[𝒗2]]
++𝜕𝒈(𝒉(𝒙))[𝜕3𝒉(𝒙)[𝒗1, 𝒗2, 𝒗3]].
+59.
+Examining these examples reveals that each term in the expression corresponds to a partition of
+the set {1, 2, …, 𝑘}. The differentiation order of 𝒈 matches the number of parts in the partition,
+while the differentiation orders of 𝒉 correspond to the sizes of the partition elements. For the
+general case with distinct vectors, we have
+𝜕𝑘𝒇(𝒙)[𝒗1, ⋯, 𝒗𝑘] =
+∑
+𝜎∈part([𝑘])
+𝜕|𝜎|𝒈(𝒉(𝒙))[⊗𝜂∈𝜎𝜕|𝜂|𝒉(𝒙)[⊗ℓ∈𝜂𝒗ℓ]].
+60.
+Here, part([𝑘]) denotes the set of all partitions of the set {1, 2, …, 𝑘}, 𝜎 represents a specific
+partition, and 𝜂 ranges over the blocks within that partition. When all perturbation vectors are
+identical (𝒗1 = 𝒗2 = ⋯= 𝒗𝑘= 𝒗), we can collect similar terms. Returning to our example for
+𝑘= 3, if we set 𝒗1 = 𝒗2 = 𝒗3 = 𝒗, the middle three terms can be grouped together
+𝜕3𝒇(𝒙)[𝒗, 𝒗, 𝒗] = 𝜕3𝒈(𝒉(𝒙))[𝜕𝒉(𝒙)[𝒗], 𝜕𝒉(𝒙)[𝒗], 𝜕𝒉(𝒙)[𝒗]]
++3 ⋅𝜕2𝒈(𝒉(𝒙))[𝜕2𝒉(𝒙)[𝒗, 𝒗], 𝜕𝒉(𝒙)[𝒗]]
++𝜕𝒈(𝒉(𝒙))[𝜕3𝒉(𝒙)[𝒗, 𝒗, 𝒗]].
+61.
+A natural question is how many similar terms can be combined in the general case. The answer
+is given by
+sym(𝜈) =
+(
+(
+(
+(
+𝑘
+1, …, 1
+⏟
+𝑛1 times
+, 2, …, 2
+⏟
+𝑛2 times
+, …
+)
+)
+)
+)
+1
+𝑛1!𝑛2!⋯𝑛𝑘!,
+62.
+where 𝜈= (𝜈1, 𝜈2, ⋯, 𝜈𝑚) represents an integer partition of 𝑘 as a tuple of positive integers with
+∑𝜈𝑖= 𝑘 and 𝑛𝑖 denoting the number of times 𝑖 appears in 𝜈. The multinomial coefficient
+counts how many ways to collect 𝑘 distinct items into the given numbers and sizes of distinct
+bins, and the second term corrects for treating bins of the same size as distinct. This leads us
+to the Faà di Bruno formula
+𝜕𝑘𝒇(𝒙)[𝒗, ⋯, 𝒗] =
+∑
+𝜈∈part(𝑘)
+sym(𝜈)𝜕|𝜈|𝒈(𝒉(𝒙))[⊗𝑛∈𝜈𝜕𝑛𝒉(𝒙)[𝒗⊗𝑛]],
+63.
+where part(𝑘) represents the set of integer partitions of 𝑘, and the symmetry coefficient sym(𝜈)
+accounts for the multiplicity of identical terms as seen in the example above. The number of
+integer partitions of 𝑘 grows asymptotically as 𝑝(𝑘) ∼
+1
+4𝑘
+√
+3 exp(𝜋√2𝑘
+3 ), which is 𝑂(exp(
+√
+𝑘)),
+i.e., subexponential growth. This means that direct evaluation of Equation 63 reduces the
+computational complexity of higher-order differentiation from exponential 𝑂(2𝑘) (naive evalu-
+ation with distinct vectors) to subexponential 𝑂(exp(
+√
+𝑘)) when leveraging the structure of
+identical perturbation vectors. While this improvement becomes significant for large 𝑘, it will not
+be apparent in our experiments since we work with small expansion orders. More importantly,
+leveraging jax.experimental.jet, which implements the Faà di Bruno formula, makes it easy
+22
+==PAGE:28==
+Jet Control Variate
+Deriving the Faà di Bruno Formula
+to compute higher-order derivatives. In the following section, we demonstrate how to construct
+higher-order control variates using the derivative outputs from jax.experimental.jet.
+6.2 Constructing Taylor Control Variates using jax.experimental.jet
+For a vector-valued function 𝒇 and perturbation vector 𝒗, jax.experimental.jet returns a tuple
+of the form
+(𝒇(𝒙), 𝜕𝒇(𝒙)[𝒗], 𝜕2𝒇(𝒙)[𝒗, 𝒗], ⋯, 𝜕𝑘𝒇(𝒙)[𝒗, ⋯, 𝒗]).
+64.
+In our setting, we have 𝒇(𝒙) = 𝒔𝜃(𝒙) and 𝒗= 𝜎𝒛. In Equation 28 we derived an approximation
+of the loss using Taylor expansions of the score model. From this derivation, we have the
+following two sums to consider
+1
+2 ∑
+|𝜶| ≤𝑘
+|𝝆| ≤𝑘
+𝜎|𝜶| + |𝝆|
+𝜶!𝝆!
+𝒛𝜶+𝝆⟨𝜕𝜶𝑠𝜽(𝒙), 𝜕𝝆𝑠𝜽(𝒙)⟩,
+65.
+∑
+|𝜶| ≤𝑘
+𝜎|𝜶| −1
+𝜶!
+𝒛𝜶𝒛𝑇𝜕𝜶𝑠𝜽(𝒙).
+66.
+We are interested in all terms that have zero expectation under the Gaussian perturbation 𝒛.
+For Equation 65, we know that 𝔼[𝒛𝜶+𝝆] = 0 when |𝜶+ 𝝆| is odd. Since |𝜶+ 𝝆| = |𝜶| + |𝝆|,
+this occurs when 𝜶 and 𝝆 have different parities. Therefore, all terms in Equation 65 that are
+products of derivatives with different parities will have zero expectation and can be used in
+the control variate. For Equation 66, we know that the 𝑖-th component of 𝔼[𝒛𝜶𝒛] is 𝔼[𝒛𝜶𝑧𝑖] =
+𝔼[𝒛𝜶+𝒆𝑖]. Since |𝜶+ 𝒆𝑖| = |𝜶| + 1, we have 𝔼[𝒛𝜶𝒛] = 𝟎 when |𝜶| is even. Therefore, all the even
+order terms in Equation 66 have zero expectation and can be used in the control variate. This
+approach significantly simplifies the construction of higher-order control variates compared to
+the manual derivation we performed for 𝑘= 1 in Section 4.5. We refer to the Taylor control
+variate constructed using this approach as the jet control variate.
+6.3 Regression Coefficients for the Jet Control Variate
+In Section 4, the control variate for the objective was a scalar, and thus the regression coefficient
+was also a scalar. The jet approach enables the construction of a vector-valued control variate
+𝑪= (𝐶1, 𝐶2, …, 𝐶𝑚)𝑇, where each component 𝐶𝑖 corresponds to a different combination of
+derivative orders. For the single sum, terms of order 𝑖 are added to 𝐶𝑖+1 (e.g., order 0 to 𝐶1, order
+2 to 𝐶3). For the double sum, terms with derivative orders 𝑖 and 𝑗 are added to 𝐶𝑖+𝑗+1 (e.g.,
+orders 0 and 1 to 𝐶2, orders 2 and 3 to 𝐶6). This multivariate structure requires a corresponding
+vector of regression coefficients, 𝜷= (𝛽1, 𝛽2, …, 𝛽𝑚)𝑇. The optimal regression coefficient vector
+is given by
+𝜷∗= 𝚺−1
+𝑪𝝈𝐿,𝑪,
+67.
+where 𝚺𝑪 is the 𝑚× 𝑚 covariance matrix of the control variate vector, and 𝝈𝐿,𝑪 is the 𝑚× 1
+covariance vector between the original loss 𝐿 and each component of 𝑪 (Rubinstein & Kroese,
+2016). In the following section, we evaluate the empirical performance of the jet control variate
+approach, both for the scalar and vector cases, and investigate whether increasing the Taylor
+expansion order yields a performance boost.
+23
+==PAGE:29==
+Jet Control Variate
+Regression Coefficients for the Jet Control Variate
+6.4. Experiments
+6.4.1. Toy Data
+We evaluate the jet control variate using the same MLP variance ratio experiment as in
+Section 4.6.1. Figure 6.1 shows the variance reduction ratios for jet orders 0 to 3 with 𝛽learn.
+Results for 𝛽loss are nearly identical (see Figure B.1) and are omitted here for clarity.
+(a) 𝑘= 0
+(b) 𝑘= 1
+(c) 𝑘= 2
+(d) 𝑘= 3
+Figure 6.1: Variance reduction ratios for the jet control variate for orders 𝑘= 0, 1, 2, 3 on the
+toy data using 𝛽learn.
+The results for 𝑘= 0 and 𝑘= 1 closely match those in Figure 4.2 and Figure A.1, as expected
+since the control variates are theoretically identical but here computed using the jet method.
+We investigated whether higher orders (𝑘= 2, 𝑘= 3) would provide improvement. However,
+as shown in Figure 6.1, this is not the case—in fact, performance slightly decreases as the
+order increases. Figure 6.2 presents the variance reduction ratio results for orders 1 to 3 using
+the learned vector regression coefficient 𝜷learn, as described in Equation 67. The corresponding
+results using 𝜷loss show nearly identical patterns and are omitted here for clarity, but can be
+found in Figure B.2.
+(a) 𝑘= 1
+(b) 𝑘= 2
+(c) 𝑘= 3
+Figure 6.2: Variance reduction ratios for the jet vector control variate for orders 𝑘= 1, 2, 3 on
+the toy data using 𝜷learn.
+Similarly, the vector approach shows no performance improvement when pushing to higher
+orders and generally performs worse overall. Figure 6.3 shows the regression coefficient 𝛽learn
+24
+==PAGE:30==
+Jet Control Variate
+Toy Data
+during training for an MLP (width 128, depth 2) using the jet control variate for orders 𝑘=
+0, 1, 2, 3 on the toy data. The values for 𝛽loss are shown in Figure B.3.
+(a) 𝑘= 0
+(b) 𝑘= 1
+(c) 𝑘= 2
+(d) 𝑘= 3
+Figure 6.3: 𝛽learn during training for an MLP with width 128 and depth 2 using the jet control
+variate for orders 𝑘= 0, 1, 2, 3 on the toy data.
+This shows that learning the regression coefficient converges to nearly identical values regardless
+of the jet control variate order. The regression coefficient values are nearly identical across all
+orders, making separate plots necessary to show any differences. At step 2000, the values are
+0.391, 0.398, 0.397, and 0.397 for orders 𝑘= 0, 1, 2, 3, respectively, demonstrating that pushing
+to higher orders has minimal effect on the control variate. To understand the limitations of
+the Taylor control variate approach, we examine the relative sizes of the different terms in the
+Taylor approximation from Equation 28. Figure 4a displays the complete Taylor approximation,
+Figure 4b shows the terms we discard (those with non-zero expectation), while Figure 4c shows
+the terms we retain as our control variate. Note that the scale of the y-axis of Figure 4c differs
+from those of the other two plots.
+(a) All terms
+(b) Non-control variate terms
+(c) Control variate terms
+Figure 6.4: Comparison of control variate terms versus non-control variate terms in the Taylor
+expansion.
+The comparison reveals that the control variate terms are substantially smaller in size than
+the discarded terms. Indeed, the complete approximation and the non-control variate terms
+visually appear nearly identical. This shows that the control variate captures only a negligible
+fraction of the total approximation. In the following section, we evaluate the jet control variate
+on the MNIST dataset.
+6.4.2. MNIST
+Figure 6.5 shows the FID results for the jet control variate on the MNIST dataset for different
+expansion orders with the optimal and learned regression coefficients for both the scalar and
+vector approaches.
+25
+==PAGE:31==
+Stein Control Variate
+(a) 𝛽loss
+(b) 𝛽learn
+(c) 𝜷loss
+(d) 𝜷learn
+Figure 6.5: FID results for jet control variates on MNIST comparing different expansion orders
+with optimal and learned regression coefficients for both scalar and vector approaches.
+These results are consistent with our findings from the toy data. For the scalar regression
+coefficients, order 𝑘= 2 performs slightly worse than lower orders, and for the vector regression
+coefficients, the performance is far worse and even diverges for 𝜷loss. Given these poor results for
+𝑘= 2, we decided not to pursue higher orders or evaluate the jet control variate on CIFAR-10.
+In Figure 6.4, we observed that the control variate terms are substantially smaller than the
+discarded terms, highlighting a major limitation of the Taylor control variate. By restricting
+ourselves to terms with known (zero) expectation, we sacrifice most of the approximation’s
+explanatory power, resulting in a control variate with poor correlation to the target loss. In the
+following section, we explore how the Stein operator can be used to construct control variates,
+potentially overcoming the information loss that limits the current approach.
+7 Stein Control Variate
+In Section 6, we observed a major limitation of the Taylor control variate approach. By
+discarding all terms with non-zero expectation, we lose most of the approximation’s explanatory
+power, resulting in poor performance. The Stein operator offers a promising alternative by
+providing a systematic way to transform functions into zero-mean control variates. This enables
+us to construct control variates using the complete Taylor expansion, avoiding the information
+loss that limits the previous approach. We will also demonstrate how the Stein operator can be
+used to transform neural networks into zero-mean control variates. We first introduce the Stein
+operator and its key properties, then demonstrate these methods.
+26
+==PAGE:32==
+Stein Control Variate
+7.1 The Stein Operator
+(Hasan et al., 2024) propose constructing control variates using the Stein operator (Gorham
+& Mackey, 2015), which provides a way to generate zero-mean functions under a target distri-
+bution. The Stein operator is defined as
+𝒯𝑝𝒈(𝒙) = 𝒈(𝒙)𝑇∇𝒙log 𝑝(𝒙) + ∇⋅𝒈(𝒙),
+68.
+where 𝒈(𝒙) : ℝ𝑑→ℝ𝑑. The Stein operator possesses a fundamental property that when applied
+to any function 𝒈(𝒙) satisfying the boundary condition 𝒈(𝒙)𝑝(𝒙) →𝟎 on 𝜕𝒱 (the boundary of
+the support of 𝑝(𝒙)), the resulting function has zero expectation under 𝑝
+𝔼𝑝[𝒯𝑝𝒈(𝑿)] = 0.
+69.
+This boundary condition is satisfied in our setting since our data is Gaussian-perturbed. The
+zero-expectation property makes the Stein operator ideal for constructing control variates, as
+it automatically ensures a zero mean and thus a control variate with known expectation. In the
+following section, we describe the Skilling-Hutchinson trace estimation method, which we use
+to estimate the divergence term in Equation 68.
+7.1.1 Skilling-Hutchinson Trace Estimation
+Computing the divergence term directly requires evaluating the full Jacobian matrix, which is
+computationally expensive in high dimensions. Instead, we can estimate the trace using the
+Skilling-Hutchinson method (Nowozin, 2022). For a random vector 𝒛∈ℝ𝑑 satisfying 𝔼[𝒛𝒛𝑇] =
+𝑰, the trace identity states that
+𝔼[𝒛𝑇𝑱𝒛] = tr(𝑱),
+70.
+and the Skilling-Hutchinson estimator is given by
+̂tr𝑀(𝑱) ≔1
+𝑀∑
+𝑀
+𝑚=1
+(𝒛(𝑚))
+𝑇𝑱𝒛(𝑚),
+71.
+where ̂tr𝑀(𝑱) →tr(𝑱) as 𝑀→∞. Two common choices for 𝒛 are:
+• Rademacher vectors: elements drawn i.i.d. from {−1, +1}
+• Gaussian vectors: elements drawn i.i.d. from 𝒩(0, 1)
+Theoretically, Rademacher vectors achieve lower variance than Gaussian vectors, but we will
+empirically evaluate both approaches for different values of 𝑀 to understand how the number
+of vectors affects the gradient variance ratio in our setting.
+7.2 Stein Control Variate Methods
+We train the Stein control variate by minimizing the variance of the control variate estimator
+𝝋∗= arg min
+𝝋Var[𝐿(𝒙; 𝜽) −𝛽𝒯𝑝𝒈(𝒙; 𝜽, 𝝋)].
+72.
+Having established the theoretical foundation, we now address how to model the function
+𝒈(𝒙; 𝜽, 𝝋) so that it effectively reduces the variance of the score model gradients. To achieve
+this, the control variate must depend on the score model parameters 𝜽; otherwise, it will have
+no influence on the score model gradients. We consider two parameterizations for 𝒈: a Taylor
+expansion-based approach and a neural network-based approach.
+27
+==PAGE:33==
+Stein Control Variate
+Stein Control Variate Methods
+7.2.1 Stein-Taylor
+Unlike the previous Taylor control variate approach, where certain terms had to be eliminated to
+ensure zero expectation, the Stein operator allows us to retain all terms in the Taylor expansion.
+Let 𝒔(𝒙; 𝜽) denote the score model. For a given order 𝑘, we define
+𝒈T(𝒙; 𝜽, 𝝋) = 𝑤0𝒔(𝒙; 𝜽) + 𝑤1𝜕𝒔(𝒙; 𝜽)[𝒗] + 𝑤2𝜕2𝒔(𝒙; 𝜽)[𝒗, 𝒗] + ⋯+ 𝑤𝑘𝜕𝑘𝒔(𝒙; 𝜽)[𝒗, ⋯, 𝒗], 73.
+where 𝝋= (𝑤0 𝑤1 … 𝑤𝑘) are learnable weights and 𝒗 is the perturbation vector. This forms
+a linear combination of the score function and its higher-order derivatives up to order 𝑘. We
+compute these derivatives using the jax.experimental.jet module as described in Section 6.
+7.2.2 Stein-NN
+Alternatively, we model the control variate using a neural network
+𝒈NN(𝒙; 𝜽, 𝝋) = NN(𝒔(𝒙; 𝜽); 𝝋),
+74.
+where the neural network processes the score model output with parameters 𝝋. This maintains
+the dependency on 𝜽 via the score model input, ensuring that the control variate can influence
+the score model gradients. For this approach, we experiment with both an MLP and a Vision
+Transformer.
+7.3 Experiments
+7.3.1 Toy Data
+To evaluate the effect of the number of vectors used in the Skilling-Hutchinson estimate on
+gradient variance, we train two score models of different sizes on the toy dataset, varying 𝑀
+from 1 to 10 and testing both Rademacher and Gaussian vectors. Figure 7.1 shows the results
+for a small MLP score model (width 128 depth 2).
+(a) Stein-Taylor, 𝛽loss
+(b) Stein-Taylor, 𝛽learn
+(c) Stein-MLP, 𝛽loss
+(d) Stein-MLP, 𝛽learn
+Figure 7.1: Skilling-Hutchinson results for Stein control variates on the toy dataset. The score
+model is a small MLP (width 128 depth 2).
+28
+==PAGE:34==
+Stein Control Variate
+Toy Data
+We see that varying the number of vectors used in the Skilling-Hutchinson estimate has negli-
+gible effect on gradient variance reduction for this small score model. The ratios in Figure 1c
+appear centered around 1.0, indicating the Stein-MLP control variate has minimal effect. This
+could occur because the control variate initially has no correlation with the loss, resulting in
+a regression coefficient near zero, which prevents the Stein-MLP control variate from learning.
+We attempted to incorporate exploration by setting 𝛽= 𝛽+ 1
+𝑡 with 𝑡 being the training step,
+but observed no changes in the results. Figure 7.2 shows the results for a larger MLP score
+model (width 377 depth 15).
+(a) Stein-Taylor, 𝛽loss
+(b) Stein-Taylor, 𝛽learn
+(c) Stein-MLP, 𝛽loss
+(d) Stein-MLP, 𝛽learn
+Figure 7.2: Skilling-Hutchinson results for Stein control variates on the toy dataset. The score
+model is a large MLP (width 377 depth 15).
+The number of vectors used in the Skilling-Hutchinson estimate shows some effect on the
+variance, but no clear trend emerges. Both Gaussian and Rademacher vectors produce similar
+results. Since each additional vector requires computing a Jacobian-vector product, increasing
+𝑀 significantly increases computational cost. Given the lack of clear improvement with more
+vectors, we use 𝑀= 1 Rademacher vector for all subsequent experiments. These results also
+provide initial insights into Stein control variate performance on the toy dataset. To further
+evaluate their effectiveness, we conduct the variance reduction experiments similar to those in
+previous sections. Figure 7.3 shows the gradient variance ratios for the Stein control variates,
+comparing 𝛽loss and 𝛽learn approaches for the Stein-Taylor (order 1) and Stein-MLP methods.
+29
+==PAGE:35==
+Stein Control Variate
+Toy Data
+(a) Stein-Taylor (𝑘= 1), 𝛽loss
+(b) Stein-MLP, 𝛽loss
+(c) Stein-Taylor (𝑘= 1), 𝛽learn
+(d) Stein-MLP, 𝛽learn
+Figure 7.3: Variance reduction ratios for the Stein control variates on the toy dataset.
+The same color scheme is used as in the Taylor results (Figure 4.2), though some ratios here
+exceed 1.0. Yellow thus indicates a gradient variance ratio of 1 or greater. The Stein control
+variates generally do not perform as well as the Taylor control variates. However, one key
+difference is that while the Taylor control variates perform best on small score models with
+diminishing returns for larger ones, some Stein methods show the opposite pattern, achieving
+best performance on the largest score models—specifically Stein-Taylor with 𝛽loss and Stein-
+MLP with 𝛽learn. This suggests that the Stein methods may have better scaling properties. The
+Stein-Taylor results for 𝑘= 0 and 𝑘= 2 are similar to the 𝑘= 1 case and are presented in
+Appendix C.1.
+7.3.2 MNIST
+Figure 7.4 shows FID scores during training for the Stein control variates for the different
+regression coefficient methods and the baseline on MNIST.
+(a) 𝛽loss
+(b) 𝛽learn
+Figure 7.4: FID scores for the Stein control variates and the baseline on MNIST.
+30
+==PAGE:36==
+Stein Control Variate
+MNIST
+We observe that 𝛽loss outperforms 𝛽learn, with the Stein-MLP control variate achieving partic-
+ularly strong results. The Vision Transformer performs worse than the MLP (both with
+138k parameters), suggesting that using a ViT is unnecessary at this scale. The Stein-Taylor
+method also performs well for 𝑘= 0. However, increasing the order to 𝑘= 1 or 𝑘= 2 does
+not improve performance (see Figure C.4). Beyond performance, the Stein-NN method offers
+greater modeling flexibility compared to the Stein-Taylor approach, as it can be easily scaled
+and configured through standard neural network hyperparameters, whereas the Stein-Taylor
+method is fundamentally limited by the computational cost of computing high-order derivatives.
+Figure 7.5 compares the FID scores of the Stein-MLP with the order 0 Taylor control variate
+from Section 4.6.2.2.
+(a) 𝛽loss
+(b) 𝛽learn
+Figure 7.5: Comparison of Stein MLP control variates with the 0th order Taylor control variate
+on MNIST.
+The results for 𝛽learn show a minor improvement over the Taylor control variates, whereas 𝛽loss
+performs far better. Figure 7.6 shows the regression coefficient values for all Stein control variate
+methods on MNIST, comparing both 𝛽loss and 𝛽learn approaches. Note that the scale of the y-
+axis is different for each subplot.
+(a) Stein-Taylor
+(b) Stein-MLP
+(c) Stein-ViT
+(d) Stein-Taylor
+(e) Stein-MLP
+(f) Stein-ViT
+Figure 7.6: Regression coefficient values for all Stein control variate methods on MNIST,
+comparing 𝛽loss (top row) and 𝛽learn (bottom row) approaches.
+For the Stein-MLP method, 𝛽loss fluctuates between approximately −100 and 100 throughout
+training, while 𝛽learn shows a gradual monotonic increase from 1 to 8. This difference has a
+significant impact on the FID scores. This suggests that if the true optimal regression coefficient
+31
+==PAGE:37==
+Stein Control Variate
+MNIST
+varies as much between batches as 𝛽loss indicates, then learning beta as a single scalar parameter
+is fundamentally ill-suited. A more flexible approach would be to learn a small neural network
+that takes contextual information and outputs the regression coefficient. This could serve as a
+middle ground between the current approaches, balancing the high variance of 𝛽loss with the
+limited flexibility of 𝛽learn. The regression coefficient values are determined by the relationship
+between the loss and the control variate, specifically 𝛽= Cov(𝐿,𝐶)
+Var(𝐶) . When the control variate
+has low variance—which occurs especially with the Stein-Taylor method—this ratio becomes
+large, explaining the large fluctuations in the coefficient values. For 𝛽learn, the Stein-MLP and
+Stein-ViT methods increase throughout training, while Stein-Taylor decreases from 1 toward 0.
+While this might suggest that these methods correlate more with the loss than the Stein-Taylor
+method, the FID scores show that the Stein-Taylor method performs comparably to the other
+methods. Figure 7.7 shows generated samples at epochs 1, 3, 5, and 20 for each Stein control
+variate method using 𝛽loss, compared with the Taylor control variate from Section 4.6.2.2 and
+the baseline. Samples for 𝛽learn are shown in Figure C.3.
+(a) Stein-Taylor
+(b) Stein-MLP
+(c) Stein-ViT
+(d) Taylor 𝑘= 1
+(e) No CV
+Figure 7.7: Generated MNIST samples at epochs 1, 3, 5, and 20 comparing the Stein control
+variates, the Taylor control variate, and the baseline using 𝛽loss.
+All Stein runs produce high-quality samples much earlier than both the Taylor control variate
+and the baseline. The Stein-MLP control variate run generates MNIST-like samples after just
+3 epochs.
+7.3.3 CIFAR-10
+Figure 7.8 shows the FID scores during training for the different regression coefficient methods
+and the baseline on CIFAR-10.
+32
+==PAGE:38==
+Stein Control Variate
+CIFAR-10
+(a) 𝛽loss
+(b) 𝛽learn
+Figure 7.8: FID scores for the Stein control variates and the baseline on CIFAR-10.
+Similar to the Taylor control variate results (Figure 4.9), the Stein control variates show no
+significant FID score improvements despite their strong performance on MNIST. The only
+observable benefit is reduced FID score variance and less divergence compared to the baseline.
+However, control variates alone are insufficient to enable model convergence on CIFAR-10.
+In retrospect, we should have first ensured better baseline convergence on CIFAR-10 before
+introducing control variates, rather than directly applying our MNIST training methodology. On
+MNIST, the baseline model also struggled to produce good samples after 20 epochs, but control
+variates were sufficient to enable convergence. Figure 7.9 shows the regression coefficient values
+for all Stein control variate methods on CIFAR-10, comparing both 𝛽loss and 𝛽learn approaches.
+Note that the y-axis scales differ between subplots.
+(a) Stein-Taylor 𝑘= 0
+(b) Stein-MLP
+(c) Stein-ViT
+(d) Stein-Taylor 𝑘= 0
+(e) Stein-MLP
+(f) Stein-ViT
+Figure 7.9: Regression coefficient values for all Stein control variate methods on CIFAR-10,
+comparing 𝛽loss (top row) and 𝛽learn (bottom row) approaches.
+The regression coefficients show behavior nearly identical to the MNIST results (Figure 7.6), so
+we refer readers to that analysis for detailed discussion. Figure 7.10 shows generated samples
+at epochs 1, 5, 10, and 20 for each Stein control variate method using 𝛽loss compared with the
+baseline. Samples for 𝛽learn are shown in Figure C.5.
+33
+==PAGE:39==
+Stein Control Variate
+CIFAR-10
+(a) Stein-Taylor
+(b) Stein-MLP
+(c) Stein-ViT
+(d) No CV
+Figure 7.10: Generated CIFAR-10 samples at epochs 1, 5, 10, and 20 comparing Stein control
+variates and baseline using 𝛽loss.
+For the baseline, there are multiple samples at epoch 20 that are just noise, which is not the
+case for the other methods. This aligns with the FID scores diverging more for the baseline.
+34
+==PAGE:40==
+Conclusion
+8 Conclusion
+In Section 4 we evaluated the Taylor control variate from (Jeha et al., 2024) on a toy dataset
+with multiple MLP configurations for the score model. The control variate shows high variance
+reduction on small MLPs, but performance degrades with deeper architectures. A learned
+regression coefficient also proves effective, achieving comparable variance reduction to the
+analytically optimal coefficients. This is encouraging since learning a single scalar parameter
+is computationally more efficient than computing the optimal values analytically. The control
+variate proves effective on MNIST, producing lower FID scores than the baseline, but does not
+improve results on CIFAR-10. Increasing the Taylor expansion order from 0 to 1 provides no
+improvement on any dataset.
+In Section 5 we explored normalizing flows as control variates, inspired by (Müller et al., 2020).
+A flow integrates to 1 over its domain, but using it as a control variate in our setting requires
+computing the expected likelihood of the flow during training, which is unknown (the likelihoods
+increase throughout training). Additionally, to use a flow as a control variate in score modeling,
+the flow must be able to affect the gradient of the score model. This means the flow must depend
+on the score model parameters, which proves problematic. These limitations led to focusing on
+alternative methods better suited for score model training.
+In Section 6, we investigated the construction of higher-order Taylor control variates using
+the jax.experimental.jet Python library. Increasing the order to 2 and 3 does not improve
+performance and appears to add noise rather than provide meaningful variance reduction. Our
+analysis reveals that the control variate terms are negligible in size compared to the discarded
+terms with non-zero expectation. This is a major limitation of the Taylor control variate.
+In Section 7 we explored the Stein operator for constructing control variates. The Stein operator
+can be used to generate zero-mean functions, making it ideal for control variate construction.
+The toy data results show minimal impact from increasing the number of vectors used in the
+Skilling-Hutchinson estimate. However, it would be valuable to test how the number of vectors
+affects convergence on real datasets. While the Stein control variates generally cannot reduce
+gradient variance on the toy dataset to the same level as the Taylor control variates, they show
+a promising scaling pattern. They perform better on larger models—the opposite of what we
+observe with the Taylor control variates. This scaling advantage is confirmed in the MNIST
+results, where the Stein control variates achieve significantly lower FID scores than the Taylor
+control variates throughout training. On CIFAR-10, however, the Stein control variates do not
+outperform the Taylor control variates.
+We experimented with three regression coefficient approaches but focused mainly on two: the
+analytically optimal coefficient computed on the loss and a learned scalar parameter, as the
+gradient-based approach is too memory-intensive for larger datasets. The optimal coefficient
+exhibits large variance, while the learned coefficient is inflexible. A promising future direction
+would be training a small neural network that takes in contextual information and outputs the
+regression coefficient, potentially providing a middle ground between these approaches.
+Overall, the most promising control variate approach for score model training appears to be the
+Stein control variates, especially the Stein-NN method. This method offers greater flexibility
+as it can be easily configured through standard neural network hyperparameters, whereas the
+Stein-Taylor method is limited to very few parameters since computing high-order derivatives
+quickly becomes infeasible. Future research should explore two key directions. First, modeling
+the regression coefficient using a neural network could provide a middle ground between the
+high-variance analytically optimal coefficient and the restrictive learned scalar parameter.
+Second, it would be interesting to investigate whether larger Stein-NN networks could enable
+35
+==PAGE:41==
+Conclusion
+CIFAR-10 convergence without requiring score model changes, data augmentation, or hyper-
+parameter tuning.
+36
+==PAGE:42==
+9 Bibliography
+Baydin, A. G., Pearlmutter, B. A., & Radul, A. A. (2015). Automatic differentiation in machine
+learning: a survey (Vol. abs/1502.05767). http://arxiv.org/abs/1502.05767
+Gorham, J., & Mackey, L. (2015). Measuring Sample Quality with Stein's Method (C.
+Cortes, N. Lawrence, D. Lee, M. Sugiyama, & R. Garnett, Eds.; Vol. 28). Curran Asso-
+ciates, Inc. https://proceedings.neurips.cc/paper_files/paper/2015/file/698d51a19d8a121ce
+581499d7b701668-Paper.pdf
+Hasan, M., Zhang, D., Ahmed, C., Khouna, A., & Bengio, Y. (2024, ). Estimating Expectations
+without Sampling: Neural Stein Estimation. https://openreview.net/forum?id=by9cKVIs0F
+Heusel, M., Ramsauer, H., Unterthiner, T., Nessler, B., Klambauer, G., & Hochreiter, S. (2017).
+GANs Trained by a Two Time-Scale Update Rule Converge to a Nash Equilibrium (Vol.
+abs/1706.08500). http://arxiv.org/abs/1706.08500
+Jeha, P., Grathwohl, W., Andersen, M. R., Ek, C. H., & Frellsen, J. (2024). Variance reduction
+of diffusion model's gradients with Taylor approximation-based control variate. https://arxiv.
+org/abs/2408.12270
+Johnson, M. J., Bettencourt, J., Maclaurin, D., & Duvenaud, D. (2022, ). Taylor-made higher-
+order automatic differentiation. https://github.com/jax-ml/jax/files/6717197/jet.pdf
+Lin, G., Milan, A., Shen, C., & Reid, I. D. (2016). RefineNet: Multi-Path Refinement Networks
+for High-Resolution Semantic Segmentation (Vol. abs/1611.06612). http://arxiv.org/abs/
+1611.06612
+Müller, T., Rousselle, F., Novák, J., & Keller, A. (2020, ). Neural Control Variates. https://
+arxiv.org/abs/2006.01524
+Nowozin, S. (2022, ). Thoughts on Trace Estimation in Deep Learning. https://www.nowozin.
+net/sebastian/blog/thoughts-on-trace-estimation-in-deep-learning.html
+Owen, A. B. (2013, ). Monte Carlo Theory, Methods and Examples. https://artowen.su.
+domains/mc/
+Rubinstein, R. Y., & Kroese, D. P. (2016). Simulation and the Monte Carlo Method. Wiley.
+Song, Y., & Ermon, S. (2020, ). Generative Modeling by Estimating Gradients of the Data
+Distribution. https://arxiv.org/abs/1907.05600
+Song, Y., & Kingma, D. P. (2021). How to Train Your Energy-Based Models. https://arxiv.
+org/abs/2101.03288
+Wang, Z., Cheng, S., Li, Y., Zhu, J., & Zhang, B. (2020). A Wasserstein Minimum Velocity
+Approach to Learning Unnormalized Models (S. Chiappa & R. Calandra, Eds.; Vol. 108).
+PMLR. https://proceedings.mlr.press/v108/wang20j.html
+Winkelbauer, A. (2014, ). Moments and Absolute Moments of the Normal Distribution. https://
+arxiv.org/abs/1209.4340
+37
+==PAGE:43==
+A Taylor Control Variate
+A.1 Variance Reduction Results with 𝛽loss
+(a) 𝛽loss, 𝑘= 0
+(b) 𝛽loss, 𝑘= 1
+Figure A.1: Variance reduction ratios for 𝛽loss on the toy dataset. Lower ratios indicate better
+performance, and numbers in parentheses show parameter counts.
+A.2 MNIST Sample Comparison for 𝑘= 0
+(a) No CV
+(b) 𝛽loss
+(c) 𝛽grad
+(d) 𝛽learn
+Figure A.2: Generated MNIST samples at epochs 1, 3, 5, and 20 comparing the baseline and
+the regression coefficient methods for 𝑘= 0.
+38
+==PAGE:44==
+A.3 CIFAR-10 Sample Comparison for 𝑘= 1
+(a) 𝛽loss
+(b) 𝛽learn
+(c) No CV
+Figure A.3: Generated CIFAR-10 samples at epochs 1, 5, 10, and 20 comparing the baseline
+and the regression coefficient methods for 𝑘= 1.
+39
+==PAGE:45==
+B Jet Control Variate
+B.1 Variance Reduction Results with 𝛽loss
+(a) 𝑘= 0
+(b) 𝑘= 1
+(c) 𝑘= 2
+(d) 𝑘= 3
+Figure B.1: Variance reduction ratios for the jet control variate for orders 𝑘= 0, 1, 2, 3 on the
+toy data using 𝛽loss.
+B.2 Variance Reduction Results with 𝜷learn
+(a) Order 1
+(b) Order 2
+(c) Order 3
+Figure B.2: Variance reduction ratios for the jet vector control variate for orders 𝑘= 1, 2, 3 on
+the toy data using 𝜷loss.
+B.3 𝛽loss Values During Training on Toy Data
+(a) 𝑘= 0
+(b) 𝑘= 1
+(c) 𝑘= 2
+(d) 𝑘= 3
+Figure B.3: 𝛽loss during training for an MLP with width 128 and depth 2 using the jet control
+variate for orders 𝑘= 0, 1, 2, 3 on the toy data.
+40
+==PAGE:46==
+C Stein Control Variate
+C.1 Stein-Taylor Variance Reduction Results for 𝑘= 0 and 𝑘= 2
+(a) 𝛽loss
+(b) 𝛽learn
+Figure C.1: Variance reduction ratios for Stein-Taylor control variate for 𝑘= 0
+(a) 𝛽loss
+(b) 𝛽learn
+Figure C.2: Variance reduction ratios for Stein-Taylor control variate for 𝑘= 2.
+41
+==PAGE:47==
+C.2 Stein Samples Comparison for 𝛽learn
+(a) Stein-Taylor
+(b) Stein-MLP
+(c) Stein-ViT
+(d) Taylor 𝑘= 1
+(e) No CV
+Figure C.3: Generated MNIST samples at epochs 1, 3, 5, and 20 comparing the Stein control
+variates, the Taylor control variate, and the baseline using 𝛽learn.
+C.3 Stein-Taylor FID Scores for 𝑘= 0, 1, 2
+Figure C.4: FID scores for Stein-Taylor control variate with 𝛽learn on MNIST for 𝑘= 0, 1, 2.
+42
+==PAGE:48==
+C.4 Stein Cifar-10 Sample Comparison for 𝛽learn
+(a) Stein-Taylor
+(b) Stein-MLP
+(c) Stein-ViT
+(d) No CV
+Figure C.5: Generated CIFAR-10 samples at epochs 1, 5, 10, and 20 comparing Stein control
+variates and baseline using 𝛽learn.
+D Experiment Details
+D.1 Score Model Training
+All score models are trained using the AdamW optimizer with the following hyperparameters:
+• Learning rate: 0.001
+• 𝛽1 = 0.9
+• 𝛽2 = 0.999
+• 𝜀= 1 × 10−8
+• Weight decay: 0.0
+• Gradient clipping: 1.0
+Noise sequence and weighting:
+• Noise sequence Σ consists of 𝑁= 10 geometrically spaced levels
+• Toy dataset: 𝜎∈[0.1, 1.0]
+• MNIST and CIFAR-10: 𝜎∈[0.01, 0.1]
+• Weighting function: 𝜆(𝜎) = 1
+𝜎
+D.2 Annealed Langevin Hyperparameters
+Sampling parameters:
+43
+==PAGE:49==
+• Toy data:
+‣ Number of steps: 10
+‣ 𝜀= 0.02
+• MNIST/CIFAR-10:
+‣ Number of steps: 100
+‣ 𝜀= 2 × 10−5
+D.3 Experimental Setup
+• All reported results are averaged over 5 independent runs
+• Batch sizes:
+‣ Toy dataset: 1000
+‣ MNIST: 64
+‣ CIFAR-10: 64
+• FID calculation: 1000 images generated after each epoch, with mean and standard deviation
+reported across runs. Feature extractor models:
+‣ MNIST: 
+https://www.kaggle.com/models/tensorflow/mnist/tensorFlow1/logits/1?
+tfhub-redirect=true
+‣ CIFAR-10: 
+https://www.kaggle.com/models/deepmind/ganeval-cifar10-convnet/
+tensorFlow1/ganeval-cifar10-convnet/1?tfhub-redirect=true
+D.4 Stein-NN Model Hyperparameters
+The MLP used in the Stein-MLP approach has the following hyperparameters:
+• Width: 100
+• Depth: 3
+The ViT used in the Stein-ViT approach has the following hyperparameters:
+• Embedding dimension: 64
+• Hidden dimension: 128
+• Number of heads: 8
+• Number of layers: 4
+• Patch size: 4
+The models both have 138k parameters.
+44

@@ -1,0 +1,3012 @@
+==PAGE:1==
+Underwater Visual­SLAM
+for Surveillance of Critical Maritime Infrastructure
+Master Thesis
+DTU Electro
+Department of Electrical and Photonics Engineering
+==PAGE:2==
+==PAGE:3==
+Underwater Visual­SLAM
+for Surveillance of Critical Maritime Infrastructure
+Master Thesis
+September, 2025
+By
+Theodor Nørby­Lassen
+Copyright:
+Reproduction of this publication in whole or in part must include the cus­
+tomary bibliographic citation, including author attribution, report title, etc.
+Published by:
+DTU, Department of Electrical and Photonics Engineering, Ørsteds
+Plads, Building 326, 2800 Kgs. Lyngby Denmark
+https://electro.dtu.dk/
+ISSN:
+[0000­0000] (electronic version)
+ISBN:
+[000­00­0000­000­0] (electronic version)
+ISSN:
+[0000­0000] (printed version)
+ISBN:
+[000­00­0000­000­0] (printed version)
+==PAGE:4==
+Approval
+This thesis has been a collaboration between DTU Aqua and DTU Electro, at the Techni­
+cal University of Denmark, DTU, in partial fulfillment for the degree Master of Science in
+Engineering, MSc Eng.
+It is assumed that the reader has a basic knowledge in the areas of algebra, deep learning,
+statistics, robotics and image processing.
+Theodor Nørby­Lassen ­ s194055
+Signature
+Date
+ii
+Underwater Visual­SLAM
+==PAGE:5==
+Abstract
+Critical maritime infrastructure requires regular inspection, but underwater environments
+limit common sensing: optical methods suffer heavy attenuation and scattering while
+acoustics trade resolution for range. This project investigates whether a dense visual–
+inertial SLAM pipeline that fuses stereo­derived dense reconstructions with IMU con­
+straints can provide reliable mapping and trajectory estimates for maritime inspection.
+We implement a pipeline that converts rectified stereo imagery into dense point clouds
+using a pretrained foundation­stereo model, suppresses erroneous “open­water” depth
+hallucinations via SAM­based segmentation combined with an edge/area heuristic, and
+feeds the filtered point clouds together with IMU data into a range–inertial SLAM back­
+end. The system is evaluated qualitatively on an in­field harbor sequence and quantita­
+tively in a controlled pool with motion­capture and depth references. Results show that
+foundation­stereo generalizes zero­shot to underwater imagery well enough to produce
+visually meaningful reconstructions, and that the SLAM backend can yield qualitatively
+consistent trajectories and maps once open­water artifacts are masked. At the same time
+the pipeline exhibits substantial spatial noise and a depth­scaling bias—primarily caused
+by a processing error (use of pre­rectification intrinsics) and unmodeled refractive distor­
+tion from the housing port—and is sensitive to surface reflections and plane­dominated
+scenes. We conclude the approach is promising but not yet operational; immediate priori­
+ties are correcting processing errors, applying refractive/housing calibration, and strength­
+ening registration via multi­sensor point cloud fusion.
+Underwater Visual­SLAM
+iii
+==PAGE:6==
+Acknowledgements
+Adolfo Damiano Cafaro, Ph.D. Candidate, DTU Electro
+Thank you for the weekly sparring and feedback both in terms of technical assistance,
+overall project guidance and in writing this thesis report.
+Fletcher Francis Thompson, Researcher, DTU Aqua
+Thank you for your invaluable technical assistance and rapid support in ASTA and on the
+ROV.
+Christian Laurberg Haslund Westerdahl, Research Assistant, DTU Electro
+Thank you for daily technical support, insightful discussions, and excellent coffee.
+Gonzalo de León, Postdoc, DTU Electro
+Thank you for frequent professional sparring on topics central to this thesis.
+Julius Wirbel, Ph.D. Candidate, DTU Electro
+Thank you for help setting up the development framework and for assistance with 3D
+printing.
+Roberto Galeazzi, Associate professor, DTU Electro
+Thank you for entrusting me with a challenging and rewarding project.
+iv
+Underwater Visual­SLAM
+==PAGE:7==
+Contents
+Preface . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ii
+Abstract . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iii
+Acknowledgements
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iv
+List of Acronyms & Abbreviations . . . . . . . . . . . . . . . . . . . . . . . . . . .
+vii
+1
+Introduction
+1
+1.1
+Focus for the project . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+1.2
+Literature review . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+2
+Background theory
+5
+2.1
+Frames of reference . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+2.2
+Environmental challenges . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+2.3
+Depth Estimation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+2.4
+Foundation Stereo . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+2.5
+Point clouds . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+2.6
+SLAM . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 14
+2.7
+GLIM
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 15
+3
+Methods
+21
+3.1
+Setup
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21
+3.2
+Constraints . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 22
+3.3
+Proposed method
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 23
+3.4
+Data . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+3.5
+GLIM settings . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+3.6
+Domain adaptation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 29
+3.7
+Final implementation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 37
+4
+Results
+41
+4.1
+ASTA Pool
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 41
+4.2
+Point cloud assessment . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 45
+4.3
+GLIM assessment
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 51
+4.4
+Troubleshooting
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 57
+5
+Discussion & Future Work
+61
+6
+Conclusion
+65
+Bibliography
+67
+A Appendix
+71
+A.1 Ladder sequence views . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 72
+A.2 Back/forth sequence setup
+. . . . . . . . . . . . . . . . . . . . . . . . . . . 73
+Underwater Visual­SLAM
+v
+==PAGE:8==
+List of Acronyms & Abbreviations
+ASTA Autonomous Systems Test Arena (DTU test facility). 41, 42, 51, 57, 62
+AUV Autonomous Underwater Vehicle. 1
+CMI Critical Maritime Infrastructure. 1
+CNN Convolutional Neural Network. 12
+CSV Comma­Separated Values (tabular data file format). 41
+DoF Degrees of Freedom. 5
+DVL Doppler Velocity Log. 2
+EIF Extended Information Filter. 2
+EKF Extended Kalman Filter. 2
+ENU East North Up. 26, 28, 44
+FOV Field Of View. 22, 51, 57, 58
+FSD Foundation Stereo Dataset. 11
+GICP Generalized Iterative Closest Point. 13, 63
+GPS Global Positioning System. 1, 6
+GPU Graphics Processing Unit. 14–16
+ICP Iterative Closest Point. 3, 12, 13
+IMU Inertial Measurement Unit. 1, 2, 16, 18, 21, 22, 25, 26, 28, 29, 44, 61, 62, 65
+IR Infrared. 12
+LiDAR Light Detection And Ranging. 1, 6, 8, 15, 25, 28, 29
+NED North East Down. 32
+PF Particle Filter. 2
+PS4 PlayStation 4 (controller). 21
+RADAR Radio Detection and Ranging. 6
+RGB Red Green Blue. 8, 12
+RGB­D Red Green Blue + Depth. 15
+RMSE Root Mean Square Error. 52
+vi
+Underwater Visual­SLAM
+==PAGE:9==
+ROS Robot Operating System. 21, 22, 26, 29
+ROV Remotely Operated Vehicle. 1, 21, 27, 37–39, 41–46, 51, 52, 56–58, 61–63, 65
+SAM Segment Anything Model (image segmentation foundation model). 32–34, 36, 61
+SAM2 Segment Anything Model 2 (successor to SAM). 32, 33
+SBL Short­Baseline acoustic positioning (SBL). 27
+SL Structured Light. 3
+SLAM Simultaneous Localization and Mapping. 14, 15, 22, 23, 25, 26, 31, 35, 37, 38,
+42, 51, 56–58
+SONAR Sound Navigation And Ranging. 15
+SOTA State Of The Art. 10, 11, 24
+ToF Time of Flight. 6
+VGICP Voxelized Generalized Iterative Closest Point. 3, 14–16, 58, 63
+VSLAM Visual Simultaneous Localization and Mapping. 1–3, 61, 65
+Underwater Visual­SLAM
+vii
+==PAGE:10==
+viii
+Underwater Visual­SLAM
+==PAGE:11==
+1
+Introduction
+The underwater realm constitutes over 70% of Earth’s surface, yet it still remains largely
+unexplored, due to the significant challenges present for human endeavor [1].
+Despite these challenges we are seeing an increasing global reliance on Critical Maritime
+Infrastructure (CMI). The European Union defines CMI as infrastructure which contributes
+to the maintenance of vital societal functions, health, safety, security, economic or well­
+being of people. This includes infrastructure in areas of shipping, energy, communication
+and fishing [2]. The structural health of these underwater infrastructures is constantly de­
+grading due to aging, fatigue, unexpected loads, and environmental wear and tear [3], and
+therefore necessitates frequent inspection. Monitoring of CMI has become more preva­
+lent due to the recent sociopolitical developments, together with concrete incidents like the
+2022 Nord Stream pipeline attacks, which have highlighted the significant vulnerabilities
+of CMI, bringing their protection to the forefront of the political agenda [2].
+Historically, inspection has been performed predominantly by human divers. This method
+is expensive, time­consuming and potentially dangerous for those involved. Furthermore,
+many of the inspection targets are inaccessible to humans due to rapid currents, low
+visibility, adverse weather conditions, and risk of exposure to chemicals or radiation [3].
+While Remotely Operated Vehicles (ROVs) have been deployed for surveys, such cases
+have been infrequent and reactive, and remain time­consuming due to the need for a
+human operator [4]. The need for a safer, cost­effective, proactive and scalable method
+for inspection has led to the development of Autonomous Underwater Vehicles (AUVs).
+These robotic platforms are increasingly being adopted, and viewed as an indispensable
+tools for underwater inspection [1] [2].
+Despite the advancements in AUV technology, significant challenges to operating in un­
+derwater environments still persist, especially with regards to navigation and perception
+[3]. Global Positioning System (GPS) cannot be transmitted underwater, rendering the
+sensor ineffective [3]. Light Detection And Rangings (LiDARs) suffer from heavy attenu­
+ation of its signal which significantly limits the working range. Acoustic sensors generally
+remain robust under water, but they are challenged by acoustic echoes in enclosed envi­
+ronments and also lack the fine spatial detail [5].
+To address the demand for high­precision localization and mapping in these challenging
+conditions, Visual Simultaneous Localization and Mapping (VSLAM) has emerged as a
+promising technology due to its low cost and ability to capture rich environmental infor­
+mation [6].
+Applying VSLAM under water is however difficult, as visual information from the environ­
+ment often exhibits insufficient texture, low lighting and frequent dropouts. To overcome
+these inherent limitations of a purely visual SLAM system, sensor fusion has emerged as
+a robust and necessary approach. By integrating data from diverse sensing modalities
+simultaneously, this strategy can exploit multiple sources of complementary information
+to enhance adaptability, reliability, and resilience in complex underwater environments [3]
+[7].
+This master project aims to design and develop a VSLAM algorithm to enable the surveil­
+lance of Critical Maritime Infrastructure, exploring the integration of a stereo camera sys­
+tem with an Inertial Measurement Unit (IMU)
+Underwater Visual­SLAM
+1
+==PAGE:12==
+1.1
+Focus for the project
+The main contributions of this work are as follows:
+• Demonstrate the novel approach of using deep learning for 3D­reconstruction of real
+underwater scenes, based on stereo imagery.
+• Apply a range­based SLAM algorithm on the point cloud reconstructions, to enable
+the localization and mapping of underwater vehicles.
+1.2
+Literature review
+SLAM: Simultaneous Localization and Mapping (SLAM) is a method that aims to simul­
+taneously create a map of an unknown environment and estimate its pose within that
+environment [8]. Many modern SLAM algorithms use a two­stage estimation approach
+which first estimates the ego­motion of the sensor, usually in real­time, and then cor­
+rects accumulated errors in a global optimization module [9]. Some algorithms further
+separate the optimization module into multiple modules, e.g. sub­mapping and global
+mapping like in GLIM [9]. The separation of optimization modules is mainly motivated to
+facilitate multiple optimization steps with varying computational demands, but can also,
+as with ORB­SLAM3 [10], be use to add robustness to tracking losses during exploration,
+by including a multi­mapping module.
+Optimization: Early underwater SLAM algorithms used filtering­based approaches for
+the optimization, including Extended Kalman Filters (EKFs), Particle Filters (PFs) and
+Extended Information Filters (EIFs), whereas the more recently used VSLAM algorithms
+mainly include graph optimization and pose graph optimization. Graph­based SLAM, es­
+pecially using factor graphs, is commonly used due to its intuitive visual representation
+and, in the case of factor­graphs, versatility in adding constraints which can be any arbi­
+trary functions [6] [11].
+Visual SLAM: Cameras are attractive sensors due to their low cost, small size, and rich
+environmental information [6]. However, underwater visual conditions significantly limit
+their usable range due to heavy light attenuation [1]. Furthermore suspended particles
+can blur or even block the camera sensor, causing momentary visual dropouts. Two
+common approaches are used to circumvent the shortcomings of cameras under water: 1)
+underwater image enhancement algorithms [6] and/or 2) fusing multiple complementary
+sensing modalities, such as sonars and IMUs [1]. Few works have demonstrated the
+applicability of VSLAM underwater, most being based on an ORB­SLAM family: In [7]
+ORB­SLAM2 was fused with Doppler Velocity Log (DVL), gyroscope and a depth sensor
+to increase its accuracy and enable operation in low lighting, fast motions and feature­
+sparse environments. [12] used tightly coupled visual and DVL fusion to significantly
+improve the accuracy of ORB­SLAM3.
+Loose vs. tight IMU coupling: The camera and IMU sensors can either be fused loosely,
+where each independently estimate their own pose and then fuse the results, or tightly,
+where both sensors are used simultaneously to optimize the pose. The tightly coupled
+method enables robust estimation in environments with insufficient geometric information
+because the IMU helps constraint the sensor state. Tightly coupled methods have also
+been shown to achieve higher accuracy than loose ones [9] [10] [12].
+Feature vs. direct point cloud registration: Between consecutive images VSLAM per­
+forms image processing to extract points and find correspondences in the subsequent
+frame. This constrains the pose of the sensor. The method for how the points are ex­
+tracted and compared depends on the type of camera sensor used; monocular, stereo
+2
+Underwater Visual­SLAM
+==PAGE:13==
+or RGB­D. Monocular and stereo sensors require image processing to extract points,
+whereas RGB­D sensors directly infer the depth either through built in algorithms or built
+in range sensor based on light emission. The types of VSLAM methods can be divided
+into two types that differ in the amount of points they extract and the method for the point
+extraction. The methods are: feature­based and direct methods[13]
+Feature­based methods seek to extract sparse robust points. Although feature­based
+methods extract reliable points, they are sensitive to outliers and may fail in textureless
+and dynamic environments, characteristics common in underwater scenes [5]. Further­
+more, since they only extract a small number of points, the created maps are sparse
+and provide less information than dense ones [13]. Regardless of these shortcomings,
+most underwater VSLAM uses feature point methods for matching, as they are able to
+handle the lighting disturbances in underwater scenes [6]. Direct methods avoid feature­
+extraction and makes use of most points for matching, which makes them less sensitive
+to outliers. Dense methods are typically more computationally demanding which limits
+their real­time use. Most algorithms make use of point cloud registration to determine the
+translation between point scans of consecutive frames. The most common registration
+algorithms used are of the Iterative Closest Point (ICP) family owing to their accuracy and
+robustness [9]. [9] uses GPU­acceleration on a ICP variant (Voxelized Generalized Iter­
+ative Closest Point (VGICP)) to achieve real­time matching on dense point clouds. The
+matching can either be frame­to­frame, meaning that only sequential frames are matched,
+or frame­to­model where each frame is matched to an internal map representation based
+on the previous frames. The frame­to­model approach reduces the estimation drift and
+makes the matching more robust by allowing some frames to be completely degenerate
+[9].
+Dense stereo matching underwater Dense Stereo matching can be either active, where
+the camera sensor emits a Structured Light (SL) pattern to aid the correspondence search,
+or passive, where the cameras rely on the ambient lighting in the scene [14]. While SL
+can increase the matching in textureless scenes, it is challenged by back­scattered light
+from suspended particles [14].
+Traditionally approaches for stereo matching determined correspondences directly based
+on pixel values. The approaches can be categorized into local methods (faster, lower
+computational cost, based on pixel values within a window) and global methods (higher
+accuracy, but more computationally complex, based on pixel values from parts of the
+entire image). In the last decade, the field has been predominantly focused on learning
+based approaches, primarily due to the limitations of traditional methods in accuracy, and
+poor generalization to unseen domains, due to the extensive requirement for fine­tuning
+[15] [16].
+Underwater Visual­SLAM
+3
+==PAGE:14==
+4
+Underwater Visual­SLAM
+==PAGE:15==
+2
+Background theory
+To present our methods and results precisely, we summarize the necessary theoretical
+background and fix the notation used throughout the thesis. We begin with the core op­
+erations and conventions for describing robot kinematics, followed by an overview of the
+maritime environment and the practical challenges it poses. Together, these sections
+establish the theoretical foundation for the work that follows.
+2.1
+Frames of reference
+The position and orientation (pose) of a rigid body (i.e. a robot) in 6 Degrees of Freedom
+(DoF) is described by a 3D coordinate p = [x, y, z] and three angles of rotation θ = [ψ, θ, ϕ]
+known as Euler angles. The pose is described relative to a coordinate frame. A coordi­
+nate frame {A} consists of a point of origin oA and three mutually orthogonal unit vectors
+ˆxA, ˆyA, ˆzA. To denote the frame of reference we denote the frame as a superscript. E.g.
+for a point p referenced to frame {A}
+pA = [aˆxA, bˆyA, cˆzA]
+(2.1)
+It is often convenient to use multiple frames when referencing the pose of a robot. Specif­
+ically, local frames on the sensors or robot, together with a global frame (usually called
+the world frame {W}) provide a reference for the absolute trajectory [17].
+2.1.1
+Transformations
+The evolution of a rigid body can be described by using rotations (R ∈R3×3) and trans­
+lations (t ∈R3). Translations are simply performed by adding a vector corresponding to
+the translation:
+p′ = p + t
+(2.2)
+Rotations are linear maps represented by a 3×3 matrix and are applied to a point through
+matrix multiplication:
+p′ = Rp
+(2.3)
+A transformation is then described by both a rotation and a translation:
+p′ = Rp + t
+(2.4)
+Applying both a rotation and translation yields a full transformation. Care must be taken
+about the ordering which they are applied, since R(p+t) ̸= Rp+t. The order is determined
+by which frame the translation and rotation is defined in ­ they must also be applied to
+points within that same reference.
+We denote transformations between frame {A} and another frame {B} as T B
+A . Such a
+transformation can be described as a homogeneous matrix T ∈R⋭×⋭:
+T B
+A =
+RB
+A
+tB
+A
+0
+1
+
+(2.5)
+Homogeneous transformations are easy to work with because they allow us to perform
+both translation and rotation by a simple matrix multiplication [17], e.g:
+pB = T B
+A pA
+(2.6)
+Underwater Visual­SLAM
+5
+==PAGE:16==
+2.1.2
+Quaternions
+Quaternions are a way of describing 3D rotations which are computationally efficient, i.e.
+they are described by only 4 numbers instead of the 9 required for rotation matrices, and
+unlike Euler angles representation, avoid the problem of what is known as a Gimbal locks.
+Gimbal lock is a loss of one degree of freedom that can occur during rotation using Euler
+angles if two of the rotation angles line up. For these reasons most software that perform
+rotation utilizes the quaternion representation [18].
+Quaternions are described as follows:
+q = w + xi + yj + zk
+(2.7)
+To use a quaternion to perform rotation you must either convert the vector to be rotated
+into a quaternion, e.g. .g.pquat = pxi + pyj + pzk pB = T B
+A pA and the apply the quaternion
+directly p′ = qpq, or convert the quaternion to a rotation matrix. The latter can be done
+using the following equation:
+R =
+
+
+1 −2(j2 + k2)
+2(ij −wk)
+2(ik + wj)
+2(ij + wk)
+1 −2(i2 + k2)
+2(jk −wi)
+2(ik −wj)
+2(jk + wi)
+1 −2(i2 + j2)
+
+
+(2.8)
+2.2
+Environmental challenges
+Operation in the underwater environment presents significant challenges, which make it
+substantially different from terrestrial environments. Many terrestrial sensing devices like
+LiDAR, Radio Detection and Ranging (RADAR), GPS and Time of Flight (ToF) sensors
+are ineffective or obsolete underwater due to the electromagnetic wave attenuation of the
+environment. For this reason, the sensing modalities most commonly used underwater
+are based on acoustics (e.g., sonars), because they remain robust even in difficult wa­
+ter conditions. However, sonars have much lower bandwidth compared to cameras and
+also lack detailed 3D spatial information. Optical sensors fall somewhere in between the
+acoustic and electromagnetic modalities ­ they provide useful information, but are heav­
+ily affected by water’s attenuation of light. The degree to which the light is absorbed
+increases with the distance it has traveled. This inherently limits the range of cameras
+when used under water. The attenuation is not even across the visible spectrum; blue
+and green light persist for longest, reaching around 30 meters, while red light disappears
+at less than 7 meters, and yellow and orange at 15 meters, see figure 2.1. Due to these
+range limitations, [19] provides a table where they propose suitable sensors to use at dif­
+ferent ranges (see table 2.1). Since we will be using the camera as our primary sensing
+modality, range limitation must be considered
+Figure 2.1: (left) Light attenuation vs depth of different colors under water. (right) Light
+absorption of different colors vs the absorption coefficient of water which is increased e.g.
+by suspended particles[19]
+6
+Underwater Visual­SLAM
+==PAGE:17==
+Table 2.1: Summary of sensors for robot’s underwater perception at different ranges [19]
+Range
+Sensing modalities
+Available data
+Robot perception ca­
+pability
+30m–10km
+USBL,
+Acoustic
+modems
+Range, heading
+Approach
+the
+target
+using
+heading
+infor­
+mation
+5m–30m
+Sonar
+Acoustic data
+Detection,
+tracking
+and recognition using
+motion features
+1m–5m
+Sonar, Camera
+Acoustic data, optical
+data
+Detection,
+track­
+ing
+and
+recognition
+using
+data­fusion
+approaches
+< 1m
+Sonar, Camera
+Acoustic data, optical
+data
+Pose estimation, 3D
+point­cloud
+recon­
+struction
+Figure 2.2: Examples of back­scattering caused by using artificial lighting in the presence
+of suspended particles [19]
+2.2.1
+Optical sensors
+The light attenuation is not only due to water itself but also suspended particles such as
+biological matter, algae and dissolved organic matter, which can further attenuate light,
+especially in the blue wavelengths. Since the attenuation is heavily affected by depth it
+means that deep dives require artificial (active) lighting. The use of active lighting however,
+can end up worsening the image if used in the presence of suspended particles, because
+the light scattered from them will be reflected directly back into the camera, and dominate
+the image. This effect is known as back­scattering, and it significantly reduces the contrast
+in the image even to the point of ’blinding’ the camera, see example in figure 2.2
+Despite these challenges, cameras are still used extensively under water because they
+provide high resolution images and offer rich spatial and feature information. To leverage
+the strengths of optical images in perception tasks, other sensor modalities are often used
+in conjunction to effectively ’cover’ the camera during dropouts. Optical and acoustic
+sensors form a complementary pair of modalities: acoustic sensors provide long range
+and robustness, while cameras provide high­detail close­range information [19].
+Underwater Visual­SLAM
+7
+==PAGE:18==
+2.3
+Depth Estimation
+While active range sensors (e.g. LiDAR and time­of­flight cameras) directly sample the
+3D geometry of a scene by emitting and measuring reflected light, conventional cameras
+only capture intensity values in a 2D pixel array. An Red Green Blue (RGB) image, for
+instance, is naturally represented as a tensor of shape H × W × 3, where H and W
+denote image height and width, and the three channels encode red, green, and blue color
+intensities.
+To comprehend how depth can be extracted from 2D images, it is essential to first under­
+stand the underlying principles of camera imaging. This section briefly covers the pinhole
+camera model, lens distortion, and the geometric relationship between a pair of cameras
+and the scene in view.
+2.3.1
+Camera fundamentals
+The simplest and most fundamental model for a camera is the pinhole camera model.
+In this ideal model, light rays from a scene pass through a single point (the pinhole) and
+project an inverted image onto a sensor plane. The model describes how a point P w =
+[xw, yw, zw] in a 3D scene is projected into a 2D pixel p = [u, v] in the image plane. This
+projective transformation is governed by the camera intrinsics, i.e. the internal parameters
+specific to a camera and lens combination. The camera intrinsic matrix K ∈R3×3 for the
+ideal pinhole model includes the focal length as well as the center point in x and y, see
+equation 2.9.
+K =
+
+
+fx
+0
+cx
+0
+fy
+cy
+0
+0
+1
+
+
+(2.9)
+The camera intrinsics can be determined by a process called camera calibration and is
+constant as long as the focus remains unchanged. With the intrinsic parameters for a
+camera we can describe the projective transformation from the real world to the image
+plane as in equation 2.10:
+sp = KT c
+wP w
+(2.10)
+Where T c
+w = [Rc
+w|tc
+w] is the transformation from the world to camera frame and s is the
+projective transformation’s arbitrary scaling [20]. Figure 2.3 provides a visual brief of the
+pinhole camera model.
+The ideal pinhole camera model does not account for the camera lens, which introduces
+distortion to the image. Since we rely on the underlying geometry of the pinhole model to
+infer depth, we need to remove this distortion. This removal is referred to as undistortion
+and is achieved by using the distortion coefficient, which model the lens’ warping effect.
+The distortion coefficients are also found during camera calibration [21].
+2.3.2
+Stereo matching
+There exist methods to derive depth information from images, particularly in systems with
+stereo cameras. A widely used approach is stereo matching, which determines the hor­
+izontal displacement between corresponding pixels in a pair of image frames. The key
+idea is that, due to real­world geometry, pixels projecting points close to the camera exhibit
+larger displacement than those projecting distant points. In literature the pixel displace­
+ment is referred to as disparity. We note that for accurate disparity estimation, it is crucial
+to establish correct pixel correspondences between the image pair.
+By computing the disparity for every corresponding pixel, we obtain a disparity map d(u, v)
+defined over the overlapping image domain (u, v) ∈IL ∩IR. Given knowledge of the real­
+world geometry, this map can be converted into a metric depth map. In a stereo setup,
+8
+Underwater Visual­SLAM
+==PAGE:19==
+Figure 2.3: The pinhole camera model. This model describes the geometric relation be­
+tween 3D points and their pixel projection in the image plane, which is governed by the
+camera intrinsics [20]
+one uses the camera intrinsics K together with the baseline b.
+Z(u, v) =
+f b
+d(u, v)
+(2.11)
+Once the depth map is obtained, each pixel coordinate (u, v) can be back­projected to the
+3D camera coordinate frame. Using the intrinsic calibration matrix K, the homogeneous
+pixel coordinate
+
+u, v, 1
+T maps to
+
+
+X
+Y
+Z
+
+= Z K−1
+
+
+u
+v
+1
+
+
+(2.12)
+2.3.3
+Rectification
+Given a pixel in one image, how can we compute the position of its correspondence in
+the other image? In the case of stereo camera setups we can make use of the position
+(baseline) and intrinsics for each camera to assist the matching.
+When a 3D point is viewed by two cameras, a powerful geometric constraint known as
+epipolar geometry arises. Consider a point pL in the left image and its corresponding
+point pR in the right image. Due to the geometric constraint of the stereo setup PR is
+constrained to lie on a specific line called the epipolar line. Then if we rectify (i.e. warp)
+the images such that corresponding horizontal scanlines are epipolar lines, each pixel
+correspondence can be found by searching horizontally across the image.
+To rectify stereo images, first rotate the cameras such that they are looking perpendicular
+to their baseline. The smallest rotation that achieves this transformation should be used.
+Next rotate the cameras around their optical axis, such that the y­axis in the camera frame
+is also perpendicular to the baseline. Lastly rotate the cameras such that their centers
+Underwater Visual­SLAM
+9
+==PAGE:20==
+Figure 2.4: Example of image rectification: (a) Original image pair overlaid with several
+epipolar lines; (b) images transformed so that epipolar lines are parallel; (c) images rec­
+tified so that epipolar lines are horizontal and in vertical correspondence; (d) final rectifi­
+cation that minimizes horizontal distortions [21]
+align. If the focal length of the cameras are different, then the images should be rescaled.
+To avoid aliasing, upsample the smaller focal­length­image to the larger one’s scale [21].
+The rectification process assumes that the images are distortion free. If that isn’t the case,
+then the images must first be undistorted.
+2.3.4
+Correspondences
+The main challenge in stereo matching is to determine the correct pixel correspondences.
+We distinguish between sparse correspondences, which attempt to find correspondences
+for just a limited set of pixels, and dense correspondences which attempt to find corre­
+spondences for all pixels. Sparse correspondences are typically computed using image
+features which can be quite robust and therefore provide a high certainty in the corre­
+spondence matches. Sparse correspondences also typically require less computation
+because, as the name implies, they have fewer matches to determine. In the case for
+image­based rendering and modeling however, a large number of points are needed for
+accurate reconstruction and therefore require the use of dense methods.
+Dense correspondences are more challenging than sparse ones because determining
+matches from textureless regions requires some guesswork. This means that dense cor­
+respondences are challenging to obtain in marine environments where we expect many
+textureless regions. Due to this challenge, recent techniques use deep learning to solve
+the stereo matching problem. The way deep learning is applied to stereo matching ranges
+from learning steps in the stereo pipeline (e.g. matching cost or optimization), to end­to­
+end 3D reconstruction based on 2D image(s) [21].
+Even with recent advancements, many of the best stereo matching algorithms use exten­
+sive fine­tuning to achieve State Of The Art (SOTA) results. Given the zero­shot capability
+shown in other domains of computer vision, this has motivated the development of foun­
+dation models for stereo depth estimation that achieve strong zero­shot generalization
+without per­domain fine­tuning, one of which, FoundationStereo, we will look into now
+10
+Underwater Visual­SLAM
+==PAGE:21==
+Figure 2.5: Left: Samples from our FoundationStereo dataset (FSD), which consists of
+synthetic stereo images with structured indoor / outdoor scenes (top), as well as more
+randomized scenes with challenging flying objects and higher geometry and texture di­
+versity (bottom). Right: The iterative self­curation process removes ambiguous samples
+inevitably produced from the domain randomized synthetic data generation process. Ex­
+ample ambiguities include severe texture repetition, ubiquitous reflections with limited sur­
+rounding context, and pure color under improper lighting.
+[22]
+2.4
+Foundation Stereo
+FoundationStereo[22] developed by NVIDIA, is a SOTA foundational model in this cate­
+gory. It has achieved 1st place on the world­wide Middlebury leaderboard and ETH3D
+leaderboard. It has been designed for robust zero­shot stereo depth estimation, meaning
+that it can generalize well to unseen real world scenarios without needing domain specific
+fine­tuning. The authors show that the model is able to handle objects with challeng­
+ing properties including (textureless / reflective / translucent / thin­structured) as well as
+complex illuminations ­ properties which are especially present in under water maritime
+environments.
+Aside from the model itself the paper also contributes with a large scale stereo image pair
+dataset of 1M synthetic images called Foundation Stereo Dataset (FSD). The dataset
+uses techniques to ensure realism in the images and accounts for crucial stereo match­
+ing challenges such as reflections, low texture surfaces and severe occlusions. FSD also
+uses domain randomization, a technique that randomizes the rendering of the simulator
+to transfer learning from simulation to the real world. The key idea is that with enough
+variability in the simulator, the real world may appear as just a variation of the render­
+ing configuration[23]. For the FSD this means varying camera parameters, lighting, and
+object configurations for the synthetically generated images. The domain randomization
+inevitably introduce ambiguous samples to the dataset which is why FSD also includes
+a self­curation pipeline. The pipeline is to first train an initial model on the FSD and af­
+terwards evaluate it to detect ambiguous samples. The ambiguous samples are then
+regenerated, and the model is retrained. Figure 2.5 is from the FoundationStereo pa­
+per[22] and shows a couple of sample images from the FSD dataset and the self­curation
+pipeline
+The architecture for FoundationStereo can be broadly divided into three stages:
+1. Feature extraction
+2. Cost Volume processing
+3. Iterative Refinement
+1. The feature extraction step combines the features from a large pre­trained depth model
+Underwater Visual­SLAM
+11
+==PAGE:22==
+(DepthAnythingV2 [24]), with those of a smaller Convolutional Neural Network (CNN)
+module (EdgeNeXt­S [25]). Specifically the DepthAnythingV2, which is trained on real
+monocular images, is included to reduce the gap between simulation and real world that
+occurs from training on synthetic data. At this step the model also extracts context fea­
+tures directly from the left image which together with the concatenated features of the
+DepthAnythingV2 and EdgeNeXt­S models help guide the later iterative refinement.
+2. The concatenated features from the left and right images are combined to construct a
+4D cost volume. This volume essentially maps out all candidate matches for each pixel
+in one image across various disparities in the other image. Thereafter, the cost volume
+is filtered to improve the reliability of potential depth matches and to incorporate broader
+contextual information. The filtered cost volume is then used to predict an initial disparity.
+3. The initial disparity is then iteratively refined to increase accuracy and sharpness. The
+refinement helps the model avoid local optima and speeds up convergence. At each
+iteration step, the current disparity is used to look up features from both the filtered cost
+volume and the features extracted directly from the left image.
+On GitHub the authors state that the input left and right image pairs for FoundationStereo
+needs to be rectified and undistorted. Although the model has been trained on RGB
+images and achieves the best results on those, the authors also state that they have
+tested the model on monochrome and Infrared (IR) images, which the model works well
+on too.
+2.5
+Point clouds
+After computing a disparity map for an image, we can use it to project each image pixel
+into a 3D point. Doing this for all pixels yields a collection of 3D points which we refer to
+as a point cloud. During this step we usually inject the real world scale information (from
+the baseline B), which ensures the point cloud, representing a reconstruction of a scene,
+is in a metric scale.
+2.5.1
+Registration
+Given a pair of point cloud reconstructions of overlapping scenes we are often interested
+in determining the transformation between the point clouds ­ a technique known as reg­
+istration ­ such that we can infer the motion between the scenes. The most widely used
+3D registration technique is the ICP algorithm [21].
+point­to­point ICP
+Given a point cloud P which we want to align with point cloud Q we define the distance
+between point p ∈P and Q as the distance between p and the closest point q ∈Q
+d(p, Q) = min
+q∈Q ∥q −p∥
+(2.13)
+The closest point in Q that yields the minimum distance is denoted as y. We define Y as
+the set of closest points and let C be the closest point operator.
+Y = C(P, Q)
+(2.14)
+The ICP algorithm consists of the following steps:
+• Compute the closest points Y = C(P, Q)
+• Use matched points mi ∈M to estimate the transformation P →Q
+12
+Underwater Visual­SLAM
+==PAGE:23==
+• Apply transformation to point cloud P
+• Repeat iteration until criterion is met (e.g. error falls below preset threshold τ)
+In the case where we don’t expect the point cloud to have full overlap, i.e. a correspon­
+dence pair for every point, we add a maximum matching threshold dmax, and ignore points
+whose correspondence distances are greater than dmax [26]. The standard ICP which
+uses distances between points is referred to as point­to­point ICP, and its optimization
+step is summed up in equation 2.15
+T ∗= argmin
+T
+X
+i
+||T · pi −mi||2
+(2.15)
+Point­to­plane ICP
+The point­to­plane variant of ICP takes advantage of the surface normals ni on the point
+cloud and penalizes only the component of the error along the surface normal. This variant
+has been shown to converge faster and be more accurate on range scans and surfaces
+[26]. The point­to­plane ICP can be summed up in equation 2.16
+T ∗= argmin
+T
+X
+i
+||ni · (T·i −mi)||2
+(2.16)
+GICP
+Generalized Iterative Closest Point (GICP) combines the point­to­point ICP and the point­
+to­plane ICP algorithms into a single probabilistic framework, and therefore is a distribution­
+to­distribution matching. The GICP algorithm models the surface from which a point was
+sampled as a Gaussian distribution, so a point pi becomes:
+pi ∼N(ˆpi, CP
+i ),
+(2.17)
+Where ˆpi is the actual point and CP
+i is the covariance matrix, which is typically estimated
+from its k­nearest neighbors. The covariance matrix is regularized by replacing its eigen­
+values with (1, 1, ϵ), which makes GICP work as a plane­to­plane ICP. ϵ is a small constant
+representing the covariance along the normal. The authors of GICP define the transfor­
+mation error as a distribution:
+di ∼N(0, CP
+i + TCQ
+i T).
+(2.18)
+With the transformation error distribution they find the transformation T that maximizes
+the log likelihood of di, see equation 2.19
+T = argmax
+T
+X
+i
+log(p(di))
+(2.19)
+= argmin
+T
+X
+i
+dT
+i (CB
+i + TCA
+i T)−1di.
+(2.20)
+VGICP
+Although the ICP variant can achieve good results (especially GICP) they are highly de­
+pendent on the quality of the correspondences found by the nearest neighbors search.
+With regard to the compute time, this search often becomes the bottleneck and it cannot
+Underwater Visual­SLAM
+13
+==PAGE:24==
+be optimized on a Graphics Processing Unit (GPU) because it makes heavy use of condi­
+tional branching. VGICP addresses this issue by replacing the per­point nearest­neighbor
+matching with a voxelized distribution aggregation. First VGICP defines the distance ˆd′
+between ˆai and its neighbors:
+ˆd′
+i =
+X
+j
+(ˆqj −T ˆpi)
+(2.21)
+This changes the distribution d′ to
+ˆd′
+i ∼(µdi, Cdi),
+(2.22)
+µdi =
+X
+j
+(ˆqj −T ˆpi) = 0,
+(2.23)
+Cdi =
+X
+j
+(CQ
+j + TCP
+i T).
+(2.24)
+and thereby the optimization to:
+T = argmin
+T
+X
+i
+
+X
+j
+(qj −Tpi)
+
+
+T 
+X
+j
+(CQ
+j + TCP
+i T)T
+
+
+−1 
+X
+j
+(qj −Tpi)
+
+
+(2.25)
+2.6
+SLAM
+For a robot to operate safely and effectively in an unknown environment, it needs to form
+an internal representation of its surroundings. An approach to this is to simultaneously
+build a mapping of the robot’s surroundings, while simultaneously estimating the robot’s
+pose w.r.t. that map. This problem is known as Simultaneous Localization and Mapping
+(SLAM). A key aspect of SLAM is the use of loop closures for the trajectory estimation, to
+reduce the odometry drift over time and ensure a globally consistent map. [8]
+A SLAM typically consists of two blocks; the front­end and the back­end. The front­end
+processes the sensor data and creates constraints, while the back­end optimizes the
+constraints to solve the state estimation and mapping. To speed up the compute time
+for a SLAM algorithm, the front­end typically creates an ”intermediate representation”
+of the raw sensor data which are more compact and easier to describe mathematically,
+e.g. using extracted features from an image in contrast to using all pixels. Methods that
+pre­process sensor data to extract intermediate representations are known as indirect
+methods, whereas methods that use the raw data are known as direct methods. Direct
+methods are typically more accurate and robust compared to indirect methods, since they
+make use of the entire sensory information. Direct methods are in turn more computation­
+ally heavy compared to indirect methods, so when designing a SLAM algorithm a choice
+in trade­off between accuracy and computation must be made. [8]
+2.6.1
+Factor graphs
+A commonly used back­end representation for a SLAM problem is the graphical one,
+specifically factor graphs. Factor graphs are bipartite graphs with vertices ϕi ∈U, edges
+eij ∈E, and nodes xj ∈V, F = (U, E, V). vertices (circles) represent any variables or
+set thereof e.g. sensor poses or landmarks and nodes (small squares) represent factors.
+Each factor can be thought of as an equation involving the two variables which is con­
+nected to by the edges. Pose­graph SLAM can be viewed as a special form of factor
+graph in which variables (vertices) can only be robot poses [11]. Figure 2.6 shows the
+visual representation of a factor graph with various factors and variables.
+14
+Underwater Visual­SLAM
+==PAGE:25==
+Figure 2.6: Example: Factor graph representation of a optimization problem with various
+variable types (vertices) and factors (nodes) [27]
+2.6.2
+Range­based SLAM
+Range­based SLAM types are algorithms which use range sensors (e.g. LiDAR, Red
+Green Blue + Depth (RGB­D), Sound Navigation And Ranging (SONAR)) as their primary
+sensor. For these SLAM types a single cycle of data collection is usually referred to as a
+scan, owing to how a LiDAR ’scans’ its environment. A scan is effectively a set of points
+or a point cloud. Range­based SLAM uses registration to compute the transformation
+between scans from which the SLAM performs the odometry estimate [27] [28].
+2.7
+GLIM
+GLIM is a tightly coupled 3D range­inertial localization and mapping framework. It is
+designed to be sensor agnostic to the range data, meaning any 3D point cloud, whether
+from a LiDAR scanner, RGB­D camera, stereo cameras and the like, can be used as
+input. GLIM utilizes GPU­accelerated scan matching to enable real­time registration on
+dense point clouds. The acceleration from the GPU also allows for a longer time window
+for optimizing sensor poses, making the algorithm more accurate and robust to sensor
+noise and degradation.
+GLIM consists of the following blocks
+• Odometry estimation
+• Local mapping
+• Global mapping
+What separates GLIM from other range­inertial based SLAM algorithms is:
+• GPU­accelerated scan matching
+• Odometry estimation via fixed­lag smoothing and keyframe­based matching
+• Global trajectory optimization by direct registration error minimization
+GLIM consists of a pre­processing module and three estimation modules (odometry, Local
+mapping and Global mapping) as seen in figure 2.7
+2.7.1
+Pre­processing
+GLIM uses VGICP as the matching cost factor to register point clouds, and extends it with
+surface­orientation based correspondence validation and a multi­resolution voxel map to
+Underwater Visual­SLAM
+15
+==PAGE:26==
+Figure 2.7: The pre­processing and three estimation modules (odometry, local mapping
+and global mapping) [9]
+improve accuracy and stability. Given a point cloud P with points pk ∈P VGICP first
+models each point as a gaussian distribution which represents the local shape of the
+surface around pk. VGICP then creates L resolution levels of voxelmaps with resolution
+rl = r02(l−1) and associates each input point pk with a corresponding voxel in each of the
+resolution levels and computes the point­to­voxel distance. GLIM extends VGICP with a
+simple correspondence validation based on the surface normals of nk of points pk ∈Pi
+to check whether each point in Pi is visible from the viewpoint of the next point cloud P|.
+This correspondence validation is employed to avoid the association of points on different
+sides of the thin walls. The objective function to be minimized is the sum of distribution­
+to­distribution distances between points pl
+k = (µl
+k, Cl
+k) and their corresponding voxels
+˜pl
+k = (˜µl
+k, ˜Cl
+k):
+ePC(Ti, Tj) =
+X
+l∈[1...L]
+X
+pk∈Pi
+eD2D pk, ˜pl
+k, T −1
+i
+Tj
+
+,
+(2.26)
+eD2D pk, ˜pl
+k, Tij
+
+= dl T
+k
+
+˜Cl
+k + Tij Ck T T
+ij
+−1
+dl
+k,
+dl
+k = Tij pk −˜pl
+k,
+Tij = T −1
+i
+Tj
+(2.27)
+GLIM implements an efficient linearization mechanism which only need two GPU­GPU
+data transfer calls per factor graph linearization task, which minimizes synchronization
+overhead and fully utilizes the power of a GPU.
+GLIM uses the IMU preintegration techniques to incorporate IMU constraints into the factor
+graph. The factor integrates the system evolution between two time steps i and j to obtain
+the relative body motion. The error term is described as:
+eIMU(xi, xj) =
+log
+ ∆RT
+ijRT
+i Rj
+2 +
+∆tij −RT
+i
+
+tj −ti −v∆tij −1
+2g∆t2
+ij
+
+2
++
+∆vij −RT
+i (vj −vi −g∆tij)
+2 .
+(2.28)
+2.7.2
+Odometry estimation
+The proposed odometry estimation method for GLIM employs a combination of fixed­lag
+smoothing and keyframe based point cloud matching. Given an input point cloud, GLIM
+first correct the distortion of the point cloud caused by sensor motion, based on the motion
+prediction from the IMU. A factor graph is then constructed as shown in figure 2.8. The
+factor distinguishes frames into three sets:
+• Active frames X a which are the frames still in the optimization window
+• Preceding frames X P
+i
+= [xi−Npre, ..., xi−1] which are the Npre latest frames
+16
+Underwater Visual­SLAM
+==PAGE:27==
+Figure 2.8: Odometry estimation factor graph from GLIM. The vertices (circles) contain
+the sensor state xt = [Tt, vt, bt] and nodes (diamonds) contain the factors between vari­
+ables. The last few frames are always included in the optimization. Variables within the
+optimization window may not affect every factor directly but are still updated by the opti­
+mizer. Frames outside the optimization window are not subject to optimization, although
+keyframes may still be used in later optimizations [9]
+• Key frames X K which are up to Nodom frames according to a keyframe selection
+strategy
+The active frames X a are the frames still in the optimization window, meaning that their
+sensor pose is still being optimized by the fixed­lag smoothing. Once frames move out
+of the optimization window, they become marginalized and are considered fixed. The
+preceding frames X P
+i
+and keyframes X K are used for optimization and have a matching
+cost factor inserted between them and the latest frame. GLIM defines the overlap rate
+between two point clouds Pi and Pj as the fraction of points in Pi that fall within a voxel
+of Pj. A new keyframe is created when a new frame has an overlap rate between it
+and all keyframes below a certain threshold. GLIM removes redundant keyframes under
+two circumstances: 1) when a keyframe’s overlap rate between it and the latest keyframe
+falls below a certain threshold, and 2) if the number of keyframes exceeds Nodom, then the
+keyframe is removed which heuristically maximizes the spatial distribution of all keyframes
+according to following score:
+s(i) = o(i, Nodom)
+X
+j∈[1,Nodom−1]\{i}
+(1 −o(i, j))
+(2.29)
+where o(i, j) is the overlap rate between keyframe i and j.
+The overall objective function for odometry estimation is:
+gLIO(X a) =
+X
+xi∈X a
+X
+xj∈X P
+i ∪X k
+ePC(Pi, Pj, Ti, Tj)+
+X
+xi∈X a
+eIMU(xi−1, xi)+eMG(X a), (2.30)
+where eMG is the error term to compensate for the marginalized variables and factors.
+2.7.3
+Local mapping
+The local mapping module in GLIM is responsible for building and refining submaps us­
+ing the marginalized frames. As a frame becomes marginalized it is fed to GLIM’s local
+mapping module. First GLIM re­performs deskewing and covariance estimation on the
+frame. Then the overlap rate for the new frame and the latest frame in the submap is
+Underwater Visual­SLAM
+17
+==PAGE:28==
+determined. If the overlap rate is below a certain threshold, then the frame is added to the
+submap factor graph. Marginalized frames are added to the submap until the number of
+frames exceed a certain threshold, or the overlap rate between the first and last frame in
+the submaps drops below a certain threshold. If either condition is met, then the frames
+are merged into a single submap via batch optimization using the Levenberg–Marquardt
+optimization algorithm. The submap factor graph has a matching cost factor between
+all combinations of frames C2X s in X s, an IMU preintegration factor between consecutive
+frames and a bias/velocity factor on each individual frame. An example of the factor graph
+for both the global and submapping can be seen in figure 2.9. The total objective function
+for the local mapping is:
+gLM(X s) =
+X
+(xi,xj)∈C2X s
+ePC(Ti, Tj) +
+X
+xi∈X s
+eIMU(xi−1, xi) +
+X
+xi∈X s
+eBV (xi),
+eBV (xi) = ∥bi −b′
+i∥2 + ∥vi −v′
+i∥2
+(2.31)
+Where eBV is a prior factor to keep the velocity and IMU bias estimates close to the
+marginalized state (v′
+i and b′
+i)
+2.7.4
+Global mapping
+Whenever a new submap is created, the global mapping module incrementally updates
+the global mapping. To retain information about the IMU bias, initial velocity and avoid
+IMU drift during the global map optimization, GLIM introduces two states called endpoints.
+Given an estimate of sensor states in a submap [x1, ..., xNsub] These states are the first
+and last sensor states (x1andxNsub) of the submap and are denoted xi
+L and xi
+R. GLIM
+also defines a submap origin T i = [Ri|ti] as the pose of the sensor at the middle of the
+submap, TNsub/2. The submap origin is then use to determine the sensor state xt relative
+to the submap origin as:
+T ′
+t = (T i)−1Tt,
+v′
+t = (Ri)−1vt,
+b′
+t = bt.
+(2.32)
+GLIM uses the submap origin T i and the sensor states xi
+L and xi
+R to create relative state
+factors between the submap origin and it’s endpoints, such that they satisfy equation 2.33.
+eEP
+L (T i, xi
+L) =
+log
+ T iT ′
+1(T i)−12
++ ∥v′
+1 −(Ri)T vi
+L∥2 + ∥b′
+1 −bi
+L∥2,
+eEP
+R (T i, xi
+R) =
+log
+ T iT ′
+Nsub(T i)−12
++ ∥v′
+Nsub −(Ri)T vi
+R∥2 + ∥b′
+Nsub −bi
+R∥2.
+(2.33)
+In addition the relative state factors, a matching cost factor between all submaps with an
+overlap rate greater than a small threshold is added, together with an IMU preintegration
+factor between the sensor states xi
+R and xi+1
+L
+of submaps xi and xi+1. An example of the
+factor graph for both the global mapping and submapping can be seen in figure 2.9. This
+yields the objective function for the global mapping module seen in equation 2.34
+18
+Underwater Visual­SLAM
+==PAGE:29==
+Figure 2.9: Global and Submapping module estimation factor graph from GLIM. The ver­
+tices (circles) contain the sensor state xt = [Tt, vt, bt], the squares contain the submaps
+and nodes (diamonds) contain the factors between variables. The local mapping module
+produces a submap from the marginalized frames of the odometry module. The submaps
+are then merged in the global mapping module. The global mapping uses the first and
+last sensor states (xi
+L, xi
+R) to create IMU factors between the submaps [9]
+gGM(X g) =
+X
+(T i,T j)∈X o
+ePC(T i, T j)
++
+X
+T i∈X g
+eIMU(xi−1
+R , xi
+L)
++
+X
+T i∈X g
+ eEP
+L (T i, xi
+L) + eEP
+R (T i, xi
+R)
+
+,
+(2.34)
+Where X g are all submaps and X o are all submaps with an overlap.
+Underwater Visual­SLAM
+19
+==PAGE:30==
+20
+Underwater Visual­SLAM
+==PAGE:31==
+3
+Methods
+3.1
+Setup
+With the background in place, we can move from theory to practice. Before proposing a
+solution however, we must consider the hardware available.
+3.1.1
+The ROV
+The solution should be developed for use on the BlueROV2 [29], which in our case is
+equipped with the heavy configuration [30]. The BlueROV2 Heavy can be seen in figure
+3.1. The BlueROV2 Heavy is a tethered ROV, controllable in 6­DoF. The ROV is in the
+smaller category, measuring (length x height x width) 457 mm x 338 mm x 254 mm and
+weighing 11–12 kg. The ROV has a modular frame which means that, if the project ne­
+cessitates it, we have the possibility to extend the frame to include additional sensors or
+scanners. The BlueROV2 Heavy is for our use case controlled with a PlayStation 4 (con­
+troller) (PS4) controller, and includes a depth hold setting, which when activated, controls
+the ROV’s vertical velocity to 0, and the roll and pitch angles to 0. The battery is rated
+to last 2 hours under normal use and can be easily swapped. These features mean that
+the BlueROV2 Heavy is intuitive to control, and easy to keep stable to fixate on a given
+target and thereby obtain good quality data. The limitation to be aware of with regards to
+maneuverability is the tether. The length of the tether is 150m, so for our use cases, the
+length will not be a limitation. The main limitation to consider for the tether is the possi­
+bility of entanglement with the environment, and the possible obstruction it can cause on
+sensors, e.g. the cameras. The path for the ROV should therefore be considered when
+planning experiments.
+Figure 3.1: The BlueROV2 Heavy. Dimensions: (length x height x width) 457 mm x 338
+mm x 254 mm: weight 11–12 kg. The the payload is the transparent tube in the middle of
+the ROV. Note: we use a flat port for the payload instead of the dome shape depicted in
+the figure
+3.1.2
+Sensors
+The ROV is equipped with 3 specific sensors which we will make use of: 1) a stereo
+Camera namely the OAK­D Lite[31], 2) an integrated IMU as part of the Pixhawk 1 Flight
+Controller[32] and 3) a pressure sensor MS5837­30BA[33].
+Messages from the flight controller and the pressure sensor are published through MAVROS,
+a Robot Operating System (ROS) package which acts as a bridge between MAVLink de­
+vices, (e.g., the Pixhawk 1), and the ROS computer[34]. This has the advantage of en­
+suring that the sensor messages are published according to standard conventions as well
+Underwater Visual­SLAM
+21
+==PAGE:32==
+Figure 3.2: Example of the effect of Rolling shutter vs global shutter. With rolling shutter,
+pixel columns are captured sequentially which can cause distortions if parts of the image
+are moving faster than the shutter, e.g. the blade of the fan in this example. Global
+shutter records all pixels at the same time so it doesn’t exhibit the same distortion on
+moving objects
+as allowing us to control the publish rates of sensors.While the depth sensor accuracy is
+listed in the datasheet as 2mm in water, the accuracy of the integrated IMU on the flight
+controller is difficult to state. The reason is that the flight controller uses a navigational
+filter (PX4) to fuse multiple sensors to improve the IMU measurement [35]. Therefore we
+must calibrate and estimate its reliability manually later.
+The OAK­D lite is set up to capture two stereo monochrome images of resolution 640x480
+as well as a single RGB image of resolution 1920x1080 which are published through ROS
+at 30Hz. The stereo images are taken with a global shutter (all pixels are captured at the
+same time), while the RGB image is captured with rolling shutter (one pixel column at a
+time)[36], see an example in figure 3.2.
+3.2
+Constraints
+To guide us in choosing a SLAM algorithm to base our solution on, we analyze the problem
+at hand and create some constraints:
+• Algorithm type: Must be Visual­Inertial since multi modality greatly increases ro­
+bustness under water. Furthermore it would be very beneficial to have the capability
+to easily include additional sensory inputs, to leverage the strengths of the various
+sensing modalities under water highlighted in 2.2
+• Map density: For surveillance we want something which is spatially accurate and
+rich in detail. Therefore we consider dense methods only
+• Robustness to noise: The algorithm must be robust to noise in the input as we
+anticipate bad image quality due to the difficult optical conditions under water.
+• Open source / implementability: To ease the implementation process and ensure
+extensibility for others we consider algorithms which are open source, and have
+their implementations made available for use.
+• Visual degradation handling: The algorithm must also be able to handle momen­
+tary degradation of the visual sensors, that are likely to arise due to visual dropouts
+in the marine environment. This could be from stirred up suspended particles or
+momentary loss of objects within the Field Of View (FOV).
+22
+Underwater Visual­SLAM
+==PAGE:33==
+• Real­time capability: For future prospects we want something which has the pos­
+sibility to work in real time as this can facilitate a quick reaction time with regards to
+surveillance.
+3.3
+Proposed method
+With the constraints set, we propose to base the solution around the use of the SLAM
+algorithm GLIM [9]. The following listing explains how GLIM satisfies the constraints:
+• Range–inertial / multi­modality: GLIM is Range­Inertial SLAM, which is sensor
+agnostic to the range sensor used to generate its point cloud input. This means that
+it can accept depth inferred from stereo matching, which would make it a Visual­
+inertial SLAM algorithm. GLIM facilitates multi­modality both tightly — by directly
+fusing point clouds from range sensors — and loosely — by utilizing a factor­graph
+backend to integrate additional measurements and constraints
+• Dense maps: GLIM builds maps from dense point clouds, meeting our requirement
+for detail­rich reconstructions. Furthermore, GLIM can be extended with a coloriza­
+tion module to the point cloud mapping using images.
+• Robust registration: The algorithm uses VGICP, a distribution­to­distribution regis­
+tration method, which inherently tolerates noise better than point­to­point approaches.
+• Extensibility and implementation: Use of GLIM is well documented by the au­
+thors, both by a detailed scientific paper, and documentation page with instructions
+on how to install, use and extend the software. The code is open source and avail­
+able on GitHub.
+• Handling visual degradation: GLIM uses a frame­to­model matching with a long
+optimization window, (adjustable and in the order of seconds) which means that it
+can tolerate a few seconds of completely degenerate point clouds.
+• Real­time potential: GLIM is designed to utilize GPU acceleration to perform SLAM
+in real time.
+To use GLIM as a visual SLAM, we need to transform the stereo images captured by
+our camera sensor, to a point cloud. As shown earlier this can be done by using stereo
+matching to compute disparity, and then using the baseline and camera intrinsics to con­
+vert the disparity into depth to project the pixels (u, v) into the camera frame (X, Y, Z). As
+previously mentioned there exist many algorithms for stereo matching, so we need to set
+some criteria for determining the right one.
+The most important criterion for the stereo matching technique is the consistency of the
+point clouds that are generated. By consistency we mean the similarity between recon­
+structions of the same objects and scenes between frames, e.g. walls have the same
+normals and objects have same geometry. If we reconstruct the scenes too dissimilarly,
+VGICP will not be able to find correct correspondences. This is because VGICP is a direct
+registration technique, meaning that it makes use of all points, in contrast to only robust
+points or features. At the same time, VGICP can tolerate different levels of noise in the
+scene reconstruction due to it being a distribution­to­distribution matching, so some noise
+in the stereo matching algorithm can be tolerated.
+The authors of GLIM demonstrate a consistent mapping result with the use of a passive
+stereo camera (StereoLabs ZED 2i [37]). However, the mapping is severely distorted due
+to the large distortion in the input point clouds. See figure 3.3 for the mapping results
+Underwater Visual­SLAM
+23
+==PAGE:34==
+obtained from different sensors by GLIM. This tells us that the distortion in the mapping
+will be directly affected by the distortion in the reconstructions, which will degrade the fine
+details in the mapping.
+Figure 3.3: Different Mapping results from various sensors obtained by GLIM [9]. The
+experimental environment is seen in the right corner, and the results from the passive
+stereo matching sensor (Stereolabs ZED2i) is highlighted by a red border. We say that
+the mapping is consistent because the walls are correctly aligned, but the map is severely
+distorted due to the distorted input point clouds.
+If we choose a learning­based approach we need to consider the limited availability of
+underwater datasets. Therefore we ideally want a model which is pretrained on an un­
+derwater dataset or has strong generalization capabilities across domains (zero­shot ca­
+pability).
+With these considerations in mind we choose to use the neural network model: Founda­
+tionStereo [22]. We note that other approaches exist both classical and learning­based,
+which also could provide good results, but for the sake of demonstrating a proof of con­
+cept, ease of implementation and SOTA accuracy together with pre­trained weights and
+zero­shot capability, we consider FoundationStereo the best option.
+FoundationStereo (and most other stereo matching techniques) requires rectified and
+undistorted images, which means that we need to obtain the camera intrinsics and create
+a script to rectify and undistort the stereo images. We also need the camera intrinsics to
+convert the disparity (pixels) to depth (m) and thereafter transform the individual pixels
+(u, v) to (X, Y, Z)m.
+The final pipeline for the proposed solution can be seen in figure 3.4.
+24
+Underwater Visual­SLAM
+==PAGE:35==
+Figure 3.4: Proposed System from image data capture to trajectory and mapping. The
+pipeline has three steps. The data acquisition, the point cloud generation, and the SLAM.
+The Blue outline with the docker logo indicates which steps are implemented inside the
+container. The dotted outline shows which processes are carried out in real time (green)
+and which aren’t (red)
+3.4
+Data
+Before we can start implementing the solution we need to obtain some data to use it on.
+The authors of GLIM provide sample test data in the ros2 bag file format [38]. This can
+be used to validate that the implementation has been installed correctly. The sample data
+includes accurate LiDAR and IMU measurements in an outdoor scene with many rich
+geometric features (buildings, trees, lamp posts), so it demonstrates the easiest case for
+GLIM to solve. It is expected that the accuracy and quality of the point clouds that can
+be produced from a stereo pair of low resolution images in an underwater scene, is much
+less than that of a high­end LiDAR measurement unit on land, so we cannot expect the
+same performance as the test data. figure 3.5 shows the SLAM result viewed in GLIM’s
+offline viewer. We will use the images from this viewer for the remainder of the report and
+therefore advise the reader to take a look at the figure to build an understanding for the
+visualization method.
+After verifying that GLIM has been installed correctly we want to move on to data from
+the actual domain, under water. Ideally we would find an underwater dataset online with
+point clouds and IMU measurements, and a ground truth to compare against. With this
+we would have been able to verify GLIM in the under water domain, separately from our
+own point cloud reconstructions. In the case of unexpected results, the search for the root
+cause could be narrowed to GLIM itself.
+We were however not able to find a dataset with precomputed point clouds, so instead
+we look for a dataset with stereo imagery, and instead test the entire system on simulta­
+neously. We ended up using the data from an experimental campaign from Skovshoved
+Havn. The advantage of this dataset was that it was obtained using the BlueROV2 Heavy
+with the OAK­D lite camera, so it mimics our physical setup. Furthermore, it was captured
+Underwater Visual­SLAM
+25
+==PAGE:36==
+Figure 3.5: SLAM result on the test data provided by the authors of GLIM. The figure
+shows the trajectory of the sensor (green line) and orientation estimates along it according
+to the East North Up (ENU)­convention. The points are the accumulated point clouds,
+which together makes up the mapping. The points are colored according to the z­value.
+A faint gray grid is shown in the middle of the viewer. This grid corresponds to the z = 0
+plane which is determined during the initialization of GLIM.
+at a real harbor, so it includes images of real marine infrastructure. The data is captured
+as a 20min long ROS bag, with the relevant ROS topics being:
+• /oak_d_lite/left/image_mono/h265: H.265 encoded monochrome image from the
+left camera of the OAK­D Lite.
+• /oak_d_lite/left/camera_info: Camera intrinsics and baseline for the left camera of
+the OAK­D Lite.
+• /oak_d_lite/rgb/image_color/h265: H.265 encoded color image from the RGB cam­
+era of the OAK­D Lite.
+• /oak_d_lite/right/image_mono/h265: H.265 encoded monochrome image from the
+right camera of the OAK­D Lite.
+• /oak_d_lite/right/camera_info: Camera intrinsics and baseline parameters for the
+right camera of the OAK­D Lite.
+• /bluerov2/mavros/imu/data: IMU data from the Pixhawk 1
+26
+Underwater Visual­SLAM
+==PAGE:37==
+• /bluerov2/mavros/global_position/rel_alt: Relative altitude data from the depth sen­
+sor
+We want to start with a task as simple as possible for GLIM to solve. Therefore we chose
+a 30 second sequence from Skovshoved Havn, where the ROV is performing a descent
+following by an ascent, while keeping an almost fixed orientation to view the feature rich
+ladder and wooden beam. We chose this sequence as there are both plenty of visual
+features available for the stereo correspondences as well as geometric features for reg­
+istration. We will refer to the chosen sequence as the ladder sequence, an example can
+be seen in 3.6. This sequence will serve as the starting point for adapting our solution to
+the under water domain.
+Figure 3.6: 6 images from the from the ladder sequence showing the environment ob­
+served by the ROV during its ascent and descent. The images are overlapping and fully
+cover the visual information during the sequence. The images are captured by the left
+camera of the OAK­D Lite
+The dataset was originally thought to include a position reference from an Short­Baseline
+acoustic positioning (SBL) (SBL) measurement, but it turned out to be too unreliable. As
+a work around, we instead used the depth sensor as a positional reference. Though this
+means that we can only compare the z­axis, it still provides valuable insight since the
+sequence we chose the ROV is mainly moving up and down.
+Underwater Visual­SLAM
+27
+==PAGE:38==
+3.5
+GLIM settings
+Although the authors of GLIM demonstrate its use with stereo cameras, the algorithm
+has been developed for LiDARs, so right away we need to disable the LiDAR specific
+features.
+LiDARs often include per­point timestamps which GLIM uses together with
+the IMU measurements to deskew the point clouds. In contrast to LiDARs, global shut­
+ter cameras (like the one we use) captures all pixel at the same point in time, render­
+ing deskewing unnecessary[9]. To disable per­point timestamps and deskewing we set
+"global_shutter_lidar": true. Ignoring this parameter will cause glim to automati­
+cally assume a scan duration of the input point clouds, based on the average difference
+between their timestamps, and then erroneously perform deskewing based on that range.
+Another important parameter to specify is the transformation from the IMU frame into the
+stereo camera frame:
+T IMU
+Camera = [R|t]
+(3.1)
+The translation can simply be measured on the BlueROV2 following the ENU conven­
+tion[39] [x, y, z] = [0.04, −0.06, 0.0] in units of meters. To determine the rotation we first
+note which orientation convention is used. The IMU data is converted through mavros and
+has a positive value of gravity when standing still, so it must use the ENU convention[40].
+The camera follows the pinhole camera model, so right, down, forward.
+Camera Frame
+ENU IMU Frame
+X
+Right
+East
+Y
+Down
+North
+Z
+Forward
+Up
+Table 3.1: Axis mappings between the Camera Frame and ENU IMU Frame
+So the rotation needs to match the axes accordingly:
+• IMU X (East) →Camera X (Right)
+• IMU Y (North) →Camera Z (Forward)
+• IMU Z (Up) →Camera ­Y (Down)
+Or, described as rotation matrix:
+R =
+
+
+1
+0
+0
+0
+0
+−1
+0
+1
+0
+
+
+(3.2)
+Combining the rotation matrix with translation vector we get the full homogeneous matrix
+describing the transformation:
+Tcamera_imu =
+
+
+1
+0
+0
+0.04
+0
+0
+−1
+−0.06
+0
+1
+0
+0.0
+0
+0
+0
+1
+
+
+(3.3)
+T_camera_imu described as a quaternion is then
+q = [0.04, −0.06, 0.0, 0.7071068, 0.0, 0.0, 0.7071068]
+28
+Underwater Visual­SLAM
+==PAGE:39==
+GLIM emphasizes the importance of synchronization between the clocks of the IMU and
+point cloud streams [9]. In practice, the timestamp you get from a ROS bag message
+reflects the time of arrival of the message at the ROS master, which can differ significantly
+from the instant the sensor actually recorded the measurement. To avoid introducing
+that buffering into GLIM’s pipeline, we instead use each message’s header.stamp ­ the
+hardware timestamp assigned by the sensor driver at capture[41].
+To give GLIM a measure of our IMU’s confidence, we must specify four noise parameters:
+the accelerometer white­noise density, the gyroscope white­noise density, the IMU bias
+random­walk noise, and the integration noise. These values should come from the IMU
+manufacturer’s datasheet or be calibrated from a still standing data sequence.
+By contrast, GLIM does not expose a single ”Point cloud noise” parameter. Instead, in its
+VGICP front end each incoming scan point is modeled as a Gaussian whose covariance
+is estimated from the local neighborhood. Dense regions yield small covariances (high
+confidence) while sparse or noisy regions yield large covariances (low confidence).
+To pick a correct base voxel resolution r0 we start with the recommended voxel size for
+indoor environments of 0.25. Later on we decrease the voxel base size until we observe
+that the matching finds the right correspondences.
+Important parameters for the implementation Note that even though we are using cam­
+eras as our ranging device, the authors of GLIM chose to name the parameters as if the
+range sensor was a LiDAR. This is just a naming scheme, but is stated to avoid confusion.
+• "global_shutter_lidar": true
+• "T_lidar_imu": [0.06, -0.04, 0.0, 0.7071068, 0.0, 0.0, 0.7071068]
+• ”sensor”:
+– "imu_acc_noise": 0.02268
+– "imu_gyro_noise": 0.02171
+– "imu_int_noise": 0.02171
+– "imu_bias_noise": 0.04468
+• "voxel_resolution": 0.25
+3.6
+Domain adaptation
+With the data sequence determined and GLIM configured to our physical setup, we can
+start applying the solution. First we inspect the point clouds generated; see figure 3.7. We
+observe the point clouds to be visually consistent with the real world, and incredibly rich in
+detail. Right away we note that there are two noticeable problems with the point clouds:
+1) noisy points at the edges of objects, and 2) that the open water has been reconstructed
+as a surface. We don’t expect the noisy points to affect the trajectory, but they will pollute
+the mapping, so later we choose to remove points by using open3d’s [42] radius outlier
+rejection. The open water surfaces are however a bit more problematic, because if they
+contain a significant portion of the points in the point cloud, they will heavily weigh the
+matching. Furthermore, since the surfaces are hallucinations, meaning that they have no
+real meaning, we have no guarantee of them being produced equally from frame to frame.
+This means that the VGICP will make use of correspondences with no real meaning.
+To examine the impact that the open water surfaces have we first create a script to count
+the number of points Nplane that the open water surface consists of and then determine
+Underwater Visual­SLAM
+29
+==PAGE:40==
+Figure 3.7: Example: detail rich point clouds generated from a specific frame of the lad­
+der sequence. Upper left shows the full hd color image from the OAK­D lite camera and
+the other three shows the point clouds reconstruction in the order: top view, front view,
+and diagonal side view. Notice that 1) the reconstruction shows noisy points at the bor­
+ders between objects at different distances, and 2) that the open water segments are
+reconstructed as surfaces
+how large the percentage rplane of the total points Npc within the point cloud that it ac­
+counts:
+rplane = Nplane
+Npc
+· 100%
+(3.4)
+To count the inlier points on the plane we use Open3D’s plane segmentation method [43].
+By using this method we assume that the open water segments are always reconstructed
+as a planar surface, however the surfaces can also sometimes be more complex than this,
+so the result of this examination should be used only as clue towards the influence of the
+inlier points. An example of a plane segmentation can be seen in figure 3.8. The method
+finds the plane with the largest support in the point cloud where inliers to the plane are
+determined by a distance to plane threshold, which we set to 0.03 in our experiment. We
+then calculate the average percentage of plane inlier points rplane for all N point clouds in
+the entire sequence:
+mean(rplane) = 1
+N
+N
+X
+i=0
+rplane[i]
+(3.5)
+With this we determine the average percentage of plane inliers to be 33%, which is large
+enough to have a significant influence on the registration. Due to the harsh assumption
+of the open water surfaces being planer, the segmentation method misses significant
+parts of the surfaces. The method also doesn’t handle cases where there are multiple
+separated segments with background surfaces. This means that the actual percentage of
+open surface points is larger than what we find. Though we don’t have the exact estimate
+of the plane percentage, we can still assert that the influence is significant and that we
+therefore need to expand our system to remove those points.
+30
+Underwater Visual­SLAM
+==PAGE:41==
+Figure 3.8: Example plane detection using open3d’s plane segmentation method [43] on
+a reconstruction from the ladder sequence. We perform the plane detection on the entire
+sequence of images, and calculate the average plane inlier point ratio: Nplane/Npc for all
+point clouds in the sequence to be 33%
+3.6.1
+Openwater segmentation and removal
+To remove the open water surfaces we first need a way to detect them. The detection can
+either be done prior to point cloud generation e.g. through segmentation, or afterwards
+by geometric constraints. Since we already have the generated point clouds, it would
+be preferable to remove the planes by a geometric constraint. Therefore we investigate
+whether we can find a geometric pattern, to create a heuristic from. Let’s consider figure
+3.9 which shows a range of examples of how the open water surfaces are reconstructed.
+The immediate idea is to filter the point clouds according to their distance from the camera,
+but as we see in figure 3.9 the surfaces can appear closer than some of the actual objects.
+Furthermore, we also see that the surfaces sometimes merge with the objects (e.g. the
+ladder in upper left corner), which further makes defining a distance threshold difficult.
+In the lower left example in the figure we see an example of the open water segments
+being reconstructed as a curved surface, which demonstrates exactly why we aren’t able
+to segment the surfaces as simple planes.
+Due to the unpredictable manner in which the open water segments affect the reconstruc­
+tion we conclude that a geometric constraint might end up becoming unreliable, especially
+later if we encounter new examples different from those in figure 3.9. Therefore we in­
+stead change direction and investigate whether using the raw images provides a more
+reliable input to base a heuristic on. We chose to tackle it as a semantic segmentation
+problem [44] ­ the problem of associating each pixel with a class label. In our case we are
+interested in classifying pixels as either ’open water’ or ’not open water’. We separate the
+problem into two steps: 1) segmentation, and 2) classification based on the segments.
+We note that accidentally removing parts of real objects is not catastrophic so long as
+enough geometric features remain for the VGICP to reliably match against. As the SLAM
+Underwater Visual­SLAM
+31
+==PAGE:42==
+Figure 3.9: Examples of how the open water surfaces appear in the point clouds recon­
+struction of the ladder sequence. The coordinate frame shows the camera pose (North
+East Down (NED)). Due to the variety in where and how the surfaces are reconstructed it
+is difficult to determine a geometric pattern for creating a constraint for filtering
+mapping accumulates point clouds, regions that were mistakenly removed in one frame
+can often be recovered from later views. By contrast, overly conservative filtering that
+fails to remove open water regions lets false points accumulate in the mapping; these
+false measurements add up over time and eventually corrupt the reconstructed surface,
+producing an unusable model. For this reason we prefer a slight tendency to over­remove
+ambiguous areas while maintaining enough inlier structure for registration.
+Segmentation
+First we need a method to segment the image. We chose to go with Facebook’s Seg­
+ment Anything Model (image segmentation foundation model) (SAM) [45].
+SAM is a
+promptable, class­agnostic image segmentation foundation model that produces seg­
+mentation masks from simple prompts ­ points or boxes. SAM was trained on the large
+scale dataset SA­1B of 1B masks and 11M images to achieve strong zero­shot gener­
+alization. The authors provide an implementation of SAM as a python package, which
+can be cloned from GitHub at [46]. From the python package we will make use of the
+SamAutomaticMaskGenerator class, which creates a grid of points on an image, and uses
+those points to prompt SAM to generate masks for the entire image. Figure 3.10 shows
+some examples of masks generations on on images from the ladder sequence.
+The reader might wonder why we chose not to use Facebook’s proposed SAM succes­
+sor, Segment Anything Model 2 (successor to SAM) (SAM2), which is both faster, lighter
+and is stated to include all the capabilities of SAM. The reason is that in our tests SAM2
+completely failed to generate segments for the underwater scenes in our data, whereas
+SAM worked as expected. In the issues section of the SAM2 GitHub [47] multiple people
+reported degraded masks when using SAM2 for static image mask generation on low res­
+olution images, whereas SAM would work as expected. Since we are also dealing with
+low resolution images, it could likely be the same issue. Figure 3.11 shows the difference
+32
+Underwater Visual­SLAM
+==PAGE:43==
+Figure 3.10: Segmentation mask generated using SAM on the rectified left images from
+the ladder sequence. SAM produces high level segments for the image (background or
+object) and also fine segments for parts of objects, although these looks to be unreliable
+of the segmentation outputs of both SAM and SAM2 on the same image. By lowering
+the stability score and IoU threshold as suggested in the issue [48], we are able to ob­
+tain a lot more masks as seen in figure 3.11c, however the segmentation mask now also
+become much more noisy at the edges. Due to the difficulties experienced with SAM2
+we choose to go with the original SAM model, but we do note that it might be possible
+to obtain equally good segmentation with SAM2 given the right set of parameters for the
+mask generator.
+(a)
+Segmentation
+masks
+produced by SAM (default
+params)
+(b)
+Segmentation
+masks
+produced by SAM2 (default
+params)
+(c) Segmentation masks pro­
+duced by SAM2 w. parame­
+ter tuning
+Figure 3.11: Comparison of segmentation prediction from SAM (left) and SAM2 (middle
+and right). With the default parameters SAM2 fails to segment the entire image, while
+SAM succeeds. (right) shows the output of SAM2 after finetuning the mask generation,
+where it generates segemnts for almost the entire image, however the segments now also
+shows unexpected noise at the borders of the masks
+Underwater Visual­SLAM
+33
+==PAGE:44==
+Figure 3.12: Example showing the SAM segmentation output and the individual masks.
+The masks are plotted individually to enable the manual labeling of them into open water
+or not open water. For this image we for example create a label array: is_openwater =
+[0,1,1,1,1,0,0,0,0,0,1,0,0,1,1]
+Detection
+After segmenting the image we want to detect which of the segments belong to open
+water, and which don’t. First, we note that the open water segments are visually very
+distinctive. They are nearly textureless, so our intuition tells us that we might be able to
+distinguish them by their edge count. To investigate this we chose an image with clear
+open water and object segments. We then compute segmentation masks with SAM on
+the image and manually label the masks as open water or not open water, see figure 3.12.
+To reduce the labeling labor we chose to only label the segments with areas larger than
+1000 pixels. Afterwards we determine the edges within the labeled segments, and report
+their nedges/maskarea ratio. The resulting edge/area ratio for the first 15 masks in figure
+3.12 can be seen below:
+mask 0 (open water=0): Number of edges in mask 35830 edge/area=0.179335
+mask 1 (open water=1): Number of edges in mask 285 edge/area=0.003078
+mask 2 (open water=1): Number of edges in mask 275 edge/area=0.002973
+mask 3 (open water=1): Number of edges in mask 13 edge/area=0.001185
+mask 4 (open water=1): Number of edges in mask 135 edge/area=0.025622
+mask 5 (open water=0): Number of edges in mask 89 edge/area=0.036341
+mask 6 (open water=0): Number of edges in mask 579 edge/area=0.265110
+mask 7 (open water=0): Number of edges in mask 234 edge/area=0.108888
+mask 8 (open water=0): Number of edges in mask 401 edge/area=0.189867
+mask 9 (open water=0): Number of edges in mask 646 edge/area=0.330943
+mask 10 (open water=1): Number of edges in mask 214 edge/area=0.135186
+mask 11 (open water=0): Number of edges in mask 138 edge/area=0.122340
+mask 12 (open water=0): Number of edges in mask 108 edge/area=0.097122
+mask 13 (open water=1): Number of edges in mask 123 edge/area=0.115385
+mask 14 (open water=1): Number of edges in mask 80 edge/area=0.076923
+Avg edges ratio for open water=0.051479, Avg edges ratio for not open water=0.166243
+34
+Underwater Visual­SLAM
+==PAGE:45==
+Sometimes the segmentation mask of open water can overlap slightly with actual objects,
+which can cause a large increase in the edge­area ratio, due to the edge between the
+open water and object segment being added to the count. To avoid this, we therefore
+erode the segmentation masks and then use the eroded mask only for counting edges.
+On the other hand, the area of segmentation masks can also sometimes be too small,
+which adds floating line artifacts, to the point cloud. To fix this issue we therefore dilate
+detected open­water masks to increase their overlap.
+(a) Point cloud using non­dilated masks
+(b) Point cloud using dilated masks
+Figure 3.13: Example of masked point cloud generation where right is using dilated masks
+and left isn’t. Not using dilated masks can cause floating lines artifacts like the one high­
+lighted by a red boarder in the left figure.
+We observe that the large segments are reliable in their edge­area ratio and that small
+segments are not. Since small segments contribute less, due to their smaller size, we can
+keep it simple and ignore the masks whose area is below a certain threshold. We chose
+the threshold from the point at which we observe the edge/area ratio to become unreliable.
+Again we note that we don’t need to be conservative with the tuning here either. Figure
+3.14 provides an example of the processing steps for the open water surface removal.
+The final algorithm in pseudo code can be seen in 1, and the complete system with the
+open water surface removal can be seen in figure 3.16:
+To see the effect removing the open water surfaces has on the SLAM estimate we per­
+form two SLAM sessions on the ladder sequence. One without the open water surfaces
+removed, and one with. The result can be seen in figure 3.15. Without the surfaces
+removed we see that GLIM completely fails. The trajectory doesn’t correspond to the up­
+/down motion which we expect, and the point clouds are completely misaligned. With the
+surfaces removed, however, GLIM estimates the trajectory to have motion mainly in the
+z­axis and produces a mapping in which the input point clouds have been added along
+the same vertical line. In other words, a consistent estimate starts to emerge. Still, there
+seems to be a lot of noise in the trajectory and mapping so therefore we move on to
+tweaking some of the parameters to see if we can better the accuracy.
+Underwater Visual­SLAM
+35
+==PAGE:46==
+Figure 3.14: processing steps for the open water surface removal. Starting from the orig­
+inal image, the SAM masks and the edges are extracted, then the edges and masks are
+overlaid to compute the edges/area­ratio for each mask ­ masks with edge/area ratio be­
+low the chosen threshold is determined to be open water. The masks are filtered accord­
+ing to area such that small unreliable masks are discarded. The resulting segmentation
+for open water is depicted in the last image (lower right)
+Algorithm 1 Open water mask generation
+Require: Image I, SAM mask generator SAM, parameters Amin, τ, ke, kd
+M ←SAM.generate(I)
+E ←CannyEdges(I)
+Mo ←∅
+for all M ∈M do
+a ←area(M)
+if a < Amin then
+continue
+end if
+Me ←erode(M, ke)
+n ←P
+p E(p) · Me(p)
+ae ←area(Me)
+r ←n/ max(1, ae)
+if r < τ then
+Md ←dilate(M, kd)
+Mo ←Mo ∪{Md}
+end if
+end for
+return Mo
+36
+Underwater Visual­SLAM
+==PAGE:47==
+(a) w/o open water surfaces removed
+(b) w. open water surface removed
+Figure 3.15: Comparison of GLIM results on a point cloud input with and without open
+water surfaces removed. Without the surfaces removed GLIM completely fails. With the
+surfaces removed however we see an estimated trajectory (green line) of going up and
+down as well as a mapping in which the input point clouds have been added in the same
+area. In other words, a consistent estimate start to emerge
+3.7
+Final implementation
+We now lower the voxel size mentioned earlier until we see the matching produce the
+right correspondences. We obtained the best results at a voxel size of 0.05. We then
+perform another SLAM with GLIM and assess the results. This time we go beyond the
+qualitative assessment and also try to compare the z­axis of the trajectory estimate to the
+depth sensor’s reading. The results of the trajectory and mapping can be seen in figures
+3.17 and 3.18.
+The goal in regards to localization from of the domain adaptation was to obtain a trajectory
+that shows the correct movement trend in the ladder sequence: the ROV moving up and
+down, with minor lateral movement. Considering figure 3.18 (the green line) we see that
+GLIM estimates exactly that. The trajectory shows that the ROV did a short descent, then
+moved slightly in the North direction while shaking a bit, and then performed an ascent. If
+we consider figure 3.17 we see that the trajectory estimate from GLIM indeed reflects the
+distinctive changes in the z­velocity. However, we also see from the scale of the trajectory,
+that our system underestimates the motion of the ROV. By scaling the trajectory with a
+factor of 3.25 we get a very close ­ although noisy ­ overlap of the GLIM z­position with the
+depth sensor. This tells us that the trajectory does reflect real movement, but also that
+there is a scaling error introduced somewhere in our system ­ at least in the z­axis.
+The goal in regards to the mapping was to obtain a mapping which could reflect the real
+world ladder and beam which we saw in figure 3.6. Considering figure 3.18 we might
+initially think that GLIM just produced a random blob of points. However, if we consider it
+more carefully, we can actually make out the sides of the ladder at the top of the mapping,
+as well as a beam at the bottom. The middle of the mapping, however, seems to be heavily
+cluttered. This phenomenon could be explained by the fact that GLIM continuously adds
+point clouds to the mapping, overlapping points from the same objects on top of each
+other many times. If those points are overlaid slightly wrong (e.g. due to noise in the
+generated point clouds or pose estimate), then that noise will accumulate as more and
+more overlapping frames are added, making the total mapping blurry. This could be the
+Underwater Visual­SLAM
+37
+==PAGE:48==
+Figure 3.16: Final system from image data capture to trajectory and mapping. This ver­
+sion is with open water mask removal. The pipeline has three steps. The data acquisition,
+the point cloud generation, and the SLAM. The Blue outline with the docker logo indicates
+which steps are implemented inside the container. The dotted outline shows which pro­
+cesses are carried out in real time (green) and which aren’t (red)
+reason why we are seeing features at the top and bottom of the generated mapping, areas
+that are only observed from the ROV a few times, whereas the middle of the mapping is
+observed through most of the sequence, and therefore very like to have had a noisy point
+clouds added to it. Because we can’t know for certain whether it is the pose estimation,
+the point clouds or both that is the root cause for the blurry mapping, the correct approach
+to cleaning the mapping is difficult to state without getting more qualitative results. So
+although we ideally would have liked to see a cleaner mapping, we now conclude the
+domain adaptation and move on to a more controlled setup before fine­tuning.
+3.7.1
+Conclusion on domain adaptation
+What we have achieved in this experiment was to verify the qualitative ability of our pro­
+posed system to perform SLAM in a real, although simple, underwater environment. To
+dive deeper into the quantitative performance of the system to both understand and eval­
+uate it better, we need better references to the real world to compare to. Recall that the
+ladder sequence only has depth as a reliable reference. Therefore, in the next section we
+set up a controlled environment to run a series of tests that produce quantitative results
+to guide parameter fine­tuning and give a more thorough understanding of the system.
+38
+Underwater Visual­SLAM
+==PAGE:49==
+Figure 3.17: Skovshoved trajectory (z only) after domain adaptation. We also plot a scaled
+version of GLIM’s trajectory to highlight that the trend in movement on the ROV is cap­
+tured. The dashed red lines indicate points at which the z­velocity of the ROV changed
+distinctively. At these instances we also note that the trajectory produced by GLIM is
+equally affected
+Figure 3.18: Mapping and trajectory (green line) of the ladder sequence obtained at
+Skovshoved Havn after domain adaptation. GLIM’s trajectory estimate shows that the
+ROV did a short descent, then moved slightly in the North direction while shaking a bit,
+and then performed an ascent, which is consistent with the motion we expect. The map­
+ping is significantly blurry, especially in middle, however we are able to make out features
+from the ladder sequence at the top and bottom of the mapping. The figure shows which
+areas exactly match of with parts of the images from the ladder sequence.
+Underwater Visual­SLAM
+39
+==PAGE:50==
+40
+Underwater Visual­SLAM
+==PAGE:51==
+4
+Results
+4.1
+ASTA Pool
+The experiments will be conducted in the test facility Autonomous Systems Test Arena
+(DTU test facility) (ASTA). In area 3 of ASTA is a pool with dimensions 6.5 x 3.5 x 3m
+pool, as well as a motions capture system above it, referred to as the Optitrack. Figure
+4.1 shows the facilities of ASTA. By placing small retroreflective markers on objects within
+the Optitrack, their pose can be accurately tracked and recorded in real time. The software
+for the Optitrack produces the recording as a Comma­Separated Values (tabular data file
+format) (CSV) file where each entry consists of frame index, time in seconds after the start
+of the recording and the concatenated poses of all rigid bodies in the recording. The pose
+format is specified in the Optitrack frame and consists of the 4 quaternions components
+for orientation and the 3 xyz­coordinates for position:
+poseoptitrack = [qx, qy, qz, qw, x, y, z]
+(4.1)
+The markers must not be obstructed, so to allow the ROV to dive in the pool, the markers
+have to be extended from the ROV up above the water surface. When processing the
+data, the true position of the ROV and milk crate can be obtained by translating the position
+of the marker along the arm to the ROV and milk crate respectively.
+p = pmarker −Rmarkera
+(4.2)
+where a = [0, 0, L]T
+Extending the markers doesn’t come without challenges, however, as the added mass
+will shift the center of mass of the ROV, affecting the dynamics and making the position
+more unstable. Additionally, noise in the orientation measurement from the Optitrack will
+be amplified in relation to the arm length, making the position estimate more sensitive to
+noise. For these reasons, the AMR group uses an arm of length 1m which we will borrow
+for the experiments.
+Figure 4.1: The areas of ASTA. The pool and Optitrack (black frame) is in area 3.
+Underwater Visual­SLAM
+41
+==PAGE:52==
+Figure 4.2: The ASTA pool with added objects in it to increase the geometric features.
+The milk crate can be seen suspended from a wooden plank at the back center of the
+pool. The objects are added in the end of the pool where the crate is situated, since that
+end will make up most of the scenes viewed by the ROV
+4.1.1
+Setup
+The goal of the experiments is to obtain quantitative results for the different blocks of
+the proposed system (see figure 3.16) in a controlled setup. This means evaluating the
+3D­reconstruction, in the case of the point cloud generation, and also jointly evaluate the
+trajectory and 3D­mapping, in case of the SLAM. To include a scale reference, we place an
+object with a known location, determined by the Optitrack, and of known dimensions in the
+pool. In our case we suspend a milk crate with dimensions (H, W, D) = (0.26, 0.30, 0.4)m,
+under the water surface such that it is placed approximately at the same depth as the
+ROV when it is maximally submerged, while keeping retroreflective markers on it visible.
+We also measure the ROV’s position using the Optitrack.
+Because the pool itself contains very few features, we placed a couple of objects in the
+pool such that the 3D­reconstruction would include more geometric features. A point
+cloud with rich geometric details will aid GLIM’s matching, because there are more points
+to match against. The objects include pipes and 3­point truss. We anticipate that the more
+features/objects we add to the pool the better the matching becomes. However, because
+the literature shows that marine environments are often textureless and feature­sparse,
+we start out with just a small amount of objects. The amount of objects are chosen and
+placed such that all that all frames captured by the ROV will have at least one object in
+them.
+The setup for the pool can be seen in figure 4.2 and the marker attachments to the ROV
+and milk crate in figure 4.5. We note that the marker suspension methods are designed to
+be completely rigid, as bendable shape would make the pose recording unrepresentative
+of the real pose and invalidate the rigid body transformation4.2 of the markers.
+42
+Underwater Visual­SLAM
+==PAGE:53==
+Figure 4.3: The milk crate setup used to
+suspend the crate under water
+Figure 4.4: The marker suspension for the
+ROV. This was provided by the AMR group
+Figure 4.5: Marker setups. (left) shows the suspension used to keep the milk crate under
+water while keeping the retroreflective markers above. To ensure that the suspension is
+rigid we used a T­slot, and an manually bent metal L­profile to secure it to the crate and
+the wooden plank. (right) shows the suspension used on the ROV. We used 4 markers: 3
+markers required for determining pose and 1 for redundancy ad case of tracking failures
+Underwater Visual­SLAM
+43
+==PAGE:54==
+4.1.2
+IMU calibration
+To calibrate the IMU we used the QGroundControl sensor setup section [49]. Unfortu­
+nately we were unable to obtain a good calibration for the accelerometer on the onboard
+IMU for the ROV. Therefore we ended up manually estimating the bias from a standstill
+sequence. The bias was calculated as the mean error in each direction:
+ba =
+ 
+1
+N
+N
+X
+i=0
+a[i]
+!
+−g
+(4.3)
+where a[i] is the i­th accelerometer sample and g is the gravitational acceleration (we use
+g = 9.81 m/s2). The measured bias ba is removed from subsequent measurements by
+simple subtraction, acorr = araw −ba.
+4.1.3
+Optitrack time offset
+The absolute timestamps of the Optitrack and ROS doesn’t line up due to a timing offset.
+To determine this timing offset we started a motion capture session, and then a ROS
+recording. Then the ROV was lifted such that it would show both a change in the Optitrack
+z­axis and in the images captured from the ROV. The Optitrack data showed movement
+at 55s after the start of the recording at 2025­07­23 12.40.38.412 PM (1753267238.412s)
+and the ROS recording showed movement at 1753267384.782176149s. This gives a time
+difference of
+1753267396.782176149s −(1753267238.412s + 55.115s) ≈103.26s
+(4.4)
+This offset will be used for experiments to align the ROS timestamps with that of the
+Optitrack.
+4.1.4
+Frame conversion
+It should also be noted that while GLIM uses the ENU convention, the Optitrack data is
+recorded as (x, y, z) = (forward, left, up). This means that consequently, the Optitrack
+x and y axes are swapped relative to GLIM’s horizontal axes, as well as the direction of
+left (y) and east (E) axis. More explicitly:
+
+
+E
+N
+U
+
+=
+
+
+0
+1
+0
+1
+0
+0
+0
+0
+1
+
+
+
+
+xo
+yo
+zo
+
+.
+(4.5)
+44
+Underwater Visual­SLAM
+==PAGE:55==
+4.2
+Point cloud assessment
+4.2.1
+Distance evaluation
+Figure 4.6: Top­view indicative schematic of the distance evaluation experiment. The
+ROV moves toward the stationary (green) milk crate along the dashed (red) line. The
+retroreflective markers can be seen on top of both the ROV and the crate. At 0.25m
+intervals, a point cloud is generated used for measurement (example shown in the figure).
+To quantify the effect of camera­to­object distance on point cloud accuracy, we positioned
+the ROV at one end of the pool and the milk crate at the opposite end (aligned vertically).
+The ROV was then driven slowly toward the crate while capturing stereo images at 30 Hz.
+At 0.25 m intervals, point cloud reconstructions were generated, from which the crate’s
+width, height and distance were measured. A sketched setup can be seen in figure 4.6.
+We use the Optitrack to record the position of the ROV and the stationary milk crate, and
+the euclidean distance between them. We use the following equation to calculate the
+relative percentage error:
+PercentError = |xtrue −xmeas|
+xtrue
+· 100%
+(4.6)
+Figure4.7 shows the measured dimensions from within the point cloud reconstruction and
+the real world dimensions vs distance. Figure 4.8 shows the relative errors derived from
+figure 4.7 as well as a linear fit. The linear fit is found by determining the 1­st order poly­
+nomial p which minimizes the sum of squared errors over all points. See equation4.7[50].
+We score the fit using the R2­score which measures how well a line approximates the real
+data where 1.0 is the best possible fit and 0.0 is the worst possible. R2 is determined from
+the sum of squared residuals SSres and the total sum of squares SStot, see equations 4.10
+E =
+k
+X
+j=0
+|p(xj) −yj|2
+(4.7)
+Underwater Visual­SLAM
+45
+==PAGE:56==
+R2 = 1 −SSres
+SStot
+(4.8)
+SSres =
+n
+X
+i=1
+(yi −ˆyi)2
+(4.9)
+SStot =
+n
+X
+i=1
+(yi −¯y)2
+(4.10)
+Figure 4.7: Distance­dependent reconstruction accuracy. The plots show point­cloud­
+measured width, height and distance of a suspended milk crate with ground­truth dimen­
+sions (H, W) = (0.26, 0.30) m and doptitrack(t), (samples are taken at 0.25 m intervals).
+Note: as distance between the ROV and crate decreases, so does the reconstruction
+error
+.
+We see that as the camera­object distance decrease, the reconstruction error also de­
+creases. This relation seems to be proportional to the distance, so we fit a linear model to
+both the width and height plot. Although, the fit looks good, both visually and from its R2­
+score, it should be noted that the points at both the start and end of the experiments fall
+below the line, which suggest that there could be a more complex relation at longer and
+shorter distances than those sampled during the experiment. Within our interval however
+we find a linear relation of werror = 8.7d+2.4 with score R2 = 0.977 and herror = 9.3d+3.9
+with score R2 = 0.964. The estimated distance error percentage also looks to be decreas­
+ing linearly, correlated with the distance until d < 2m, at which point the error increases
+46
+Underwater Visual­SLAM
+==PAGE:57==
+Figure 4.8: Relative percent error for the plots in 4.7 between the reconstruction and the
+reference (see equation 4.6). A good linear fit was found for the width and height, while the
+depth doesn’t show a purely linear relation. Notice that the width and height fits have very
+similar shapes, which suggest that they might be affected equally by the camera­to­object
+distance.
+again. This tells us that the relative distance error is not just a linear correlation with the
+true camera­to­object distance.
+4.2.2
+Multiple objects
+To examine if different types of objects affect the point cloud generation differently we per­
+form an experiment where we place a multitude of objects within the camera frame. The
+objects are a superset of the ones used in the other experiments. We then compare the
+dimensions of the objects within the point cloud to their real world measured dimensions.
+The measurements and comparisons can be seen in figure 4.9.
+The experiment was planned before the discovered relation of the reconstruction dimen­
+sions to the camera­to­object distance, and most importantly that the error across the
+image plane is different from the error into the plane. Since the distances sampled in this
+experiment is neither purely into the image plane or across it (and because the number
+of samples is small) it becomes difficult to quantitatively state anything about the effect
+that different objects has on the reconstruction accuracy. We can however see that the
+sampled distances which go mostly along the image plane have smaller relative errors
+than those going mostly into the plane, which reaffirms the conclusions from the previous
+experiment 4.2.1.
+Underwater Visual­SLAM
+47
+==PAGE:58==
+Figure 4.9: Reconstruction distances vs real distances. The red value is the measured
+distance from within the reconstruction and the green value is the real distance. Note
+although difficult to see, the figure shows a grayscale point cloud ­ not a monochrome
+image
+4.2.3
+Failure scenarios examples
+The preceding results have all been obtained in cases where the point clouds have been
+visually consistent with the real world. From observation, however, there are conditions
+where the system fails to generate consistent point clouds, making them unusable with
+GLIM. The next section will try to showcase these scenarios.
+Water surface reflections
+First the most notable failure mode is when the images contain downward reflections from
+the water surface, see figure 4.10. The greater the part of the image the water reflection
+takes up, the more nonsensical the disparity estimate is. In the examples shown in the
+figure only a small fraction of the image can contain reflections for the reconstructions
+to be consistent with the real world. When used with GLIM, even short periods of point
+clouds generated in the presence of water surface reflections like those shown in the figure
+can cause GLIM to fail. The fact that GLIM fails with such an input is to be expected
+as it is impossible to find correspondences between point clouds that are primarily just
+hallucinations.
+Consistency issues
+Although FoundationStereo is often able to detect the walls of the pool and assign con­
+sistent disparity along it, the distance to the wall, can vary a lot between frames when
+the features are sparse. Figure 4.11 shows an example of three frames captured within
+the same second which exhibit a significantly different disparity estimation. We have also
+noticed inconsistent disparity estimates on objects moving in and out of frame. Two ex­
+amples of this can be seen in figure 4.12.
+These findings about inconsistencies between disparity estimates on objects and walls
+should not come as a big surprise. The reason is that the inconsistencies appear in
+scenarios where there are few visual clues to infer image depth from. The scenarios
+shown are ambiguous and therefore produce varying estimates.
+48
+Underwater Visual­SLAM
+==PAGE:59==
+Figure 4.10: Four examples of disparity estimation from frames where water surface re­
+flections are visible to various degrees. The red rectangles outline the part of the image
+which contains the water surface reflections. In this example all but the lower right dis­
+parity estimate would cause GLIM to fail.
+Figure 4.11: Example of greatly varying disparity prediction on the same wall with ap­
+proximately same camera­to­object distance captured within the same second. The wall
+produces varying estimates because there aren’t enough visual clues to determine the
+actual distance. Notice that the network succeeds to detect the wall as a wall and can
+therefore assign a wall­consistent disparity along it
+Underwater Visual­SLAM
+49
+==PAGE:60==
+Figure 4.12: Example of inconsistent disparity estimates on objects moving in and out
+of frame. (Upper) shows the beam holding the crate ’merging’ with a pipe behind it until
+enough visual features become present for the network to separate them. (Lower) shows
+a varying disparity estimate of the end of the crate as it moves into frame
+50
+Underwater Visual­SLAM
+==PAGE:61==
+4.3
+GLIM assessment
+To evaluate GLIM we ran three simple SLAM experiments and then assessed the result­
+ing trajectories and maps. Each experiment consists of moving the ROV along a straight
+line aligned with one coordinate axis: vertical (up/down), longitudinal (forward/back), and
+lateral (sideways). We used the same setup for the pool as in figure 4.2 and used the Op­
+titrack for reference. For the vertical (up/down) sequence the ROV dives, so the Optitrack
+markers cannot remain above water; in that case we rely on the onboard depth sensor as
+the reference for the z­axis.
+When processing the results for the experiments we observed that GLIM had a a tendency
+to start rotating the pose estimate when viewing the end wall of the pool ­ as was previously
+observed to happen (see figure 3.15a). We therefore employed the same method by
+masking out the parts of the images which consist of low texture segments. This alleviated
+the rotation issue. Since the masking algorithm was designed for open water and not for
+the walls of the pool in ASTA, it doesn’t always remove the entire wall as desired. This is
+especially the case on parts of the walls which are not perpendicular to the ROV ­ such
+as the bottom, sides and corners. This method unfortunately also often segments out the
+smooth surfaced pipes which were added to the pool, reducing the amount of features.
+Using the masking method does, however, have the benefit of not only providing results
+at all, but also better simulates the intended use case, where most of the image will be
+masked out due to it being open water. Figure 4.13 shows an example of GLIM rotating
+the pose when the ROV should have near zero angular velocity.
+Figure 4.13: Example: The pose estimate from GLIM starts to rotate when only the end
+wall is viewed. Notice how the blue lines (Up­direction) starts to fan out together with the
+rectangular walls. A full video can be seen at https://youtu.be/IQECAHpGCiM
+The depth limitation on the ROV which was introduced to keep the retroreflective marker
+above water to use the Optitrack, proved to be a significant limitation due to the effect
+that the water surface reflections has on the disparity prediction from Foundation Stereo.
+At the maximum depth the water surface was often within the FOV of the ROV. This was
+especially true for the back/forth sequence, but also in the up/down sequence. For the
+up/down sequence we had to crop the sequence at the start and end to remove the images
+with water surface in them which reduced the sequence length significantly. The back and
+forth sequence had large portions of water surface in almost all images and therefore had
+to be scrapped completely.
+Underwater Visual­SLAM
+51
+==PAGE:62==
+Figure 4.14: Top­view indicative schematic of the sideways experiment. The ROV moves
+from the lower right side of the pool (lower wall in image) to the left side (upper), and
+back. The path follows the dashed (red) line. The retroreflective markers can be seen on
+top of both the ROV and the crate. At 30Hz images are captured from which disparity is
+predicted, then masked, and converted to a point cloud
+4.3.1
+Sideways sequence
+We start by examine the results from the experiment which had the least problems, the
+sideways sequence. An overview of the experiment can be seen in figure 4.14. We split
+the results into two parts: 1) the trajectory evaluation, and 2) the mapping evaluation.
+Trajectory: The trajectory estimate by GLIM vs the Optitrack reference can be seen in
+figure 4.15. We also plot a scaled version of the x­axis of the trajectory like we did in the
+end of the section about domain adaptation (see figure 3.17). This time the scale is not
+picked freely, but instead determined by using the relation between predicted width and
+error found in the experiment shown in figure 4.7. We notice that after applying the scale,
+the x­trajectory follows the same movement trend as the Optitrack reference, showing a
+stop like the reference, at the time when the ROV reaches the left wall. The results show a
+score (Root Mean Square Error (RMSE)) in the xyz­trajectory of 0.501m, 0.068m, 0.145m,
+and a RMSE of the scaled x­trajectory of 0.271m. The much smaller Y and Z RMSEs
+primarily reflect the fact that the ROV’s trajectory in this experiment is dominated by motion
+along X. Interestingly we see a larger RMSE in Z compared to Y, although we know that
+the ROV has almost no movement in z, but a little in Y. in other words, relative to the
+motion of the ROV the Z­estimate shows a much greater error than the Y­estimate.
+Mapping: The mapping estimate produced by GLIM can be seen from 3 views (diagonal,
+overhead, front) in figures 4.16. First we note that objects in the map appear very distorted.
+Consider for example the milk crate which looks to be fanned out, the extruded ladder and
+the truss, which has lost its fine geometric details. The figure also highlights a pipe which
+has been duplicated four times. Although the objects appear distorted, we are still able
+to make out some fine details on them which have allowed us to recognize them in the
+map afterward. Furthermore the objects are positioned in the right areas of map, and
+match their positions in the real pool setup. We also observe that the trajectory within the
+map shows the ROV moving sideways across the pool, reaching all the way from wall
+to wall, which matches what actually happened during the experiment. We note that the
+map appears polluted by seemingly meaningless point segments, which is partially due to
+52
+Underwater Visual­SLAM
+==PAGE:63==
+Figure 4.15: GLIM’s trajectory estimate on the sideways sequence. Each xyz­component
+are plotted separately. The GLIM X­axis trace is also shown after applying a scale cor­
+rection derived from the distance–error relation in figure 4.7. Due to how the sideways
+experiment was performed we mainly expect motion along the x­axis (see figure 4.14)
+artifacts from parts of the walls which hasn’t been completely removed by the open water
+surface removal method. These artifacts are to be expected as the open water surface
+removal wasn’t designed for this use case, so it does not perform optimally.
+Underwater Visual­SLAM
+53
+==PAGE:64==
+(a) A diagonal view of the mapped environment.
+(b) An overhead view of the mapped environment.
+(c) A front view of the mapped environment. (the gray line is the z = 0 viewed
+from the side)
+Figure 4.16: Different views of the mapped environment for the sideways experiment.
+Landmark objects and walls are highlighted, as well as the world frame orientation in the
+left corner.
+54
+Underwater Visual­SLAM
+==PAGE:65==
+Figure 4.17: Over head view of the GLIM’s mapping from the sideways sequence, and the
+sampled points and distances from it. The green line at the bottom shows the trajectory
+estimate. The points and distances are sampled as in the distance evaluation experiments
+(see figure 4.7). Note that due to the noisy mapping estimate, the sampled points includes
+great uncertainty
+To inspect the global scale of the mapping produced by GLIM we sampled points di­
+rectly within it and compared their distances to the corresponding real world dimensions
+obtained from the Optitrack, and the known pool dimensions. The sampled points are
+shown in figure 4.17. After determining the distances between the points, both within the
+mapping, and the real world, we determined the relative error by using the formula:
+α = dGLIM −dOptiTrack
+dOptiTrack
+· 100%.
+(4.11)
+The distances and relative errors between GLIM and the Optitrack are shown in table
+4.1. The table shows that GLIM underestimates the map dimensions. The wall­to­wall
+span ­ the x­direction ­ is underestimated by ≈43%. In the y­direction the relative errors
+are: ROV–crate ≈48%, the crate–wall ≈59%, and the ROV–wall ≈52%. As with the depth
+experiment we see that the relative error increases in correlation with the camera­to­object
+distance. We note that sampling points like this in a noisy mapping inevitably introduces
+a lot of error due to the uncertainty about where to sample the points given the noisy
+surfaces. This mean that the numerical values reported in table 4.1 should not be used
+as an exact measurement.
+Underwater Visual­SLAM
+55
+==PAGE:66==
+Pair
+dGLIM [m]
+dOptiTrack [m]
+|∆| [m]
+Relative error (%)
+Left wall – Right wall
+2.00
+3.50
+1.50
+43%
+ROV – Crate
+1.25
+2.41
+1.16
+48%
+Crate – End Wall
+0.64
+1.55
+0.91
+59%
+ROV – End Wall
+1.89
+3.96
+2.07
+52%
+Table 4.1: Comparison of measured distances from the GLIM map and references (Opti­
+track + pool dimensions). Relative error is computed as |dGLIM−dOptiTrack|
+dOptiTrack
+· 100%
+Figure 4.18: Side view indicative schematic of the up/down experiment. The ROV de­
+scends from the water surface, to the bottom of the pool and then back up. The path
+follows the dashed (red) line. The depth sensor is used for reference. At 30Hz images
+are captured from which disparity is predicted, then masked, and converted to a point
+cloud.
+4.3.2
+up/down sequence
+Next we have the up/down sequence. For this experiment we only show the z­trajectory
+and compare it to the depth sensor reference. The reason we don’t use the Optitrack
+reference is because the markers would get obstructed during the dive, figure 4.18 show
+the setup for the up/down experiment.
+While processing the results we saw that the up/down sequence has a very few geomet­
+ric features in the scenes at the bottom of the pool. If we apply the open water surface
+removal to those scenes then there are almost no geometric features left for the GLIM to
+match against, which causes great instability during the SLAM. Therefore, we disable the
+open water surface removal and try to rely on the end wall in the scene for matching. As
+shown earlier the walls are not guaranteed to have a reliable distance estimate and are
+correlated with incorrect orientation estimation, so we don’t want to rely too much on the
+walls. Therefore we chose to use open3d’s plane segmentation method to segment the
+wall and then downsample the points on the wall thereby giving it less influence on the
+matching. Figure 4.19 shows the resulting SLAM in three scenarios: 1) no processing
+on the walls, 2) downsampling of the wall segments and 3) walls removed completely.
+We obtain the most visually consistent trajectory from the second method by keeping the
+56
+Underwater Visual­SLAM
+==PAGE:67==
+walls, but downsampling them to reduce their presence. Mapping:
+Although the SLAM with the downsampled walls achieves the most consistent trajectory,
+its mapping is not very satisfactory. The main geometric feature in the scene is the milk
+crate and the ArUco board behind it, but the mapping only shows a consistent reconstruc­
+tion of the ArUco board, while the crate is duplicated. An explanation for why the crate is
+duplicated even though it is one of the main features in the scene is that it moves out of
+the FOV while the ROV is close to the bottom of the pool. The ROV stays at the bottom
+of the pool for long enough for the frames with the crate in it to move out of the fixed­lag
+optimization window (5s) so when the crate again enters the FOV during the ascent, it
+might not have the previous crate to register against. This is of course assuming there
+isn’t a keyframe in the optimization window which includes the crate.
+(a) up/down sequence with
+walls
+(b) up/down sequence with
+downsampled walls
+(c) up/down sequence with
+walls removed
+Figure 4.19: map and trajectory of the up/down sequence. Visually, the most consistent
+trajectory was obtained using the downsampled walls
+Trajectory (in Z)
+When comparing the trajectory in Z vs the depth sensor, we see that although the tra­
+jectory looks visually consistent in the mapping, it doesn’t align well with the changes in
+velocity that the depth sensor experiences. We see from the Z­trajectory in figure 4.20
+that when the ROV descents below 2m GLIM fails to track its position and instead es­
+timates the ROV as being at a nearly constant level. A likely cause for this is the lack
+of features at the bottom of the pool, which causes GLIM to lose track of geometries to
+match against.
+4.4
+Troubleshooting
+By performing the experiments in ASTA we identify two notable problems which we would
+like to investigate further to understand the root cause and possibly how to fix them. The
+problems identified are 1) the negative influence that the pool walls have on GLIM’s ori­
+entation estimate, and 2) the scaling issue in the point cloud reconstructions.
+4.4.1
+VGICP on the pool walls
+During the experiments performed in ASTA we experienced many problems with GLIM’s
+pose estimation in cases where the 3D reconstructions included reconstructions of the
+pool walls. We were able to somewhat circumvent this problem by using the open water
+surface removal method, but it was mostly a quick fix to achieve some results. In this
+section we would like to investigate why GLIM fails in the presence of the pool walls.
+First we recap the observed failure scenarios. What we experienced was that when the
+reconstruction included a large part of a flat surface, the pool wall, GLIM would start mis­
+estimating the orientation of the ROV, causing the pose to rotate, and thereby fanning out
+the mapping. In the sideways sequence we mostly experienced this at the middle of the
+Underwater Visual­SLAM
+57
+==PAGE:68==
+Figure 4.20: trajectory in z vs the depth sensor, produced from the up/down sequence
+with the downsampled walls. While the ROV’s depth is below 2m the z­component of
+trajectory shows the ROV standing still, which we can see from the depth sensor reference
+isn’t correct
+sequence where only one wall, the end wall, was in the camera’s FOV. Before using the
+open water surface removal method, we tried using open3d’s plane segmentation method
+[43] to remove the walls, but it only managed to segment the end wall and not the side
+walls. With only the end wall removed we performed a SLAM session, and saw that the
+position estimation of the ROV had a tendency to ’cling’ to the side wall when they were in
+the FOV. In other words GLIM would estimate the ROV’s position to be mostly stationary
+while the side wall was visible, and only start moving when it wasn’t anymore.
+While considering the cause for this we note that the authors of VGICP state, that the
+covariance regularization used in GICP makes it work as a plane­to­plane ICP [51]. It is
+safe to assume that this effect carries over to the VGICP algorithm which uses the same
+regularization method. This plane­to­plane registration might be the root of the issue with
+the walls of the pool. What a plane­to­plane method penalizes is the misalignment of
+the normals and tangential of planes. This matching causes planes to match such that
+they lie flat on each other. This heavy emphasis on having the planes match on top of
+each other would explain the clinging to the walls. The plane­to­plane matching however,
+doesn’t constrain the rotation of the planes, so when only one surface is in view, it cannot
+properly constrain the orientation. This could be why we see the orientation estimates of
+point cloud input in the middle scenes of the sideways sequence where only the end wall
+is visible.
+While processing the results for the up/down sequence we were able to improve the vi­
+sual consistency of the trajectory estimate by downsampling the points on the end wall,
+effectively making the walls have less influence in the matching. This result suggests that
+when we are presented with point clouds in which the majority of the points lie on a sin­
+gle large plane, then we can obtain a better estimate by putting less emphasis on those
+planes compared to the other geometries in the scene.
+4.4.2
+Reconstruction scaling issue
+Next we want to understand the scaling issue in the point clouds. We first consider the
+distance dependency in the reconstruction error explored in the distance evaluation ex­
+periment 4.8. The results that we obtain for the 3D­reconstruction shows that although
+58
+Underwater Visual­SLAM
+==PAGE:69==
+the crate is reconstructed visually well, it exhibits a distance dependent relative scaling
+error in all three dimensions. The width and height of the crate (horizontal to the image)
+show a similar linear correlation with the distance. This is especially apparent by viewing
+the raw data points. Let’s examine the reprojection equation used for calculating X and
+Y to recall which variables influence the estimate to locate the source of error:
+X = (u −cx)Z
+fx
+Y = (v −cy)Z
+fy
+(4.12)
+Since both the center points (cx, cx) and focus lengths (fx, yy) are constants, they cannot
+be the cause of the distance correlated relative error. An error in these would show a
+constant relative error. This means that the error must be found in Z (the distance going
+into the image). If the error is from Z then that would also explain why the distance
+correlation for X and Y is so similar as that is the only variable present in both equations.
+From the results we see that Z also exhibits a relative scaling error. The error seems to be
+correlated to the distance but not purely linearly like the width and height. At close camera­
+to­object distances (< 2m) we find that the relative error stops decreasing and instead
+increases. The rate of increase looks to be exponential, but as there aren’t enough data
+points to safely conclude this. What we can say is that while X and Y show strong linear
+correlations with the distance, Z exhibits a more complex relation. The total variation in
+the relative error also exhibits a lower range for Z (∈{39%, 47%}) whereas the range for
+X and Y are (∈{9%, 44%}) and (∈{10%, 48%}) respectively. Let’s examine the equation
+used for calculating Z to recall which variables influence its estimate:
+Z = fB
+d
+(4.13)
+We can rule out the baseline as the source of error by double checking the datasheet, in
+which we see that we are indeed using the right value (75mm). Again, an error in f would
+show a constant relative error, so it cannot be the cause for a distance correlation either.
+This leaves us with the raw disparity prediction of FoundationStereo.
+Being a neural network, it is quite difficult (maybe impossible) to understand the inner
+workings of the model. It could be that the distance correlation which we see is a result
+of FoundationStereo not being trained on underwater imagery, and therefore behaves
+unexpectedly, e.g. due to the lighting or textureless regions. One thing to note is that
+FoundationStereo was evaluated on RGB­images, but we use monochrome, so that is
+a discrepancy. The authors do however, state that they also have seen good results on
+grayscale images, so it is not the most likely explanation for the scaling error.
+What we can examine however, is whether there is being injected any distortions or ar­
+tifacts into the model via the input. FoundationStereo assumes rectified and undistorted
+images as its input. Failing to properly provide this would explain why the model fails to
+predict the right disparity. We have verified the intrinsics and distortion parameters by
+performing our own camera calibration, using Kalibr with a pinhole model with radial and
+tangential distortion. Furthermore we have visually inspected the images post distortion
+and rectification to verify that the images looks to be correctly rectified and doesn’t include
+any radial and tangential distortion. Of course radial and tangential distortion doesn’t ac­
+count for all possible distortion in existence. A type of distortion which we cannot detect
+from visual inspection (unless incredibly severe) is refractive distortion. This type of distor­
+tion occurs when light passes through materials with different refractive indexes, causing
+Underwater Visual­SLAM
+59
+==PAGE:70==
+the angle of incidence to change. This refraction causes objects to appear closer than
+they actually are, though the effect isn’t uniform. This explanation is further supported
+by the paper [52] which states that the refraction of light at the water­glass­air interfaces
+causes distortion that is dependent on scene distance. This refractive distortion cannot be
+fully absorbed by standard lens distortion parameters, and therefore requires the model­
+ing of the housing distortion as well. The paper provides an open source tool for housing
+calibration which can be used to account for the port distortion.
+During this investigative process we also discovered a bug within the proposed system.
+After the rectification step, we have accidentally saved the initial camera intrinsics which
+are only valid for the undistorted images prior to the rectification. After rectifying the im­
+ages we essentially have a new virtual camera as described earlier, so the intrinsics
+change. The new intrinsics are the same for the left and right camera (ensured by the
+rectification) and can be seen in equation 4.14
+Krect =
+
+
+730.44
+0.00
+318.73
+0.00
+730.44
+240.52
+0.00
+0.00
+1.00
+
+
+(4.14)
+And the intrinsics prior to rectification 4.15:
+K =
+
+
+610.60
+0
+321.92
+0
+610.74
+237.84
+0
+0
+1
+
+
+(4.15)
+(4.16)
+We note that the focal lengths are significantly different from the original intrinsics, and
+therefore must have a significant influence on the reconstruction. Using the wrong focal
+length will show up as a bias in the relative error of Z which would explain why the relative
+error doesn’t seem to be reaching 0 at any point.
+60
+Underwater Visual­SLAM
+==PAGE:71==
+5
+Discussion & Future Work
+Before concluding the project we try to zoom out to restate the project objective and eval­
+uate how well it has been addressed.
+The main goal for the project was:
+”To design and develop a VSLAM algorithm to enable the surveillance of Criti­
+cal Maritime Infrastructure, exploring the integration of a stereo camera system
+with IMU”
+To address this objective we have proposed a Range­Inertial SLAM system based on
+stereo matching using a pretrained neural network as the stereo matching algorithm.
+Specifically, we used the SLAM algorithm, GLIM [9], and the stereo matching neural net­
+work FoundationStereo[22].
+The proposed system facilitates multi­sensor fusion in two important ways: 1) a factor
+graph backend which allows us to add constraints of any type and 2) an input with a uni­
+form data representation (point cloud) which provides great freedom in merging different
+types of range sensors, both by tight and loosely coupled methods.
+We have implemented the proposed system on a ROV, the BlueROV2 with the heavy
+configuration ­ a vehicle suited for underwater surveillance. During the implementation
+process we have used a data sequence from a real underwater environment for qualitative
+assessment. The sequence was captured at Skovshoved Havn and its content depicts
+marine infrastructure, see fig. 3.6.
+It was found that the zero­shot capability of FoundationStereo extends to real underwater
+scenes, which we conclude from its visually consistent reconstructions in the environment.
+We found that when used under water, FoundationStereo interprets open water image
+segments as surfaces in close proximity the camera, instead of infinitely far away points.
+To address this issue we devised a method to segment the open water parts of the image,
+thereafter using the segments to mask out the erroneous disparity prediction on the open
+water regions. To realize this algorithm we first use SAM [45] to segment the image.
+Then we detect the edges in the image and calculate the edges pr. area for each of the
+segments produced by SAM. We then exploit the textureless property of the open water
+segments to label the segments either as open water or not, based on their edge/area
+ratio. With this method we are able to filter the open water segments of in the real marine
+images from the ladder sequence at Skovshoved Havn. The edge/area threshold is fine­
+tuned for the OAK­D lite and therefore likely needs camera­specific fine tuning if a different
+sensor is used. Furthermore, the method was only evaluated on the ladder sequence
+and therefore is not guaranteed to yield the same results in other marine environments,
+especially if those environments feature less texture, increased suspended particles or
+significantly different lighting. This is because these properties affect the edges within the
+image and possibly also the quality of SAM’s segmentation output.
+In the ladder sequence, however, the method was able to successfully remove the open
+water segments. Thereby we were able to demonstrate a functioning SLAM with our pro­
+posed system, on a real maritime infrastructure from the sequence in Skovshoved Havn.
+From these results we observe that the trajectory and mapping estimate is consistent with
+the motion of the ROV and geometry in the environment. At the same time we also note
+Underwater Visual­SLAM
+61
+==PAGE:72==
+that the mapping is very noisy, especially in the middle of the sequence where many point
+clouds are overlapped. The authors of GLIM obtain similarly noisy mappings when us­
+ing stereo matching, which they attribute directly to distorted input point clouds. Since
+we are using a probabilistic framework for stereo matching, a neural network, the noisy
+mapping could be an inevitable consequence of using such a method. The reason is that
+even though the point clouds doesn’t look noisy when viewed individually, small variations
+in disparity estimates from FoundationStereo will accumulate when multiple point clouds
+are merged. On the other hand SLAM is a joint method that optimizes both trajectory and
+mapping simultaneously, meaning that a noisy mapping also could be caused by a noisy
+pose estimate, which causes point clouds to be overlapped slightly wrong. This effect will
+also accumulate noise over time in the same way. The high level of reconstruction noise
+reduces usable detail: in practice the pipeline reliably recovers only large­scale shapes,
+while fine structures are lost or blurred. To give a confident answer to what the cause of
+noise is, a quantitative assessment of the point cloud reconstruction, and the SLAM is
+needed.
+To this end we devised a number of simple experiments in ASTA, evaluating the stereo
+matching and the SLAM both separately and jointly, to understand their individual perfor­
+mances and their mutual influence. The experiments were designed to be as simple and
+easy for the proposed system to solve, such that they would have limited sources of error
+and would be easy to interpret.
+To give a definite answer to the earlier posed question we had to be able to rule out either of
+the two possibilities: 1) noisy pose estimate or 2) noisy input point clouds. Unfortunately,
+we did not manage to show an experiment without noise in the pose estimate or without
+noise in the point clouds, so we cannot provide a definite answer. We do, however, see
+from the results that the trajectory estimate is very noisy 4.15, so although we cannot say
+that the pose estimate is the only reason for the noisy mappings, we can at least assert
+that it is a significant source of error. The mapping results from the pool experiment further
+suggest that the noisy maps could be from improper point cloud registration, as most of
+the objects in the scenes seems to have been duplicated. An improper registration would
+provide an erroneous pose estimate, which provides a noisy trajectory.
+While investigating the cause for the noise, we found some concrete problems which likely
+has an effect on the pose estimate. The problems are:
+Scaling error: We find that the trajectory makes sense within the map that is has built,
+however the dimensions and trajectory is scaled down in reference to the real world. We
+find that this scaling error stems from the point cloud reconstructions which exhibit a scal­
+ing error in the depth estimate. We suggest that this scale difference is caused by two
+things: a refractive distortion from the ROV’s payload housing and the erroneous use of
+the pre­rectification intrinsics during the metric re­projection. The latter is a bug so it is
+addressed simply by correcting the used intrinsics. The latter can be addressed by includ­
+ing the refraction of the flat glass port of the payload housing into the distortion model,
+possibly by using the calibration tool provided in [52]. Addressing these could remove
+the scaling issue observed in the reconstruction. In fig. 4.15 we were able to correct the
+scale of the trajectory in X in post­processing by using the distance dependency found
+in fig. 4.7, to determine a scaling factor. We used the dominant geometry in the scene
+(the milk crate) to determine a constant scaling factor, but in reality this is only an approx­
+imation because the true scale varies throughout the point cloud and between frames. To
+fully compensate for the scaling we would need to correct the reconstruction prior to the
+estimation. By doing this the IMU and point cloud will have the same scale, and so they
+62
+Underwater Visual­SLAM
+==PAGE:73==
+can be optimized properly together. Currently the fusion of their estimates must always
+be disagreeing on the total motion. For the mapping and trajectory estimates, this would
+not only correct the scale but likely also decrease the noise and misalignment.
+Planer surfaces: The large flat surfaces dominates VGICP’s matching but doesn’t con­
+strain the orientation estimate well, causing unstable estimates when only one surface
+is present. During the experiments we circumvent this issue by either segmenting out
+or downsampling the pool walls. By employing this method we observe that the objects
+in the foreground show improved alignments, which tells us that their influence on the
+matching has increased. For our tests in GICP the large emphasis on the walls had a
+negative influence on the overall estimate, likely owing to the fact that most of the time
+only one wall was visible. The plane­to­plane matching is very beneficial to have in indoor
+environments, where many walls with different orientations are in view at the same time,
+as this constrains the pose estimate accurately and efficiently. In an underwater environ­
+ment, however, we often find ourselves in open areas. As explained in the theory section
+cameras have significantly reduced range under water ­ less than 5m. Given this short
+range and the reduced FOV from overlapping stereo images, scenarios where multiple
+walls are present at the same time is less likely. For future development it would be inter­
+esting to examine if and when the plane­to­plane matching is beneficial for under water
+settings ­ especially when used with a close range sensor.
+We alleviated the issue by removing points from the walls, however a better solution might
+be found by instead adding more points to the reconstruction, e.g. from a secondary
+range sensor with a longer range or larger FOV. Since acoustic sensors have much longer
+range than the camera, and is highlighted as a complimentary sensing modality in many
+litterateurs, it would be interesting to incorporate it in the solution for future research. This
+direct fusion of different sensing modalities into a point cloud is a great benefit of the
+solution’s homogeneous data representation.
+Furthermore we also found a significant failure mode of the depth estimation module.
+FoundationStereo fails to predict meaningful results when even a small portion of the in­
+put image has the water surface (viewed from below) within it. It hasn’t been pinpointed
+what about the water surfaces causes FoundationStereo to fail. The issue might be that
+the visual information from the surfaces are so out­of­distribution that FoundationStereo
+doesn’t understand the scene, but it could also be something more fixable like the in­
+creased light from its reflection. If it is a lighting issue then it might be fixable by a simple
+image processing technique like a normalization of the pixel intensities. In our experi­
+ments we only observe the phenomenon while the ROV is close to the surface. It would
+be interesting to examine if the water surfaces affects FoundationStereo in the same way
+in cases where the ROV is viewing the surface from various distances and angles. If such
+an experiment for example showed a diminishing effect of the water surfaces on Founda­
+tionStereo’s prediction, then we would have a strong indication that the lighting from the
+surfaces could be the cause. The consequences of this discovery are that for practical
+applications the proposed solution cannot be used when the water surface is within the
+FOV of the camera. The problem might be circumvented without finding the underlying
+cause, by employing a geometric filtering method which uses the ROV’s orientation to­
+gether with the FOV angle of the camera to determine if the water surface is within view.
+Then we can act on this to either ignore the frame, or possibly crop it to remove the parts
+which include surface reflections.
+While these discoveries yield important insight into the robustness and shortcomings of
+our system, they also prevented us from obtaining the quantitative data we had planed.
+Underwater Visual­SLAM
+63
+==PAGE:74==
+Because we discovered these problems near the end of the project, we did not have time
+to address them and rerun the experiments to collect the desired measurements. In ret­
+rospect, it would have been beneficial to invest time early on in acquiring a representative
+real­world dataset with proper references. This would have allowed us to adapt and test
+in the same domain and thereby reduce the number of unforeseen challenges. A numeri­
+cal reference would have made it straightforward to quantify whether a parameter change
+improved or degraded the estimate ­ and by how much. Instead, we had to adapt to the
+domain primarily by visually inspecting mappings and trajectories.
+Originally we selected this dataset because it let us begin implementation immediately
+and “fail fast” if the approach proved infeasible. At the time, the project planned to use a
+different camera sensor, so we did not want to invest time collecting data for hardware that
+might not be used. That sensor was subsequently delayed and never integrated; however,
+in hindsight we should have shifted focus earlier to the available setup. Keeping the
+project timeline better in mind would have allowed us to abandon the plan to use another
+sensor sooner and concentrate resources on gathering more results for the sensor which
+we actually had.
+64
+Underwater Visual­SLAM
+==PAGE:75==
+6
+Conclusion
+This project set out to design and implement a VSLAM for surveillance of critical maritime
+infrastructure using a stereo camera integrated with an IMU. A solution was realized by
+combining a pretrained stereo matching network (FoundationStereo) with a range­inertial
+SLAM framework (GLIM), and demonstrated on the BlueROV2 platform using the OAK­
+D Lite camera and Pixhawk 1 flight controller. The solution facilitates dense mapping
+estimates to fully leverage the detail­rich information of the camera sensor, and multi­
+sensor fusion through a homogeneous input data representation and versatile factor graph
+backend. The results obtained during the project demonstrate two key outcomes: first,
+modern stereo foundation models can generalize zero­shot to underwater imagery well
+enough to produce meaningful reconstructions; and second, that the reconstructions can
+be used in a SLAM system to generate a qualitatively consistent trajectory and mapping
+in a real underwater environment.
+However, the trajectory and maps exhibit significant noise and scale errors. We identified
+two primary causes: (1) a processing bug where pre­rectification intrinsics were incorrectly
+used after rectification, and (2) refractive distortion introduced by the ROV’s flat housing
+port, which is not modeled by standard lens distortion parameters. As a consequence of
+the substantial spatial noise within the mappings, only large, coarse geometric features
+are reliably recoverable in practical surveillance scenarios. With these problems resolved
+however we believe that the approach shows potential as an extremely versatile SLAM
+solution for maritime surveillance.
+To increase the robustness and accuracy of the solution we propose that future work focus
+on strengthening the registration stage by fusing complementary range sensing modalities
+into a single point cloud before matching, so that the registration algorithm sees spatially
+larger point clouds with greater geometric diversity.
+Underwater Visual­SLAM
+65
+==PAGE:76==
+66
+Underwater Visual­SLAM
+==PAGE:77==
+Bibliography
+[1]
+Dinh Quang Huy et al. “Object perception in underwater environments: a survey on
+sensors and sensing methodologies”. In: Ocean Engineering 267 (2023), p. 113202.
+ISSN: 0029­8018. DOI: https://doi.org/10.1016/j.oceaneng.2022.113202. URL: https:
+//www.sciencedirect.com/science/article/pii/S0029801822024854.
+[2]
+Christian Bueger and Tobias Liebetrau. “Critical maritime infrastructure protection:
+What’s the trouble?” In: Marine Policy 155 (2023), p. 105772. ISSN: 0308­597X.
+DOI: https://doi.org/10.1016/j.marpol.2023.105772. URL: https://www.sciencedirect.
+com/science/article/pii/S0308597X23003056.
+[3]
+Joel Friesen Waldner and Ayan Sadhu. “A systematic literature review of unmanned
+underwater vehicle­based structural health monitoring technologies”. In: Journal of
+Infrastructure Intelligence and Resilience 3.4 (2024), p. 100112. ISSN: 2772­9915.
+DOI: https://doi.org/10.1016/j.iintel.2024.100112. URL: https://www.sciencedirect.
+com/science/article/pii/S2772991524000318.
+[4]
+Oda Ryggen. Surveillance of Critical Underwater Infrastructure using modern un­
+derwater technology — blueyerobotics.com. https://www.blueyerobotics.com/blog/
+surveillance-of-critical-underwater-infrastructure-using-underwater-technology. [Ac­
+cessed 28­08­2025].
+[5]
+Shuoshuo Ding et al. “Robust visual­based localization and mapping for underwater
+vehicles: A survey”. In: Ocean Engineering 312 (2024), p. 119274. ISSN: 0029­
+8018. DOI: https://doi.org/10.1016/j.oceaneng.2024.119274. URL: https://www.
+sciencedirect.com/science/article/pii/S002980182402612X.
+[6]
+Song Zhang et al. “Visual SLAM for underwater vehicles: A survey”. In: Computer
+Science Review 46 (2022), p. 100510. ISSN: 1574­0137. DOI: https://doi.org/10.
+1016/j.cosrev.2022.100510. URL: https://www.sciencedirect.com/science/article/pii/
+S1574013722000442.
+[7]
+Elizabeth Vargas et al. “Robust Underwater Visual SLAM Fusing Acoustic Sensing”.
+In: 2021 IEEE International Conference on Robotics and Automation (ICRA). 2021,
+pp. 2140–2146. DOI: 10.1109/ICRA48506.2021.9561537.
+[8]
+Luca Carlone et al. “Part1 Prelude”. In: SLAM Handbook. From Localization and
+Mapping to Spatial Intelligence. Ed. by Luca Carlone et al. Cambridge University
+Press.
+[9]
+Kenji Koide et al. “GLIM: 3D range­inertial localization and mapping with GPU­
+accelerated scan matching factors”. In: Robotics and Autonomous Systems 179
+(Sept. 2024), p. 104750. ISSN: 0921­8890. DOI: 10.1016/j.robot.2024.104750. URL:
+http://dx.doi.org/10.1016/j.robot.2024.104750.
+[10]
+Carlos Campos et al. “ORB­SLAM3: An Accurate Open­Source Library for Visual,
+Visual–Inertial, and Multimap SLAM”. In: IEEE Transactions on Robotics 37.6 (Dec.
+2021), pp. 1874–1890. ISSN: 1941­0468. DOI: 10.1109/tro.2021.3075644. URL:
+http://dx.doi.org/10.1109/TRO.2021.3075644.
+[11]
+Timothy Barfoot et al. “Advanced State Variable Representations”. In: SLAM Hand­
+book. From Localization and Mapping to Spatial Intelligence. Ed. by Luca Carlone
+et al. Cambridge University Press.
+[12]
+Yupei Huang et al. “Self­Localization of a Biomimetic Robotic Shark Using Tightly
+Coupled Visual­Acoustic Fusion”. In: IEEE Transactions on Industrial Electronics
+71.10 (2024), pp. 12581–12591. DOI: 10.1109/TIE.2024.3352147.
+Underwater Visual­SLAM
+67
+==PAGE:78==
+[13]
+Andréa Macario Barros et al. “A Comprehensive Survey of Visual SLAM Algo­
+rithms”. In: Robotics 11.1 (2022). ISSN: 2218­6581. DOI: 10.3390/robotics11010024.
+URL: https://www.mdpi.com/2218-6581/11/1/24.
+[14]
+Kai Hu et al. “Overview of Underwater 3D Reconstruction Technology Based on
+Optical Images”. In: Journal of Marine Science and Engineering 11.5 (2023). ISSN:
+2077­1312. DOI: 10.3390/jmse11050949. URL: https://www.mdpi.com/2077-1312/
+11/5/949.
+[15]
+Mohd Saad Hamid et al. “Stereo matching algorithm based on deep learning: A
+survey”. In: Journal of King Saud University ­ Computer and Information Sciences
+34.5 (2022), pp. 1663–1673. ISSN: 1319­1578. DOI: https://doi.org/10.1016/
+j.jksuci.2020.08.011. URL: https://www.sciencedirect.com/science/article/pii/
+S1319157820304493.
+[16]
+Fabio Tosi, Luca Bartolomei, and Matteo Poggi. A Survey on Deep Stereo Matching
+in the Twenties. 2024. arXiv: 2407.07816 [cs.CV]. URL: https://arxiv.org/abs/2407.
+07816.
+[17]
+{Mark W.} Spong, Seth Hutchinson, and M. Vidyasagar. “Robot modeling and con­
+trol”. English (US). In: IEEE Control Systems 26.6 (Dec. 2006), pp. 113–115. ISSN:
+1066­033X. DOI: 10.1109/MCS.2006.252815.
+[18]
+Kenneth J. Waldron and James Schmiedeler. “Kinematics”. In: Springer Handbook
+of Robotics. Ed. by Bruno Siciliano and Oussama Khatib. Cham: Springer Interna­
+tional Publishing, 2016, pp. 11–36. ISBN: 978­3­319­32552­1. DOI: 10.1007/978-3-
+319-32552-1_2. URL: https://doi.org/10.1007/978-3-319-32552-1_2.
+[19]
+Dinh Quang Huy et al. “Object perception in underwater environments: a survey on
+sensors and sensing methodologies”. In: Ocean Engineering 267 (2023), p. 113202.
+ISSN: 0029­8018. DOI: https://doi.org/10.1016/j.oceaneng.2022.113202. URL: https:
+//www.sciencedirect.com/science/article/pii/S0029801822024854.
+[20]
+OpenCV. OpenCV: Camera Calibration and 3D Reconstruction — docs.opencv.org.
+https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html. [Accessed 15­07­2025].
+[21]
+Richard Szeliski. Computer Vision: Algorithms and Applications. 2nd. Berlin, Hei­
+delberg: Springer­Verlag, 2010. ISBN: 1848829345.
+[22]
+Bowen Wen et al. “FoundationStereo: Zero­Shot Stereo Matching”. In: arXiv (2025).
+[23]
+Josh Tobin et al. Domain Randomization for Transferring Deep Neural Networks
+from Simulation to the Real World. 2017. arXiv: 1703.06907 [cs.RO]. URL: https:
+//arxiv.org/abs/1703.06907.
+[24]
+Lihe Yang et al. Depth Anything V2. 2024. arXiv: 2406.09414 [cs.CV]. URL: https:
+//arxiv.org/abs/2406.09414.
+[25]
+Muhammad Maaz et al. EdgeNeXt: Efficiently Amalgamated CNN­Transformer Ar­
+chitecture for Mobile Vision Applications. 2022. arXiv: 2206.10589 [cs.CV]. URL:
+https://arxiv.org/abs/2206.10589.
+[26]
+“Generalized­ICP”. In: June 2009. DOI: 10.15607/RSS.2009.V.021.
+[27]
+Jakob Engel et al. “Visual SLAM”. In: SLAM Handbook. From Localization and Map­
+ping to Spatial Intelligence. Ed. by Luca Carlone et al. Cambridge University Press.
+[28]
+Jens Behley et al. “LiDAR SLAM”. In: SLAM Handbook. From Localization and Map­
+ping to Spatial Intelligence. Ed. by Luca Carlone et al. Cambridge University Press.
+[29]
+Blue Robotics. BlueROV2 — bluerobotics.com. https://bluerobotics.com/store/rov/
+bluerov2/. [Accessed 21­08­2025].
+[30]
+Blue Robotics. BlueROV2 Heavy Configuration Retrofit Kit — bluerobotics.com.
+https://bluerobotics.com/store/rov/bluerov2- upgrade- kits/brov2- heavy- retrofit/.
+[Accessed 21­08­2025].
+68
+Underwater Visual­SLAM
+==PAGE:79==
+[31]
+Luxonis Docs. OAK­D Lite — shop.luxonis.com. https://shop.luxonis.com/products/
+oak-d-lite-1?variant=42583102456031. [Accessed 21­08­2025].
+[32]
+PX4. 3DR Pixhawk 1 Flight Controller (Discontinued) | PX4 Guide (main) — docs.px4.io.
+https://docs.px4.io/main/en/flight_controller/pixhawk#schematics. [Accessed 21­
+08­2025].
+[33]
+TE. 0­30 Bar Digital Pressure Sensor | MS5837 — te.com. https://www.te.com/en/
+product-CAT-BLPS0017.html. [Accessed 21­08­2025].
+[34]
+ROS.org. mavros. https://wiki.ros.org/mavros#mavros.2BAC8-Plugins.sys_status.
+[Accessed 21­08­2025].
+[35]
+PX4. Using PX4&apos;s Navigation Filter (EKF2) | PX4 Guide (main) — docs.px4.io.
+https://docs.px4.io/main/en/advanced_config/tuning_the_ecl_ekf. [Accessed 21­
+08­2025].
+[36]
+Rathis Kumar. What are Global Shutter and Rolling shutter Cameras? How to choose
+the one that fits the application? ­ e­con Systems — e­consystems.com. https://
+www.e-consystems.com/blog/camera/technology/what-are-global-shutter-and-rolling-
+shutter-how-to-choose-the-one-that-fits-the-application/. [Accessed 21­08­2025].
+[37]
+StereoLabs. ZED 2i | Stereo Camera | Stereolabs — stereolabs.com. https://www.
+stereolabs.com/en-dk/store/products/zed-2i. [Accessed 22­08­2025].
+[38]
+k.koide. Getting started ­ GLIM — koide3.github.io. https://koide3.github.io/glim/
+quickstart.html. [Accessed 04­09­2025].
+[39]
+REP 103 – Standard Units of Measure and Coordinate Conventions (ROS.org) —
+ros.org. https://www.ros.org/reps/rep-0103.html. [Accessed 01­08­2025].
+[40]
+REP 145 – Conventions for IMU Sensor Drivers (ROS.org) — ros.org. https://www.
+ros.org/reps/rep-0145.html. [Accessed 01­08­2025].
+[41]
+Marsel Faizullin, Anastasiia Kornilova, and Gonzalo Ferrer. Open­Source LiDAR
+Time Synchronization System by Mimicking GNSS­clock. 2022. arXiv: 2107.02625
+[cs.RO]. URL: https://arxiv.org/abs/2107.02625.
+[42]
+Open3d. Point cloud outlier removal &#x2014; Open3D latest (664eff5) documen­
+tation — open3d.org. https://www.open3d.org/docs/latest/tutorial/Advanced/
+pointcloud_outlier_removal.html. [Accessed 23­08­2025].
+[43]
+Open3D. Point Cloud &#x2014; Open3D latest (664eff5) documentation — open3d.org.
+https : / / www . open3d . org / docs / latest / tutorial / Basic / pointcloud . html # Plane -
+segmentation. [Accessed 23­08­2025].
+[44]
+IBM. What Is Instance Segmentation? | IBM — ibm.com. https://www.ibm.com/
+think/topics/instance-segmentation. [Accessed 24­08­2025].
+[45]
+Alexander Kirillov et al. Segment Anything. 2023. arXiv: 2304.02643 [cs.CV]. URL:
+https://arxiv.org/abs/2304.02643.
+[46]
+Alexander Kirillov et al. “Segment Anything”. In: arXiv:2304.02643 (2023).
+[47]
+Nikhila Ravi et al. “SAM 2: Segment Anything in Images and Videos”. In: arXiv
+preprint arXiv:2408.00714 (2024). URL: https://arxiv.org/abs/2408.00714.
+[48]
+heyoeyo. Comparison of SAM and SAM2 checkpoints ∙Issue #92 ∙facebookre­
+search/sam2 — github.com. https://github.com/facebookresearch/sam2/issues/92.
+[Accessed 04­09­2025].
+[49]
+QGC guide. Sensor Setup (PX4) | QGC Guide (4.3) — docs.qgroundcontrol.com.
+https://docs.qgroundcontrol.com/Stable_V4.3/en/qgc- user- guide/setup_view/
+sensors_px4.html. [Accessed 26­08­2025].
+[50]
+numpy.polyfit 2014; NumPy v2.4.dev0 Manual — numpy.org. https://numpy.org/
+devdocs/reference/generated/numpy.polyfit.html. [Accessed 18­08­2025].
+Underwater Visual­SLAM
+69
+==PAGE:80==
+[51]
+Kenji Koide et al. “Voxelized GICP for Fast and Accurate 3D Point Cloud Registra­
+tion”. In: 2021 IEEE International Conference on Robotics and Automation (ICRA).
+2021, pp. 11054–11059. DOI: 10.1109/ICRA48506.2021.9560835.
+[52]
+Felix Seegräber et al. A Calibration Tool for Refractive Underwater Vision. 2025.
+arXiv: 2405.18018 [cs.CV]. URL: https://arxiv.org/abs/2405.18018.
+70
+Underwater Visual­SLAM
+==PAGE:81==
+Underwater Visual­SLAM
+71
+==PAGE:82==
+A
+Appendix
+A.1
+Ladder sequence views
+(a) A diagonal view of the mapped environment.
+(b) An overhead view of the mapped environment.
+(c) A front view of the mapped environment.
+Figure A.1: Different views of the mapped ladder sequence from Skovshoved Havn
+72
+Underwater Visual­SLAM
+==PAGE:83==
+A.2
+Back/forth sequence setup
+The pool setup for the failed experiment on the back/forth sequence can be seen in figure
+A.2. The figure also shows an example of erroneous depth map and point cloud.
+Figure A.2: Top view: indicative schematic of the back/forth experiment. The ROV moves
+from the back wall of the pool (left wall in image) to the end wall (right), and back. The path
+follows the dashed (red) line. The retroreflective markers can be seen on top of both the
+ROV and the crate. At 30Hz images are captured from which disparity is predicted, then
+masked, and converted to a point cloud. Note: This experiment was discarded as most of
+the images had water surface reflection in them, causing erroneous disparity estimation.
+An example of this is shown in the figure
+Underwater Visual­SLAM
+73
+==PAGE:84==
+Og de levede lykkeligt til deres dages ende
+Technical
+University of
+Denmark
+Ørsteds Plads, Bygning 343
+2800 Kgs. Lyngby
+Tlf. 4525 1700
+https://electro.dtu.dk/

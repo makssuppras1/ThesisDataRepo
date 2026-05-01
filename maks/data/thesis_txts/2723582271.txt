@@ -1,0 +1,2487 @@
+==PAGE:1==
+M.Sc. Thesis
+Master of Science in Engineering
+CAWS Data Upload Scaling
+Scaling a high throughput data management in-
+frastructure using a microservice architecture
+Stefan Harabagiu (s213805)
+Kongens Lyngby 2023
+==PAGE:2==
+DTU Health Tech
+Department of Health Technology
+Technical University of Denmark
+Ørsteds Plads
+Building 345C
+2800 Kongens Lyngby, Denmark
+Phone +45 4525 3031
+healthtech-info@dtu.dk
+www.healthtech.dtu.dk
+==PAGE:3==
+Preface
+This M.S.c.
+thesis was prepared at the department of Applied Mathematics and
+Computer Science at the Technical University of Denmark in fulfillment of the re-
+quirements for acquiring a Master of Science in Engineering degree in Computer
+Science and Engineering.
+Kongens Lyngby, March 15, 2023
+Stefan Harabagiu (s213805)
+==PAGE:4==
+ii
+==PAGE:5==
+Abstract
+Digital phenotyping platforms have been benefiting from modern advancements in
+technology that allow the collection of a wide variety of physical data from a person
+with the use of sensors in mobile and wearable devices. By using these large amounts
+data that are being recorded in a continuous manner, researchers can perform studies
+into the treatment, prevention and diagnosis of diseases both mental and physical.
+At the Copenhagen Center for Health Technology(CACHET), such a digital phe-
+notyping platform called the CACHET Research Platform(CARP) is being developed
+to allow researchers to conduct their own studies.
+However, the CARP Web Services(CAWS) project which provides the component
+for handling the data uploaded by the participant devices presents scalability issues
+due to its monolithic implementation. Currently the data upload component can not
+handle operating under high workloads and scaling it would affect the entire system.
+This thesis will attempt to solve the scalability issues of this component by migrat-
+ing it into a microservice and integrating it with the rest of the CAWS components.
+Furthermore, a deployment strategy will be devised as well as configuring an environ-
+ment in order to allow for the individual scaling of the component.
+==PAGE:6==
+iv
+==PAGE:7==
+Acknowledgements
+I would like to thank my supervisor Jakob E. Bardram for the help and guidance
+throughout the course of this thesis. I would also like to thank the CARP development
+team for their help in discussing aspects of the project. Last but not least, I would
+like to thank my family and friends for their continuous support.
+==PAGE:8==
+vi
+==PAGE:9==
+Contents
+Preface
+i
+Abstract
+iii
+Acknowledgements
+v
+Contents
+vii
+1
+Introduction
+1
+1.1
+Background . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+1
+1.2
+Problem statement . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+1.3
+Research goals and methods . . . . . . . . . . . . . . . . . . . . . . . .
+3
+1.4
+Impact - innovation and application
+. . . . . . . . . . . . . . . . . . .
+4
+1.5
+Thesis outline . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4
+2
+Related Work
+7
+2.1
+MD2K . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+2.2
+RADAR-base . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+2.3
+Migrating to microservices . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+3
+Analysis
+11
+3.1
+CARP Domain . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+3.2
+CAWS Architecture
+. . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+3.3
+Communication . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+13
+3.4
+Deployment . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+4
+Design
+21
+4.1
+Current CAWS project . . . . . . . . . . . . . . . . . . . . . . . . . . .
+22
+4.2
+Decoupling the services
+. . . . . . . . . . . . . . . . . . . . . . . . . .
+24
+4.3
+Microservice Architecture . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+4.4
+Deployment architecture . . . . . . . . . . . . . . . . . . . . . . . . . .
+27
+5
+Implementation
+29
+5.1
+RabbitMQ communication . . . . . . . . . . . . . . . . . . . . . . . . .
+29
+5.2
+DataUpload component message handling . . . . . . . . . . . . . . . .
+33
+==PAGE:10==
+viii
+Contents
+5.3
+Containerization
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+5.4
+Docker Swarm and the deployment environment
+. . . . . . . . . . . .
+37
+5.5
+Deploying the system . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+38
+6
+Deployment Operations
+43
+6.1
+Scaling the DataUpload service . . . . . . . . . . . . . . . . . . . . . .
+43
+7
+Discussion
+49
+7.1
+Goals
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+49
+7.2
+Limitations . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+50
+7.3
+Future work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+52
+8
+Conclusion
+55
+A
+NGINX reverse proxy
+57
+B
+Docker Swarm ingress network
+59
+C
+Accessing the source code
+61
+D
+Acronyms
+63
+Bibliography
+65
+==PAGE:11==
+CHAPTER 1
+Introduction
+1.1
+Background
+The modern technological advancements in the healthcare industry allow for the de-
+velopment of new techniques for diagnosing, treating and data gathering on patients.
+The process of collecting and using data generated by electronic devices such as smart-
+phones and wearables is called Digital Phenotyping[HVC19]. DP has huge potential
+due to the high availability of data gathering devices thanks to the massive popularity
+of smartphone and wearable technology.
+DP is being used in the health care sector to record large amounts of data from
+the devices of study participants or patients in order to analyze it with the purpose of
+finding potential diagnoses, treatment or just for the purpose of monitoring. Chapter
+10 of the book Mental Health in a Digital World [Car+21] discusses the potential of
+DP in psychiatry and how it can be used to solve problems encountered by clinicians.
+Because the clinician does not need to be present for observing the patient, the book
+states that the patient may participate in the assessment on their own time and in
+their natural environment, removing many of the logistical barriers associated with
+clinical assessment; it also mentions that because of the nature of how the data is
+collected it can lead to more reliable data as it eliminates the bias between patient
+and clinician.
+A prominent combination with DP is the use mobile sensing.[Bau19] Smartphones
+have great DP capabilities due to the amount of sensors built into them by default but
+also because of the large amount of health monitoring devices that can be connected
+to a smartphone such as Fitbit1 for general monitoring or even wearable ECG mon-
+itors2. Because of this, mobile health(mHealth) applications contain great potential
+for increasing the capabilities of DP. The chapter mHealth Applications: Potentials,
+Limitations, Current Quality and Future Directions[Mes+19] of the book Digital Phe-
+notyping and Mobile Sensing[Bau19] presents the potential of mHealth applications
+for health services and provides evidences to the benefits of using them in the health
+care sector. Among others, evidence is presented to support the eﬀicacy of mHealth
+apps in supporting treatment adherence in patients, but also in the treatment of
+depression.
+1https://www.fitbit.com/global/eu/home
+2https://getwellue.com/products/duoek-hand-held-wearable-ekg-tracker
+==PAGE:12==
+2
+1 Introduction
+At the Copenhagen Center for Health Technology(CACHET), a digital phenotyp-
+ing platform called the CACHET Research platform(CARP) is being developed with
+the purpose of allowing researchers to create customized studies based on the retrieval
+of sensor data from mHealth apps.
+Among the services made available through CARP, the CARP Web Services(CAWS)
+project provides a cloud-based backend platform for managing research studies. The
+service provides the REST APIs used to manage studies, participants and also record
+the data sent by the participants’ devices. However, the project is implemented as
+a modular monolith and the data upload component presents scalability issues and
+can not handle higher workloads.
+This project aims to help solve the issues described above by using a microservice
+architecture as well as creating a deployment environment to allow for a scalable
+component that can handle higher resource utilization.
+1.2
+Problem statement
+As explained above, the data upload component of the CAWS platform needs to
+be refactored into a more scalable solution that can handle higher loads under use.
+Furthermore, the implementation of CAWS has to follow the CARP Core domain
+model and provides other functionalities like, user management and study manage-
+ment, therefore the integration with the domain and the rest of the components has
+to be considered.
+Taking this into account, the following problem statement can be formulated:
+How can a microservice architecture and deployment environment be
+designed so that the data upload component can be scalable and integrated
+with the domain and other components?
+From this problem statement, the following sub-problems can be outlined:
+• How can scalability be achieved through a microservice architecture?
+• How can the microservice architecture be integrated?
+• How can a deployment environment be designed to support the scalability prop-
+erties of the data upload component?
+• How can scalability be showcased?
+The goal of this thesis can be summarized as follows: To re-design the data upload
+component as a microservice, integrate it with the CAWS components and deploy
+them in a suitable environment with the scope of making it be operable under higher
+upload rates.
+==PAGE:13==
+1.3 Research goals and methods
+3
+1.3
+Research goals and methods
+This section will further detail the sub-problems defined in the previous section as
+well as explain how possible solutions for them will be investigated and chosen in
+order to fulfill the goal of providing scalability to the data upload component.
+1.3.1
+How can scalability be achieved through a microservice
+architecture?
+Scalability is a property of software that represent its ability to either raise or decrease
+its performance depending on the workload it is experiencing. The plan to ensure
+this property for the data upload component is to first research the key aspects of a
+microservice architecture that allow for easily scalable components and how they can
+be translated in the context of the CAWS project. Then, the proper technologies with
+which to design and implement such an architecture have to be analyzed. The tools
+and frameworks utilized should be chosen based on how well they can contribute to
+achieve a scalable microservice and also on how their design allows them to be used
+in a scalable environment.
+1.3.2
+How can the microservice architecture be integrated?
+The data upload component has to be able to function as part of the CARP architec-
+ture by using the CARP Core domain, but also by being available to the rest of the
+components in the CAWS project. It should also be able to integrate with the other
+components on a deployment environment.
+The plan is to research the proper technologies that will allow the microservice
+to communicate with the components that have dependencies on modules that are
+part of the data upload domain. These technologies should facilitate the interaction
+between the services without adding unnecessary overhead to the resource consump-
+tion of the system and they should be robust enough to ensure that there will be no
+miscommunication during runtime.
+1.3.3
+How can a deployment environment be designed to
+support the scalability properties of the data upload
+component?
+With a component designed to be scalable it is important to provide an environment
+where the scalability property can be benefited from. The deployment environment
+but also the tools used to deploy the system should allow for services to be scaled up
+or down without requiring time consuming processes and configurations in order for
+the system to be agile when adapting to situations in a production environment.
+==PAGE:14==
+4
+1 Introduction
+The plan is to look into what environments best suit the deployment of a mi-
+croservice architecture and allow for fast scalability of its services. At the same time,
+looking into what tools are best suited to package and deploy the solution on the
+environment is equally important. The deployment tool used should provide func-
+tionalities that allow for easy scaling of services but it should also be able to function
+out-of-the-box regardless of the environment it is deployed in.
+1.3.4
+How can scalability be showcased?
+Scalability can be achieved through the design and implementation of the system,
+using the right tools and technologies that facilitate and enable it; and providing the
+right environment that can allow for scaling to be used.
+The plan to properly demonstrate how a service can be scaled after it is imple-
+mented and deployed is to provide examples of operations that can be used to either
+scale up or down the data upload component. The examples should show how both
+the design of the architecture but also the choice of deployment tools and environment
+allow for the component to be scaled.
+1.4
+Impact - innovation and application
+The aim is to allow the CARP platform to handle a larger number of devices to
+be connected to mHealth applications in order to support broader studies on larger
+amounts of participants(mHealth applications with a large user base). This, in turn,
+supports the spread of using digital phenotyping by making it more available to
+researchers.
+1.5
+Thesis outline
+The next chapters will describe how a solution to the scalability problems of the data
+upload component was investigated, designed and implemented.
+The second chapter will provide a look at other similar platforms and their ar-
+chitecture and technologies. The analysis chapter discusses how scalability can be
+achieved through a microservice architecture, how the component can be integrated
+with the existing monolith and how a cloud deployment strategy will complement the
+microservice architecture. The design chapter will illustrate how the ideas presented
+during analysis take shape and how the chosen technologies will be used to achieve a
+scalable system. The implementation chapter showcases how the design choices were
+put into practice and provides more concrete examples on how the system and de-
+ployment environment were configured as well as how the deployment was executed.
+The scalability achieved through this system will be demonstrated in the next chapter
+and showcase how the component can be scaled in the cloud deployment, and how
+the architecture of the cloud environment can be changed to meet the business needs.
+==PAGE:15==
+1.5 Thesis outline
+5
+Lastly, the discussions chapter will show how the research goals defined in the begin-
+ning have been fulfilled as well as provide some details about limitations that were
+encountered and future work for the project. The conclusion chapter will summarize
+the work done as part of this thesis.
+==PAGE:16==
+6
+==PAGE:17==
+CHAPTER 2
+Related Work
+This chapter presents some digital phenotyping projects that are similar to the CARP
+platform as well as discusses some literature that is related to the stated problem.
+2.1
+MD2K
+MD2K is a platform for gathering mobile and wearable sensor data and analysing it
+in order to gain insight on the factors that influence the health of the participants.
+The tools and software of the MD2K platform are open source and made available
+for researchers to configure them for their own study cases. [MD223d]
+The mCerebrum mobile phone software provided by them allows for the collection
+and streaming of sensor data recorded by the participants phone but also from other
+devices that are connected to the phone. This means that mCerebrum is able to
+collect data from a wide range of devices like Chestband ECG sensor, blood pressure,
+carbon monoxide, wrist devices and many more. The collected data is sent to the
+Cerebral Cortex which they call the cloud companion of mCerebrum [MD223c]. Cere-
+bral Cortex is a cloud backend that was designed to support large scale data handling
+and be paired up with the mCerebrum app; it provides data analysis and visualiza-
+tion capabilities to support research studies based on the collected data [MD223a].
+The platform has a highly modular architecture, where parts of it are separated into
+containerized services with Docker. There is not much detailed documentation avail-
+able for it unfortunately, but by inspecting the multiple repositories available on
+GitHub for it a few things can be noted. The platform is written in Python and uses
+Flask as a framework to create the REST API that connects to the mCerebrum app.
+The REST API then sends the data to the CerebralCortex-DataIngestion component
+which is a separate service implemented in Python that uses Kafka as a Big Data
+ingestion tool.[MD223b]
+Even though the ingestion component is a separate service, it is designed to work
+within the architecture of the overarching Cerebral Cortex cloud server platform and it
+is not a suitable replacement to be used within the CARP environment. Furthermore,
+its Python implementation would not allow for the integration with the CARP Core
+domain model which is a collection of Kotlin defined interfaces.
+==PAGE:18==
+8
+2 Related Work
+However, it can be noticed that the architecture of the cloud platform is based
+on microservices, with the component that handles data retention implemented as
+a separate service. Unfortunately, there is no documentation available as to how it
+is deployed on the cloud environment and what server architecture they use; in the
+GitHub documentation the instructions for setting up the Cerebral Cortex backend
+state that it should be done via docker-compose, which implies that it will run on a
+single physical node.
+2.2
+RADAR-base
+RADAR-base is another open source platform that can handle the collection of data
+from wearable and mobile devices for providing data visualization and study manage-
+ment for the purposes of conducting health related research.
+The platform features an architecture based on plugins that can be extended to
+include data collection from additional devices that are not supported in its basic
+version. They also feature a highly modular architecture with different decoupled ser-
+vices forming a single platform. However, the extensibility provided by RADAR-base
+through plugins is made to not limit the researchers’ studies by not supporting the
+collection of data from the devices they require. Therefore, the individual components
+of the RADAR-base architecture are implemented to function within that design and
+their deployment architecture. [RAD23a]
+The architecture of the RADAR-base project is based on microservices deployed
+using Kubernetes and Helm. This makes the solution deployable on any cloud provider
+and they state in the GitHub documentation that it can run on a single server or server
+cluster environment. [RAD23b]
+2.3
+Migrating to microservices
+The conference paper Transform Monolith into Microservices using Docker[SS18]
+discusses a strategy of refactoring a monolith into a microservice architecture. It is
+suggested that a progressive approach should be taken by extracting smaller parts of
+a monolith into a microservice that is fully decoupled and repeating this process until
+the monolith is either stripped down entirely or it becomes a microservice itself.
+When creating a microservice from a part of the monolith they list a few steps
+to be taken. Firstly, is to determine what modules from the monolith should form
+the microservice. It is not recommended to consider every module as a microservice
+and instead focus first on modules that use in-memory databases, resource intensive
+algorithms or are central to the business value and are often changed and updated.
+==PAGE:19==
+2.3 Migrating to microservices
+9
+After the modules that will form the microservice are chosen, they should first be
+decoupled from the monolith by establishing Inter Process Communication(IPC). Af-
+ter decoupling is achieved the microservice can be containerized with Docker to be
+run as a completely separate process from the monolith. In the paper, Docker is also
+recommended as it facilitates the cloud deployment and it allows for scaling services
+and automating the deployment process.
+The paper Monolithic vs. Microservice Architecture: A Performance and Scalabil-
+ity Evaluation[BOP22] presents an evaluation made on a web application to test its
+performance under a monolithic implementation and then a microservice implemen-
+tation. The motivation behind the paper is to test if the migration to microservices is
+beneficial in the context of smaller monolithic systems; the purpose is to investigate
+the effects of a microservice architecture on a system that does not operate on the
+scale of top tech giants like Netflix, Amazon, etc. The most noteworthy finding of the
+paper are that a monolith performs better than its microservice counterpart when
+it is running on a single machine and the microservice implementation outperforms
+the monolith in the cloud when deployed on multiple physical nodes. Because of this,
+the designing and setup of a multi-node deployment environment is motivated as a
+part of this thesis; with the scope of providing the data upload microservice with a
+runtime environment where it can benefit from its scalability property.
+==PAGE:20==
+10
+==PAGE:21==
+CHAPTER 3
+Analysis
+This chapter presents the topics, architectures and technologies that are relevant to
+solving the problem.
+3.1
+CARP Domain
+Figure 3.1: CARP Domain Diagram.
+The CARP Core project provides the business logic and data models required
+by the research platform but without any of the components needed to actually run
+the platform. The CARP Webservices project uses the domain and business layer
+provided by CARP Core and acts like a wrapper around that allows it to function
+properly such as the API, security, authentication, database storage. This approach
+follows a Hexagonal Architecture in which the components are decoupled from the
+environment, making the CARP Core project independent of the technologies chosen
+for web, messaging and database storage.
+The CARP Core domain is presented
+==PAGE:22==
+12
+3 Analysis
+in diagram 3.1 which showcases the different separated components that define the
+business logic for the research platform.
+3.2
+CAWS Architecture
+The CARP Web Services (CAWS) project follows the domain defined by CARP Core,
+its current implementation can be described as a modular monolith where the imple-
+mentation of the domain components described in the previous section are grouped
+together in modules. These modules are implemented as REST APIs with a clear sep-
+aration between their functionalities, however these modules are not decoupled from
+one another completely and some dependencies still remain. Moreover, all of these
+REST APIs are part of the same Spring Boot web application and are containerized
+and deployed in the same Docker container. Because of this all of the modules are
+part of the same machine process and therefore, compete for resources. The Data
+Upload component suffers the most out of this because it needs to be able to handle
+a high throughput of requests coming from the devices that send the data acquired
+from the study participants.
+The issue in scalability that the CAWS project is facing can be attributed to its
+monolithic design that does not allow for individual scaling of its modules. In order
+to be able to scale the Data Upload component both vertically and horizontally so
+that its performance can be improved, migrating to a microservice architecture is
+essential.
+3.2.1
+Modularity vs Microservice Architecture
+In comparison, modularity can be viewed as a precursor step in achieving a microser-
+vice architecture. The conference paper from the International Conference on Infor-
+mation Management and Technology (ICIMTech) in 2020 mentions how grouping a
+monolithic system into modules is an important step in migrating from a monolithic
+to a microservices architecture. [PMA19]
+In chapter 2 of the book Practical Microservices Architectural Patterns the differ-
+ences between a modular monolith and a miscroservices based system are detailed.
+It states that modularity refers to grouping related functionalities together in the
+form of multiple files or libraries and that a modular monolith lacks flexibility when
+it comes to scalability. In the same chapter the book illustrates the architecture of
+a modular monolith and states that in such a monolith it is not possible to scale
+horizontally specific modules that are under more load or to scale vertically modules
+that have a higher cost of failure. [Chr19]
+By creating a microservice from the DataUpload component both vertical and hor-
+izontal scalability can be fine tuned for it so that it can operate in optimal conditions.
+==PAGE:23==
+3.3 Communication
+13
+As mentioned before in subsection 3.2.1 a microservice architecture allows us to pick
+and choose which services need to be scaled up.
+3.3
+Communication
+When migrating to a microservice architecture a very important step is to decide how
+to handle the communication between the services. Usually, in a modular monolith
+interactions between modules are easily handled through dependencies; whenever
+one of the modules needs to exchange data with another one this can be easily done
+through simple method calls as the modules are part of the same runtime and process.
+In a microservice architecture the communication has to be done through a transfer
+protocol between the separate processes.
+There are several ways to do that such
+as through a TCP socket connection, HTTPS requests, etc. but the most widely
+adopted way to handle communication between microservices is through Message
+Brokers.
+3.3.1
+Message Brokers
+Message brokers are pieces of software that handle the flow of communications be-
+tween the services of a system. They allow for the components of a system to be
+completely decoupled from one another as they can operate in a fire-and-forget way
+without having to wait for a reply and block the process. Most message brokers utilize
+a queue data-structure to be able to store and ensure delivery to the recipient. When
+the broker receives a message it stores it in a queue until they are processed by the
+receiver.
+When it comes to which tools to use as message brokers, RabbitMQ and Apache
+Kafka are the most popular choices. The article Microservice development using Rab-
+bitMQ message broker published in the Science, Engineering and Technology journal
+[ĆBL22] provides insights into how RabbitMQ works but also the benefits it provides
+as a means of communication in a microservice architecture. It states that RabbitMQ
+is a lightweight tool that can handle the delivery of messages between microservices
+with no loss, it is fault tolerant, scalable and easily accessible. In the article it is
+also presented a comparison between the use cases where RabbitMQ or Kafka is a
+better fit. Kafka is overall a more complex tool that requires more resources to run
+because it can perform significantly more complex tasks than RabbitMQ. Overall
+Kafka is a better choice when there is also the need for processing and analysis of Big
+Data whereas RabbitMQ is the right choice for light weight communication between
+services.
+Another aspect that has to be taken into account is that currently the CAWS
+project already uses RabbitMQ for the sending of emails and receiving data points.
+When factoring this in along with the information presented above it does not seem
+==PAGE:24==
+14
+3 Analysis
+viable to introduce Kafka just for the communication between the microservices for
+a number of reasons. First of all, Kafka requires more resources than RabbitMQ and
+it would also be added along with it unless the whole project is refactored to not
+use RabbitMQ anymore. This is something to be avoided since the purpose is to
+make the system use less resources not more. Secondly, the reason for the need of a
+message broker in the microservice architecture is for the communication between its
+components and as it has been presented above, RabbitMQ is more than capable of
+handling this task.
+3.4
+Deployment
+Deploying an application or software system means running it on a remote host
+(server) where it can be publicly accessed by the users. When deploying a system
+there are two main decisions that have to be considered; what kind of server is needed
+and how can the system run on the server. The most common approach for this is
+to use a Cloud Platform as a server provider and a containerization tool to provide the
+server with something it can compile and run.
+3.4.1
+Cloud Platforms
+Cloud Platforms deliver computing resources over the internet without the need for the
+organization developing the system to have an internal infrastructure or hardware.
+They are a type of Cloud Services that operate on the concept of Platform as a Service
+(PaaS) and they have been adopted by many organizations for their benefits.
+In chapter 3 of the book Impact of Cloud Adoption on Agile Software Development
+describes the benefits of using cloud services in an agile development environment
+and states that tools provided by cloud services contribute to a reduced economic
+investment and instant availability of the developed product. [Kar13]
+3.4.2
+Cloud Platform Providers
+There are numerous cloud platform providers available that offer great performance
+and a wide array of features, however, for the purpose of this thesis three of them will
+be taken into consideration: Amazon Web Services (AWS), Google Cloud Platform
+(GCP) and Digital Ocean. AWS and GCP are two of the most used providers and
+they were chosen for their diverse range of features, but also because of their free
+tier offers when it comes to pricing. Digital Ocean is a more simple provider with
+less features and it is taken into consideration because it is already being used by
+CACHET to host the CAWS project which can lead to better and easier integration
+with the internal infrastructure of CACHET, but also because it offers better pricing
+options.
+==PAGE:25==
+3.4 Deployment
+15
+3.4.2.1
+Amazon Web Services
+AWS is one of the most used Cloud Service Providers (CSPs) and it is a very ma-
+ture platform at the moment as it was launched in 2006 by Amazon and has been
+constantly evolving over the years.
+They provide many services that can suit an
+organizations needs for infrastructure with a good payment policy of pay-as-you-go,
+which bills their clients based on the resources they have used. You can use AWS for a
+variety of services like hosting applications, storage, databases, etc. and the benefits
+of that is that they are very flexible and easy to scale up or down, giving instant
+access to thousands of servers. The AWS regional availability is used worldwide by
+organizations and they provide very good coverage in most parts of the world.[Ser23a]
+Moreover, AWS provides a generous free tier access to users that want to test the
+platform or use it for small personal projects. Their 12 month free tier access gives the
+user the possibility to experiment with most of the features available on AWS with
+certain limitations. What is most relevant to the scope of this thesis is the Amazon
+Elastic Compute Cloud (EC2) which provides host machines on the cloud that can
+be used to host applications. EC2 offers virtual environments they call instances,
+which can be configured to run a variety of operating systems, different combinations
+of CPU, RAM, storage and networking capacities and they also allow to configure
+different security groups for your instances to limit how they can be reached over the
+internet. [Ser23b]
+3.4.2.2
+Google Cloud Platform
+Google Cloud Platform (GCP) is another popular platform for cloud services provided
+by Google and one of AWS’s main competitors on the market. It provides many ser-
+vices similarly to AWS such as compute engines, storage, database services, however
+it only provides a Kubernetes engine for the handling of containers and deployment
+as opposed to Amazon which offers plain Docker support as well.
+Overall, GCP provides similar features as AWS and for the scope of this thesis the
+relevant aspects to compare between the two is their computing engines that provide
+the servers for the CAWS project to be deployed on; EC2 and Google Compute
+Engine (GCE) which are also quite similar as well. However, the technology used
+for deploying and managing the multi-container architecture of the project has to
+be taken into account as well. The choice of the tools to do that are detailed in
+section 3.4.4 Container Orchestration Tools and the fact that GCP only provides
+Kubernetes support can have influence on the decision.
+3.4.2.3
+Digital Ocean
+Digital Ocean is a newer CSP that has been rising in popularity due to its com-
+petitive pricing and robust features of cloud computing, database management, app
+deployment platform and Kubernetes cluster management. It is a platform oriented
+==PAGE:26==
+16
+3 Analysis
+specifically to developers that is simple to use, it has a more intuitive and well de-
+signed UX than AWS and GCP.
+Digital Ocean is currently the platform that the CARP project is using to host
+their deployments and therefore this platform is also taken into account when deciding
+for a suitable CSP. A good benefit to using Digital Ocean is that the new version of
+the CAWS project can be integrated into CACHET’s cloud provider and that I also
+get access to their resources which are significantly better than the free tiers that AWS
+and GCP provide. Moreover, migrating from one CSP to another is a time consuming
+task which can also be costly and result in potential down times for the system; and
+it should be considered when the benefits of changing the CSP far outweigh the
+drawbacks.
+3.4.3
+Docker
+Containerization is the main process that is used when preparing your software to be
+deployed on a server and through this process the code is packaged together with all
+the files and operating system libraries and dependencies it needs to run the code. By
+creating such a container the software can be easily deployed on any infrastructure
+without the need of any setup on the server. Furthermore, a container is lightweight
+and portable which makes it easy to be deployed, re-run or moved to another host
+which speeds up tasks that can be costly. [Inc22b]
+The most used tool for containerizing an application is Docker, an open source
+project published by Docker Inc. Docker is used as it is the best performing tool
+available that creates lightweight containers which have very good CPU, memory
+and disk usage performance. Aside from its resource eﬀiciency docker containers are
+highly portable as they can run on any supported Linux version which is an important
+feature when using a microservice architecture deployed on a Cloud Platform.[Pot+20;
+Ser21]
+Docker helps with the deployment process by allowing a web application to be con-
+tainerized and run in a Linux environment making it possible to easily deploy your
+application on any machine without the need of extensive setup. In a microservice
+architecture the application is split into separate services that can each run in their
+own Docker container. Through the use of docker-compose these containers can be
+grouped together and define a single multi-container application. The Compose tool
+of Docker runs these containers on the same local network allowing for easy communi-
+cation between them as every container can discover the others. This is very helpful
+as it means that every service runs independently from the other and eliminates the
+single point of failure dangers of a monolithic application. It is also great in terms
+of scalability as new services can be easily added into the architecture in a plug and
+play manner. However, with Compose all of these containers are deployed on the
+same server meaning that they still compete for resources and if the server becomes
+==PAGE:27==
+3.4 Deployment
+17
+overloaded then the entire system suffers from it regardless of the decoupling between
+them.
+In order to solve this issue, the containers need to be deployed on a network of
+multiple hosts that can communicate with each other. In this way, the containers
+can be separated into groups and deployed on their own servers, allowing the system
+as a whole to have access to more resources.
+In order to achieve this, Container
+Orchestration Tools can be used to facilitate this process as well as providing other
+benefits to the system.
+3.4.4
+Container Orchestration Tools
+The main issue that a container orchestration tool can solve in the context of this
+thesis is management of these containers in the cloud across multiple hosts. With
+these tools, multiple containers that are part of the same system can be grouped
+together in clusters where the orchestration tool handles the communication on the
+same network.
+Furthermore, these tools provide other benefits such as avoiding the need to handle
+every container manually or handling network communication; they can also provide
+features like load balancing on the incoming traﬀic as well. To summarize, these tools
+provide many benefits and can save a significant amount of time spent on managing,
+monitoring and planning actions on each container. [MK20] There are several such
+tools available that can be used, but in this thesis two of them are considered, Docker
+Swarm and Kubernetes
+3.4.4.1
+Docker Swarm
+Docker Swarm is an orchestration tool part of the Docker project. It is contained
+in the Docker Engine by default therefore no further installation is needed besides
+having docker. The concept of Docker Swarm is that multiple hosts that are running
+in swarm mode form together a swarm in which they can have the role of manager,
+worker or both. A Node in swarm mode refers to any instance of Docker part of
+the swarm and across these instances the manager node of a swarm distributes tasks
+according to the services specified when deploying to the swarm.
+To differentiate
+between standalone container and a container that is part of a swarm, the Docker
+documentation refers to a running container in a swarm as a task. A service is the
+specification of task that tells the manager node details about how to run the task in
+the swarm, it can specify the number of replicas, ports, container image, commands,
+etc. In a swarm, the Docker containers run distributed across the hosts and they can
+be easily scaled by specifying the number of replicas for each of them.
+Docker Swarm provides useful features that make it desirable to be used in the
+context of this thesis like, integration with the Docker Engine, automatically bringing
+back replicas that crashed through desired state reconciliation, built in load balancer,
+automatically handling network communication between nodes.[Inc23]
+==PAGE:28==
+18
+3 Analysis
+3.4.4.2
+Kubernetes
+Kubernetes is a container orchestration tool originally created by Google and since
+it was made open source it has been hosted and maintained by the Cloud Native
+Computing Foundation (CNCF). Chapter 3 of the book Introducing Azure Kuber-
+netes Service showcases the parts of a Kubernetes cluster and what they are used for
+as well as providing an overview of its key features, widespread usage and complex
+architecture. Kubernetes is currently the most popular orchestration tool available
+widely used by most developer teams and even offered as managed services by the
+top cloud providers. Kubernetes allows the deployment, management and scaling
+of Docker containers within a fast growing community and ecosystem. The impor-
+tant features provided by Kubernetes are: scaling up or down of the containers, load
+balancing, self-healing by automatic restarting the failed containers and plenty oth-
+ers. Kubernetes has a pretty complex architecture which allows for complicated and
+specific deployments to be defined.
+In figure 3.2 provided by the Kubernetes documentation [Kub22] the structure
+of a Kubernetes cluster is illustrated. A Kubernetes cluster refers to a set of worker
+nodes that run containers which are all managed by the Control Plane. The control
+plane of a cluster acts as a manager as it can make decisions regarding the nodes and
+events that occur inside it.
+k-proxy
+kubelet
+sched
+sched
+sched
+Control Plane
+Node
+etcd
+Kubernetes cluster
+api
+api
+api
+c-c-m
+c-c-m
+c-c-m
+c-m
+c-m
+c-m
+Node
+Node
+k-proxy
+kubelet
+kubelet
+k-proxy
+Control plane
+Scheduler
+sched
+Cloud controller
+manager
+(optional)
+c-c-m
+Controller
+manager
+c-m
+kubelet
+kubelet
+kube-proxy
+k-proxy
+(persistence store)
+etcd
+etcd
+Node
+API server
+api
+Figure 3.2: Kubernetes Architecture.
+In Kubernetes, the containers that have to be deployed are first defined as Pods.
+Pods act as a configuration wrapper around the containers and are then put inside of
+the cluster nodes. Services and Deployments can also be declared which allow for
+the grouping together of Pods and specifying replicas for pods respectively. [BRB20]
+==PAGE:29==
+3.4 Deployment
+19
+3.4.5
+Docker Swarm vs Kubernetes
+As shown in the previous subsections, both Docker Swarm and Kubernetes are fully
+developed container orchestration tools that can manage a deployment like the one
+planned for the CAWS and DataUpload microservices. In this section a comparison
+between the two will be presented and based on that one of the two tools will be
+chosen.
+In the Advances in Intelligent Systems and Computing journal from 2019 The
+comparison of container orchestrators paper discusses the difference between these
+two and presents some key ideas that are important.
+Docker Swarm is overall a
+simpler tool with less features than Kubernetes. Kubernetes is a more mature tool
+that underwent more development and therefore it provides a wide range of features
+on top of the basic needs of a generic orchestration tool. However, Kubernetes is
+much more complex and harder to setup as it requires more configuration. These
+ideas are also supported in the paper A performance comparison of cloud-based con-
+tainer orchestration tools published in the 10th IEEE International Conference on
+Big Knowledge conference, in which performance were run with containers running
+an application that detects patterns from LiDAR data using machine learning. The
+outcome of the experiments shows that Swarm performs very well, and even though
+Kubernetes showed higher overheads they were reasonably low. The increase in the
+Kubernetes overheads is due to the additional components that Kubernetes has to
+run which can be expensive for small sized clusters. However, in large deployments
+for complex and big systems Kubernetes is an overall better choice for orchestration.
+[MP19; Pan+19]
+From the information presented so far the orchestration tool that will be used to
+handle the deployment and management of the CAWS system will be Docker Swarm.
+The architecture of the solution is composed of two microservices running in their own
+containers as well as the PostgreSQL and RabbitMQ containers. This is not a highly
+complex structure and therefore many of the Kubernetes features are not needed
+in this case. Moreover, Kubernetes requires much more configuration and Docker
+Swarm is better fitted for smaller projects with a low number of containers. The
+important functionalities that provide fault tolerance, load balancing and network
+communication are provided by both tools, therefore Docker Swarm is more than
+adequate to handle the needs of the deployment.
+==PAGE:30==
+20
+==PAGE:31==
+CHAPTER 4
+Design
+In this chapter it is presented the design of the microservice architecture based on
+the technologies and concepts described in chapter 3 Analysis.
+In order to start designing the microservices first of all the current CAWS project
+has to be inspected to look at its structure for how the modules are implemented,
+the dependencies between them and identify what part of the project constitutes the
+Data Upload component that needs to be extracted into a separate service. After that
+it will be presented the design changes made to the base CAWS project in order to
+allow the decoupling of the modules that constitute the Data Upload component, how
+communication between the services fits in the architecture and the overall design of
+the microservice architecture along with the deployment architecture design.
+==PAGE:32==
+22
+4 Design
+4.1
+Current CAWS project
+Diagram 4.1 showcases the current structure of the CAWS project. The modules
+displayed are all separated into their own packages and it can also be seen how they
+relate to the CARP domain shown at the beginning of the previous chapter.
+CAWS
+Module
+Module
+Document
+Consent
+File
+Account
+Colllection
+Summary
+Security
+Study
+DataPoint
+Deployment
+Consent
+Protocol
+Data
+Figure 4.1: CAWS Implementation.
+4.1.1
+Dependency inspection
+What comes to attention at a first glance are the Data and DataPoint modules which
+constitute the implementation of the Data Upload component. The DataPoint mod-
+ule contains the API code for creating, retrieving and deleting data points. It contains
+the DataPointServiceImpl class which holds the business logic required to process the
+requests and the DataPointRepository class as the database adapter. Because these
+two classes provide the functionality of the component it is important to investigate
+if the other modules in the projects have any dependencies on them. Any coupling be-
+tween the DataPoint module and another one will have to be resolved by establishing
+communication between them over RabbitMQ so that the DataPoint module can be
+extracted out of the project without breaking the functionality of the other modules.
+The Deployment, Summary and Study modules are dependent on DataPoint as they
+==PAGE:33==
+4.1 Current CAWS project
+23
+require instances of either the DataPointServiceImpl class or the DataPointReposi-
+tory in the flow of their business logic. The next module that will be part of the
+DataUpload microservice is the Data module. The Data module is responsible for
+handling the management of data streams which are used for handling data points
+received in batches. Just like the other module, the classes which provide the func-
+tionality to this module are investigated to check for dependencies in the logic of
+the other modules, in this case we are looking at the DataStreamServiceImpl, Core-
+DataStreamService and the repository interfaces under the repository package. By
+investigating the project it is apparent that the Deployment and Summary modules.
+The dependency diagram in figure 4.2 more clearly illustrates how these modules
+depend on each other. The diagram is not a complete depiction of the classes and
+models inside of each module as it contains only the relevant components. There are
+also some classes that are closely related to the ones that have dependencies on the
+data modules and they are present in the diagram to provide a general overview of
+the structure.
+Deployment
+StudyDeploymentController
+CoreParticipationService
+CoreDeploymentService
+Repository
+StudyDeploymentController
+Study
+CoreParticipantRepository
+StudyController
+CoreStudyRepository
+Summary
+SummaryController
+SummaryServiceImpl
+ResourceExporterServiceImpl
+SummaryRepository
+DataPoint
+DataPointService
+DataPointRepository
+Data
+CoreDataStreamService
+DataStreamService
+DataStreamSequenceRepository
+Figure 4.2: Dependency diagram.
+As it can be seen in the dependency diagram the Deployment module has 2 depen-
+dencies, one is on the DataPointService as the API controller StudyDeploymentCon-
+troller contains a statistics endpoint which requires the getStatistics method from
+the DataPointService. The other one is on the CoreDataStreamService class which is
+required by the CoreDeploymentService class. This dependency is not based on any
+==PAGE:34==
+24
+4 Design
+explicit method or parameter but instead it requires an instance of the CoreDataS-
+treamService. This is because classes that are prefixed with the keyword Core are
+used to import parts of the domain defined by the CARP Core project.
+The Summary, similarly to the Deployment module, also has one dependency one
+each of the data upload related modules.
+The ResourceExporterServiceImpl class
+depends on both the DataPointService and DataStreamSequenceRepository as it is
+responsible for exporting data points and data stream sequences in Json file formats.
+Both of these dependencies are based on method calls as they require to retrieve data
+from the Data and DataPoint modules.
+The Study module has one dependency on the DataPointRepository class as the
+CoreStudyRepository class, when removing a study it needs to communicate with all
+the services that manage data related to studies and trigger their respective deleteAll
+methods.
+4.2
+Decoupling the services
+Now that the dependencies between the modules have been identified, this section
+will illustrate how they will be decoupled from each other. When decoupling compo-
+nents from a project with the purpose of moving them into a separate service it is
+important that the communication and interaction between them remains agnostic
+to their internal logic and implementation. This is where RabbitMQ comes into play
+as it will allow for completely decoupling the CAWS modules from the DataUpload
+ones.
+Summary
+Study
+DataPoint
+Deployment
+Data
+RabbitMQ
+Instance
+DataStream
+ServiceAdapter
+Figure 4.3: Decoupled Services Diagram.
+Figure 4.3 depicts how the modules will be decoupled form one another through
+the use of RabbitMQ. With this design, the modules will communicate with eachother
+through the RabbitMQ middleware which will receive messages from the components
+and forward them to the correct consumers. As a result, instead of requiring the
+DataUpload modules as a direct dependency, the CAWS modules can send messages
+==PAGE:35==
+4.2 Decoupling the services
+25
+with the necessary parameters for the execution of the DataUpload methods and lis-
+ten for the response when it is done. Another noteworthy change is the addition of
+the DataStreamServiceAdapter component as a dependency to the Deployment mod-
+ule, because the module requires an instance of the DataStreamService and passes
+it to instantiate the DeploymentService. This service is defined in the CARP Core
+project through the use of interfaces and requires an instanced object that imple-
+ments the DataStreamService interface which is also defined in the core project. The
+implementation of this interface is done by the CoreDataStreamService class, how-
+ever this needs to be moved as it is part of the DataUpload domain. In order to
+solve this dependency issue, an adapter component can be used as a wrapper and
+passed to the DeploymentService as a replacement for the CoreDataStreamService
+class. This adapter will implement the interface and use RabbitMQ communication
+to communicate with the DataUpload service.
+==PAGE:36==
+26
+4 Design
+4.3
+Microservice Architecture
+Now that the modules that form the DataUpload component have been identified and
+determined how they will be decoupled from the CAWS service, the architecture of
+the microservices will be presented in this section.
+CAWS
+DataUpload
+RabbitMQ
+Microservice
+environment
+API
+Gateway
+Figure 4.4: Microservice Architecture.
+In figure 4.4 the microservice architecture is illustrated as a diagram where the 2
+services that will form the system are the CAWS microservice and the DataUpload
+microservice. Each of them are attached to their own PostgreSQL database instance
+and use the RabbitMQ middleware to communicate with each other. The API Gate-
+way is a service that will receive all the incoming requests from the outside and route
+them to the correct microservice endpoint. With this architecture, the DataUpload
+component can run as a separate process completely detached from the base CAWS
+service. This will allow for the component to be scaled individually to achieve the de-
+sired operational performance. By deploying it on a separate host machine it can be
+scaled up to have access to more hardware resources and it can be scaled horizontally
+through replication.
+==PAGE:37==
+4.4 Deployment architecture
+27
+In order to be able to perform these scaling operations on the component, however,
+the system needs to be deployed in an environment that allows for it. To do that, the
+container orchestration tool Docker Swarm is used to deploy the system on a Cloud
+Service Provider.
+4.4
+Deployment architecture
+This section will cover the deployment environment of the system and how it is
+designed to allow for a scalable DataUpload component.
+For the designing of the deploy environment two key aspects have to be taken into
+account. First, the Docker Swarm environment and how the containers are distributed
+across the swarm cluster and second, how many host machines are needed on the cloud
+environment and how many resources they require.
+A node in Docker Swarm represents a host machine on which it runs containers
+and replicas of containers. By referring to the Microservice Architecture in figure 4.4
+it can be noticed that at least 6 containers are required to be distributed throughout
+the swarm, as each service in the diagram should be containerized with Docker. De-
+pending on how these containers are distributed in the swarm, we get a clearer view
+of what type of cloud host machines are needed.
+Swarm manager
+Worker Node
+Worker Node
+Worker Node
+CAWS
+DataUpload
+RabbitMQ
+Gateway
+Figure 4.5: Swarm Architecture.
+Figure 4.5 showcases the design of the node cluster and how the services will
+be deployed on it. The manager node in a swarm is responsible for controlling the
+distribution of containers across the swarm. They do that by scheduling the services
+==PAGE:38==
+28
+4 Design
+to be run on specific nodes and by maintaining the desired state of the swarm by
+adding and removing replicas of a service. Because of this the best practice is for the
+manager node to be a separate machine that does not perform any other tasks than
+scheduling. However, the manager node acts by default as a worker node as well to
+allow for the use of more resources when there is a lower number of cloud machines
+available. In this design, the API Gateway was chosen to run on the manager node
+to avoid having another host machine just for it. This is because the API Gateway
+does not require a large amount of resources to run and the manager node can handle
+the extra load.
+The other three worker nodes are responsible for running the microservices in the
+architecture. The CAWS and DataUpload containers are paired together with their
+own database service to comply with the Database-Per-Service concept of microser-
+vices. This way the system avoids having a single point of failure as either service can
+still function if the other fails. As a result of this distribution, both of these nodes
+will be the most resource intensive to run and therefore their assigned host machines
+will require the most resources out of them all.
+The third worker node is responsible for running the RabbitMQ instance that
+will handle the communication between the CAWS and DataUpload services.
+As
+RabbitMQ is a lightweight service this node will not require many resources and can
+therefore be deployed on a smaller machine like the manager node.
+==PAGE:39==
+CHAPTER 5
+Implementation
+In this chapter, the implementation of the design described in chapter 4 will be pre-
+sented. The structure and order will roughly follow the one in the design chapter
+by starting first with resolving the dependencies between the modules through Rab-
+bitMQ communication, containerizing the new DataUpload microservice, setting up
+the swarm in a cloud environment and then deploying the solution on the swarm.
+5.1
+RabbitMQ communication
+To setup the communication the queues have to be defined and then those queues can
+be bound to an exchange. The exchange type that is used is the direct exchange as
+it is the one that performs the fastest; the fanout exchange type is not a good fit for
+this scenario and the topic exchange has been avoided for performance reasons. The
+code shown will be grouped into 3 sections, each section containing the setup in each
+of the modules that have dependencies on the DataUpload component: Summary,
+Study and Deployment.
+5.1.1
+Study
+The Study module has a dependency on the DataPointRepository class in the remove
+method from CoreStudyRepository. This method is called when an entire study has
+to be removed and therefore all associated data points have to be removed from the
+repository as well. First, the DataPoint delete queue has to be created and bound to
+a direct exchange. Listing 5.1 shows how the direct exchange and queue is created
+using the rabbit.data-upload.datapoint.delete.queue identifier and then bound together
+with the BindingBuilder.
+==PAGE:40==
+30
+5 Implementation
+1 val DATA_UPLOAD_DATAPOINT_DELETE_QUEUE = environment.getProperty("rabbit.
+data-upload.datapoint.delete.queue")
+2
+3 @Bean
+4 fun dataUploadDatapointDeleteDirectExchange(): DirectExchange
+5 {
+6
+return DirectExchange(DATA_UPLOAD_DATAPOINT_DELETE_QUEUE)
+7 }
+8
+9 @Bean
+10 fun dataUploadDatapointDeleteQueue(): Queue
+11 {
+12
+return QueueBuilder.durable(DATA_UPLOAD_DATAPOINT_DELETE_QUEUE).build()
+13 }
+14
+15 @Bean
+16 fun dataUploadDeleteBinding(): Binding
+17 {
+18
+return BindingBuilder.bind(dataUploadDatapointDeleteQueue()).to(
+dataUploadDatapointDeleteDirectExchange()).with(
+DATA_UPLOAD_DATAPOINT_DELETE_QUEUE)
+19 }
+Listing 5.1: Queue and exchange definition and binding.
+The rest of the queues which will be used are created in a similar and therefore
+only the listing for the creation of this one is showed.
+The next step is to send a message on this queue and replace the dataPointRepos-
+itory.deleteAllByDeploymentIds call. To do that the RabbitTemplate class from the
+org.springframework.amqp.rabbit.core.RabbitTemplate package is used to send mes-
+sages to a queue. The instance of the helper class is created by Spring Boot and
+through Spring Boot’s dependency injection functionality it can be accessed by adding
+private val rabbitTemplate: RabbitTemplate to the constructor of a class that
+is autowired by Spring.
+Listing 5.2 shows how the a message containing the deploymentIdsString is sent
+through the delete queue using the convertAndSend method of the RabbitTemplate.
+1
+rabbitTemplate.convertAndSend(environment.getProperty("rabbit.data-
+upload.datapoint.delete.queue")!!, deploymentIdsString)
+Listing 5.2: Sending a message through the delete queue.
+5.1.2
+Summary
+The Summary module has a dependency on the DataPointService and DataStreamSe-
+quenceRepository classes in the ResourceExporterServiceImpl. The exportDataPoints
+and exportDataStreamSequences methods are used to retrieve information about data
+points or data stream sequences and export them in a Json file format. To decouple
+this from the DataPoint and Data modules these 2 methods are refactored to send a
+==PAGE:41==
+5.1 RabbitMQ communication
+31
+message on the queue to ask for the necessary data for execution to be retrieved and
+receive them as a reply from the DataUpload component through the same queue.
+Listing 5.3 illustrates how the exportDataPoints method is refactored to use Rab-
+bitMQ communication.
+The converSendAndReceiveAsType method of the Rabbit-
+Template sends a message on the queue and creates a callback queue that is consumed
+when the reply is available. The ParameterizedTypeReference type is used in line 3
+to create a custom type that can be specified to the rabbitTemplate so that the reply
+can be stored in the val dataPoints: List<Any>? variable.
+1 override fun exportDataPoints(deploymentIds: List<String>, rootFolder: Path,
+summaryLog: SummaryLog)
+2 {
+3
+class ResponseFromDataUpload : ParameterizedTypeReference <List<Any>>()
+4
+val dataPoints: List<Any>? =
+5
+rabbitTemplate.convertSendAndReceiveAsType(
+6
+environment.getProperty("rabbit.data-upload.datapoint.
+getAllForDownload.queue")!!,
+7
+deploymentIds ,
+8
+ResponseFromDataUpload())
+9
+10
+if (dataPoints.isNullOrEmpty())
+11
+{
+12
+LOGGER.info("No datapoint data was found.")
+13
+summaryLog.infoLogs.add("No datapoint data was found.")
+14
+return
+15
+}
+16
+val dataPointsPath = resolveFullPathForFilename("${rootFolder.fileName}/
+datapoints.json")
+17
+createFileForResourceOnPath(dataPointsPath , dataPoints , summaryLog)
+18 }
+Listing 5.3: ExportDataPoints method.
+5.1.3
+Deployment
+The Deployment module has a dependency on the CoreDataStreamService in the
+CoreDeploymentService and a dependency on the DataPointService in the StudyDe-
+ploymentController. To decouple the controller from the service is very similar to
+the exportDataPoints listing shown before: create a type reference using Parame-
+terizedTypeReference then request the necessary information with convertSendAn-
+dReceiveAsType.
+What is more noteworthy here is the creation of the DataStreamServiceAdapter
+shown in Figure 4.3 of Section 4.2 in the Design chapter.
+==PAGE:42==
+32
+5 Implementation
+DataUpload
+CAWS
+CAWS
+<<Interface>>
+DataStreamService
++ appendToDataStreams(studyDeploymentId, batch)
++ closeDataStreams(studyDeploymentIds)
++ getDataStream(dataStreamId, from, to): DataStreamBatch
++ openDataStreams(configuration)
++ removeDataStreams(studyDeploymentIds): Set<UUID>
+CoreDataStreamService
+CoreDeploymentService
+<<Interface>>
+DataStreamService
++ appendToDataStreams(studyDeploymentId, batch)
++ closeDataStreams(studyDeploymentIds)
++ getDataStream(dataStreamId, from, to): DataStreamBatch
++ openDataStreams(configuration)
++ removeDataStreams(studyDeploymentIds): Set<UUID>
+DataStreamServiceAdapter
+RabbitMQ
+CoreDeploymentService
+CoreDataStreamService
+Figure 5.1: DataStreamServiceAdapter decoupling.
+Figure 5.1 illustrates how the DataStreamServiceAdapter will be implemented and
+decouple the Deployment module in the CAWS service from the DataUpload service.
+In the top section it is showcased the current implementation where CoreDataStream-
+Service is part of the CAWS project and directly implements the DataStreamService
+interface.
+In the bottom section, the DataStreamServiceAdapter class implements
+the interface and each of the methods will contain code that sends messages through
+RabbitMQ to the CoreDataStreamService which will handle the requests and send
+back replies when needed.
+In Listing 5.4 is showcased the implementation of 3 of the methods of the data
+stream adapter. The appendToDatastreams and closeDataStreams methods use the
+convertAndSend rabbit template methods to send data through their associated queues
+so that the CoreDataStreamService in the DataUpload component will execute prop-
+erly. The getDataStream method is another requets/reply scenario that uses the con-
+==PAGE:43==
+5.2 DataUpload component message handling
+33
+vertSendAndReceiveAsType method to retrieve a data stream batch from the Core-
+DataStreamService and throws a ResourceNotFound exception in case the service
+failed to retrieve them.
+1 override suspend fun appendToDataStreams(studyDeploymentId: UUID, batch:
+DataStreamBatch) {
+2
+val message = AppendToDataStreamMessage(studyDeploymentId , batch)
+3
+rabbitTemplate.convertAndSend(environment.getProperty("rabbit.data-
+upload.datapoint.appendToDataStreams.queue")!!, JSON.encodeToString(
+message))
+4 }
+5
+6 override suspend fun closeDataStreams(studyDeploymentIds: Set<UUID>) {
+7
+rabbitTemplate.convertAndSend(environment.getProperty("rabbit.data-
+upload.datapoint.closeDataStreams.queue")!!, studyDeploymentIds)
+8 }
+9
+10 override suspend fun getDataStream(
+11
+getDataStream: DataStreamId ,
+12
+fromSequenceId: Long,
+13
+toSequenceIdInclusive: Long?
+14 ): DataStreamBatch {
+15
+val message = GetDataStreamMessage(getDataStream , fromSequenceId ,
+toSequenceIdInclusive)
+16
+class ResponseFromDataUpload : ParameterizedTypeReference <
+DataStreamBatch >()
+17
+18
+return rabbitTemplate.convertSendAndReceiveAsType(
+19
+environment.getProperty("rabbit.data-upload.datapoint.getDataStream.
+queue")!!,
+20
+message,
+21
+ResponseFromDataUpload()
+22
+) ?: throw ResourceNotFoundException(getDataStream.toString())
+23 }
+Listing 5.4: Adapter implementation.
+5.2
+DataUpload component message handling
+Now that the modules in the CAWS service are decoupled from the DataPoint and
+Data modules, the DataUpload microservice can be created using these modules. To
+keep the functionality of the CAWS service RabbitMQ listeners have to be added to
+this service in order to handle the messages sent showcased in Section 5.1.
+==PAGE:44==
+34
+5 Implementation
+To do this, a separate class called DataUploadMessageListeners is created where
+all the RabbitListener methods can be grouped together. The implementation of this
+class is shown in Listing 5.5.
+1 class DataUploadMessageListeners {
+2
+@Autowired
+3
+@Lazy
+4
+lateinit var dataPointRepository: DataPointRepository
+5
+6
+@Autowired
+7
+@Lazy
+8
+lateinit var dataPointService: IDataPointService
+9
+10
+@Autowired
+11
+@Lazy
+12
+lateinit var dataStreamService: DataStreamService
+13
+14
+@Autowired
+15
+@Lazy
+16
+lateinit var dataStreamSequenceRepository: DataStreamSequenceRepository
+17
+18
+@RabbitListener(queues = ["\${rabbit.data-upload.datapoint.delete.queue}
+"])
+19
+fun receiveDelete(deploymentIdsString: Set<String>)
+20
+{
+21
+dataPointRepository.deleteAllByDeploymentIds(deploymentIdsString)
+22
+}
+23
+24
+@RabbitListener(queues = ["\${rabbit.data-upload.datapoint.
+getAllForDownload.queue}"])
+25
+fun receiveGetAllForDownload(deploymentIds: List<String>): List<
+DataPoint>
+26
+{
+27
+return dataPointService.getAllForDownload(deploymentIds)
+28
+}
+29
+30
+@RabbitListener(queues = ["\${rabbit.data-upload.datastream.
+findAllDataStreamSequences.queue}"])
+31
+fun receiveFindAllDataStreamSequences(deploymentIds: List<String>): List
+<DataStreamSequence >
+32
+{
+33
+return dataStreamSequenceRepository.findAllByDeploymentIds(
+deploymentIds)
+34
+}
+35
+36
+@RabbitListener(queues = ["\${rabbit.data-upload.datastream.
+appendToDataStreams.queue}"])
+37
+fun receiveAppendToDataStreams(message: AppendToDataStreamMessage)
+38
+{
+39
+runBlocking {
+40
+dataStreamService.appendToDataStreams(message.studyDeploymentId ,
+message.batch)
+41
+}
+42
+}
+43
+==PAGE:45==
+5.2 DataUpload component message handling
+35
+44
+@RabbitListener(queues = ["\${rabbit.data-upload.datastream.
+closeDataStreams.queue}"])
+45
+fun receiveCloseDataStreams(studyDeploymentIds: Set<UUID>)
+46
+{
+47
+runBlocking {
+48
+dataStreamService.closeDataStreams(studyDeploymentIds)
+49
+}
+50
+}
+51
+52
+@RabbitListener(queues = ["\${rabbit.data-upload.datastream.
+getDataStream.queue}"])
+53
+fun receiveGetDataStream(message: GetDataStreamMessage): DataStreamBatch
+54
+{
+55
+val result = runBlocking {
+56
+dataStreamService.getDataStream(message.getDataStream , message.
+fromSequenceId , message.toSequenceIdInclusive)
+57
+}
+58
+59
+return result
+60
+}
+61
+62
+@RabbitListener(queues = ["\${rabbit.data-upload.datastream.
+openDataStreams.queue}"])
+63
+fun receiveOpenDataStreams(configuration: DataStreamsConfiguration)
+64
+{
+65
+runBlocking {
+66
+dataStreamService.openDataStreams(configuration)
+67
+}
+68
+}
+69
+70
+@RabbitListener(queues = ["\${rabbit.data-upload.datastream.
+removeDataStreams.queue}"])
+71
+fun receiveRemoveDataStreams(studyDeploymentIds: Set<UUID>): Set<UUID>
+72
+{
+73
+val result = runBlocking {
+74
+dataStreamService.removeDataStreams(studyDeploymentIds)
+75
+}
+76
+77
+return result
+78
+}
+79
+80
+@RabbitListener(queues = ["\${rabbit.data-upload.datapoint.getStatistics
+.queue}"])
+81
+fun receiveGetStatistics(deploymentIds: List<String>):
+DeploymentStatisticsResponseDto
+82
+{
+83
+return dataPointService.getStatistics(deploymentIds)
+84
+}
+85 }
+Listing 5.5: DataUploadMessageListeners class implementation.
+By using the @RabbitListener annotation a method can be configured as a lis-
+tener to a specific queue which is specified in the queues parameter of the annotation.
+These methods are called whenever a message is consumed from the queue by the
+==PAGE:46==
+36
+5 Implementation
+service and use the DataPointRepository, DataPointService, DataStreamService and
+DataStreamSequenceRepository to execute the correct business logic for the case. For
+example, the receiveDelete method listens and consumes the messages send on the
+DataPoint delete queue showcased in Listings 5.1 and 5.2. The method deleteAllBy-
+DeploymentIds which was needed as a dependency in the CAWS service is now used
+in this listener in the DataUpload service. Other listeners like receiveGetAllForDown-
+load listeners also have a return type and therefore also return a result back to the
+sender instead of just executing a method. This is how the request/reply pattern
+becomes functional and allows for communication like the one showed in Listing 5.3.
+5.3
+Containerization
+Now that the DataUpload service has been decoupled from the CAWS service and the
+communication between has been established with RabbitMQ, the DataUpload ser-
+vice can be containerized with Docker so that it can be deployed. The CAWS service
+is already set up for containerization and therefore only the DataUpload component
+requires this step.
+To do this it is pretty straightforward and all that is required is the addition of a
+Dockerfile that specifies how to build the solution.
+1 FROM gradle:6.8.3-jdk11 AS builder
+2 COPY ./ /src
+3 USER root
+4 WORKDIR /src
+5 RUN gradle clean bootJar -x test
+6
+7
+8 FROM openjdk:15
+9 WORKDIR /app
+10 COPY --from=builder /src/build/libs/data-upload.jar .
+11
+12 RUN chown -R root:root /app
+13 USER root
+14
+15 ENTRYPOINT ["java","-jar","data-upload.jar"]
+16
+17 CMD ["java", \
+18
+# -XX:+UnlockExperimentalVMOptions -XX:+UseCGroupMemoryLimitForHeap >
+lets the JVM respect CPU and RAM limits inside a Docker container
+19
+"-XX:+UnlockExperimentalVMOptions", "-XX:+UseCGroupMemoryLimitForHeap",
+"-XshowSettings:vm", \
+20
+# -XX:+ExitOnOutOfMemoryError > JVM exits on the first occurrence of an
+out-of-memory error
+21
+"-XX:+ExitOnOutOfMemoryError","-XX:+HeapDumpOnOutOfMemoryError", "-XX:
+HeapDumpPath=/tmp","-XX:ErrorFile=/tmp/jdk.error", \
+22
+"-XX:TieredStopAtLevel=1", \
+23
+"-Djava.security.egd=file:/dev/./urandom", \
+24
+"-Dcom.sun.management.jmxremote", \
+25
+"-jar", "/app/data-upload.jar"]
+==PAGE:47==
+5.4 Docker Swarm and the deployment environment
+37
+Listing 5.6: Dockerfile for the DataUpload service.
+The Dockerfile first specifies to use gradle as a build tool and compiles the .jar files
+needed for execution as a first step, and then as a second step using openjdk uses the
+compiled data-upload.jar file along with some extra Java runtime arguments specified
+in CMD to run the application. With this file, Docker can create an image which can
+then be used to create and run a Docker container that holds the DataUpload service.
+This can be done using command line arguments or with docker-compose, however,
+in this case before creating and running the container a few more steps have to be
+taken.
+5.4
+Docker Swarm and the deployment environment
+In order to create the containers and setup the microservices, the cloud environment
+has to be configured followed by initializing the swarm on the virtual hosts. After
+those are configured, the images for both of the services can be created using the
+Dockerfiles, transported on the remote host and then deployed in the Docker Swarm
+to be run as containers.
+The cloud environment where the system will be hosted is on DigitalOcean, the
+reasoning for this is because CACHET already uses this platform to host their current
+apps including CAWS and they can provide two Droplets that can be used as host
+machines.
+The AWS free tier unfortunately does not provide machines powerful
+enough to run any of the microservices as they run out of memory when trying to
+deploy the system on them.
+Therefore, because there is access to only two host
+machines this means that the architecture presented in Figure 4.5 cannot be fully
+realised in this scope. Because the focus is on the DataUpload component, one of the
+droplets will be used to host the CAWS service, database, RabbitMQ and gateway;
+and the other droplet will be reserved for the DataUpload service. After the Droplets
+are created and configured so that they can be accessed through a ssh connection,
+the only configuration they need is to install Docker on both of them.
+5.4.1
+Initializing the Swarm
+Now that both Droplets have Docker running on them a Swarm can be initialized
+from the machine that should be manager, in this case it will be from the host that
+will contain the CAWS service. To do thi, the docker swarm init command has to
+be executed, after that the other droplet can be added to the swarm as a worker
+node with the docker swarm join command. With the manager and worker node
+connected in a swarm, this means that the containers deployed inside it will be on
+the same network by default and also under Docker Swarm’s automatic container
+discovery, so any communication between containers on different nodes is handled by
+the swarm. This is a great benefit since it means that the containers communicate
+==PAGE:48==
+38
+5 Implementation
+with each other through the DNS addresses they have assigned by Docker Swarm so
+if any of them get reassigned to another node with a different IP address there is no
+extra configuration needed.
+The next step is to get access to the Docker images needed to create and run the
+containers. For the Postgre and RabbitMQ instances there is no further configuration
+needed as they can just be pulled from Docker Hub, however for the CAWS and
+DataUpload services it is different. To be able to run the services in the swarm it
+needs to have access to the images of the containers, there are multiple ways to do
+that: the images can be packaged in a compressed file from the local computer and
+transferred to the remote with the help of a transfer tool, the host machine can pull
+the projects from Git and create the images themselves or the images can be built on a
+local computer and uploaded to a private DockerHub repository. However, the second
+option is not very practical since it would make it hard to automate the deployment
+process if CI/CD pipelines will be set up in the future and using DockerHub is an
+overall more practical solution that eliminates the need of doing file transfers anyways
+so the 3rd option is chosen in this case.
+To do this, a private DockerHub repository has to be created using their on-
+line tools; the repository created was named dra5ke/thesis-repository. With the use
+of the Dockerfiles created for both services the images for them can be created lo-
+cally with the commands docker build -t dra5ke/thesis-repository:webservices . and
+docker build -t dra5ke/thesis-repository:dataupload . The -t option tags the images
+with the name of the repository followed by an identifier for the specific image af-
+ter the : character, this is necessary so that when using docker push <REPOSI-
+TORY_NAME:IMAGE_IDENTIFIER> Docker knows how to find the correct pri-
+vate repository on DockerHub. Now that the images have been successfully pushed
+to the online repository, on the manager node in the swarm the personal Docker ac-
+count credentials can be used for authentication which will allow the use of the docker
+pull command followed by the repository_name/image_name combination showed
+before.
+5.5
+Deploying the system
+There are a few ways of deploying containers to a swarm, but when there are multiple
+services it is better to create a compose file where they are all specified in the same
+place. This file is called in the Docker Swarm documentation a stack deploy file and
+it is similar to a normal docker-compose file but with a few changes that allow for
+specifying Swarm mode specific parameters. Listing 5.7 shows the stack deploy file
+that is used to deploy the containers as well as use the Docker Swarm functionalities
+that allow to scale individual services.
+==PAGE:49==
+5.5 Deploying the system
+39
+1 version: '3.9'
+2
+3 services:
+4
+postgres:
+5
+image: postgres:latest
+6
+ports:
+7
+- 5434:5434
+8
+expose:
+9
+- "5434"
+10
+command: -p 5434
+11
+environment:
+12
+- POSTGRES_USER=carp
+13
+- POSTGRES_PASSWORD=carp
+14
+- PGDATA=/data/postgres
+15
+volumes:
+16
+- postgres:/var/lib/postgresql/data
+17
+- ./docker_postgres_init.sql:/docker-entrypoint -initdb.d/
+docker_postgres_init.sql
+18
+deploy:
+19
+mode: replicated
+20
+replicas: 1
+21
+placement:
+22
+constraints: [node.role == manager]
+23
+rabbitmq-prod:
+24
+container_name: carp-rabbitmq-prod
+25
+image: rabbitmq:3-management
+26
+hostname: rabbitmq-prod
+27
+ports:
+28
+- 5672:5672
+29
+- 15672:15672
+30
+- 15692:15692
+31
+volumes:
+32
+- rabbitmq_prod:/var/lib/rabbitmq/data
+33
+- ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+34
+- ./enabled_plugins:/etc/rabbitmq/enabled_plugins
+35
+network_mode: host
+36
+deploy:
+37
+mode: replicated
+38
+replicas: 1
+39
+placement:
+40
+constraints: [node.role == manager]
+41
+cans-ws-data-upload-staging:
+42
+image:
+dra5ke/thesis-repository:dataupload
+43
+ports:
+44
+- 8080:8080
+45
+expose:
+46
+- "8080"
+47
+environment:
+48
+- SPRING_PROFILES_ACTIVE=staging
+49
+deploy:
+50
+mode: replicated
+51
+replicas: 2
+52
+placement:
+53
+constraints: [node.role == worker]
+==PAGE:50==
+40
+5 Implementation
+54
+cans-ws-staging:
+55
+image: dra5ke/thesis-repository:webservices
+56
+ports:
+57
+- 8081:8081
+58
+expose:
+59
+- "8081"
+60
+environment:
+61
+- SPRING_PROFILES_ACTIVE=staging
+62
+deploy:
+63
+mode: replicated
+64
+replicas: 2
+65
+placement:
+66
+constraints: [node.role == manager]
+67
+68 volumes:
+69
+postgres:
+70
+rabbitmq_prod:
+Listing 5.7: Stack deploy file.
+The contents are very similar to a normal docker compose file where for every ser-
+vice the build image, ports, volumes and environment variables are specified, but the
+noteworthy differences are under the deploy keywords. The deploy section for each
+service represents the usage of the Docker Swarm container orchestration tool. The
+first parameter, mode, is used to specify if the service should be deployed either repli-
+cated or global. Global means that Docker Swarm will create one container on every
+physical node in the swarm, replicated means that there will be as many containers as
+specified under replicas and they will be distributed automatically by Docker Swarm
+through the nodes unless constraints are specified. In this case, because there are 2
+physical nodes available and the aim is to isolate the DataUpload service containers
+on their own physical nodes so that they do not compete for resources with the others,
+placement constraints are specified for each service to ensure it. As it can be noticed,
+the cans-ws-data-upload-staging services is constrained to the worker node through
+the use of constraints: [node.role == worker] and the others on the manager node.
+Both the CAWS and DataUpload components are configured to be deployed with 2
+replicas, this means that Docker Swarm will create two containers that run the web
+service for each component at the same time. The replica functionality is a key aspect
+that provides great scalability to both services and it can be further tweaked once an
+initial deployment is done. The reason for setting two replicas for a service as a base
+case even though both of the replicas will run on the same node is to provide fault
+tolerance by default.
+With the deploy file configured, the system can now be deployed on the cloud
+environment. To do that, the stack deploy file is transfered on the manager node, the
+necessary Docker images are pulled so that they can be accessed and the system is
+deployed using the command docker stack deploy –compose-file docker-compose.yml
+CAWSstack. The first options parameter specifies what file to use for the deploy and
+it is then followed by a name that will be assigned to the stack, in this case it is
+CAWSstack. Figure 5.2 shows the output of the command where it can be seen how
+==PAGE:51==
+5.5 Deploying the system
+41
+Docker Swarm first creates an overlay network for the containers and then it brings
+up every service one by one.
+Figure 5.2: Output of the stack deploy command.
+With Docker Swarm the stack and services can be inspected to see if the container
+creation and assignment worked as intended. With the use of the docker stack ps and
+docker service ls commands more information can be accessed about the status of the
+swarm, Figure 5.3 shows the output of these commands after the deploy.
+Figure 5.3: Status of the services after deploy.
+There are a few noteworthy pieces of information displayed in this. First of all, in
+the stack inspection it can be noticed that some of the containers have failed to run.
+This is due to the fact that the order in which the services are being run is random,
+ans services like CAWS and DataUpload for example depend on others to be up and
+running so that they can establish a connection during startup. However, this is not
+an issue due to Docker Swarm state management functionality.
+Because we have
+specified that two replicas of the CAWS and DataUpload to be running, whenever
+one of the replicas fail, another one is automatically created by the swarm to maintain
+the desired state. It can be noticed that the swarm operates in the desired state with
+the output of the service ls command where it can be seen that the desired number of
+replicas for each service is correct. This example also showcases how fault tolerance
+==PAGE:52==
+42
+5 Implementation
+is achieved with this setup in a production environment, as if one of the CAWS or
+DataUpload fail and crash, the other running replicas will still be functional and be
+able to handle requests while Docker Swarm runs another replica to maintain the
+state.
+One last thing to inspect is whether the allocation of the containers respects
+the intended design, the DataUpload component should be running on the worker
+node and the rest of the services on the manager node. To do that the docker node
+ps command can be used from a manager node to list the containers running on any
+node of the swarm, this can also be achieved by ssh-ing into the worker node manually,
+however in a scenario where a large number of nodes would be part of a swarm, using
+the manager node is more practical. Figure 5.4 shows the list of containers running on
+the worker node and it can be seen that both replicas as well as leftover information
+about the initial failed container have been scheduled to run on the worker node
+which is named stefan-thesis-dataupload.
+Figure 5.4: Containers running on the worker node.
+==PAGE:53==
+CHAPTER 6
+Deployment
+Operations
+The aim of this chapter is to showcase the new functionalities that are introduced by
+deploying the microservice architecture that has been created in the cloud environ-
+ment on Digital Ocean with the use of Docker Swarm. Because the initial deployment
+has been realized and the microservices are successfully running and using the repli-
+cation feature, this chapter aims to showcase how this setup can be operated to
+provide as much scaling as needed for any specific service. The way these features
+will be showcased is through the premise of possible scenarios that might occur in a
+production environment.
+6.1
+Scaling the DataUpload service
+With the current deployment showcased in Section 5.5 the DataUpload microservice
+has been deployed to a separate physical node, decoupled from the the other services.
+This way, the service has more resources available for itself since there are no other
+processes on that node to take up part of them and there are also multiple replicas
+of it running to ensure fault tolerance. By comparing that environment with the
+current CAWS project deployment where the data upload component is part of the
+same process as the others and run on the same machine, it can be noticed that the
+DataUpload component has been scaled to an increased amount of resources made
+available and multiple instances that However, even though the component has been
+scaled, the purpose of this section is to showcase how the scalability property has
+been achieved through the changes introduced with this thesis.
+A scenario that can illustrate how scalability is achieved is when in a production
+environment, a component experiences much heavier load due to increased traﬀic
+which can lead to exhausting the available resources and then failure. Lets assume
+that during normal operations a new study is being deployed and part of this study a
+high number of participants are going to start sending a large amount of data at fast
+rate to be handled by the DataUpload component. This amount of extra load on the
+component is considered to be so high that the current physical node it is deployed
+begins getting close to using up all of its resources and is in danger of crashing and
+==PAGE:54==
+44
+6 Deployment Operations
+failing. To further scale this component up another node can be added to the swarm
+and then more replicas of the service can be created to run on that node. Because
+Docker Swarm provides its own load balancer, the incoming traﬀic will be balanced
+between the nodes that run containers of the DataUpload service.
+In the context of this thesis, because only two Droplets are available on Digital
+Ocean, to simulate the addition of another node to the swarm, the system will be
+redeployed to have all services running on the manager node, and the empty worker
+node will be removed from the swarm.
+In Figure 6.1 it is shown the swarm with only a single node available after the
+worker node has been removed. With this swarm setup the system can be deployed
+to this node after removing the [node.role == worker] constraint of the data upload
+service from the docker-compose file.
+Figure 6.1: Single node swarm.
+Figure 6.2 shows the status of the services after they have been deployed and it
+can be seen that the only the manager node is in use.
+Figure 6.2: Services running on a single node.
+With this setup the premise of the scenario is that the current node will be put
+under very high load due to the DataUpload service receiving high traﬀic and will
+start reaching the limit of the resources available for it. In order to prevent the node
+from crashing and experiencing downtime, but also to be able to handle the extra
+traﬀic a new node can be added to the swarm and the data upload service can be
+scaled up to more replicas. Firstly, a new node has to be added to the swarm to
+increase the overall resources the swarm has access to, Figure 6.3 shows the swarm
+after the node has been added to it.
+With the new node added to the swarm, the data upload can now be scaled up
+using the docker service scale command. As it can be seen in Figure 6.4 the command
+requires the name or in this case id of the service and the number of replicas the service
+==PAGE:55==
+6.1 Scaling the DataUpload service
+45
+Figure 6.3: Joining a node to the swarm.
+should have. In this case since there are 2 replicas running already on the manager
+node, the service is being scaled up to 4 replicas.
+Figure 6.4: Scaling up the DataUpload service.
+When inspecting the service it now has 4 replicas as shown in Figure 6.5. What
+is important to note is where those two new replicas are running in the swarm; when
+connecting to the worker node and executing the docker ps command there should be
+two containers running the data upload component automatically assigned there by
+the swarm in order to not overload the manager node.
+Figure 6.5: Service status after scaling up.
+Figure 6.6 shows that when listing the containers on the new node there are two
+new containers running the data upload service. This means that the service has been
+successfully scaled up and now it has access to more resources to be able to handle
+the extra load.
+However, constantly deploying multiple replicas and adding more nodes to the
+environment increases the cost of maintaining the cloud environment and it is not
+cost eﬀicient to do so. The environment should be monitored and adapted to the
+needs of the system. Large study releases with a very high participant count require
+to scale up a system, but there are scenarios when it can require less resources to run
+and maintaining the extra nodes becomes an unnecessary expense.
+==PAGE:56==
+46
+6 Deployment Operations
+Figure 6.6: New containers on the worker node.
+For example, after a large study is completed and removed from the system like in
+the code example from Section 5.1.1 the participants will be removed as well and stop
+uploading data resulting in decreasing the workload for the data upload component.
+Scaling back down the data upload component can now be easily achieved with Docker
+Swarm. The number of replicas can easily be brought down to a lower number to
+decrease the CPU usage of the nodes and if even less performance is required a node
+can be easily removed from the swarm and then Docker will reassign the replicas to
+an available one as part of its desired state reconciliation mechanism.
+The following setup shown in Figure 6.7 shows a deployment of the CAWS system
+with two replicas of the data upload deployed on two separate nodes. In order to
+scale down the system to reduce the upkeep cost of the cloud environment, the node
+running one instance of the data upload component can be removed from the swarm
+as shown in Figure 6.8.
+Figure 6.7: Multi node deployment before scaling down.
+Figure 6.8: Remove node from the swarm.
+With the node removed from the swarm the replica that was running on it will
+==PAGE:57==
+6.1 Scaling the DataUpload service
+47
+shutdown as it loses the connection. Docker will then bring up another replica to
+maintain the desired state of 2 replicas on the manager node as it is the only available
+node in the swarm that can receive tasks. In Figure 6.9 it is shown the stack status
+after the node was removed. It can be noticed that the container running on the
+stefan-thesis-dataupload node was shutdown and the one above it was brought up
+instead on the stefan-thesis-webservices node. Now the system has been scaled down
+to use less nodes in the deployment environment and decrease performance but also
+decrease upkeep expenses. Note that when deployed on a CSP like AWS which offers
+pay-as-you-go type billing the decrease in cost occurs automatically as the node will
+not use resources anymore, however on a monthly payment plan like the one on Digital
+Ocean the node has to be removed from the payment plan using their online portal.
+Figure 6.9: Scaled down component running on a single node.
+==PAGE:58==
+48
+==PAGE:59==
+CHAPTER 7
+Discussion
+In this chapter the goals set in the beginning of the project are discussed in relation
+to the work done as part of this thesis. After that limitations that were encountered
+as part of the project are presented and lastly, what lies in the future of this project
+is discussed.
+7.1
+Goals
+In Section 1.3 a number of goals set to be achieved by this project were presented and
+detailed; this section aims to present how each of those goals were realized through
+the work done as part of this thesis.
+7.1.1
+How can scalability be achieved through a microservice
+architecture?
+The research done as part of Chapter 2 showed that larger digital phenotyping plat-
+forms approach a microservice design with Docker as a containerization tool and are
+deployed in a cloud environment with the use of container orchestration tools. The
+papers presented in this chapter mention the scalability and performance benefits
+of adopting a microservice architecture. Furthermore, in Chapter 3 the differences
+between a moddular monolith and a microservice architecture have been investigated
+and showed that microservices provide the potential to scale specific services of the
+system.
+By analyzing the CAWS architecture and design, the data upload microservice
+has been designed as part of Chapter 4 to be completely decoupled from the mono-
+lith project and containerized by itself in order to allow for the service to be scalable.
+This design was implemented using the technologies analyzed in Chapter 3 and demon-
+strated in Chapter 6 how the service can be scaled using deployment technologies.
+7.1.2
+How can the microservice architecture be integrated?
+In Chapter 3 communication technologies and tools have been looked into to ensure
+that the data upload microservice will be able to integrate with the monolith. Then
+in Chapter 4 it is presented how the microservice can be integrated both with the
+==PAGE:60==
+50
+7 Discussion
+other CAWS modules but also with the CARP Core domain by using RabbitMQ and
+refactoring the hard dependencies between then. The implementation of this design
+and how communication is achieved is showcased in Chapter 5.
+7.1.3
+How can a deployment environment be designed to
+support the scalability properties of the data upload
+component?
+The proper tools and technologies that can allow for the scaling of microservices as
+well as what deployment environment is required for it have been analyzed as part
+of Chapter 3. Then Chapter 4 shows how a Docker Swarm architecture has been
+designed to be deployed on a multi-node cloud environment and then implemented
+and deployed as part of Chapter 5.
+7.1.4
+How can scalability be showcased?
+In Chapter 6 it is showcased how the microservice architecture provides scalability
+to the data upload component by using Docker Swarm in the cloud environment to
+scale up or down the data upload microservice based on the demand of the system.
+The microservice can be deployed as part of a larger multi-node system together with
+the CAWS monolith by design, with the added benefit of providing fault tolerance
+and scalability for both services.
+7.2
+Limitations
+This section will present the limitations encountered throughout the project and dis-
+cuss possible solutions.
+7.2.1
+Asynchronicity
+In a microservice architecture the communication between services should be asyn-
+chronous and not block the flow of a service when it sends a message. This is done
+in some of the cases in the communication between the data upload service and the
+CAWS service, however because of limitations from the Spring Boot framework and
+which is synchronous and has no mechanism for registering callbacks to method calls
+for asynchronously waiting for replies some of the communication between the ser-
+vices is done synchronously. This issue can be solved by migrating to an asynchronous
+Java based framework like Spring WebFlux, Play Framework or Vert.x but the limited
+time prevented from including this refactor in the project.
+==PAGE:61==
+7.2 Limitations
+51
+7.2.2
+Database
+The current database configuration and deployment is not up to par with microservice
+standards but due to time constraints it has been ommitted in this thesis.
+First
+of all, the database should be separated so that the each microservice has its own
+database. The logical separation of the tables is already achieved by base version of
+the CARP platform as each service modifies their own table. Also the deployment
+of the database solution requires more configuration; the Postgre service should be
+configured for database replication so that multiple replicas of the database service
+can be deployed to the swarm like with the microservices. Doing this requires more
+manual configuration and a good understanding or research into how PostgreSQL
+works.
+This is a more complicated task in general as databases are by design a
+stateful service and measures have to be put in place to ensure the integrity of the
+stored data. Doing this, however, will ensure high availability and fault tolerance of
+the persistence layer, but can in turn be resource intensive and research should be
+done to see how much replication is needed and if other database technologies than
+PostgreSQL provide more eﬀicient replication mechanisms. It is also noteworthy that
+some CSPs provide features and support to achieve database replication on a more
+robust and secure level.
+7.2.3
+Dependencies
+To achieve a more ideal deployment the Authentication and User modules should
+be extracted out of the monolith as well.
+With the current implementation this
+dependency is repeated in both microservices and should not exist ideally. Having
+these modules extracted would be of good benefit as they serve as an entry-point to
+all requests into the system and being able to scale and replicate them in the swarm
+would load balance the requests between them and eliminate the ”funnel” that is
+formed with the current architecture, but again due to development time constraints
+this change is not part of the project.
+7.2.4
+Cloud resources
+Another limitation of this project was the available resources on the cloud which was
+mentioned before in this paper. The initial design of the deployment environment
+which is shown in Chapter 4 specifies multiple nodes to be used. This is because in a
+microservice architecture critical services like the API Gateway or the message broker
+instance should run in their own physical node to prevent having a single point of
+failure and ensure that the app is constantly available and the communication between
+the services has constant uptime.
+==PAGE:62==
+52
+7 Discussion
+7.2.5
+Working reverse-proxy
+An important limitation encountered that prevented the ability of conducting perfor-
+mance tests on the architecture was the lack of a working reverse-proxy. In order to
+be able to test the performance of the scaled up component in the cloud, an NGINX
+reverse-proxy was set up as part of the deployment with the purpose of exposing
+the system to incoming requests from the outside and routing them to the correct
+service domain in the swarm. This proxy was developed to a point where it was
+close to being functional, but because of limited development time it was not finished.
+The issue encountered was a connection issue over the network between the NGINX
+container and the other services and there was no more time to look into alternative
+technologies/solutions or other potential fixes for the issue. Because of this, a detailed
+performance analysis where the deployed system is measured empyrically to compare
+to the monolithic deployment is not part of this thesis report.
+7.3
+Future work
+This section will discuss what future improvements or additions can be done to build
+upon this project.
+7.3.1
+Expand the architecture
+The platform would benefit from having the rest of the monolith transformed incre-
+mentally into a full microservice architecture. By extracting one service at a time
+and introducing it on the deployment environment, small incremental steps that also
+maintain the platforms production availability can be taken until the monolith is
+completely transformed into microservices.
+7.3.2
+Cloud Service Provider in-depth analysis
+Research could be done into the multiple CSPs or even just the one that CARP
+currently uses to create a detailed cost/performance analysis to see how many nodes
+are viable to be maintained in the cloud environment. As mentioned in the limitations
+part, creating nodes on a CSP is a costly process and the ones provided by their free
+tiers do not have the necessary resources to be able to run the system. With proper
+funding a more detailed analysis into how much performance is gained through each
+node compared to how much it costs to maintain it could give more insights into a
+more optimal architecture but also on more feasible CSPs
+7.3.3
+Continuous Integration and Continuous Deployment
+CI/CD is an important addition to any software system that can increase their avail-
+ability and facilitate a faster development cycle. By setting up automated build and
+==PAGE:63==
+7.3 Future work
+53
+deploy pipelines, changes to the services can be taken on the deployment environ-
+ment in a more faster pace. With the current data upload microservice deployed on
+a cloud environment a CI/CD pipeline would make it much more easy to update on
+production as the entire monolith is not required to be built and redeployed with
+every change.
+==PAGE:64==
+54
+==PAGE:65==
+CHAPTER 8
+Conclusion
+This thesis involved investigating and solving the scalability issues of the data up-
+load component of the CARP platform in order to allow for higher workloads to be
+processed.
+In the beginning a research into other digital phenotyping platforms was conducted
+to investigate their architecture and technologies that are used. Relevant papers about
+the migration from an already existing monolothic system to a microservice based one
+were investigated to gain insight into the benefits, but also to devise a methodology
+for approaching such a task.
+The analysis chapter discussed how a microservice architecture provides scalabil-
+ity to its components in comparison with the CARP monolithic architecture. It then
+presented how scalability can be achieved through a deployment environment, how
+communication can be achieved to decouple the service and integrate it with the rest
+of the architecture and what considerations to take before designing a deployment
+environment and choosing an orchestration tool. The chapter also presents and com-
+pares different technologies that can be used to achieve the afore mentioned tasks
+along with arguments as to why they were chosen to be used in the context of this
+project.
+The design and implementation chapters materialize the research and learning
+done as part of the previous chapters before them. The design of the system details
+how each consideration identified in the analysis chapter has been taken into account
+in order to create a scalable component, but also to design a deployment strategy
+and environment which allows to perform scaling operations on the microservices.
+The chapter provides diagrams and explanations to support the choices made in its
+conception and how the technologies chosen in the analysis chapter will be used in
+the architecture. The implementation chapter then presents how the microservices
+were implemented acording to the design and how the deployment strategy has been
+used to deploy the system on a cloud environment that supports scaling the services.
+Finally, a discussion was conducted to showcase how the scalability of the data
+upload component has been achieved and how the architecture allows for its scaling
+to be manipulated through the tools and technologies chosen and implemented in this
+==PAGE:66==
+56
+8 Conclusion
+project.
+Overall, the data upload component of the CARP platform has achieved scalability
+both vertically, as the microservice can be replicated across as many nodes as needed
+with the use of Docker Swarm, and horizontally, as the vertical scaling of each node
+can be configured as well through the CSP it is deployed on. There is more work ahead
+of the project to be considered fully production ready, but the methodologies used
+in this project can be replicated to deploy a microservice system that is completely
+scalable with a deployment strategy already designed to be hosted by powerful cloud
+hosts across a multi-node environment.
+==PAGE:67==
+APPENDIX A
+NGINX reverse proxy
+NGINX is a open source web server that can be used to provide support to a web based
+application like load balancing, caching, reverse proxy. NGINX was used as part of
+the deployment process and design of the microservice architecture with the purpose
+of acting as a reverse proxy. The usage of a reverse proxy is to expose the system
+to outside requests, which then the NGINX instance can route to the appropriate
+services.
+In this appendix details regarding its implementation and usage will be
+presented.
+In order to create a reverse proxy with NGINX, a configuration file has to be
+configured first.
+In this file the port on which the server to listen for incoming
+requests has to be declared as well as the upstream paths and routing paths.
+1 upstream cans-ws-staging {
+2
+server cans-ws-staging:8081;
+3 }
+4
+5 upstream cans-ws-data-upload-staging {
+6
+server cans-ws-data-upload-staging:8080;
+7 }
+8
+9 server {
+10
+listen 80;
+11
+12
+location /cans-ws-staging {
+13
+proxy_pass http://cans-ws-staging/;
+14
+}
+15
+16
+location /cans-ws-data-upload-staging {
+17
+proxy_pass http://cans-ws-data-upload-staging/;
+18
+}
+19 }
+Listing A.1: NGINX configuration file.
+Listing A.1 shows the nginx.conf file used to configure the NGINX web server for
+the deployment of the system. After this file is created, a Dockerfile can be written
+which builds the NGINX server using the publicly available image online and then
+replacing the configuration file with the one written above.
+==PAGE:68==
+58
+A NGINX reverse proxy
+1 FROM nginx:1.15
+2
+3 COPY nginx.conf /etc/nginx/conf.d/default.conf
+Listing A.2: NGINX Dockerfile.
+After adding this as a service to the docker-compose file the swarm deploy will
+contain an instance of the web server and will be able to accept HTTP requests.
+==PAGE:69==
+APPENDIX B
+Docker Swarm ingress
+network
+This appendix is dedicated to explaining some inner workings of Docker Swarm which
+are deemed important to still mention to further explain how it can provide scalability
+to a system.
+As shown in Chapter 5 Implementation, Docker Swarm allows to create replicas
+of any service that is part of it. A replica of a service is basically another identi-
+cal container that runs the same process. This feature is what provides horizontal
+scalability to a service and can be used to distribute the incoming workload between
+the replicas of a service to balance it between the nodes of a swarm. This is possible
+because of Docker Swarm’s ingress network and load balancing capabilities which will
+be explained in this appendix.
+Figure B.1 is an example diagram taken from the Docker documentation[Inc22a]
+available online and it provides a good overview of a potential setup.
+Figure B.1: Docker Swarm Ingress Network example.
+==PAGE:70==
+60
+B Docker Swarm ingress network
+In this figure, an example of 3 physical nodes is illustrated, where a replicated
+service called my-web is deployed in the swarm. The first 2 nodes each run a replica
+of the my-web service while the third node has none. As it can be seen the ingress
+network created by Docker Swarm is an overlay over all the nodes that participate
+in the swarm. Moreover, it can be noticed that each node in the swarm has also
+an instance of the swarm load balancer running even though there are no containers
+scheduled on them.
+What the ingress network and load balancers provide is that whenever a request
+targeted at the my-web service comes in from the outside it is redirected to one of
+the replicas of the service. As expected, each node has a different IP address like
+the ones shown in the figure, however, the overlay network allows for the creation of
+virtual IP addresses for every replica like shown in the figure: the my-web. 1 replica is
+accessible through the 10.0.0.1:80 address and the other replica on the virtual address
+10.0.0.2:80.
+This means that whenever a request is being redirected by a proxy like the one
+showed in Appendix A to the my-web:8080 address, the request will be routed to a
+load balancer which has access to the virtual IPs of the service’s replicas and then
+redirected to the exposed port of the replica.
+Because of this implementation, replicas of a service distributed on multiple nodes
+will split the incoming workload between them and balance the resource utilization
+in the network. This feature is what allows for the horizontal scaling of a service
+with Docker Swarm, whenever more replicas are distributed on additional nodes the
+resource utilization is automatically distributed due to the ingress routing mesh and
+load balancing capabilities of Docker Swarm
+==PAGE:71==
+APPENDIX C
+Accessing the source
+code
+This appendix will provide the links to access the source code related to this project.
+The code is divided between two GitHub repositories; one is the CAWS repository
+where a separate branch called stefan-thesis was created from the development branch
+and the other repository is a completely separate one containing the data upload
+microservice and it is called CAWS-DataUpload.
+The CAWS repository which contains the monolith without the data upload
+modules can be accessed at: https://github.com/cph-cachet/carp.webservices-
+docker/tree/stefan-thesis
+The link should open the repository on the correct branch which is stefan-thesis
+The data upload component’s source code can be accessed at:
+https://github.com/Dra5ke/CAWS-DataUpload
+This repository also contains the docker-compose.yml file which was showcased
+in Chapter 5. This file is used to deploy the application on the cloud environment
+and it can be found in the root folder of the repository. The NGINX reverse proxy
+mentioned in Appendix A is contained in the reverse-proxy folder in the root of this
+repository.
+Because the docker-compose file is configured for a stack deployment to a Docker
+Swarm; a separate file is created to be used for running the system locally called
+docker-compose.local.yml. However, in order to run it locally on a single machine
+some extra steps still have to be taken.
+First of all, both the CAWS and DataUpload service images have to be built with
+Docker. This can be done by opening a command prompt in the root folder of each
+project and running these commands:
+docker build -t dra5ke/thesis-repository:dataupload .
+and
+docker build -t dra5ke/thesis-repository:webservices .
+==PAGE:72==
+62
+C Accessing the source code
+The first command is for the data upload project and the other one for the web-
+services project.
+After those images are build the reverse proxy image has to be built in a similar
+way. This can be done by opening a command prompt in the reverse-proxy folder of
+the data upload project and running this command:
+docker build -t dra5ke:reverse-proxy .
+After that, the system can be run from the root folder of the data upload project
+with the command: docker-compose -f docker-compose.local.yml up
+Note that in order to run the system like this all the swarm configurations about
+nodes and replicas from the original compose file had to be removed from this one
+and therefore, running the system like this is not an accurate representation of the
+cloud environment.
+==PAGE:73==
+APPENDIX D
+Acronyms
+CACHET Copenhagen Center for Health Technology
+CARP CACHET Resarch Platform
+CAWS CARP Web Services
+REST
+Representational state transfer
+API
+Application programming interface
+HTTP
+Hypertext Transfer Protocol
+ECG/EKG Electrocardiogram
+PaaS
+Platform as a Service
+CNCF
+Cloud Native Computing Foundation
+CSP
+Cloud Service Provider
+EC2
+Elastic Compute Cloud
+AWS
+Amazon Web Services
+GCP
+Google Cloud Platform
+GCE
+Google Compute Engine
+IPC
+Inter Process Communication
+==PAGE:74==
+64
+==PAGE:75==
+Bibliography
+[Bau19]
+Harald Baumeister. Digital Phenotyping and Mobile Sensing. eng. Springer
+International Publishing, 2019. isbn: 303031619x, 3030316203, 9783030316198,
+9783030316204.
+[BOP22]
+Grzegorz Blinowski, Anna Ojdowska, and Adam Przybylek. “Monolithic
+vs. Microservice Architecture: A Performance and Scalability Evalua-
+tion.” eng. In: Ieee Access 10 (2022), pages 20357–20374. issn: 21693536.
+doi: 10.1109/ACCESS.2022.3152803.
+[BRB20]
+Steve Buchanan, Janaka Rangama, and Ned Bellavance. “Inside Kuber-
+netes.” In: Introducing Azure Kubernetes Service : A Practical Guide to
+Container Orchestration. Berkeley, CA: Apress, 2020, pages 35–50. isbn:
+978-1-4842-5519-3. doi: 10.1007/978-1-4842-5519-3_3. url: https:
+//doi.org/10.1007/978-1-4842-5519-3_3.
+[Car+21]
+Lior Carmi et al. “Digital Phenotyping.” eng. In: Mental Health in a
+Digital World (2021), pages 207–222. doi: 10.1016/B978-0-12-822201-
+0.00002-2.
+[ĆBL22]
+Amar Ćatović, Nevzudin Buzađija, and Samir Lemes. “Microservice de-
+velopment using RabbitMQ message broker.” und. In: Science, Engineer-
+ing and Technology 2.1 (2022), pages 30–37. issn: 27442527. doi: 10.
+54327/set2022/v2.i1.19.
+[Chr19]
+Binildas Christudas. “Introducing Microservices.” eng. In: Practical Mi-
+croservices Architectural Patterns (2019), pages 21–34. doi: 10.1007/
+978-1-4842-4501-9_2.
+[HVC19]
+Kit Huckvale, Svetha Venkatesh, and Helen Christensen. “Toward clinical
+digital phenotyping: a timely opportunity to consider purpose, quality,
+and safety.” In: NPJ digital medicine 2.1 (2019), pages 1–11.
+[Inc22a]
+Docker Inc. Use swarm mode routing mesh. 2022. url: https://docs.
+docker.com/engine/swarm/ingress/ (visited on February 14, 2023).
+[Inc22b]
+Docker Inc. What is a container? 2022. url: https://www.docker.com/
+resources/what-container/ (visited on February 14, 2023).
+[Inc23]
+Docker Inc. Swarm mode overview. 2023. url: https://docs.docker.
+com/engine/swarm/ (visited on February 15, 2023).
+==PAGE:76==
+66
+Bibliography
+[Kar13]
+Sowmya Karunakaran. “Impact of Cloud Adoption on Agile Software
+Development.” eng. In: Software Engineering Frameworks for the Cloud
+Computing Paradigm (2013), pages 213–234. doi: 10.1007/978-1-4471-
+5031-2_10.
+[Kub22]
+Kubernetes. Kubernetes Components. 2022. url: https://kubernetes.
+io/docs/concepts/overview/components/ (visited on February 15,
+2023).
+[MD223a]
+MD2Korg. Cerebral Cortex Cloud Platform. 2023. url: https://github.
+com/MD2Korg/CerebralCortex/tree/3.3#readme (visited on March 13,
+2023).
+[MD223b]
+MD2Korg. CerebralCortex Data Ingestion (CC-DI). 2023. url: https:
+//github.com/MD2Korg/CerebralCortex-DataIngestion/tree/3.2#
+readme (visited on March 13, 2023).
+[MD223c]
+MD2Korg. mCerebrum. 2023. url: https://archive.md2k.org/software-
+under-the-hood/software-uth-mcerebrum.html (visited on March 13,
+2023).
+[MD223d]
+MD2Korg. MD2K Overview. 2023. url: https://archive.md2k.org/
+about.html (visited on March 13, 2023).
+[Mes+19]
+Eva-Maria Messner et al. “mHealth Applications: Potentials, Limitations,
+Current Quality and Future Directions.” In: Digital Phenotyping and Mo-
+bile Sensing: New Developments in Psychoinformatics. Edited by Harald
+Baumeister and Christian Montag. Cham: Springer International Publish-
+ing, 2019, pages 235–248. isbn: 978-3-030-31620-4. doi: 10.1007/978-3-
+030-31620-4_15. url: https://doi.org/10.1007/978-3-030-31620-
+4_15.
+[MK20]
+Marek Moravcik and Martin Kontsek. “Overview of Docker container
+orchestration tools.” eng. In: Iceta 2020 - 18th Ieee International Confer-
+ence on Emerging Elearning Technologies and Applications, Proceedings
+(2020), pages 475–480. doi: 10.1109/ICETA51985.2020.9379236.
+[MP19]
+Lubos Mercl and Jakub Pavlik. “The comparison of container orchestra-
+tors.” eng. In: Advances in Intelligent Systems and Computing 797 (2019),
+pages 677–685. issn: 21945365, 21945357. doi: 10.1007/978-981-13-
+1165-9_62.
+[Pan+19]
+Yao Pan et al. “A performance comparison of cloud-based container or-
+chestration tools.” eng. In: Proceedings - 10th Ieee International Confer-
+ence on Big Knowledge, Icbk 2019 (2019), pages 191–198. doi: 10.1109/
+ICBK.2019.00033.
+[PMA19]
+Francisco Ponce Mella, Gastón Márquez, and Hernán Astudillo. “Migrat-
+ing from monolithic architecture to microservices: A Rapid Review.” In:
+September 2019.
+==PAGE:77==
+Bibliography
+67
+[Pot+20]
+Amit M. Potdar et al. “Performance Evaluation of Docker Container
+and Virtual Machine.” eng. In: Procedia Computer Science 171 (2020),
+pages 1419–1428. issn: 18770509. doi: 10.1016/j.procs.2020.04.152.
+[RAD23a]
+RADAR-base. Concepts and components of RADAR-base. 2023. url:
+https://radar- base.org/docs/concepts- and- components- of-
+radar-base/ (visited on March 13, 2023).
+[RAD23b]
+RADAR-base. RADAR-Kubernetes. 2023. url: https://github.com/
+RADAR-base/RADAR-Kubernetes#readme (visited on March 13, 2023).
+[Ser21]
+Amazon Web Services. Whitepapers. 2021. url: https://docs.aws.
+amazon.com/whitepapers/latest/docker-on-aws/container-benefits.
+html (visited on February 14, 2023).
+[Ser23a]
+Amazon Web Services. About AWS. 2023. url: https://aws.amazon.
+com/about-aws/ (visited on February 22, 2023).
+[Ser23b]
+Amazon Web Services. What is amazon EC2? - Amazon Elastic Compute
+Cloud. 2023. url: https://docs.aws.amazon.com/AWSEC2/latest/
+UserGuide/concepts.html (visited on February 22, 2023).
+[SS18]
+Sarita and Sunil Sebastian. “Transform Monolith into Microservices using
+Docker.” eng. In: 2017 International Conference on Computing, Commu-
+nication, Control and Automation, Iccubea 2017 (2018), page 8463820.
+doi: 10.1109/ICCUBEA.2017.8463820.
+==PAGE:78==

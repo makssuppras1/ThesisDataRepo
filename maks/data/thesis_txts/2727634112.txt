@@ -1,0 +1,1710 @@
+==PAGE:1==
+Counterfactual example generation in medi­
+cal imaging
+Master Thesis
+DTU Compute
+Department of Applied Mathematics and Computer Science
+==PAGE:2==
+==PAGE:3==
+Counterfactual example generation in medical imaging
+Master Thesis
+May, 2023
+By
+Lucie Fontaine
+Copyright:
+Reproduction of this publication in whole or in part must include the cus­
+tomary bibliographic citation, including author attribution, report title, etc.
+Cover photo:
+Vibeke Hempler, 2012
+Published by:
+DTU, Department of Applied Mathematics and Computer Science,
+Richard Petersens Plads, Building 324, 2800 Kgs. Lyngby Denmark
+https://www.compute.dtu.dk/
+ISSN:
+[0000­0000] (electronic version)
+ISBN:
+[000­00­0000­000­0] (electronic version)
+ISSN:
+[0000­0000] (printed version)
+ISBN:
+[000­00­0000­000­0] (printed version)
+==PAGE:4==
+Approval
+This thesis has been prepared over five months at the Section for Visual Computing,
+Department of Applied Mathematics and Computer Science, at the Technical University of
+Denmark, DTU, in partial fulfilment for the degree Master of Science in Human­Centered
+Artificial Intelligence.
+Lucie Fontaine ­ s212804
+Signature
+Date
+ii
+Counterfactual example generation in medical imaging
+14-07-2023
+==PAGE:5==
+Abstract
+As deep learning start to reach high stakes applications such as medical image diagno­
+sis, and their failures modes start to be uncovered, increasing attention has been directed
+towards explainability. Counterfactual explanations tackle the question: ”what would the
+input look like had the prediction been different?”. We consider the task of medical im­
+age diagnosis in the case where the disease is correlated with a demographic attribute.
+A black box model might exploit this correlation and make a prediction based on this at­
+tribute. Counterfactual explanations are typically used to uncover such biases. In this
+thesis, we instead propose a VAE­based classifier that is robust to such bias and is by
+design counterfactually explainable. We show that this classifier can extract a feature that
+encodes the disease label in the data while being uninformative of the demographic at­
+tribute. This objective is typically implemented using marginal independence constraints.
+However, we show that under certain assumptions on the causal relationships between
+the demographic attribute and the label, conditional independence constraints can be
+derived from this objective. These constraints can be relaxed in two ways, using the
+conditional mutual information and the Maximum Mean Discrepancy. We evaluate our
+two models on variations of the Colored MNIST dataset and compare them with versions
+of the models implementing marginal independence constraints, and a baseline model
+without independence constraints. We show that marginal independence constraints are
+inadequate when the label is correlated with the attribute, and that our approach using
+conditional independence constraints should be preferred over the alternative versions,
+when the correlated attribute is as predictive of the label as the label­specific features in
+the image.
+Counterfactual example generation in medical imaging
+iii
+==PAGE:6==
+Acknowledgements
+Lucie Fontaine, MSc Human­Centered Artificial Intelligence, DTU
+Creator of this thesis.
+Eike Willi Petersen, Postdoc, DTU Compute
+Supervisor.
+Aasa Feragen, Professor, DTU Compute
+Supervisor.
+iv
+Counterfactual example generation in medical imaging
+==PAGE:7==
+Contents
+Preface . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+ii
+Abstract . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iii
+Acknowledgements
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iv
+1
+Introduction
+1
+2
+Background
+3
+2.1
+Latent subspaces in Variational Autoencoders . . . . . . . . . . . . . . . . .
+3
+2.2
+Invariant representations
+. . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+2.3
+Counterfactual explanation
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+3
+Methods
+9
+3.1
+Causal graph . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+3.2
+Model . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+3.3
+Invariance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 10
+3.4
+Counterfactual generation . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+4
+Experiments
+13
+4.1
+Datasets . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13
+4.2
+Experimental setup . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 14
+4.3
+Experiment 1: Varying levels of correlation . . . . . . . . . . . . . . . . . . . 16
+4.4
+Experiment 2: Noisy labels
+. . . . . . . . . . . . . . . . . . . . . . . . . . . 22
+5
+Discussion
+31
+5.1
+Experiment 1: Varying levels of correlation . . . . . . . . . . . . . . . . . . . 31
+5.2
+Experiment 2: Noisy labels
+. . . . . . . . . . . . . . . . . . . . . . . . . . . 31
+5.3
+Future work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+6
+Conclusion
+35
+Bibliography
+36
+A Appendix
+39
+A.1 Experiment 1: Varying levels of correlation . . . . . . . . . . . . . . . . . . . 39
+A.2 Experiment 2: Noisy labels
+. . . . . . . . . . . . . . . . . . . . . . . . . . . 44
+Counterfactual example generation in medical imaging
+v
+==PAGE:8==
+vi
+Counterfactual example generation in medical imaging
+==PAGE:9==
+1
+Introduction
+The development of machine learning has revolutionized the field of computer vision,
+which moved from traditionally hand­crafted features to learning­based methods in a
+range of applications such as image segmentation, registration and classification, due
+to the increased accuracy. In the last years, the deep learning revolution, enabled by the
+advances in hardware and the larger availability of data, provided further improvements
+by enabling more complex models through deep architectures, as demonstrated by the
+performance of deep learning models on the challenging ImageNet classification task [1].
+However, the vast majority of benchmarks like ImageNet measure model performance
+by assessing validation performance on a test set that is independent and identically
+distributed (i.i.d.) with respect to the training set, which is rarely justified in real­world
+settings. Indeed, deep learning models often learn shortcuts in unpredictable ways and
+consequently suffer from unexpected generalisation failures [2]. Shortcut solutions per­
+form well on i.i.d test data but fail on datasets that are systematically different from the
+i.i.d. training and test data, also called out­of­distribution (o.o.d) data. For example, a
+deep classifier was able to detect pneumonia from X­ray scans of a number of hospitals
+but failed for scans from new hospitals: it learned to identify a hospital­specific metal token
+on the scans and used the hospital’s pneumonia prevalence rate to adjust its predictions
+[3]. Relatedly, deep learning models replicate, and sometimes amplify, human biases in
+the data, when a sensitive attribute that is spuriously correlated with the target is picked
+up as a shortcut feature for the prediction. Examples include algorithms used to predict
+criminal recidivism, such as COMPAS which was reported by ProPublica to be ”biased
+against blacks” [4], or to select candidates based on their résumés, like Amazon’s hiring
+tool which was found to be biased in favour of men [5].
+These failures, in addition to the black box nature of deep learning models, have slowed
+down their adoption in high stakes applications such as healthcare and justice. That
+is why, explainability in machine learning has attracted considerable interest from the
+research community. In particular, counterfactual explanations are an example­based
+approach which explains a specific prediction from a black box model by providing an
+example that is close to the original input but that would result in a different prediction [6].
+For example, in the context of medical imaging, the outcome of a disease classifier for an
+image presenting a disease can be explained with an example of the same image without
+the disease according to the classifier. After a model is deployed, this method can be
+used to help build trust in a black box system by giving the user an understanding of how
+the predictor makes a decision. Before that can happen, however, one should ensure
+that the model is free of biases to the extent possible. Towards this aim, counterfactual
+explanations have been used to uncover model biases [7, 8, 9]. For example, if the
+classifier learned to predict the disease based on an attribute that is spuriously correlated
+with the disease, such as a demographic attribute, a counterfactual example could be an
+image in which this attribute has been changed. However, although this method can help
+detect biases, it does not generally provide a method for mitigating them.
+Bias mitigation has been tackled in the field of invariant representation learning [10, 11,
+12], and has been linked to causality [13, 14, 15]. Indeed, bias arises when a model
+is trained on a specific domain, but doesn’t generalize to other domains. Therefore, in­
+variant representation learning aims at learning representations that are invariant under
+changes in domains. The domains can be sensitive or nuisance attributes. When the
+Counterfactual example generation in medical imaging
+1
+==PAGE:10==
+domains are nuisances, as in the case of X­ray scans from different hospitals, we are
+dealing with robustness; when they are sensitive attributes, such as race or gender, we
+are dealing with fair representations [10, 16]. This is usually done by encoding an input
+into a representation that is uninformative of the bias variable, while still being optimal
+for the supervised task under consideration. This objective is typically implemented as
+an independence constraint, which is in practice relaxed to other measures, such as the
+mutual information [11, 17, 12] and the Maximum Mean Discrepancy [10].
+In this thesis, we combine counterfactual explanations and invariant representation learn­
+ing, in the aim of building a fair and robust classifier with an in­built capability to generate
+counterfactual explanations for the task of disease diagnosis in medical images. We pro­
+pose a VAE­based generative model which learns a latent space W×Z where W encodes
+information about the disease and Z encodes the remaining information in the image. A
+classifier predicts the label based on W, and a counterfactual example can be gener­
+ated for an input image by changing the latent variable belonging to W in a way that flips
+the prediction of the classifier. However, when the presence of a disease is correlated
+with a demographic attribute, this attribute might be encoded in W, and consequently,
+the classifier might use this information to make predictions. This is problematic because
+the demographic attribute is first of all sensitive, and might even be spuriously correlated
+with the disease, hindering the robustness of the classifier. Therefore, we would like to
+learn representations in W that are invariant to the demographic attribute, and represen­
+tations in Z that are invariant to the target label. Under certain assumptions on the causal
+relationship between the label and the correlated attribute, we show that this objective
+translates to conditional independence constraints on the latent variables, the label and
+the attribute. We obtain two versions of our model by extending the common relaxations
+of the independence constraints using mutual information and Maximum Mean Discrep­
+ancy to the conditional case. We evaluate our method experimentally on the Colored
+MNIST dataset by comparing our two models to their equivalent implementing marginal
+independence constraints and to a baseline model without independence constraints.
+The thesis is organized as follows. The present chapter introduced the content of the
+thesis. We introduce the relevant background for this thesis in chapter 2 before presenting
+our methods in chapter 3. Chapter 4 presents the datasets and the experiments which
+were carried out during the thesis. Finally, the results obtained in the experiments are
+discussed and concluded in chapter 5 and 6.
+2
+Counterfactual example generation in medical imaging
+==PAGE:11==
+2
+Background
+The thesis relies on previous work related to generative modelling, invariant representa­
+tion learning and counterfactual explanation, which we will introduce in the present chap­
+ter.
+2.1
+Latent subspaces in Variational Autoencoders
+Our approach to classification and counterfactual generation relies on learning latent sub­
+spaces using Variational Autoencoders. This section introduces Variational Autoencoders
+(VAE) and the Conditional Subspace VAE.
+2.1.1
+Variational Autoencoder
+Variational Autoencoders (VAE) are based on the auto­encoder setup, which consists
+of encoding an input x into a low­dimensional representation z and decoding it into a
+reconstruction ˆx. However, while the encoder and decoder networks of a simple auto­
+encoder return values for z and ˆx, the corresponding networks in a VAE return values for
+the parameters of the distributions over z and x. A VAE models the latent variable z using
+a probabilistic framework, and defines a generative process
+z ∼pθ(z), x ∼pθ(x|z)
+where the prior pθ(z) is a chosen distribution, typically a standard normal distribution
+N(0, I), and the observation model pθ(x|z) is a distribution depending on z, typically
+a diagonal Gaussian distribution N(x|µθ(z), σθ(z)) in the case of real­valued data or a
+Bernoulli distribution B(x|gθ(z)) in the case of binary data [18]. Loaiza­Ganem and Cun­
+ningham [19] introduce a new distribution called the continuous Bernoulli for [0,1]­valued
+data, which improves on the Gaussian and Bernoulli VAE commonly used for modelling
+MNIST images.
+Parameter estimation can be performed by maximizing the likelihood pθ(x) over a dataset.
+However, pθ(x) =
+∫
+z pθ(x|z)pθ(z)dz is intractable. Variational inference overcomes this in­
+tractability by maximizing a lower bound of the marginal log likelihood, called the Evidence
+Lower Bound (ELBO)
+log pθ(x) ≥Eqϕ(z|x)[log pθ(x|z)] −DKL(qϕ(z|x) ∥pθ(z))
+where qϕ(z|x) ≈pθ(z|x) is the approximate posterior, typically a diagonal Gaussian N(z|µϕ(x), σϕ(x)).
+From the ELBO, one can obtain the loss function over a dataset D scaled by the number
+of data points |D|:
+L(θ, ϕ; D) = −1
+|D|
+∑
+x∈D
+Eqϕ(z|x)[log pθ(x|z)] −DKL(qϕ(z|x) ∥pθ(z)).
+In practice, we apply minibatching to obtain an unbiased estimate of the gradient of the
+loss function.
+We have now introduced the VAE, upon which the model in the next section is built.
+Counterfactual example generation in medical imaging
+3
+==PAGE:12==
+2.1.2
+Conditional Subspace VAE
+The architecture of our model is based on the Conditional Subspace VAE (CSVAE) pro­
+posed by Klys et al. [17] which we present in this section.
+Given a dataset of elements (x, y) with x ∈Rn and y ∈Y = {0, 1}k representing k
+features of x, and a latent space Z × W with W = ∏k
+i=1 Wi, the CSVAE learns a latent
+representation of the data which encodes all information related to feature i labelled by yi
+exactly in the low­dimensional subspace Wi. This model is used for the task of attribute
+manipulation in images.
+The CSVAE is trained by maximizing a form of variational lower bound on the marginal
+log likelihood and minimizing the mutual information between Z and Y , resulting in the
+optimal parameters
+θ∗, ϕ∗= arg min
+θ,ϕ β1M1(θ, ϕ) + β2M2(δ)
+(2.1)
+δ∗= arg min
+δ
+β3N(δ).
+(2.2)
+In equation 2.1, the first term M1 = ED(x,y)[m1(x, y)] with
+m1(x, y) = −Eqϕ(z,w|x,y)[log pθ(x|z, w)] + DKL [qϕ(w|x, y) ∥p(w|y)]
++ DKL [qϕ(z|x) ∥p(z)] −log p(y)
+is the upper bound on the negative marginal log likelihood −log pθ,ϕ(x, y), averaged over
+the dataset D of elements (x, y), where they assume that Z is independent of W and Y ,
+and X is independent of Y given W.
+Since minimizing the mutual information
+I(Y ; Z) = H(Y ) −H(Y |Z)
+(2.3)
+is equivalent to maximizing the conditional entropy H(Y |Z), the second term in equation
+2.1, M2 = ED(x)[m2(x)] with
+m2(x) = Eqϕ(z|x)
+[∫
+Y
+qδ(y|z) log qδ(y|z)dy
+]
+approximates −H(Y |Z) by using approximate posteriors qδ(y|z) and qϕ(z|x) and by av­
+eraging over the empirical data distribution.
+Computing M2 requires learning the approximate posterior qδ(y|z), by minimizing N =
+−ED(x,y)[n(x, y)] with
+n(x, y) = Eqϕ(z|x)[qδ(y|z)].
+The terms M2 and N can be seen as an adversarial component since qδ(y|z) predicts y
+from z while qϕ(v|x) generates z in a way that prevents this. A diagram of the CSVAE can
+be seen in Figure 2.1.
+The adversarial component is one approach to learn invariant representations, which we
+will present in the next section.
+4
+Counterfactual example generation in medical imaging
+==PAGE:13==
+Figure 2.1: The encoder (left) and decoder (right) of the CSVAE. Shaded nodes represent
+conditioning variables. Dotted arrows represent adversarially trained prediction networks
+used to minimize mutual information between variables. Figure taken from Klys et al. [17].
+2.2
+Invariant representations
+Invariant representations are representations that are invariant under changes in do­
+mains. Domains can be nuisance or sensitive attributes. When the domains are nui­
+sances, we are dealing with robustness; when they are sensitive attributes, we are dealing
+with fair representations [10, 16].
+The objective is usually to encode an input x into a representation z that is uninformative
+of the nuisance or sensitive attribute c, while still being optimal for the supervised task
+under consideration. This objective is typically implemented as an independence con­
+straint z ⊥c. In practice this constraint is relaxed to other measures, such as the mutual
+information I(z, c) [11, 17, 12] and the Maximum Mean Discrepancy [10].
+However, this approach assumes that P(Y |X) does not change across domains. There­
+fore, class­conditional independence constraints z ⊥c | y have been proposed for the
+general case when this distribution can change [20]. The present section introduces two
+approaches to implement these constraints in order to learn conditional invariant repre­
+sentations.
+2.2.1
+Adversarial training
+Adversarial training has been proposed to learn invariant representations by making the
+learned representations on different domains indistinguishable for an adversarial network
+[21]. Subsequently, the adversarial loss has been mathematically derived using the mu­
+tual information [17, 11], as presented in section 2.1.2.
+Adversarial training has also been used to learn conditional invariant representations by
+training an adversarial network to predict the domain from the representation for each
+value of the label [20]. We will derive the adversarial loss similarly to Klys et al. using the
+conditional mutual information.
+The conditional mutual information is the expected value of the mutual information of two
+random variables given the value of a third [22]. It can be rewritten in terms of mutual
+information [23]:
+I(X; Y |Z) = I(X; Y, Z) −I(X; Z)
+(2.4)
+Another approach to learn invariant representations uses the Maximum Mean Discrep­
+ancy, which will be presented next.
+Counterfactual example generation in medical imaging
+5
+==PAGE:14==
+2.2.2
+Maximum Mean Discrepancy
+The Maximum Mean Discrepancy (MMD) [24, 10, 21] quantifies the distance between two
+distributions by comparing all of their moments. It can be efficiently implemented using
+the kernel trick. For any positive definite kernel k, the MMD between two distributions p
+and q is
+DMMD(p ∥q) = Ep(z),p(z′)[k(z, z′)] + Eq(z),q(z′)[k(z, z′)] −2Ep(z),q(z′)[k(z, z′)]
+and DMMD(p ∥q) = 0 if and only if p = q [21].
+The MMD is used by the Variational Fair Autoencoder (VFAE) [10] to learn fair represen­
+tations. The model is based on a VAE with priors that encourage independence between
+sensitive variables s and latent variables z. However, they argue that there could still
+be some dependence in the approximate marginal posterior qϕ(z|s), in particular if the
+label y is correlated with the sensitive variable s. Therefore, VFAE maximizes a penal­
+ized lower bound which impose a regularization on the marginal qϕ(z|s) through the MMD
+penalty DMMD(qϕ(z|s = 0) ∥qϕ(z|s = 1)). We will adapt this penalty to obtain conditional
+invariant representations.
+2.3
+Counterfactual explanation
+Explainable machine learning can be categorized into two approaches: model explanation
+and outcome explanation [6]. Counterfactual explanations are an instance of the outcome
+explanation approach, which explain an explanation for a specific prediction from a black
+box model. They provide an example that is close to the original input but that would result
+in a different prediction. These explanations are typically generated post­hoc by training
+a separate VAE or Generative Adversarial Networks (GAN). In particular, counterfactual
+explanations generated with VAEs are often based on gradient descent in latent space,
+requiring an optimization for each input [25, 26]. In contrast, our approach uses a VAE
+to both make predictions and generate counterfactual explanations, without requiring any
+additional optimization. This approach is based on two previous works by Downs et al.
+and Zhang et al, which we will now present.
+Downs et al. created Counterfactual Recourse Using Disentangled Subspaces (CRUDS)
+[27] which uses the CSVAE to generate counterfactual data that satisfy desirable out­
+comes. CRUDS generates counterfactuals for a data point (x, y = 0) with correspond­
+ing approximate posteriors qϕ(w|x, y = 0) and qϕ(z|x) by sampling z from the posterior
+qϕ(z|x) and w from the prior p(w|y = 1) and decoding the latent representation into the
+input space. However, according to Zhang et al., the counterfactuals generated for dif­
+ferent inputs following this method tend to be similar. In addition, this method is limited
+to counterfactual recourse and does not provide a classification model, nor does it aim at
+explaining one.
+Zhang et al. [28] share our goal of simultaneous classification and counterfactual gen­
+eration, but use the latent space of a VAE with normalizing flows (NF). The proposed
+NF­VAE uses normalizing flows in between the encoder and decoder of the VAE to create
+a latent representation that can be classified using a probit regression model. Figure 2.2
+illustrates the pipeline of the model. We will present the model in more detail in the rest
+of the section.
+The probit regression model is a binary linear classifier with weight a ∈Rd, bias b ∈R
+and hidden variable λi ∈R for the i­th data point:
+a ∼N(0, Id), b ∼N(0, σ2
+0), λi ∼N(⟨zK
+i , a⟩+ b, 1)
+6
+Counterfactual example generation in medical imaging
+==PAGE:15==
+Figure 2.2: An illustration of the NF­VAE model proposed by Zhang et al. An encoder
+maps the input to the latent space z (left). The latent variable is used by the linear classifier
+(middle). Finally, the input is reconstructed by a decoder (right). Figure taken from Zhang
+et al. [28].
+where zK
+i is the output from the final K­th normalizing flow. The class label is modeled as
+yi = sign(λi). The classifier is jointly trained with the NF­VAE.
+Since a is orthogonal to the decision boundary, a latent vector zK
+i can be projected onto
+the decision boundary by adding αia to it such that (zK
+i + αia)T a + b = 0, which gives
+αi = −(zK
+i )T a+b
+aT a
+. The latent vector can be projected further into the counter­class region
+using a step size larger than 1:
+(zK
+i )c = zK
+i + step × αia
+A counterfactual example can then be generated by decoding (zK
+i )c. Figure 2.3 shows
+counterfactual examples generated from an input image with different steps. Compared
+to CRUDS, Zhang et al. argue that their approach makes more tailored modifications to
+the input data.
+Counterfactual example generation in medical imaging
+7
+==PAGE:16==
+Figure 2.3: A rendering of the NF­VAE’s latent space and the counterfactuals generated
+from an input image with different steps. Using the decision boundary of the linear classi­
+fier in this space, the model generates a sequence of counterfactuals that look increasingly
+like the counter­class. Figure taken from Zhang et al. [28].
+8
+Counterfactual example generation in medical imaging
+==PAGE:17==
+3
+Methods
+The methods in this thesis will now be presented. First, we describe our assumptions
+about the considered variables using a causal graph and derive two conditional inde­
+pendence constraints. Then, we describe the general architecture of our model, before
+focusing on two versions of the model which implement the conditional independence
+constraints. Finally, we present our counterfactual generation method.
+3.1
+Causal graph
+We consider a binary attribute c which is correlated with the label y. In particular, we
+assume that c and y have a parent­child relationship or have a common parent. For
+example, c could be the age of a patient, causing the presence of a disease y. We aim
+to learn a representation of the data in the latent space W × Z that encodes information
+about y in W and the remaining information, including information about c, in Z.
+Our assumptions about the relationships between the latent variables, the label and the at­
+tribute can be modelled by three possible causal graphs represented in Figure 3.1, where
+we assume that the latent variables w and z are the generative factors of the image x. For
+example, w could be clinically­relevant information about the disease and z could be in­
+formation about the demographic attributes of the patient and the other factors of variation
+in the image. Each causal graph corresponds to one of the three considered relationships
+between c and y.
+From the causal graphs in Figure 3.1, we can derive the following conditional indepen­
+dence relationships between the latent variables, the label and the attribute [29]:
+w ⊥c | y
+z ⊥y | c.
+These independence constraints are implemented through a regularization term in the
+loss function of our model, which will be presented in the next section.
+3.2
+Model
+The CSVAE architecture is changed in several ways to obtain our model.
+First, we supervise the latent space W by adding a classifier which predicts the label y
+from the latent variable w. Therefore, the encoder of the CSVAE in the latent subspace
+W is changed to only take the image x as input, and not the label y, resulting in the loss
+LVAE(θ, ϕ, ψ) = ED(x,y)
+[
+−β1Eqϕ(w|x)qψ(z|x)[log pθ(x|w, z)] + β2DKL [qϕ(w|x) ∥p(w|y)]
++ β3DKL [qψ(z|x) ∥p(z)]
+]
+.
+where the observation model
+pθ(x|w, z) = CB(x|λθ(w, z))
+is a Continuous Bernoulli distribution instead of a Gaussian distribution, and following the
+implementation of the CSVAE, the distributions parameterized by the encoder networks
+are Gaussians with a diagonal covariance matrix
+qϕ(w|x) = N(w|µϕ(x), σϕ(x))
+Counterfactual example generation in medical imaging
+9
+==PAGE:18==
+x
+w
+z
+y
+c
+(a) c is a parent of y.
+x
+w
+z
+y
+c
+(b) c is a child of y.
+x
+w
+z
+y
+c
+p
+(c) c and y have a common
+parent p.
+Figure 3.1: Causal graphs corresponding to the three considered relationships between c
+and y. Observed variables are represented by white nodes and hidden variables by grey
+nodes.
+qψ(z|x) = N(z|µψ(x), σψ(x))
+and the priors are independent Gaussians
+p(z) = N(0, 1)
+p(w|y = 1) = N(µ1, σ1)
+p(w|y = 0) = N(µ2, σ2)
+for fixed choices of µ1, σ1, µ2, σ2.
+Although y has been removed from the input of the encoder network in the latent subspace
+W, the latent representation w still encodes the label y because it is regularized using a
+logistic regression model with the classification loss
+LLR(ϕ, γ) = −β4ED(x,y)qϕ(w|x)[log qγ(y|w)]
+where the distribution of the logistic regression model qγ(y|w) = B(y|πγ(w)) is a Bernoulli
+distribution.
+Finally, we add a regularization term Linvariance that enforces the desired conditional inde­
+pendence constraints and which will be described in the next section.
+Combining the previous terms gives the overall loss function
+L = LVAE + LLR + Linvariance.
+The general architecture and implementation of the model has now been presented. In
+the next section, we will give details of the regularization term Linvariance.
+3.3
+Invariance
+Invariant representations corresponding to the conditional independence constraints de­
+rived in section 3.1 can be learned in two ways, resulting in two versions of the model
+described in the previous section which only differ in the choice of the invariance regular­
+ization term Linvariance. This section derives this regularization term for the two versions.
+10
+Counterfactual example generation in medical imaging
+==PAGE:19==
+3.3.1
+Adversarial
+The first version, which we call the conditional adversarial model, uses the conditional
+mutual information.
+The conditional mutual information measures the conditional de­
+pendence between the relevant variables, i.e., the conditional independence constraint
+w ⊥c | y is equivalent to I(w; c|y) = 0 [13]. Following equations 2.3 and 2.4 in the back­
+ground section, the conditional mutual information I(w; c|y) can be rewritten in terms of
+mutual information as
+I(w; c|y) = I(c; w|y) = I(c; w, y) −I(c; y)
+= H(c) −H(c|w, y) −I(c; y).
+The entropy H(c) and the mutual information I(c; y) are constant with respect to the model
+parameters so minimizing I(w; c|y) is equivalent to maximizing H(c|w, y). Similarly to
+the CSVAE, we introduce an approximate posterior qδ(c|w, y) = Cat(c|πδ(w, y)), where
+Cat denotes the categorical distribution, to approximate the conditional entropy H(c|w, y).
+Following the same reasoning for z ⊥y | c, we choose Linvariance as
+Lcond
+adversarial(ϕ, ψ, δ1, δ2) = β5ED(x,y)qϕ(w|x)
+[∫
+C
+qδ1(c|w, y) log qδ1(c|w, y)dc
+]
++ β6ED(x,y)qψ(z|x)
+[∫
+Y
+qδ2(y|z, c) log qδ2(y|z, c)dy
+]
+for the conditional adversarial model. Computing this term requires learning the approxi­
+mate posteriors qδ1(c|w, y) and qδ2(y|z, c), so we independently optimize
+δ∗
+1 = arg max
+δ1 ED(x,y,c)qϕ(w|x)[qδ1(c|w, y)]
+δ∗
+2 = arg max
+δ2 ED(x,y,c)qψ(z|x)[qδ2(y|z, c)].
+3.3.2
+MMD
+The second version, which we call the conditional MMD model, uses the MMD penalty.
+The conditional independence constraint w ⊥c | y is equivalent to p(w|y, c = 0) =
+p(w|y, c = 1) which can be implemented by matching the moments of the marginal poste­
+rior distributions of the latent variables qϕ(w|y = 0, c = 0) and qϕ(w|y = 0, c = 1), as well
+as qϕ(w|y = 1, c = 0) and qϕ(w|y = 1, c = 1). Following the same reasoning for z ⊥y | c,
+we obtain the invariance loss for the conditional MMD model
+Lcond
+MMD(ϕ, ψ) = β5ED(x,y,c)
+[Ny=0
+N
+DMMD [qϕ(w|y = 0, c = 0) ∥qϕ(w|y = 0, c = 1)]
++ Ny=1
+N
+DMMD [qϕ(w|y = 1, c = 0) ∥qϕ(w|y = 1, c = 1)]
+]
++ β6ED(x,y,c)
+[Nc=0
+N
+DMMD [qψ(z|c = 0, y = 0) ∥qψ(z|c = 0, y = 1)]
++ Nc=1
+N
+DMMD [qψ(z|c = 1, y = 0) ∥qψ(z|c = 1, y = 1)]
+]
+where N is the size of the dataset D of elements (x, y, c) and for i ∈{0, 1}, Ny=i and Nc=i
+denote the size of the subsets of the dataset D with y = i and c = i respectively. DMMD
+is implemented using the Gaussian kernel
+k(z, z′) = e−γ∥z−z′∥2
+where the bandwidth γ is estimated using the median heuristic [24], as discussed in sub­
+section 4.2.2.
+Counterfactual example generation in medical imaging
+11
+==PAGE:20==
+3.3.3
+Baselines
+The two conditional models presented above will be compared to their marginal equiva­
+lents, which implement the marginal independence constraints w ⊥c and z ⊥y, similarly
+to the CSVAE and the VFAE. The corresponding loss functions are
+Lmarg
+MMD(ϕ, ψ) = β5ED(x,c)
+[
+DMMD [qϕ(w|c = 0) ∥qϕ(w|c = 1)]
+]
++ β6ED(x,y)
+[
+DMMD([qψ(z|y = 0) ∥qψ(z|y = 1)]
+]
+Lmarg
+adversarial(ϕ, ψ, δ1, δ2) = β5ED(x)qϕ(w|x)
+[∫
+C
+qδ1(c|w) log qδ1(c|w)dc
+]
++ β6ED(x)qψ(z|x)
+[∫
+Y
+qδ2(y|z) log qδ2(y|z)dy
+]
+where δ1 and δ2 are optimized following
+δ∗
+1 = arg max
+δ1 ED(x)qϕ(w|x)[qδ1(c|w)]
+δ∗
+2 = arg max
+δ2 ED(x)qψ(z|x)[qδ2(y|z)]
+and qδ1(c|w) = Cat(c|πδ1(w)), qδ2(y|z) = Cat(y|πδ2(z)). We will call these models the
+marginal MMD and adversarial models. Finally, we also consider a baseline model without
+independence constraints, i.e. with Linvariance = 0.
+These models will be compared experimentally in the next chapter. Before turning to
+the experiments, we will describe how these models are used to generate counterfactual
+examples in the next section.
+3.4
+Counterfactual generation
+Once the model has been trained, counterfactual examples can be generated for an input
+image using the weights of the logistic regression model. The logistic regression model
+has a Bernoulli posterior qγ(y|w) = B(y|πγ(w)) where πγ(w) = σ(wT aγ +bγ). To generate
+a counterfactual example for an image x, it is first encoded into w and z by sampling from
+the approximate posterior distributions qϕ(w|x) and qψ(z|x). Then, the latent vector w is
+projected into the counter­class region using a step size larger than 1
+wc = w + step × αiaγ
+where αi = −wT aγ+bγ
+aγT aγ
+as derived in section 2.3. Finally, the latent vectors wc and z are
+decoded into a counterfactual image using the parameter λθ(wc, z) of the decoder distribu­
+tion pθ(x|wc, z) = CB(x|λθ(wc, z)), following the approach of Loiza­Ganem to reconstruct
+MNIST images [19]. Indeed, we find that using the mean of the distribution instead results
+in paler images because of the infinite derivative of the mean function at 0 and 1, whereas
+sampling from the distribution gives noisy images, as shown by Loaiza­Ganem et al. [19].
+This concludes the present chapter describing the methods relevant to this thesis. We
+proposed a method for simultaneous classification and counterfactual generation based
+on two invariant latent subspaces respectively encoding the target label and a correlated
+attribute. In the next chapter, experiments are carried out to evaluate our method.
+12
+Counterfactual example generation in medical imaging
+==PAGE:21==
+4
+Experiments
+In this chapter, we describe the experiments and their results.
+We first conduct a series of experiments comparing the models with different levels of
+correlation (none, medium, high) between the target label and the correlated attribute,
+using variations of the Colored MNIST (CMNIST) dataset [14]. The purpose is to deter­
+mine which model is the most adequate for classification and counterfactual generation
+depending on the level of correlation. We then reiterate the experiment with a moderate
+degree of correlation using a version of the CMNIST dataset with noisy labels, to compare
+the different models in a more realistic setting.
+All experiments were conducted on the gpuv100 nodes of DTU High­Performance Com­
+puting cluster, with a Tesla V100 GPU. The code for reproducing the experiments can
+be found at https://github.com/fontaluc/master-thesis-results. It was written from scratch
+in Pytorch, based on the probabilistic implementation of the VAE from the Deep learning
+course at DTU and several public repositories.
+We start by presenting the datasets that we constructed for the experiments, before pro­
+ceeding to the experiments themselves.
+4.1
+Datasets
+We experimented with variations of the Colored MNIST dataset, introduced by Arjovsky et
+al. for out­of­distribution generalization [14]. The goal is to predict a binary label assigned
+to each image based on the digit. Each image is colored either red or green in a way that
+correlates spuriously with the label. Therefore, the color is an effect of the label.
+In our experiments, the datasets are obtained from MNIST by subsampling and transform­
+ing each example of 4 and 9 as follows. First, assign the preliminary binary label ˜y = 0 for
+digit 4 and ˜y = 1 for digit 9, which we call the true label. Second, obtain the final label y,
+which we call the noisy label, by flipping ˜y with probability pn. Third, sample the color id
+c by flipping y with probability pe. We call this probability the color flip rate. Finally, color
+the image red if c = 1 or green if c = 0. We use pn = 0 and pe ∈{0.05, 0.2, 0.5} in the first
+series of experiments and pn = pe = 0.2 in the second experiment. For each experiment,
+a training set is created from the MNIST training set using the chosen pe and two test sets
+are created from the MNIST test set, with a color flip rate of pe and 1 −pe respectively.
+The first test set has the same correlation between the label and the color as the training
+set, and will be called i.i.d, whereas the second test set has a correlation in the opposite
+direction, and will be called o.o.d. The training set is then split into train/validation sets
+with as many validation samples as test samples. This results in a train/validation/test
+split of 9800/1991/1991 samples.
+Our datasets differ from the original Colored MNIST in two ways. While the original dataset
+consists of all digit numbers, we restrict our datasets to only images of 4 and 9 following
+Zhang et al. [28]. Additionally, the original training set contains two environments with
+pe = 0.2 and pe = 0.1 while the test set has pe = 0.9 and both sets have pn = 0.25.
+Indeed, while Arjovsky et al. learn representations that are invariant to the environment,
+our aim is to learn representations that are explicitly invariant to the color. For this reason,
+we include the color id c in the data in addition to the image x and the label y, whereas
+Arjovsky et al. include the environment id e. Furthermore, we find that setting pn = pe is
+sufficient to make the color useful enough for predicting the target label.
+Counterfactual example generation in medical imaging
+13
+==PAGE:22==
+The datasets used in the experiments have been presented. We can now describe the
+experimental setup.
+4.2
+Experimental setup
+In this section, we describe the architecture and hyperparameters of the models used in
+the experiments, as well as their evaluation. In the experiments, we choose Z = W = R2
+and µ1 = (0, 0), σ1 = (1, 1), µ2 = (6, 6), σ2 = (1, 1). Our choice of prior differs from the
+implementation of the CSVAE [17]. Indeed, for MNIST images of 4 and 9, it was necessary
+to place the means µ1 and µ2 corresponding to the two classes further apart in order to
+separate them in latent space. Moreover, we set the standard deviations σ1 and σ2 to
+be equal, because we have no reason to assume that images of 4 and 9 have different
+variances in the MNIST dataset.
+4.2.1
+Architecture
+The choice of architectures for our models is based on previous implementations of related
+models. Our models can be decomposed into three components, corresponding to the
+three losses in the objective function: the VAE, the logistic regression model and the
+invariance component. All models share the same architectures for the VAE and the
+logistic regression model.
+The VAE is composed of two encoders
+qϕ(w|x) = N(w|µϕ(x), σϕ(x))
+qψ(z|x) = N(z|µψ(x), σψ(x))
+such that
+[µϕ(x), log σϕ(x)] = [Linearϕ(4) ◦ReLU ◦Linearϕ(128) ◦ReLU ◦Linearϕ(256)] (x)
+[µψ(x), log σψ(x)] = [Linearψ(4) ◦ReLU ◦Linearψ(128) ◦ReLU ◦Linearψ(256)] (x)
+where Linearϕ(h) and Linearψ(h) denote linear layers with learnable parameters ϕ and ψ
+respectively and h output units, and a decoder pθ(x|w, z) = CB(x|λθ(w, z)) parameterized
+by
+λθ(w, z) = [Sigmoid ◦Linearθ(392) ◦ReLU ◦Linearθ(256) ◦ReLU
+◦Linearθ(128)] (w, z).
+The logistic regression model is characterized by the predictive posterior qγ(y|w) = B(y|πγ(w))
+parameterized by
+πγ(w) = [Sigmoid ◦Linearγ(1)] (w).
+Additionally, the adversarial models each include two auxiliary networks as part of the in­
+variance component. For the conditional model, the auxiliary classifiers are characterized
+by the predictive posteriors
+qδ1(c|w, y) = Cat(c|πδ1(w, y))
+qδ2(y|z, c) = Cat(y|πδ2(z, c))
+which are parameterized by
+πδ1(w, y) = [Linearδ1(2) ◦ReLU ◦Linearδ1(64) ◦ReLU ◦Linearδ1(64)] (w, y)
+πδ2(z, c) = [Linearδ2(2) ◦ReLU ◦Linearδ2(64) ◦ReLU ◦Linearδ2(64)] (z, c).
+The marginal model includes the same auxiliary classifiers except that they only take the
+latent variables as inputs.
+14
+Counterfactual example generation in medical imaging
+==PAGE:23==
+4.2.2
+Hyperparameters
+All models were trained for 200 epochs with a batch size of 64 and the Adam optimizer
+with a learning rate of 5 × 10−4. The batch size, optimizer and learning rate were chosen
+following Klys et al. [17], whereas the number of epochs was determined based on the
+training curves in our preliminary experiments. The lengthscale of the Gaussian kernel
+used in the MMD estimator for each pair of latent samples was not tuned, but automatically
+updated during training every 20 epochs by computing the median distance between the
+corresponding latent samples in the training set. The coefficients in the objective function
+were tuned in each experiment. We describe the choice of hyperparameters and the
+tuning procedure for each experiment in the corresponding section.
+4.2.3
+Evaluation
+Since our aim is simultaneous classification and counterfactual generation, our evaluation
+is geared towards classification accuracy and invariance of the representations.
+The classification accuracy of the logistic regression model is computed on both i.i.d and
+o.o.d. test sets, to evaluate the classifier’s performance in these two scenarios. Further­
+more, since the classifier takes latent variable w as input, the accuracies on both test sets
+also indicate whether the representations w are invariant to the color. Indeed, if they are
+not invariant to the color, the classifier could use the information about the color that is
+encoded in the representations to predict the label, resulting in decreased generalization
+performance.
+The invariance of the representations is also measured quantitatively in four ways on the
+i.i.d test set.
+A typical measure of invariance is the adversarial accuracy [10, 11]. Indeed, represen­
+tations that are invariant to an attribute are minimally informative about this attribute, so
+we evaluate the accuracies of adversaries which predict c from the latent variable w and
+y from the latent variable z. These adversaries have the same architecture as the auxil­
+iary classifiers in the marginal adversarial model and are trained post­hoc on the training
+data using the same optimizer during 20 epochs. We will therefore call them marginal
+adversaries. In our experiments, y and c are correlated, so even if the representations
+are invariant, the adversary could predict the desired attribute based on the correlated
+one with an accuracy greater than 0.5.
+Additionally, one way to evaluate that representations w are invariant to the color, is to
+count the number of counterfactual examples that have their color changed, since coun­
+terfactual generation only involves changes to the representations w. More precisely, we
+measure the number of counterfactuals for which the sum of the normalized pixel values
+in the channel corresponding to the color that is not the color of the original image is more
+than a chosen threshold. We set this threshold to 0.01 after inspecting the normalized
+pixel values of a number of MNIST images. We call this measure N. appear. It should be
+as close to 0 as possible.
+The last two measures are based on the invariance penalty in the loss function of our two
+conditional models.
+Based on our adversarial model, we propose to evaluate the adversarial accuracies in
+predicting c from (w, y) and y from (z, c). This choice is motivated by preliminary experi­
+ments where we observed that the predictive posterior of the auxiliary networks converges
+to pe when the learned representations are invariant, whereas the entropy, which appears
+in the invariance penalty, converges to a value that is more difficult to interpret. These
+Counterfactual example generation in medical imaging
+15
+==PAGE:24==
+adversaries have the same architecture as the auxiliary classifiers in the conditional ad­
+versarial model and are trained post­hoc on the training data using the same optimizer
+during 20 epochs. We will therefore call them conditional adversaries.
+Based on our MMD model, we also propose to measure the mean MMD penalty for each
+type of latent samples on the whole test set D of samples (x, y, c):
+MMD(W; C|Y ) := ED(x,y,c)
+[Ny=0
+N
+DMMD [qϕ(w|y = 0, c = 0) ∥qϕ(w|y = 0, c = 1)]
++ Ny=1
+N
+DMMD [qϕ(w|y = 1, c = 0) ∥qϕ(w|y = 1, c = 1)]
+]
+MMD(Z; Y |C) := ED(x,y,c)
+[Nc=0
+N
+DMMD [qψ(z|c = 0, y = 0) ∥qψ(z|c = 0, y = 1)]
++ Nc=1
+N
+DMMD [qψ(z|c = 1, y = 0) ∥qψ(z|c = 1, y = 1)]
+]
+where we use the same notation as in subsection 3.3.2. These quantities should also be
+as close to 0 as possible.
+Finally, we evaluate the models qualitatively by inspecting the latent samples generated
+from the i.i.d. and o.o.d. test sets, colored according to the color and the label, and the
+counterfactuals generated with a step of 2 for a batch of images randomly selected from
+the i.i.d. test set.
+Each model is trained with three random seeds 0, 1 and 2, to account for the randomness
+of model training. The quantitative evaluation of the models is based on the three runs,
+whereas the qualitative evaluation is based on the run with a random seed of 0.
+The aspects which are common to both experiments have been presented. We will now
+go trough the hyperparameter tuning and the results of each of the two experiments.
+4.3
+Experiment 1: Varying levels of correlation
+In the first experiment, we evaluate our models on CMNIST datasets with true labels
+and different levels of correlation between the target label and the color: pn = 0 and
+pe ∈{0.05, 0.2, 0.5}.
+4.3.1
+Hyperparameter tuning
+In this experiment, the coefficients in the loss were chosen based on different trials with
+the baseline and conditional models using a combination of quantitative and qualitative
+measures.
+We log the training and validation curves during training for each of the terms in the ob­
+jective function, in addition to the latent samples colored according to the label and color
+and the reconstructions for a random batch from the validation set. The reconstructions
+are chosen to be the parameters of the continuous Bernoulli distributions λθ(w, w), which
+are returned by the decoder network, as explained in section 3.4.
+After training, we visualize the latent samples of the whole validation set, colored accord­
+ing to colors and labels, and the counterfactuals generated with a step of 2 for a batch of
+validation images, to qualitatively inspect the invariance of the learned representations.
+The logged curves and plots, and the final visualizations are used to tune the β coefficients
+in the objective function. The following coefficients were chosen for all models:
+β1 = β3 = 1, β2 = β4 = β5 = β6 = 10.
+16
+Counterfactual example generation in medical imaging
+==PAGE:25==
+4.3.2
+Results
+We plot the quantitative measures for the different models and levels of correlation in
+Figure 4.1, and the qualitative measures for each level of correlation in Figures A.1 to 4.4
+(in the appendix).
+Figure 4.1: Quantitative comparison of models with true labels and decreasing levels of
+correlation between the label and the color, i.e. pn = 0 and pe ∈{0.05, 0.2, 0.5}. The
+abbreviations Acc. and N. appear respectively stand for the accuracy and the number
+of counterfactuals that have their color changed. MMD(w ⊥c | y) and MMD(z ⊥y | c)
+denote MMD(W; C|Y ) and MMD(Z; Y |C). All values are computed on the i.i.d. test set
+except in the second subplot. Note that the classification accuracies on the i.i.d. and
+o.o.d. test sets are shown with different scales in the first two subplots, similarly to the
+MMD terms in W and Z.
+We will first discuss the results in classification accuracy. As pe decreases from 0.5 to 0.05,
+i.e. as the relationship between color and label strengthens, the classification accuracy
+increases slightly for all models on the i.i.d. test set, but decreases more significantly on
+the o.o.d. test set. This suggests that more information about the color gets encoded
+in the label­specific latent subspace W as the correlation with the label increases. This
+Counterfactual example generation in medical imaging
+17
+==PAGE:26==
+spurious feature is used by the classifier to predict the label, resulting in slightly improved
+i.i.d performance but considerably worse o.o.d. generalization performance. However,
+we notice that when the correlation is strongest, i.e. pe = 0.05, the conditional MMD
+model generalize better on the o.o.d. test set than the other models. This suggests that
+the conditional MMD model learned representations w that are more invariant to the color.
+We now turn to the MMD terms and N. appear, which should be as close to 0 as possible
+for the representations to be invariant. All models perform similarly well at pe = 0.5 with
+values close to 0. This suggests that when the color and the label are not correlated,
+independence constraints are not needed to separate the two factors because the sepa­
+ration already follows from the inductive biases of our baseline model. However, when pe
+is decreased to 0.2, the marginal MMD model gets worse since the MMD terms and N.
+appear increase. This happens only at pe = 0.05 for the marginal adversarial model, and
+to a lesser extent for the baseline and conditional models. Nevertheless, the conditional
+models have a lower N. appear than the baseline. Note that MMD(Z; Y |C) increases
+more than MMD(W; C|Y ) when the correlation increases, given the different scales on
+the y axis.
+The qualitative measures, gathered in the appendix, provide visual explanations of the
+results given by these two quantitative measures of invariance.
+For pe = 0.5, all models learned similar representations of the data, which conform to the
+desired invariances. As an example, the latent samples and counterfactuals generated
+by the baseline model from the i.i.d. test set are shown in Figure 4.2. The latent samples
+generated from the i.i.d. test set in Figure 4.2a are well separated according to the label
+in the subspace W and the color in the subspace Z. Moreover, the latent samples in W
+cannot be separated according to the digits’ colors and the latent samples in Z cannot
+be separated according to the digits’ labels. Furthermore, the counterfactual examples
+shown in Figure 4.2b all retain the color of the inputs while changing the label.
+For pe = 0.2, the representations learned by the marginal MMD model in the subspace
+Z are less invariant to the label compared to the other models, as can be seen in Fig­
+ure A.3. Figure 4.3 shows that the red and green clusters in the subspace Z have some
+overlap at their frontier. Moreover, the blue samples (labeled 9) in the red cluster are not
+homogeneously distributed, suggesting that the representations z might not be invariant
+to the label y.
+The overlap between the red and green clusters in the subspace Z becomes even more
+pronounced for pe = 0.05 and also affects the marginal adversarial model. In comparison,
+the encodings of the baseline and the conditional models are similar to those obtained
+with higher pe, but the clusters in the subspace W are slightly closer to each other, as can
+be seen in Figure A.5. This is also illustrated with the counterfactual examples generated
+by the different models in Figure 4.4, where one of the input images has its color flipped
+for the baseline and conditional models and even more of them for the marginal models.
+In short, the qualitative measures indicate that as the variables y and c get more cor­
+related, the marginal models fail to separate the colors in Z, which results in a loss of
+invariance of the representations to the label y.
+The insights provided by the latent samples can help us interpret the adversarial accu­
+racies. The accuracies of the adversaries are approximately equal to pe for all models,
+except for the adversary which predicts y from z. The accuracy for this adversary is lower
+than pe for the marginal MMD model when pe ≤0.2 and the marginal adversarial model
+when pe = 0.05. This is because the marginal models fail to separate the colors in the
+18
+Counterfactual example generation in medical imaging
+==PAGE:27==
+(a) Latent samples
+(b) Counterfactual explanations
+Figure 4.2: Qualitative measures for the baseline model on the i.i.d. test set with pn = 0
+and pe = 0.5. (a) The rows represent the latent subspaces W and Z, with each data point
+colored according to the label (orange or blue) in the first column and the color (red or
+green) of the digit in the second column. (b) Counterfactual explanations (second row)
+generated with a step of 2 for 10 input images (first row) randomly selected from the test
+set.
+subspace Z when the variables get more correlated, as we have seen using the latent
+samples. Indeed, if z is invariant to y, then an adversary can only predict y based on the
+information about c which is encoded in z. In other words, it will predict y based on the
+majority class for each value of c. For c = 0, the majority class is y = 0 since we obtain the
+color c by flipping the label y with a ratio pe ≤0.5, so the adversary will predict y = 0. This
+hypothesis is confirmed by visualizing the decision boundaries of two adversaries which
+both predict y from z but on a subset of the samples with c = 0 and c = 1 respectively.
+However, since the red and green clusters corresponding to the two values of c in the
+subspace Z are overlapping for the marginal MMD model when pe ≤0.2 and the marginal
+adversarial model when pe = 0.05, as shown in Figure 4.3, the accuracy will be lower than
+pe, because it cannot perfectly separate the colors based on z. This is not the case for the
+adversary which predicts y from (z, c) because c is provided as input to the adversary, so
+Counterfactual example generation in medical imaging
+19
+==PAGE:28==
+Figure 4.3: Latent samples generated by the marginal models from the i.i.d. test set with
+pn = 0 and pe ∈{0.05, 0.2}.
+it doesn’t need to be predicted from z. In contrast, the orange and blue clusters are well
+separated for all models in the subspace W because of the classification loss and the KL
+divergence, resulting in accuracies equal to pe for both adversaries.
+To summarize, the measures of invariance provide the following conclusions:
+• When label and color are not correlated, all models learn the desired invariances.
+• When they are correlated, the marginal models fail to separate the colors in Z, and
+consequently learn representations z that are not invariant to the label y.
+20
+Counterfactual example generation in medical imaging
+==PAGE:29==
+Figure 4.4: Counterfactual explanations generated with a step of 2 for 10 input images
+(shown in the first column) randomly selected from the i.i.d. test set with pn = 0 and
+pe = 0.05. Each column correspond to one model, except for the first column.
+The last conclusion suggests that marginal independence constraints are not adequate
+for learning invariant representations when color and label are correlated. However, the
+baseline model seems to be almost as good as the conditional models in this respect. This
+indicates that the baseline hasn’t learned to use the color to classify the digits, probably
+because the shapes of the digits are more useful in predicting the labels than the colors.
+Furthermore, we hypothesize that disentangling color from label is an easy task for such
+a simple dataset as CMNIST, and learning invariant representations might become more
+challenging when dealing with a disease label and a demographic attribute in medical
+Counterfactual example generation in medical imaging
+21
+==PAGE:30==
+images. To make the task more realistic, we could add noise to the labels, so that the
+colors become at least as predictive as the images. In a medical imaging setting, this
+noise could correspond to the complexity of diagnosing a disease from an image, which
+is not as straightforward as classifying a digit. We will investigate this scenario in the next
+experiment.
+4.4
+Experiment 2: Noisy labels
+To make the colors more useful in predicting the labels, we create a dataset with noisy
+labels. The flipping ratio for the label and the color pn and pe were both set to 0.2, so that
+the colors and the original, black and white images are equally predictive of the labels.
+This makes the task of learning invariant representations more challenging, requiring a
+more systematic procedure of hyperparameter tuning.
+4.4.1
+Hyperparameter tuning
+The weights in the loss function of the models are tuned to achieve good classification
+accuracy and counterfactual generation. The loss function of the MMD and adversarial
+models is composed of the loss of the baseline model with an invariance penalty. There­
+fore, we first tune the weights in the loss of the baseline model, before tuning the weights
+of the invariance penalty in the loss of the MMD and adversarial models while keeping
+the weights of the baseline fixed. Hyperparameter tuning is performed by training models
+with random seeds 0, 1, 2 and evaluating them on the validation set.
+Baseline model
+The loss of the baseline model is made of four components, weighted by the coefficients
+β1 to β4: the reconstruction loss, the KL divergences between the posterior and the prior
+in the subspaces W and Z, and the classification loss. We set β1 and β3 to 1, and tune
+β2 and β4.
+We first tune β2 ∈J1, 5K by setting β4 to 0. We train the corresponding baseline models
+and evaluate the mean KL divergence ED(x,y) [DKL(qϕ(w|x) ∥p(w|y))] on the training and
+validation sets. Figure 4.5a shows that the KL divergence for the validation set decreases
+when β2 is increased from 1 to 2 before reaching a plateau. Therefore, we choose β2 = 2.
+We then tune β4 ∈{1, 10, 20, 30, 40, 60, 80, 100} by setting β2 = 2. We train the corre­
+sponding baseline models and evaluate the mean predictive posterior ED(x,y)qϕ(y|w)[qγ(y |
+w)] on the training and validation set. Figure 4.5a shows that the mean predictive pos­
+terior on the validation set is constant for all values of β4 > 0, and close to the optimal
+value, which is equal to 1 −pn = 0.8 given that the amount of label noise is characterized
+by pn = 0.2. Therefore, we choose β4 = 1.
+Thus, the following coefficients were chosen for the baseline model:
+β1 = β2 = β4 = 1, β3 = 2.
+MMD and adversarial models
+The losses of the MMD and adversarial models are made of the loss of the baseline model
+and an invariance penalty, which is composed of two components weighted by β5 and β6,
+corresponding to the latent subspaces W and Z respectively. We set the coefficients in
+the baseline component to the previously chosen values and set the two weights β5 and
+β6 to be equal: βm := β5 = β6. We tune βm ∈{1, 10, 20, 30, 40, 60, 80, 100}. We train
+the corresponding models and evaluate them on the validation set using the quantitative
+measures defined in subsection 4.2.3.
+The results of the hyperparameter tuning for the conditional models are plotted in Fig­
+ure 4.6. As βm increases, the MMD terms decrease, especially in the subspace W. The
+22
+Counterfactual example generation in medical imaging
+==PAGE:31==
+(a) Tuning β2 with β4 = 0.
+(b) Tuning β4 with β2 = 2.
+Figure 4.5: Tuning the baseline model with three repetitions per model. (a) With β4 = 0,
+the mean KL divergence ED(x,y) [DKL(qϕ(w|x) ∥p(w|y))] in the validation set reaches a
+plateau at β2 = 2. (b) With β2 = 2, the mean predictive posterior ED(x,y)qϕ(y|w) [qγ(y|w)]
+on the validation set plateaus at β4 = 1. The optimal value is shown with a horizontal
+dotted line.
+MMD penalty in the subspace Z is already low for the baseline, because the label y is
+encoded in the subspace W, through the classification loss, so the representations z are
+already invariant to y without any additional regularization term. However, it is more diffi­
+cult to make the representation w invariant to the color c because it is as predictive of the
+label as the shape of the digit. As βm increases to 100, MMD(W) decreases to the level
+of MMD(Z). Similarly, N. appear decreases as βm increases, until βm = 40 for the MMD
+model and βm = 20 for the adversarial model.
+The classification accuracy decreases as βm increases. Indeed, this is due to giving
+more weight to the invariance penalty, to the disadvantage of the classification loss. The
+adversarial accuracies converge to 1−pe = 0.8 as βm increases, except for the adversary
+which predicts c from w. The accuracy of this adversary decreases as the classification
+accuracy decreases, especially after βm = 20. This conforms with the results obtained
+for the adversarial accuracies in the first experiment. Indeed, when βm increases, the
+representations become more invariant, as suggested by the decrease of the MMD terms
+and N. appear. Therefore, an adversary can only predict an attribute based on the attribute
+which is correlated with it with a flip ratio pe. Specifically, an adversary that predicts c from
+w will actually predict the majority color corresponding to the predicted label y. Since the
+accuracy of predicting y from w decreases with increasing βm, the accuracy of predicting
+c also decreases.
+Therefore, we will choose βm = 20 for the two conditional models to balance between
+classification accuracy and invariance of the representations.
+Similarly, the results of the hyperparameter tuning for the marginal models are plotted in
+Figure 4.7. The classification accuracy and the accuracies of the marginal adversaries
+are already decreasing at βm = 1. This might be because the marginal invariance penalty
+encourages the minimization of these adversarial accuracies. The decrease in the accu­
+racy of the adversary which predict y from z is in contrast with what we observed with the
+conditional models, for which this accuracy was converging to 0.8, and suggests that the
+colors are no longer well separated in the subspace Z, which we could see by visualizing
+the latent samples.
+Counterfactual example generation in medical imaging
+23
+==PAGE:32==
+Figure 4.6: Tuning the conditional MMD (first column) and adversarial (second column)
+models on the validation set with three repetitions each. In the first row, we plot the classi­
+fication accuracy and the adversarial accuracies. In the third row, we plot MMD(W; C|Y )
+and MMD(Z; Y |C) which we respectively denote by MMD(w ⊥c | y) and MMD(z ⊥y | c).
+The MMD penalty decreases in the subspace W for both models as βm increases, but
+not in the subspace Z. N. appear seems to reflect the trend of the MMD penalty in the
+subspace Z, increasing after β3 = 1 for the MMD model and fluctuating for the adversarial
+model. Thus, we choose βm = 1 for the two marginal models as a trade­off between
+classification accuracy and invariance of the counterfactuals, in terms of N. appear.
+24
+Counterfactual example generation in medical imaging
+==PAGE:33==
+Figure 4.7: Tuning the marginal MMD (first column) and adversarial (second column)
+models on the validation set with three repetitions each. In the first row, we plot the
+classification accuracy of the logistic regression model and the adversarial networks. In
+the third row, we plot MMD(W; C|Y ) and MMD(Z; Y |C) which we respectively denote by
+MMD(w ⊥c | y) and MMD(z ⊥y | c).
+4.4.2
+Results
+We show the quantitative measures for the different models in Table 4.1 and plot the
+qualitative measures for each model individually in Figures A.6 to A.10 (in the appendix).
+The classification accuracies of the different models are close to their optimal value of
+0.8 on the i.i.d. test set, although slightly lower for the conditional models, but closer to
+Counterfactual example generation in medical imaging
+25
+==PAGE:34==
+mmd
+adversarial
+baseline
+conditional
+marginal
+conditional
+marginal
+Pred. Acc.
+i.i.d.
+0.78±0.0
+0.79±0.01
+0.77±0.01
+0.79±0.0
+0.79±0.0
+o.o.d.
+0.6±0.01
+0.57±0.01
+0.55±0.02
+0.56±0.03
+0.55±0.02
+Adv. Acc.
+w →c
+0.79±0.01
+0.83±0.04
+0.8±0.02
+0.83±0.04
+0.87±0.06
+(w, y) →c
+0.79±0.01
+0.83±0.02
+0.81±0.02
+0.83±0.03
+0.85±0.06
+z →y
+0.81±0.0
+0.77±0.02
+0.8±0.0
+0.77±0.02
+0.75±0.03
+(z, c) →y
+0.81±0.0
+0.81±0.0
+0.81±0.0
+0.81±0.0
+0.81±0.0
+MMD
+w ⊥c | y
+0.23±0.03
+0.32±0.07
+0.26±0.05
+0.37±0.1
+0.42±0.09
+z ⊥y | c
+0.01±0.0
+0.02±0.0
+0.02±0.01
+0.04±0.03
+0.03±0.04
+N.appear
+25±8
+366±151
+89±126
+513±160
+655±226
+Table 4.1: Quantitative comparison of models with pn = pe = 0.2. The abbreviations Pred.
+Acc. and Adv. Acc. stand for predictive accuracies and adversarial accuracies, which are
+the classification accuracies of the logistic regression model on the i.i.d. and o.o.d. test
+sets and of the adversarial networks on the i.i.d. test set.
+0.5 on the o.o.d. test set. However, the classification accuracy on the o.o.d. test set is
+significantly larger for the conditional MMD model than for the other models. This can
+be seen by inspecting the latent samples in the subspace W generated by the models
+from the o.o.d. test set in Figure 4.8a. Indeed, the latent samples generated from the
+conditional MMD model are closer to the prior compared to the other models.
+The adversarial accuracies on the latent subspace W are close to 0.8 for the conditional
+models, and higher on average for the other models, with more variance between the
+three runs. This suggests that the marginal and baseline models are encoding more
+information about the color c in the representation w than that which is provided by the
+label. In other words, the representations w learned by these models are not invariant to
+the color.
+In the subspace Z, the accuracies differ between the marginal and conditional adver­
+saries. The accuracies of the conditional adversary are equally close to 0.8 for all models,
+whereas the accuracies of the marginal adversary are lower for the marginal and base­
+line models. This indicates that the conditional adversaries are predicting the label based
+on the majority class for each color, and that the color cannot be easily predicted from
+the latent samples z generated by the marginal and baseline models from the i.i.d. test
+set. Indeed, Figure 4.8b show that the red and green clusters in the subspace Z are well
+separated for the conditional models, whereas they are overlapping for the other models.
+These results are confirmed by the values of the MMD terms and N. appear, which are
+considerably smaller for the conditional models, especially the conditional MMD model.
+The marginal models have lower values than the baseline model and among the marginal
+models, the MMD model is also superior to the adversarial model according to these two
+measures of invariance. This can also be seen by visualizing the latent samples generated
+by the models from the i.i.d. test set in Figures A.6a to A.10a. Most notably, the labels are
+not uniformly distributed in the red cluster in the subspace Z for the marginal adversarial
+model and the baseline model. Counterfactual examples shown in Figure 4.9 further
+support and illustrate our conclusions regarding color flips. Indeed, for 10 input images
+randomly taken from the i.i.d. test set, the number of color flips is 3 for the baseline and
+26
+Counterfactual example generation in medical imaging
+==PAGE:35==
+marginal adversarial models, 2 for the marginal MMD model and 0 for the conditional
+models.
+Thus, this second experiment showed using the CMNIST dataset that the conditional
+MMD model is the most adequate for simultaneous classification and counterfactual gen­
+eration when we introduce noise to the labels. In the next section, we will discuss the
+results obtained in the experiments.
+Counterfactual example generation in medical imaging
+27
+==PAGE:36==
+(a) o.o.d. test set
+(b) i.i.d. test set
+Figure 4.8: Latent samples generated by the different models. (a) Latent subspace W
+generated from the o.o.d. test set, with data points colored according to the label y. (b)
+Latent subspace Z generated from the i.i.d. test set, with data points colored according
+to the color c.
+28
+Counterfactual example generation in medical imaging
+==PAGE:37==
+Figure 4.9: Counterfactuals generated with a step of 2 for 10 input images (shown in the
+first column) randomly selected from the i.i.d. test set with pn = pe = 0.2. Each column
+correspond to one model, except for the first column.
+Counterfactual example generation in medical imaging
+29
+==PAGE:38==
+30
+Counterfactual example generation in medical imaging
+==PAGE:39==
+5
+Discussion
+The results of the two experiments will be summarized and discussed with an emphasis
+on the limitations of our method. This discussion will serve as a basis for envisioning
+future work.
+5.1
+Experiment 1: Varying levels of correlation
+In the first experiment, which involved variations of the CMNIST dataset with true labels
+and three different levels of correlation between the label and the color, it was found
+that the marginal models are not able to learn representations that exhibit the desired
+invariances when the correlation is high or medium. However, this result should be treated
+with care because the hyperparameter tuning was only carried out with the baseline and
+conditional models. Thus, results related to these two models are more trustworthy, even
+though trials involved values of the hyperparameters that were chosen based on human
+optimization, which could be imperfect compared to a more systematic hyperparameter
+tuning like in the second experiment. It was shown that surprisingly, even for a high
+degree of correlation between the label and the color, the representations learned by the
+baseline model were almost as invariant as those learned by the conditional models. This
+was evaluated on the i.i.d. test set but this is likely to stay true on the o.o.d. test set, given
+that the accuracies on this test set are still higher than 0.9 for all models. We hypothesize
+that in order to be exploited by a model, a spuriously correlated features must not only be
+predictive of the outcome but also significantly improve predictions.
+5.2
+Experiment 2: Noisy labels
+To make the colors as predictive of the labels as the shapes of the digits, we introduced
+label noise to the CMNIST dataset with a moderate degree of correlation in the second
+experiment. We found as expected that the conditional models were better able to learn
+the desired invariances in the representations while having a good classification accuracy
+compared to the marginal models, which were also superior to the baseline model. Among
+the two conditional models, the MMD model was found to be superior to the adversarial
+model in terms of generalization performance and invariance of the representations. In
+addition, the MMD model is faster to train since it doesn’t require training an additional
+network contrary to the adversarial model.
+A systematic hyperparameter tuning was carried out on all models, giving us more con­
+fidence in these results than in the first experiment. Interestingly, the hyperparameter
+tuning of the marginal models showed that the lowest weight for the marginal invariance
+penalty was actually the best, suggesting that the results for the marginal models in the
+first experiment could be improved by decreasing these weights. The hyperparameter
+tuning consisted in starting with the simplest model possible and adding components one
+by one to the loss function and tuning the corresponding weights, one at a time. This
+method of hyperparameter tuning was chosen instead of grid search for time reasons, be­
+cause model training is time­consuming, taking up to 30 minutes for the adversarial model.
+In addition, hyperparameter tuning could not be automatized using grid search, random
+search or bayesian optimization, because there isn’t one unique criterium to choose the
+values of the hyperparameters, which are the coefficients of the different components in
+the loss function. In addition, the criteria for choosing them are actually part of the loss
+Counterfactual example generation in medical imaging
+31
+==PAGE:40==
+function and the corresponding weights for deciding the hyperparameter values are ac­
+tually the hyperparameters we are trying to optimize. Nevertheless, our method has the
+advantage of producing meaningful tuning curves that were used to check that our models
+are working as intended and provided further insights into the workings of the models. In
+particular, the hyperparameter tuning of the conditional and marginal models showed that
+the conditional MMD penalty MMD(Z) is already low for the baseline model, suggesting
+that it might not be necessary to regularize the representations z to make them invariant
+to the label. Therefore, this puts into question our choice of setting β5 = β6, suggesting a
+direction for future work.
+5.3
+Future work
+As suggested above, future work could include repeating the tuning of β5, with β6 = 0.
+Indeed, although our conditional models performed as desired on the i.i.d. test set, this
+was less the case on the o.o.d. test set, where we found that the classification accuracy
+was considerably diminished, especially for the adversarial model, suggesting room for
+improvement in terms of generalization performance.
+A natural continuation of this thesis would then be to apply our method to a real­world
+dataset. In particular, this thesis was motivated by the task of disease diagnosis in medical
+images, where the presence of a disease could be correlated with a demographic attribute.
+In this section, we describe the dataset, experimental setup and evaluation which could
+be used for this task.
+5.3.1
+Dataset
+CheXpert, a large dataset of chest X­rays labelled with the presence of 14 radiographic
+observations, would be appropriate for this task, because it provides two demographic
+attributes, the age and sex, in addition to the labels. Among these 14 observations, car­
+diomegaly, which refers to enlarged heart, is particularly well suited to the purpose of
+counterfactual explanation, because the validity of the explanation can easily be evalu­
+ated by computing the difference map between the original image and the counterfactual
+example.
+That is why, cardiomegaly was also chosen as the target class for explanation by Singla
+et al. [30] who proposed a method of counterfactual explanation which gradually exagger­
+ates the semantic effect of a given class predicted by a black box model. They show that
+their method can discover confounding bias in the data by training a smile classifier on a
+biased version of CelebA, a benchmark dataset of celebrity images, confounded with gen­
+der such that all smiling images are of male faces. Our method has similar capabilities,
+because it can generate a sequence of counterfactual examples that look increasingly like
+the counter­class, by increasing the step of the projection onto the decision boundary, as
+shown in Figure 2.3. However, contrary to Singla et al., our goal is not to explain a biased
+classifier, but to create a classifier which is at the same time robust to a known source of
+bias, and explainable through counterfactual generation. Indeed, cardiomegaly could be
+correlated with age and gender because it is associated with heart diseases, whose inci­
+dence increases with age and male gender [31]. In addition, images are labelled with the
+presence of ”Support Devices”, which could also correlate with cardiomegaly, and com­
+pared to demographic attributes, this label has the advantage of being easily recognized
+on the image, which facilitates the evaluation of the invariance of the representations.
+Therefore, we created a balanced dataset using a subset of CheXpert consisting of chest
+X­rays with an anteroposterior (AP) view. In CheXpert, labels for the presence of the
+14 observations were extracted automatically from free text radiology reports as positive,
+32
+Counterfactual example generation in medical imaging
+==PAGE:41==
+negative, uncertain or unmentionned. Images with a negative label for cardiomegaly were
+few, as opposed to images with an unmentionned label, so our dataset consisted of all AP
+images with a positive label and a subset of the AP images with an unmentionned label, to
+make the dataset balanced with respect to the label, amounting to 40950 images. In our
+dataset, we found as expected that the proportion of older patients that had cardiomegaly
+is larger than for younger patients: 56 percent for patients aged older than 60 years, the
+median age in our dataset, against only 44 percent for patients aged younger than 60
+years. The difference was smaller for the presence of support devices, and even smaller
+for the gender. Therefore, future work could include the creation of biased datasets, where
+the correlation between cardiomegaly and the considered attribute is larger.
+5.3.2
+Experimental setup
+The experimental setup used for CMNIST images will need to be adapted to deal with
+real­world images. This subsection proposes avenues for setting the experiments using
+chest X­rays.
+Architecture
+As a first step, we propose to implement a standard VAE model for CheXpert images re­
+sized to 256 × 256, based on an implementation proposed by Srinivasan et al. [32], who
+generate chest X­rays that are realistic although a bit blurry, and the implementation of
+a convolutional VAE for MNIST images, proposed by Khemakem et al. [33]. Compared
+to the architecture which we used for the CMNIST dataset, this VAE has a deeper ar­
+chitecture of convolutional neural networks, with more hidden units. Indeed, the VAE is
+composed of an encoder network which parameterizes the distribution
+qϕ(z|x) = N(z|µϕ(x), σϕ(x))
+such that
+[µϕ(x), log σϕ(x)] = [Linearϕ(400) ◦Linearϕ(200) ◦Convϕ(1024; 4, 2, 1)
+◦LeakyReLU ◦BNϕ ◦Convϕ(1024; 4, 2, 1)
+◦LeakyReLU ◦BNϕ ◦Convϕ(1024; 4, 2, 1)
+◦LeakyReLU ◦BNϕ ◦Convϕ(128; 4, 2, 1)
+◦LeakyReLU ◦BNϕ ◦Convϕ(256; 4, 2, 1)] (x)
+(5.1)
+and a decoder network which parameterizes the observation model pθ(x|z) = CB(x|λθ(z))
+with
+λθ(z) = [ConvTransposeθ(256; 4, 2, 1) ◦LeakyReLU ◦BNθ ◦ConvTransposeθ(256; 4, 2, 1)
+◦LeakyReLU ◦BNθ ◦ConvTransposeθ(256; 4, 2, 1)
+◦LeakyReLU ◦BNθ ◦ConvTransposeθ(256; 4, 2, 1)
+◦LeakyReLU ◦BNθ ◦ConvTransposeθ(512; 4, 2, 1)
+◦LeakyReLU ◦BNθ ◦ConvTransposeθ(1024; 8, 1, 0) ◦Linearθ(32768)] (z).
+(5.2)
+In equations 5.1 and 5.2, LeakyReLU is the Leaky ReLU activation function with slope
+0.01, BNϕ and BNθ are 2D batch normalization layers with learnable parameters ϕ and θ.
+In equation 5.1, Convϕ(h; k, s, p) denotes a 2D convolution with h out­channels, kernel size
+k, stride s, padding p and learnable parameters ϕ. Similarly, ConvTransposeθ(h; k, s, p)
+in equation 5.2 denotes a 2D transposed convolution with the same parameters.
+Counterfactual example generation in medical imaging
+33
+==PAGE:42==
+The Continuous Bernoulli distribution chosen for the observation model could solve the
+problem of blurriness encountered by Srinivasan et al. when generating images, as dis­
+cussed in section 2.1.1. This could be checked in future work by training the VAE on our
+dataset. Based on this basic VAE architecture, we could then implement our model using
+latent subspaces W = R2 and Z = R200, and repeat the experiment carried out with the
+version of the CMNIST dataset with noisy labels on this new dataset.
+Evaluation
+We can directly reuse the quantitative and qualitative measures which we proposed to
+evaluate our models on the CMNIST dataset, to the exception of N. appear. During the
+experiments on the CMNIST dataset, we actually considered an alternative measure,
+named N. switch, which counts the number of counterfactual examples which have their
+color switched compared to the original image. An image colored red is said to switch color
+if the sum of pixel values in the green channel of the counterfactual example is larger than
+that of the red channel, and this is reversed for a green image. However, N. appear was
+chosen instead for the CMNIST dataset because N. switch doesn’t account for the cases
+where the original color is still predominant, but where the other color also appears in the
+image, which is a sign that the label­specific representations are not invariant to the color.
+In the case of chest X­rays, similar measures could be devised by training separate clas­
+sifiers for age, gender and support devices. N. switch can directly be adapted to this new
+dataset, by inferring these attributes from the counterfactual examples using the trained
+classifiers and counting the number of images which switched value for the correspond­
+ing attribute. N. appear could also be adapted, although less obviously, by considering
+the confidence of the classifier which is trained to predict the attribute. Since the consid­
+ered attributes are all binary, we can evaluate how much the confidence of the classifier
+changed from the original input to the counterfactual example and define a threshold of
+significance. If the threshold is reached for an image and its counterfactual example, we
+consider that they contribute to N. appear, similarly to CMNIST images.
+34
+Counterfactual example generation in medical imaging
+==PAGE:43==
+6
+Conclusion
+In this thesis, we combined the theory of invariant representation learning with variational
+autoencoders and counterfactual explanations to create a method for simulatenous clas­
+sification and counterfactual generation, in the presence of correlation between the target
+label y and a known attribute c. We proposed a generative model which learns a repre­
+sentation W × Z of the data, where W encodes information about the target label y and
+Z encodes information about c along with the remaining information in the image. This
+separation of information is achieved by learning representations w which are invariant
+to the attribute c and representations z which are invariant to the label y. Invariant rep­
+resentations are often implemented using marginal independence constraints between
+the latent variable and the attribute, through adversarial training or minimizing the MMD
+penalty. However, we have shown using a causal graph that when y and c either share
+a parent­child relationship or are confounded by a third variable, the desired invariances
+should be implemented using conditional independence constraints. Therefore, we ex­
+tended adversarial training and the MMD penalty to the conditional case, to create two
+different models. To evaluate the relevance of our approach, we proposed to compare
+our conditional models to their marginal equivalents and a baseline model without any
+independence constraints. These models were evaluated on variations of the CMNIST
+dataset, where the color of the digits is caused by their label, using quantitative and qual­
+itative measures of invariance.
+First, we investigated the effect of the correlation strength between the color and the label
+by varying the flip ratio pe to create the datasets. It was found that the baseline learned
+the desired representations as well as the proposed, conditional models, even when the
+correlation is high. However, this was not the case for the marginal models, which were
+shown to be appropriate only when the variables are not correlated. We hypothesized
+that the model did not learn to rely on the color to predict the label because the shapes of
+the digits were more predictive of the label.
+Therefore, we made the color as useful as the shapes of the digits by introducing label
+noise to a CMNIST dataset with a moderate level of correlation. We argued that adding
+noise to the labels could simulate the more complex task of diagnosing medical images.
+We proposed a method of hyperparameter tuning and showed that marginal indepen­
+dence constraints are not adequate for learning invariant representations. However, re­
+sults show that they still outperform the baseline, suggesting that these constraints are
+still better than none, which explain why they were proposed in previous work. In con­
+trast, our proposed approach using conditional independence constraints proved to be
+well suited to the task, especially when we relax these constraints using the MMD.
+Finally, we discussed the limitations of our approach and suggested directions for future
+work. In particular, we proposed to apply our method to detect cardiomegaly in chest
+X­rays images using the CheXpert dataset. We highlighted the relevance of this dataset
+for our method, discussed how to preprocess the dataset for it to be used in future exper­
+iments, and how the experimental setup used for the CMNIST dataset could be adapted
+to this more challenging, real­world dataset.
+Counterfactual example generation in medical imaging
+35
+==PAGE:44==
+Bibliography
+[1]
+Alex Krizhevsky, Ilya Sutskever, and Geoffrey E. Hinton. “ImageNet Classification
+with Deep Convolutional Neural Networks”. In: Commun. ACM 60.6 (May 2017),
+pp. 84–90. ISSN: 0001­0782. DOI: 10.1145/3065386. URL: https://doi.org/10.1145/
+3065386.
+[2]
+R. Geirhos et al. “Shortcut learning in deep neural networks”. In: Nature Machine
+Intelligence 2.11 (2020), pp. 665–673. DOI: 10.1038/s42256-020-00257-z.
+[3]
+John R. Zech et al. “Variable generalization performance of a deep learning model to
+detect pneumonia in chest radiographs: A cross­sectional study”. In: PLOS Medicine
+15.11 (Nov. 2018). Ed. by Aziz Sheikh, e1002683. DOI: 10 . 1371 / journal . pmed .
+1002683. URL: https://doi.org/10.1371/journal.pmed.1002683.
+[4]
+Julia Angwin et al. Machine Bias. https://www.propublica.org/article/machine-bias-
+risk-assessments-in-criminal-sentencing. Accessed: 2023­06­12.
+[5]
+Jeffrey Dastin. Amazon scraps secret AI recruiting tool that showed bias against
+women. https://www.reuters.com/article/us-amazon-com-jobs-automation-insight-
+idUSKCN1MK08G. Accessed: 2023­06­12.
+[6]
+Sahil Verma et al. Counterfactual Explanations and Algorithmic Recourses for Ma­
+chine Learning: A Review. 2022. arXiv: 2010.10596 [cs.LG].
+[7]
+Pau Rodriguez et al. Beyond Trivial Counterfactual Explanations with Diverse Valu­
+able Explanations. 2021. arXiv: 2103.10226 [cs.LG].
+[8]
+Saloni Dash, Vineeth N Balasubramanian, and Amit Sharma. Evaluating and Miti­
+gating Bias in Image Classifiers: A Causal Perspective Using Counterfactuals. 2022.
+arXiv: 2009.08270 [cs.CV].
+[9]
+Diego Velazquez et al. “Explaining Visual Counterfactual Explainers”. In: Transac­
+tions on Machine Learning Research (2023). Reproducibility Certification. ISSN:
+2835­8856. URL: https://openreview.net/forum?id=RYeRNwRjNE.
+[10]
+Christos Louizos et al. The Variational Fair Autoencoder. 2017. arXiv: 1511.00830
+[stat.ML].
+[11]
+Daniel Moyer et al. Invariant Representations without Adversarial Training. 2019.
+arXiv: 1805.09458 [cs.LG].
+[12]
+Ruggero Ragonesi et al. “Learning Unbiased Representations via Mutual Informa­
+tion Backpropagation”. In: CoRR abs/2003.06430 (2020). arXiv: 2003.06430. URL:
+https://arxiv.org/abs/2003.06430.
+[13]
+Seonguk Seo, Joon­Young Lee, and Bohyung Han. Information­Theoretic Bias Re­
+duction via Causal View of Spurious Correlation. 2022. arXiv: 2201.03121 [cs.LG].
+[14]
+Martin Arjovsky et al. Invariant Risk Minimization. 2020. arXiv: 1907.02893 [stat.ML].
+[15]
+Chaochao Lu et al. “Invariant Causal Representation Learning for Out­of­Distribution
+Generalization”. In: International Conference on Learning Representations. 2022.
+URL: https://openreview.net/forum?id=-e4EXDWXnSn.
+[16]
+Ayush Jaiswal et al. “Discovery and Separation of Features for Invariant Represen­
+tation Learning”. In: ArXiv abs/1912.00646 (2019).
+[17]
+Jack Klys, Jake Snell, and Richard Zemel. Learning Latent Subspaces in Variational
+Autoencoders. 2018. arXiv: 1812.06190 [cs.LG].
+[18]
+Diederik P Kingma and Max Welling. Auto­Encoding Variational Bayes. 2022. arXiv:
+1312.6114 [stat.ML].
+[19]
+Gabriel Loaiza­Ganem and John P. Cunningham. The continuous Bernoulli: fixing
+a pervasive error in variational autoencoders. 2019. arXiv: 1907.06845 [stat.ML].
+36
+Counterfactual example generation in medical imaging
+==PAGE:45==
+[20]
+Ya Li et al. “Domain Generalization via Conditional Invariant Representations”. In:
+Proceedings of the AAAI Conference on Artificial Intelligence 32.1 (Apr. 2018). DOI:
+10.1609/aaai.v32i1.11682. URL: https://ojs.aaai.org/index.php/AAAI/article/view/
+11682.
+[21]
+Shengjia Zhao, Jiaming Song, and Stefano Ermon. “InfoVAE: Balancing Learning
+and Inference in Variational Autoencoders”. In: Proceedings of the AAAI Conference
+on Artificial Intelligence 33.01 (July 2019), pp. 5885–5892. DOI: 10.1609/aaai.v33i01.
+33015885. URL: https://ojs.aaai.org/index.php/AAAI/article/view/4538.
+[22]
+A.D. Wyner. “A definition of conditional mutual information for arbitrary ensembles”.
+In: Information and Control 38.1 (1978), pp. 51–59. ISSN: 0019­9958. DOI: https:
+//doi.org/10.1016/S0019-9958(78)90026-8. URL: https://www.sciencedirect.com/
+science/article/pii/S0019995878900268.
+[23]
+Thomas M. Cover and Joy A. Thomas. Elements of Information Theory 2nd Edition
+(Wiley Series in Telecommunications and Signal Processing). Wiley­Interscience,
+July 2006. ISBN: 0471241954.
+[24]
+Arthur Gretton et al. A Kernel Method for the Two­Sample Problem. 2008. arXiv:
+0805.2368 [cs.LG].
+[25]
+Shalmali Joshi et al. xGEMs: Generating Examplars to Explain Black­Box Models.
+2018. arXiv: 1806.08867 [cs.LG].
+[26]
+Rachana Balasubramanian et al. Latent­CF: A Simple Baseline for Reverse Coun­
+terfactual Explanations. 2021. arXiv: 2012.09301 [cs.LG].
+[27]
+M. Downs et al. “CRUDS: Counterfactual Recourse Using Disentangled Subspaces”.
+In: ICML Workshop on Human Interpretability in Machine Learning (2020), pp. 1–
+23.
+[28]
+Wei Zhang, Brian Barr, and John Paisley. “An Interpretable Deep Classifier for
+Counterfactual Generation”. In: Proceedings of the Third ACM International Con­
+ference on AI in Finance. ICAIF ’22. New York, NY, USA: Association for Comput­
+ing Machinery, 2022, pp. 36–43. ISBN: 9781450393768. DOI: 10.1145/3533271.
+3561722. URL: https://doi.org/10.1145/3533271.3561722.
+[29]
+Judea Pearl. Causality. Models, Reasoning, and Inference. 2nd ed. Cambridge,
+UK: Cambridge University Press, 2009. ISBN: 978­0­521­89560­6. DOI: 10.1017/
+CBO9780511803161.
+[30]
+Sumedha Singla et al. “Explanation by Progressive Exaggeration”. In: International
+Conference on Learning Representations. 2020. URL: https : / / openreview . net /
+forum?id=H1xFWgrFPS.
+[31]
+Hina Amin and Waqas J. Siddiqui. Cardiomegaly. https://www.ncbi.nlm.nih.gov/
+books/NBK542296/. Accessed: 2023­07­12.
+[32]
+Arvind Akpuram Srinivasan et al. Lung Cancer Detection using Deep Learning.
+https://schaudhuri16.github.io/LungCancerDetection/. Accessed: 2023­07­13.
+[33]
+Ilyes Khemakhem et al. Variational Autoencoders and Nonlinear ICA: A Unifying
+Framework. 2020. arXiv: 1907.04809 [stat.ML].
+Counterfactual example generation in medical imaging
+37
+==PAGE:46==
+38
+Counterfactual example generation in medical imaging
+==PAGE:47==
+A
+Appendix
+A.1
+Experiment 1: Varying levels of correlation
+Figure A.1: Latent samples generated from the i.i.d. test set with pn = 0 and pe = 0.5. The
+columns represent the latent subspaces W and Z, with each data point colored according
+to the label (orange or blue) and the color (red or green) of the digit. Each row corresponds
+to one model.
+Counterfactual example generation in medical imaging
+39
+==PAGE:48==
+Figure A.2: Counterfactuals generated with a step of 2 for 10 input images (shown in the
+first column) randomly selected from the i.i.d. test set with pn = 0 and pe = 0.5. Each
+column correspond to one model, except for the first column.
+40
+Counterfactual example generation in medical imaging
+==PAGE:49==
+Figure A.3: Latent samples generated from the i.i.d. test set with pn = 0 and pe = 0.2. The
+columns represent the latent subspaces W and Z, with each data point colored according
+to the label (orange or blue) and the color (red or green) of the digit. Each row corresponds
+to one model.
+Counterfactual example generation in medical imaging
+41
+==PAGE:50==
+Figure A.4: Counterfactuals generated with a step of 2 for 10 input images (shown in the
+first column) randomly selected from the i.i.d. test set with pn = 0 and pe = 0.2. Each
+column correspond to one model, except for the first column.
+42
+Counterfactual example generation in medical imaging
+==PAGE:51==
+Figure A.5: Latent samples generated from the i.i.d. test set with pn = 0 and pe = 0.05.
+The columns represent the latent subspaces W and Z, with each data point colored ac­
+cording to the label (orange or blue) and the color (red or green) of the digit. Each row
+corresponds to one model.
+Counterfactual example generation in medical imaging
+43
+==PAGE:52==
+A.2
+Experiment 2: Noisy labels
+(a) Latent subspaces
+(b)
+Counterfac­
+tuals
+Figure A.6: Qualitative evaluation of the marginal MMD model for pn = pe = 0.2. (a) The
+two columns of plots respectively correspond to the latent samples generated from the
+i.i.d and o.o.d. test sets. (b) Fifteen images were randomly selected from the i.i.d. test
+set and counterfactuals were generated with a step of 2.
+44
+Counterfactual example generation in medical imaging
+==PAGE:53==
+(a) Latent subspaces
+(b) Counterfactu­
+als
+Figure A.7: Qualitative evaluation of the marginal MMD model for pn = pe = 0.2. (a) The
+two columns of plots respectively correspond to the latent samples generated from the
+i.i.d and o.o.d. test sets. (b) Fifteen images were randomly selected from the i.i.d. test
+set and counterfactuals were generated with a step of 2.
+Counterfactual example generation in medical imaging
+45
+==PAGE:54==
+(a) Latent subspaces
+(b) Counterfactu­
+als
+Figure A.8: Qualitative evaluation of the conditional adversarial model for pn = pe = 0.2.
+(a) The two columns of plots respectively correspond to the latent samples generated
+from the i.i.d and o.o.d. test sets. (b) Fifteen images were randomly selected from the
+i.i.d. test set and counterfactuals were generated with a step of 2.
+46
+Counterfactual example generation in medical imaging
+==PAGE:55==
+(a) Latent subspaces
+(b) Counterfactu­
+als
+Figure A.9: Qualitative evaluation of the marginal MMD model for pn = pe = 0.2. (a) The
+two columns of plots respectively correspond to the latent samples generated from the
+i.i.d and o.o.d. test sets. (b) Fifteen images were randomly selected from the i.i.d. test
+set and counterfactuals were generated with a step of 2.
+Counterfactual example generation in medical imaging
+47
+==PAGE:56==
+(a) Latent subspaces
+(b) Counterfactu­
+als
+Figure A.10: Qualitative evaluation of the baseline model for pn = pe = 0.2. (a) The two
+columns of plots respectively correspond to the latent samples generated from the i.i.d
+and o.o.d. test sets. (b) Fifteen images were randomly selected from the i.i.d. test set
+and counterfactuals were generated with a step of 2.
+48
+Counterfactual example generation in medical imaging
+==PAGE:57==
+Counterfactual example generation in medical imaging
+49
+==PAGE:58==
+Technical
+University of
+Denmark
+Richard Petersens Plads, Building 324
+2800 Kgs. Lyngby
+Tlf. 4525 1700
+https://www.compute.dtu.dk/

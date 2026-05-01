@@ -1,0 +1,1528 @@
+==PAGE:1==
+Compressing Highly-Repetitive Collections
+Master’s thesis
+Author: Roar Nind Steffensen
+Study Number: s144107
+Supervisors: Philip Bille & Inge Li Gørtz
+Submission: June 12’th 2024
+==PAGE:2==
+Preface
+This project is submitted in candidacy for the MSc degree in Computer Science and En-
+gineering from the Technical University of Denmark. The project was originally proposed
+and supervised by the professors Philip Bille and Inge Li Gørtz, and has been carried out
+by Roar Nind Steffensen.
+The idea to this project was largely inspired by the previous work Hierarchical Relative
+Lempel-Ziv Compression by Simon J. Puglisi and Simon R. Tarnow together with Philip
+and Inge.
+Prior to this project, a special course of 5 ECTS points has been completed as preparation,
+where relevant papers and the basic compression techniques were researched and tested.
+The work on this project was carried out from January 22 to June 12, spanning a total of
+21 weeks and a workload of 30 ECTS points.
+All source code is submitted as a zip file to DTU Inside along with the dissertation. Com-
+bined the implementation is ∼30k lines of code implemented in rust, however significant
+portions of code is duplicated between versions to allow for quick iteration of versions and
+ensure that later changes did not break previous versions, making it easy to AB test.
+Roar Nind Steffensen
+==PAGE:3==
+Table of contents
+1
+Abstract
+1
+2
+Introduction
+1
+3
+Basic compression tools
+2
+3.1
+LZ77 Compression (LZ77) . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+3.2
+Relative LZ77 Compression (RLZ) . . . . . . . . . . . . . . . . . . . . . . .
+3
+3.3
+Phrase encoding
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+4
+Git compression scheme
+5
+4.1
+Repository structure . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+4.2
+Objects
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+4.3
+Packfiles . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+4.4
+Advantages . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+4.5
+Drawbacks . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+5
+Alternative compression scheme
+10
+5.1
+S1: Plain LZ77 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+10
+5.2
+S2: RLZ compressing previous commits
+. . . . . . . . . . . . . . . . . . . .
+12
+5.3
+S3: Phrase encoding . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+13
+6
+Improving performance
+14
+6.1
+S4: File buffers . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+6.2
+S5: Adapt magic heuristic from git . . . . . . . . . . . . . . . . . . . . . . .
+17
+6.3
+S6: Extend DAG to full history . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+7
+Experimental results
+21
+7.1
+Handcrafted tests . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+7.2
+Comparing all schemes . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+7.3
+Random Github repository benchmarks
+. . . . . . . . . . . . . . . . . . . .
+26
+7.4
+Commit size benchmarks
+. . . . . . . . . . . . . . . . . . . . . . . . . . . .
+29
+7.5
+Large repository test . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+32
+8
+Conclusion and evaluation
+33
+9
+Appendix
+i
+9.1
+All versions overview . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+i
+9.2
+LZ77 Search data structure . . . . . . . . . . . . . . . . . . . . . . . . . . .
+iv
+==PAGE:4==
+1
+Abstract
+In this project we investigated the compression scheme currently found in the version con-
+trol system called git. Based on previous work with reference based compression, it was
+assumed that the history of commits in a git repository could be compressed more efficiently.
+We briefly went through some basic compression tools/methods as well as how the current
+compression scheme in git works. With this knowledge we developed alternative compres-
+sion schemes focused on the drawbacks highlighted in gits compression. The alternative
+schemes started as a very simple idea and was improved iteratively, initially focusing on the
+compressed database size and then on compression time. The most significant implemented
+schemes S1-S6 are discussed in this report, out of a total of 16 versions comprised of several
+intermediate steps between the six discussed schemes as well as some alternative approaches
+which were discontinued.
+Each of the alternative schemes are initially tested on a suite of data sets where compression
+ratios, and later also commit performance, are compared to git.
+Finally the two best
+schemes, S3 and S6, are tested on a sample of ∼400 random GitHub repositories, again
+compared to git, in order to see how they perform on real data.
+Overall the mean compression ratio of the best alternative schemes used between 25% and
+50% of the database size used by git, but during testing we found some edge cases, with
+large files, where the phrase encoding in git would perform best, and several options are
+discussed which could improve on this.
+The final scheme uses an internal structure similar to the repository structure found in git,
+but allows for multiple references for each file. This means, that the amount of phrases for
+compression is generally expected to be equal or better than in git, but checkout and phrase
+encoding now has to manage the increased amount of compression dependencies.
+2
+Introduction
+In this project, we will evaluate how well we can compress highly-repetitive collections,
+using simple compression schemes. Here we define such collections as an ordered set of
+entries, in this case strings, where the change between consecutive entries is small. Therefore
+many/large substrings from an entry will be shared with its neighbours.
+The concrete domain we are going to focus on, is the commit history of a git repository,
+however many of the implemented principles are domain agnostic and should work for any
+such collection. Take the case where entries are numbers, where the repetition would in the
+patterns over the history of entries and not between consecutive entries. By segmenting the
+history into blocks, we could map the domain into a similar problem; consecutive blocks of
+shared patterns.
+In the modern world, this problem is of high significance, due to the large amounts of data
+stored in cloud platforms providing backups and history access. Storing each snapshot as
+1
+==PAGE:5==
+raw data would be wasteful as each change between subsequent history entries usually only
+contain minor local changes. According to Wikipedia GitHub alone has over 420 million
+repositories[1], and therefore if this data can be compressed more efficiently, the overall
+reduction in storage and energy resources could have a considerable environmental and
+economical impact.
+3
+Basic compression tools
+The main compression tool we are going to use, is LZ77 compression[2]. This is a simple,
+universal and loss-less compression scheme, which has been shown to produce an essentially
+optimal loss-less compression[3] on an individual sequence of data.
+In addition to the
+isolated LZ77 compression, we will also use a relative LZ77 compression scheme[4] which
+allows reuse between multiple strings.
+Since these tools will be used in different ways
+throughout this project, we will briefly go through their inner workings and how they have
+been adapted/extended.
+Throughout the report there are two major parameters of interest, being how well data is
+compressed compared to its original size, and how much time it takes to compress. These
+two parameters will be referred to as compression ratio and performance respectively.
+3.1
+LZ77 Compression (LZ77)
+The principal concept of the LZ77 compression scheme, is to represent the string as phrases
+reusing substrings from the string itself, where phrase k contains an offset ok and a length
+lk. More formally, the phrase k producing a substring starting at position i in the source
+string is greedily matched with the longest common substring starting at position j < i,
+setting ok = i −j and lk to the length of the matched substring. Importantly, the matched
+substring is allowed to exceed the starting position i of the currently evaluated phrase.
+The resulting phrases from compressing a string S is then
+lz77(S) = (o1, l1), (o2, l2), . . . , (om, lm)
+(1)
+where m is the total amount of phrases, and
+S = S(0 −o1, l1) ∥S(l1 −o2 + 1, l2) ∥. . . ∥S(
+ m−1
+X
+i=1
+li
+!
+−om + 1, lm)
+(2)
+where S(i, l) is the substring of S starting at position i and of length l, and ∥is the string
+concatenation operator.
+From eq 2 we immediately see an issue with the first phrase not having any symbols available
+to reuse, similarly how do we handle the first occurrence of each symbol in S, since it will
+by definition not be available to reuse in the already parsed portion of S.
+2
+==PAGE:6==
+There are many ways to handle this, such as appending the next symbol s to each phrase,
+or prepending the used alphabet uncompressed as metadata to the parsed string to lookup
+first occurrences. In this case, we are going to split phrases into either literal or pointer
+phrases, where literal phrases contain a single symbol, and pointer phrases are equivalent
+to the phrases in 1. By splitting up these phrase types, we have more control when deciding
+how to encode the phrases before storing on disk.
+3.2
+Relative LZ77 Compression (RLZ)
+A clear limitation on the LZ77 compression scheme, is that it only allows reuse within a
+single string S. However, if we have an existing collection R of strings available, it might
+be possible to compress S as phrases reusing substrings from reference strings R ∈R. The
+best case would be if ∃R ∈R | S = R(i, |S|) for some i allowing S to be compressed as a
+single phrase. Alternatively it may be the case that ∃s ∈S, ∀R ∈R | s ̸∈R. The solution
+here is to allow the RLZ compression to have literal and pointer phrases similar to the LZ77
+compression where pointer phrases can either point to S or some reference string R ∈R.
+This way, unique symbols are again handled as literal phrases, and the pointer phrases are
+greedily chosen as the longest matching substring in R or in the parsed string from S.
+Since phrases resulting from RLZ compression may have multiple sources, each pointer
+phrase requires some meta data, and we are going to see multiple ways this can be encoded.
+3.3
+Phrase encoding
+The final size of the compression relies heavily on how the phrases are encoded. Here we
+will go through different phrase encodings, which we are going to use later.
+Naive pointer phrase encoding
+Based on the simple phrase structure from eq 1, a naive encoding could simple be storing the
+phrases exactly as written: (ok, ol), .... This is generally a wasteful way to encode phrases,
+since the offset and length could be on the order of |S| using up to 2 × log10(|S|) × 8 bits
+plus the 3 × 8 bits for the parentheses and comma, per phrase.
+Static pointer phrase encoding
+A simple improvement would be to remove the redundant symbols, and store the two
+parameters as N-bit integers, for some suitable choice of N such as 32. This would create
+statically sized phrases, but limit the size of strings possible to compress to 232 bits. Total
+size per phrase is then 2 × 32.
+This phrase encoding is not bad for relatively large strings, however for smaller strings there
+is a large overhead from the unused range in the 32 bit parameters.
+3
+==PAGE:7==
+Tight static pointer phrase encoding
+To improve on the issue with the static pointer phrase encoding, we can scan the pointer
+phrases and record the largest offset and length used. The minimum amount of bits to
+encode these parameters are then used when encoding pointer phrases. This reduces the
+total size of each phrase to at most 2 × log2(|S|).
+In order to decode the phrases, we need to store the offset and length bit sizes as meta
+data, however this is a constant overhead and not per phrase. Using the same size limit as
+before, it would be a constant 2 × log2(32) = 10 bit overhead from metadata.
+Huffman coding
+If we make use of the frequency of symbols, we can improve phrase encoding even more by
+use of Huffman coding[5]. The way it works, is by assigning each symbol a Huffman code,
+which is a unique prefix-free code, where frequently occurring symbols are assigned shorter
+codes than infrequent codes. By enforcing the Huffman codes to be prefix-free, it is possible
+to know when a code has been fully parsed during the decoding step.
+To construct the Huffman tree, the frequencies/amount of occurrences of each symbol is
+recorded. Each symbol is then set as the root of a tree with only one node, with each node
+storing the total frequency of symbols in its subtree. Two trees from the forest with the
+smallest values in their roots are picked and merged with a new root storing the sum of the
+subtree frequencies. Trees are merged until a single tree remains. The final tree contains
+the Huffman codes for all symbols stored in the leafs. The base b of the code here is 2
+since we use binary codes, but in principle any base can be configured by merging b trees
+at a time. By construction, all symbol codes must be prefix-free, since they are mapped
+to a unique leaf in the tree. Symbols of low frequency will be merged early and thereby
+be pushed deeper in the final tree producing a longer code, compared to high frequency
+symbols which are merged later.
+3
+b
+1
+c
+5
+a
+0
+1
+0
+1
+1
+3
+4
+5
+9
+a
+b
+c
+0
+1
+4
+5
+a
+3
+b
+1
+c
+Figure 1: Huffman Tree example with construction.
+4
+==PAGE:8==
+Figure 1 shows an example tree with its construction. Here the symbols are assigned the
+following codes: a = 1, b = 01 and c = 00. A nice lower bound for the size of the codes is
+when the symbol frequencies consist of a single symbol which is given the empty code.
+In general choosing the lowest frequency trees while merging can tie-break arbitrarily, how-
+ever for a given set of symbols and frequencies to consistently produce the same tree, there
+should be a consistent set of rules for how the forest is ordered during merging, e.g. ini-
+tially having symbols ordered by frequency where groups of same frequencies are ordered
+lexicographically. When merging trees, each same frequency group could then be treated
+as a queue and child nodes are ordered according to the relative ordering of the trees before
+merging.
+Variants of Huffman coding has also been shown to asymptotically approach the same
+optimal complexity bounds as LZ77 compression[2], however storing the Huffman tree as
+meta data requires a non-trivial amount of data for a large set of symbols.
+With these tools, we now have the basic building blocks to compress a highly-repetitive
+collection. There are several important steps that we have not yet considered, but first we
+should have a brief look into how the current compression scheme in Git works, since it
+operates on similar principles.
+4
+Git compression scheme
+The compression scheme currently implemented in Git, is a two level compression scheme,
+working on a custom representation of the repository through history. By splitting the
+compression into two levels, it is possible to have a very fast initial compression which
+compromises on the compression ratio, allowing for quick iterations while creating commits.
+Here all changes are tracked as objects in git which are compressed in isolation. When either
+an I/O operation is required or sufficiently many objects are generated the second level of
+compression compress objects into a packfile which is more computationally intensive but
+produces a much better compression ratio[6].
+First we will look into the internal structure managed in Git (as we will see a similar
+structure in our final scheme), and then briefly go into the core mechanics of the two levels
+of compression. Finally we will consider the advantages and drawbacks of this compression
+scheme which will guide how our alternative compression scheme will function.
+4.1
+Repository structure
+The main components of the repository structure is the tree over the file system originating
+at the root folder of the git repository. To represent this, git builds a tree with 3 node
+5
+==PAGE:9==
+types1. The first two node types are tree which represent a folder with its child references
+and blob which most commonly store the contents of a file. The third node type is commit
+which stores meta-information such as commit author, commit message, pointer to previous
+commit and to the tree node representing the repository root folder at time of that commit.
+The full structure creates a directed acyclic graph (DAG) since any cycles would correspond
+to an infinitely large repository state at the corresponding commit. Where a repository state
+defines the full set of folders and files in the tracked repository at some time in history.
+Commit 1
+Commit 2
+Tree
+"foo"
+Tree
+"bar"
+FileA.txt
+FileA.txt
+FileB.txt
+Commit 3
+Tree
+src
+Tree
+"John Doe"
+meta
+author.txt
+Figure 2: Repository structure example.
+Node types are represented as commit: teal
+diamond, tree: green superellipse and blob: red rectangle. Edge labels represent file/folder
+names.
+In figure 2, we see an example of a git repository structure, with commits on the left, each
+pointing to its root tree node and potentially a previous commit for navigation. After the
+first commit, the repository contains a single file called FileA.txt with the contents ”foo”.
+The second commit adds a new file called FileB.txt with the contents ”bar”, and since the
+previous file stays unchanged, the tree node has a reference to the existing blob node for
+FileA.txt. The third commit moves the existing files into a subfolder called src which in
+this case reuses the existing tree node. A new folder called meta is also added at the root
+of the repository with a file called author.txt containing the string ”John Doe”.
+Nodes may be reused if git recognises that files have been moved. In general, the state of a
+repository for a given commit, is found by the reachable nodes from its root tree node.
+1Technically, Git also has a tag node type to label a commit, but that is not important for the purpose
+of this project.
+6
+==PAGE:10==
+4.2
+Objects
+With the repository structure already defined, objects are very simple. Each node in the
+repository structure is serialised into a string and compressed with zlib[7] using the deflate
+algorithm[8].
+The compression used in zlib is a windowed LZ77 compression with Huffman coding. By
+keeping the LZ77 compression windowed, phrases are restricted to a limited offset and
+length by using a statically sized buffer of size b storing the last b bytes streamed from the
+source string S. This buffer size b defines the size of the window and limits the time used
+to search for phrases as well as memory usage.
+As mentioned in section 3.3 under Huffman coding, you need the Huffman tree to de-
+code phrases using this encoding technique, however pre-calculated Huffman trees based on
+common symbol frequencies exist, making it possible to omit the overhead of the tree as
+metadata, in the hope that the compressed data follows a similar distribution of symbol
+frequencies as the static tree. To get the best of both worlds, zlib by default encodes phrases
+with both the a static and dynamic Huffman tree approach and use the one providing the
+best overall compression ratio, including metadata.
+4.3
+Packfiles
+Even if the object compression was not windowed, the compression ratio would be wasteful,
+since it does not take advantage of the similarity between files and across commits. By
+only creating objects for changed files and their ancestor tree nodes, it does not waste
+space by recompressing unchanged files, but duplicating the content would still double the
+compression size2.
+To improve on this, packfiles order all objects, from the history of the repository, according
+to a magic heuristic. The documentation on how the internals of packfiles are precisely
+carried out have been improved over the years, however it has never been great, as quoted
+from Linus Torvalds himself[9]:
+... I don’t think the docs exist. That’s something where I don’t think anybody
+else than me even really got involved. Most of the rest of Git others have been
+busy with (...), but packing nobody touched after I did it.
+And later when outlining the pack heuristics:
+2Git may recognise that files have been copied and reuse objects, but by adding trivial changes to each
+file, this example holds.
+7
+==PAGE:11==
+... Git really doesn’t follow files. So what it does is
+- generate a list of all objects
+- sort the list according to magic heuristics
+- walk the list, using a sliding window, seeing if an object can be diffed against
+another object in the window
+- write out the list in recency order
+And finally on the choice of heuristic:
+... The point is that it’s all really just any random heuristic, and the ordering
+is totally unimportant for correctness, but it helps a lot if the heuristic gives
+”clumping” for things that are likely to delta well against each other.
+From this, as well as consolidating the documentation[7] and code[10], we can gather that
+each object oi at position i in this magic ordering, the best reference oj<i is found, by
+calculating the delta compression between oi and oj and choosing the reference that produces
+the smallest compression.
+The magic heuristic/delta ordering is then briefly described as:
+The delta ordering is (...):
+- first sort by the ”basename” of the object, as defined by the name the object
+was first reached through when generating the object list
+- within the same basename, sort by size of the object
+- but always sort different types separately (commits first).
+That’s not exactly it, but it’s very close.
+Again from the documentation[7] and code[10], we see that the reference search is win-
+dowed/limited to a max offset to limit time spent on compression. The compression used
+for delta compression is a custom implementation (xdiff[11]) based on LibXDiff. According
+to the library’s home page[12], it implements binary file compression using the algorithm
+described in File System Support for Delta Compression[13] together with Rabin-Karp fin-
+gerprints as described in Fingerprinting By Random Polynomials[14]. For text file compres-
+sion, it implements the algorithm created by Eugene W. Myers in An O(ND) Difference
+Algorithm and Its Variations[15].
+The resulting pack-format according to its documentation[16], contains some meta data
+including version and object count followed by the compressed objects which are either
+stored in undeltified representation or deltified representation each with their own meta data
+and associated compressed data. The compressed data uses variable sized blocks of either
+a) batched offset and size instructions for reference compression, or b) zlib compressed data
+to append the target buffer without use of reference. Numbers in the packfile also follow a
+custom integer encoding, where the most significant bit of each byte in the number is a flag
+indicating if it is the last byte, and the remaining 7 bits carries the information to generate
+the number. This produces a variable sized integer encoding, not setting an upper bound
+8
+==PAGE:12==
+on compressed files and limiting the overhead of unused range for small values.
+The result from packing objects is again a DAG with all objects having at most 1 outgoing
+edge. All compressed objects are serialised and written in recency order to the packfile. An
+index is stored next to the packfile, storing meta data such as at what offset each object is
+stored, size, type and dependencies. Figure 3 contains a visual of the packfile dependencies,
+but keep in mind that these are only compression references, and all data regarding the
+repository structure, as mentioned in 4.1, is stored inside the objects.
+commits
+trees
+blobs
+Pack order
+Figure 3: Dependency graph of packed objects. Objects are shown in groups of object type,
+in pack order. Dependencies are depicted by arrows between objects.
+For subsequent packfile compressions, delta compressions are reused where possible. If either
+an object or its dependency/reference has changed, it is recompressed. Many configurations
+in git impact how pack files are managed, such as the window used to scan for references,
+splitting the pack into clusters to limit the time used to read the pack file and pruning
+objects, to name a few.
+As such, the delta compression is in principle similar to what we have seen with RLZ, where
+data is compressed by evaluated references and reusing content to improve compression.
+4.4
+Advantages
+As mentioned under packfiles, only compressing changed objects is an immediate advantage
+in both compression ratio and performance compared to compressing the full repository
+state and since packfiles operate on objects, it benefits both levels of compression.
+By only allowing a single reference for delta compression, there is no need for meta data
+per phrase, as self reference phrases are only included in the zlib compressed data blocks.
+The dependency graph is also only a path from the target object, meaning recompressions
+due to changed dependencies are reduced.
+4.5
+Drawbacks
+Although there are advantages from limiting the amount of references in delta compression,
+it is also the main drawback. Removing this restriction, and letting phrases reuse substrings
+9
+==PAGE:13==
+from multiple references it should be possible to produce more efficient phrases and therefore
+higher compression ratios.
+According to the pack-format documentation and other sources implementing parsers of
+gits packfile[17][18] these blocks are stored explicitly and not further encoded, meaning
+offset and size parameters in their reference blocks are stored using the custom integer size
+encoding, and data blocks are stored according to the compression produced by zlib.
+When defining our own compression scheme, we will see what happens when we remove
+this restriction, initially only considering compression ratio, and then later adapting the
+algorithm to improve performance.
+5
+Alternative compression scheme
+Based on what we have seen so far from the basic compression tools and the methods used
+by Git, lets start with the simplest (but still practical) compression scheme we can create,
+and then iteratively try to improve it.
+While developing the alternative compression scheme(s), each iteration is implemented as an
+individual scheme. This makes it possible to compare schemes with respect to compression
+ratio and performance. The following sections will go through the 6 most important schemes
+(named S1-S6), amongst all implemented versions3. Test results for each scheme are shown
+in section 7, and an overview of all implemented versions is available in Appendix 9.1.
+5.1
+S1: Plain LZ77
+So far, LZ77 compression has been the backbone of most compression methods seen. The
+simplicity of the algorithm combined with the great compression ratio is what makes this
+so appealing. However, running LZ77 compression on the entire history of the repository
+quickly becomes unfeasible, so our first version will try to run LZ77 on the repository at
+each commit. To do this, we read in the repository, serialise it to one big blob (binary large
+object), concatenating all files with their paths as metadata, and compress it in isolation
+using LZ77 compression.
+This scheme effectively allows each file to have all previous files as reference in the order
+that files were serialised, meaning similar files can be compressed very efficiently. The main
+drawback is, that most files in this commit is assumed to be unchanged from the previous
+commit, and therefore if we could reuse phrases from the previous commit, we would be
+able to compress unchanged files as a single phrase. This drawback is clearly seen in the
+experimental results in section 7.1.
+3Not all versions differ enough to be considered different schemes, which is why schemes and versions are
+distinguished here.
+10
+==PAGE:14==
+S1 decompression
+To decompress the repository state at a given commit, we load the corresponding compressed
+blob from disk for the requested commit id and decompress the repository state directly
+according to the LZ77 decompression as shown in eq 2. The simplest way to restore the
+repository state from here is to delete all files and folders in the current root folder and
+write all files found when scanning the decompressed blob at their stored paths. Creating
+sub-directories when needed.
+If we want to avoid touching unchanged files, we can initially record all existing files prior
+to restoring the repository state. Before writing a file to disk, we check if it already exists
+and has the correct content, if not we update the file. When all decompressed files have
+been handled, we check for any unhandled existing files and delete them. This way we avoid
+having the modified timestamp updated by the operating system.
+LZ77 implementation
+Until now, we have only discussed what LZ77 compression is, but not how to calculate it
+in practice. As this will be used in various ways throughout the different versions, lets go
+through the main mechanics.
+Calculating the LZ77 over a string S of size n can be done by e.g. calculating the suffix
+tree over S, where each internal node is augmented by the smallest index of the suffixes
+in its subtree. A phrase is then calculated by matching from the root of the suffix tree,
+stopping at the deepest matched node sn covering a suffix index si strictly less than the
+current phrase position i in S. The phrase offset is then i −si and the length is the string
+depth of sn.
+Building the suffix tree can be done in O(sort(n, Σ)) time, where Σ is the alphabet of S, and
+matching a phrase (ok, lk) takes O(lk) time by traversing the matched path in the suffix tree.
+Since all of S will be compressed as phrases, and each phrase contributes a non-overlapping
+segment of S, evaluating all phrases takes O(n) in total. This requires that phrase offset
+can be found in constant time from the last matched internal node, but that can be done
+by e.g. pointers in internal nodes to smallest covered leaf.
+In practice, the alphabet over our string S can be restricted, since we are serialising files
+stored on disk, which are stored as bytes (where extended alphabets such as unicode is
+encode as multiple bytes). By operating directly on the bytes of S, we have a fixed alphabet
+size of 256, making it possible to create the suffix tree in O(n) time (where n now is the
+amount of bytes of S), giving a total LZ77 compression time of O(n). This definition of n
+is a very natural choice, since the compression ratio metric is measuring how many bytes
+on disk is required to store the data.
+The final implementation did not use suffix trees due to its construction overhead, however
+its an important compression bound, since it shows that we can compress in optimal linear
+time and that the compression performance really comes down to how much data we need to
+11
+==PAGE:15==
+compress in the implemented scheme, as well as scaling constants hidden in the asymptotic
+bound. See Appendix 9.2 for how the LZ77 compression was implemented in practice.
+5.2
+S2: RLZ compressing previous commits
+Building on the highlighted drawback from S1, we introduce RLZ compression to reuse
+content across commits.
+We load in the full repository state and serialise it as a blob similar to S1, and the first
+commit is simply LZ77 compressed. However for subsequent commits, we decompress the
+head commit, and recompress it using RLZ with the current repository blob as reference.
+The current repository blob is then LZ77 compressed and stored, updating the head to
+point at the new commit.
+For this scheme to work, it is important that the RLZ compressed commits are allowed to
+produce pointer phrases pointing to either the reference or itself, since new symbols could
+be introduced and new sections may be more efficiently compressed using self referencing
+phrases instead of reusing content from the reference. Another requirement it, that the
+RLZ compressed commits are compressed in recency order, i.e. each commit is compressed
+with the next commit as reference, such that dependencies go forward in history. This is
+because, we need to have random access in the reference in order to use it for RLZ, and
+if dependencies went the other way, we would have to decompress the entire history to
+recompress the head commit. An immediate consequence of this, is that latter commits are
+faster to decompress compared to old commits, which is an accepted checkout compromise
+in Git.
+This compression scheme has the same advantages when compressing the last commits,
+allow files to reuse content from many other files within the repository, but now also allowing
+unchanged/copied content to be compressed as single phrases between consecutive commits.
+Based on the outlined features from highly-repetitive collections, this produces a highly
+effective compression scheme.
+S2 decompression
+To decompress the compressed data from S2, we start with the head commit which is
+LZ77 decompressed the same way as S1. From here, we can RLZ decompress the previous
+commit, using the current head as reference, which will recursively serve as the reference for
+the next commit, until the target commit is reached. All commits after the target commit
+must therefore be decompressed as the compression dependencies form a linked list.
+RLZ decompression is similar to LZ77 decompression, with the only difference being which
+source we are looking up the phrases from.
+Each LZ77 and RLZ decompression takes linear time in the size of the decompressed string,
+and since each commit stores the full repository state, decompression time is equivalent to
+12
+==PAGE:16==
+the total size of all repository states from the target to the head O(Pt
+i=h |Si|), and while
+decompressing we store at most 2 full repository states in memory, using O(maxt≤i≤h |Si|)
+space, as each compression data structure for LZ77 and RLZ use linear space over the size
+of the source and reference.
+RLZ implementation
+Using the LZ77 implementation from S1 we can implement RLZ compression as follows.
+Build an LZ77 search data structure for both source and reference. When evaluating the
+next phrase, we lookup the longest matching substring in both the source and reference,
+where only the source lookup is index restricted. The phrase is then set to the index and
+length of the longest match, as well as some metadata to indicate if it is referencing the
+source or reference. As we will see, this metadata is only temporary, as the phrases will be
+transformed during encoding.
+5.3
+S3: Phrase encoding
+So far S1 and S2 has only considered the quality of compression in terms of phrase count,
+but since the phrases produced here are different than the phrases produced by git, we
+need to consider how phrases are encoded. As mentioned in section 3.3, phrase encoding
+can have a big impact on the final compression ratio, as reducing the bits required to store
+each phrase by some fraction, will result in a similar fractional reduction in the size of the
+database.
+The implemented versions, backing the discussed schemas so far, have used the naive en-
+coding in plain text. This was done intentionally to see the difference encoding makes in
+the final compression ratio.
+For LZ77 compression we are going to use Huffman coding for literal phrases, and tight
+static pointer encoding for pointer phrases. Since the majority of literals are expected to
+be lexical, the used alphabet is assumed to be a small fraction of the 256 possible bytes.
+In code and text there is usually also an uneven distribution in symbol frequencies which
+Huffman coding will take advantage of. However for the pointer phrases, the offset and
+length can be any of the n possible values and the large possible range of values would
+also generate a lot of metadata if encoded in the Huffman tree. Therefore the tight static
+encoding is chosen as a compromise.
+A similar encoding is used for the RLZ phrases, the only change being that in pointer
+phrases, instead of storing the offset, we treat the source as R∥S and use the absolute index
+into this buffer. Thereby differentiating pointer phrases source based in whether the index
+is within the length of R. In the worst case where the combined length of R∥S exceeds the
+next power of 2 compared to the longest of the R and S buffers, it works like a bit flag in
+front, and otherwise it has no overhead.
+For both the LZ77 and RLZ compression we store the following metadata:
+13
+==PAGE:17==
+• Total size of the uncompressed string
+• Amount of bits for index and length of pointer phrase parameters
+• Huffman tree over literals
+In practice, we don’t store the entire Huffman tree as metadata, instead we store the used
+literals with their frequencies, similar to how the dynamic Huffman tree is encoded in zlib[8].
+By following a similar set of rules for constructing the tree, we can recalculate the same
+Huffman tree while decoding.
+Since the set of phrases are identical to S2 but with less space required to store each phrase,
+we expect S3 to be a strictly better compression than S2 assuming that meta data overhead
+is relatively small.
+6
+Improving performance
+With S3, we have developed an efficient compression scheme for highly-repetitive collections
+with respect to compression ratio while keeping computation within the scope of the current
+and previous entry/commit. In section 7.1 we see that S3 seems to outperform the current
+Git compression scheme with respect to compression ratio, however the commit time per-
+formance is several times slower when the committed changes are small/few relative to the
+size of the repository state.
+In section 5.1 we mention that calculating the LZ77 compression is asymptotically optimal
+in terms of time, so either we can optimise the time required to calculate the LZ77 phrases
+for a marginal/scalar performance increase, or we need to cache compressed files.
+Using the assumption of, only a small fraction of files are changed between commits, we can
+check if a file and its dependencies have changed to determine if it needs to be recompressed.
+Attempting to improve performance naively may have dire consequences on the compression
+ratio, so it is important that we are aware of this compromise going forward. E.g. caching
+LZ77 search data structure of the head commit would be counter productive, as it would
+use O(n) space meaning we would be better off storing the last commit uncompressed.
+6.1
+S4: File buffers
+Tracing the compression time when committing to S3, it is apparent that the majority of
+time is used compressing the new head. Inspecting the phrases of the head commit and
+previous commits this is explained by, the head commit being a pure LZ77 compression
+with many small phrases, compared to previous commits being RLZ where large sections
+are compressed as single phrases spanning multiple files each. This scheme will therefore
+focus on time used to compress the head commit.
+We still need to recompress the previous head commit with RLZ, however by serialising the
+repository state blob once the current head compression is done, we can run an identical
+14
+==PAGE:18==
+RLZ as in S3. Here we just need to be careful when serialising the repository state blob,
+being sure to sort the files the same way as in S3 to allow RLZ phrases to span file borders.
+S4 head compression
+To improve the speed of compressing the head, we will introduce file compression caching as
+mention previously, but maintain the main features of S3, letting files be compressed with
+multiple reference files and maximally reusing content between commits for compression.
+Instead of immediately serialising the new repository state into a blob, we will track the files
+separately, and build a dependency graph defining the references of each file for compression.
+For each file, we decompress the corresponding file from the previous head commit and check
+if any changes has occurred, in which case it is marked as dirty. A second pass of the file
+graph is then conducted to mark files containing dirty dependencies. This set of marked
+nodes/files are the only files which are compressed, and all other files can directly copy the
+compressed phrases from the previous head commit.
+A non-trivial amount of time during compression is used to build the LZ77 searching data
+structures, so these are lazily created to avoid time used on unnecessary files. This now
+introduces a multi-reference setup for RLZ compression phrases, compared to S3 where we
+had 1 real reference and many implicit references by serialising all files into a single blob, but
+we will see an elegant solution to the issue of phrase meta data when considering encoding.
+RLZ
+RLZ
+RLZ
+h
+h-1
+h-2
+h-3
+r
+Figure 4: S4 head compression structure.
+r: New repository state.
+h: Head commit
+with individual files and dependency graph. h-x: x’th commit before head in history with
+serialised files. Color coding of r: Removed files have no color. Green files are changed.
+Files with bold border requires recompression.
+The new representation/structure used for compression in S4 can be seen in figure 4. Here
+we clearly see how the previous commits h-1, h-2, ... are serialised and RLZ compressed
+identical to S3, but the head commit now contains the full compression dependency graph.
+Comparing the new state r with the head h, we also see how some files can be reused directly,
+15
+==PAGE:19==
+but changed/removed files and any files depending on them requires recompression.
+S4 dependency graph
+To build the dependency graph, we want to connect files with references which are good
+candidates for compression. Evaluating these connections should be more performant than
+running the full LZ77 compression of S3, so it would not be productive to compress files
+with all possible sets of references. Instead we are going to approximate how well a file can
+be compressed using a certain other file as reference. This approximate compatibility will
+be called the compression potential from one file to another, and is a directed relationship,
+as one file may be fully embedded in another larger file, but not the other way.
+A suitable tool for calculating this compression potential would be locality sensitive hashing
+(LSH) using e.g. Jaccard Similarity[19], to compare the approximate similarity between
+files. As part of the implementation of the LZ77 data structure seen in the appendix 9.2,
+we calculate Rabin Karp fingerprints, so instead of calculate a different set of hashes for
+the LSH, we will use the already computed fingerprints, as these are the exact hashes used
+to determine if a potential phrase is evaluated during both LZ77 and RLZ compression.
+The main difference between this Rabin Karp based compression potential compared to the
+Jaccard Similarity measure is also that we want to prioritise files which can be compressed
+fully by the reference, which is not a symmetric relation.
+The compression potential is calculated as:
+CP(f1, f2) = |{RKz,p(f1)} T {RKz,p(f2)}|
+|{RKz,p(f1)}|
+(3)
+where CP denotes the compression potential approximating how well f1 can be compressed
+by f2 as reference. RKz,p denotes the Rabin Karp fingerprints calculated from the given
+string using fixed parameters p and z where p is the prime defining the field of randomised
+polynomials and hashing exponent z ∈{1 . . . p}.
+Compared to the Jaccard Similarity which approximates how much of the two sets are
+in common, CP approximates the how much of the first set it has in common with the
+second, giving us the asymmetric relation we wanted. If the two sets are disjoint, we get a
+compression potential of 0, and if the first file is fully contained in the second, we get 1.
+It is important that we also consider the unique set of hashes, as otherwise the similarity
+would be biased by the difference in frequency of hashes, and considering how much of e.g.
+code has leading whitespace, this bias could be large.
+To build the dependency graph, we therefore calculate the Rabin Karp fingerprints for all
+files, and evaluate the compression potential between all pairs. The files are then topologi-
+cally sorted by iteratively choosing the file with the highest outgoing compression potential,
+and then removing all remaining connections to that file to avoid cyclical dependencies.
+16
+==PAGE:20==
+Adapting a similar windowed dependency limit as seen in git’s packfile, we can limit the
+amount of outgoing dependencies for each file to some upper bound which we can test
+experimentally. Again this is done to reduce the amount of files to recompress on subsequent
+commits due to dirty dependencies. Any choice of limit on dependencies would produce a
+valid compression and could in principal be adjusted dynamically throughout the history
+of the repository.
+S4 phrase encoding
+With the dependency graph built, and files compressed, it is now time to encode the phrases.
+Each pointer phrase contains meta data to indicate which source is used, either self referenc-
+ing or external reference. The key idea here, comes from the fact that we have a topological
+sorting of the files. Firstly, the ordering of files is reversed, such that all dependencies point
+backwards. Next, we calculate a prefix sum array P over all the raw lengths of the files
+in order. Each pointer phrase with source at index is > 0 then gets their index offset by
+P[is −1]. Finally, all phrases are appended into single list and encoded similar to the LZ77
+compression in S3.
+Doing this completely avoids the need for phrase meta data to track reference dependencies.
+Effectively, we have generated a similar LZ77 compression of the head to S3, but now with
+each file only compressed using phrases of a limited amount of other files, and phrases are
+guaranteed to not cross file borders.
+By appending the compressed phrases instead of individual file encodings, we also only
+require 1 Huffman tree over literals and similar to S3 head encoding.
+One important detail which must not be omitted, is when reusing file compressions across
+commits the phrases must be mapped from LZ77 phrases to the intermediate phrase con-
+taining source metadata, and then mapped back to the final ordering together with the
+recompressed file compressions. This is a required step, since new files may be interleaved
+between the reused files in the topological ordering, meaning the index offset would be
+incorrect if not mapped.
+S4 decompression
+Due to the choice of phrase encoding, we can decompress the S4 compression identically to
+S3, as decompression is not dependent on the choice of phrases.
+6.2
+S5: Adapt magic heuristic from git
+Inspecting the performance traces of S4, the head compression is now only a small frac-
+tion of the overall time used for a commit. The bottleneck is now between calculating the
+compression potential matrix and the head RLZ compression. This indicates that improv-
+ing RLZ by e.g. extending the dependency graph to the previous commits, would stall
+performance, as the LSH bottleneck would be worsened.
+17
+==PAGE:21==
+Currently S4 is very attractive, as it produces a good compression ratio with minimal
+assumptions/heuristics to the structure of the compressed content.
+However, with git repositories being able to have an arbitrarily large state per commit, the
+next significant performance improvement is found by adapting a similar file comparison
+heuristic as git, to avoid the heavy cost of building a dependency graph based on file
+contents. By only sorting files, i.e. objects if same type and where all files are in the latest
+commit, the heuristic is simplified to comparing the file by name, in this case lexicographic
+ordering. The idea here is that the file name is associated to the domain of what a file
+contains and therefore similarly named files have something in common.
+Here, git weights the last characters most in this string comparison to group files of the
+same extension, which could easily be adapted in S5 also.
+S5 dependency graph
+With the file comparison defined, we can again build the dependency graph, now without
+processing file contents. The dependency graph is then constructed by connecting files with
+their previous k files in this ordering for some window size k determined experimentally.
+Again, any positive non-zero value of k would yield a valid compression, and could be
+adjusted dynamically.
+Connecting a file f to the previous k files may produce dependencies which do not contribute
+phrases to the compression of f, however since the graph is not saved explicitly between
+commits, any unused dependencies are erased when parsing the dependencies of the head
+commit on subsequent commits and will therefore not trigger recompressions if changed.
+S5 phrase encoding
+The encoding task for S5 is conceptually identical to S4, as it is not dependent on how the
+dependency graph is built. We have a set of files compressed as phrases with meta data
+to their references. Encoding is therefore the exact same as in S4, reversing the file order,
+calculating the prefix array P over raw file sizes, and appending all compressed phrases
+according to their ordering and encoding as a whole, with phrase indices offset by the
+source in P.
+S5 decompression
+Similar to S4, the final compressed phrases and encoding of S5 can be parsed identically as
+in S3.
+6.3
+S6: Extend DAG to full history
+Finally, to avoid recomputing the RLZ compression of the entire repository state each
+commit, we get to S6. The next step is to extend the dependency graph of S5 to the entire
+18
+==PAGE:22==
+commit history, which is now feasible since we are sorting objects by their meta data.
+By extending the dependency graph to the entire history we are now closing in on the
+packfile compression scheme used in git as described in section 4.3.
+For this to be possible, we need to track the different objects of the repository, such that
+each commit can reproduce the correct state. Here we reach a similar data structure as
+seen in git with commit, tree and blob nodes structured as a DAG. Similarly, to compare
+these we define the following comparison seen in 4:
+CMP(o1, o2) =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Less
+type(o1) < type(o2)
+Greater
+type(o1) > type(o2)
+Less
+name(o1) < name(o2)
+Greater
+name(o1) > name(o2)
+Less
+id(o1) > id(o2)
+Greater
+id(o1) < id(o2)
+Equal
+otherwise
+(4)
+where type(o) refers to the commit, tree and blob object type of the object o and are
+compared in any consistent order (in this case as listed here), name(o) is the name of
+the object (empty, folder name and file name respectively) compared according to their
+lexicographic ordering, id(o) is comparing the consecutive id given to all objects following
+recency order, sorting most recent objects first. The cases are checked top-down, i.e. id’s
+are compared only if type and name were equal.
+The intuition behind this ordering is, that all objects of each type are grouped together,
+and all objects with the same name within a type is grouped together. As this ordering
+will contain all versions of all files, previous versions of file f will be positioned as near
+neighbours of f, and importantly they will be after f due to the tie-breaks on id for recency
+order. Previous versions of f can therefore still use f as reference using RLZ compression.
+The focus is now changed from storing the state of each commit, to storing the state of each
+file, only producing new states when changes occur. Commit objects are then responsible
+for tracking the states of files required for that commit.
+S6 dependency graph
+From the previous schemes, we saw the importance of both allowing cross references within
+the latest repository state for file compression, and maximal reuse for head compression.
+To accommodate both these features in the new scheme, we will need to consider which
+objects are evaluated as dependencies. Some limited amount of the k allowed dependencies
+will be allocated to references within the name group of an object, i.e. the objects sharing
+the same name as the current object. The remaining dependencies will be connected to
+19
+==PAGE:23==
+the most recent object in each of the previous name groups. Figure 5 shows how such
+dependencies could look within a group of objects of same type.
+a1
+a4
+a6
+a8
+a9
+a10
+a11
+c3
+b2
+b5
+b7
+Figure 5: Full history object dependency connections. This example shows the dependencies
+within the group of blob type objects. Letters a-c represent simple file names. Objects are
+annotated with their id in the corner. Not all arrows are shown to reduce clutter.
+The conditions which trigger an object to be recompressed is then: 1) its content has
+changed and 2) an object is added to its name group.
+The second condition is there
+to ensure that objects are efficiently RLZ compressed using its newer versions, allowing
+for efficient reuse when changes are small, and reuse across multiple commits. To avoid
+recompressing the entire name group, the top x most recent objects of the group could be
+recompressed.
+S6 phrase encoding
+As seen in figure 5, S6 phrases can refer to dependencies which are far away in terms of
+the topological sorting.
+Storing phrases with their absolute offset like with S4 and S5,
+would grow too much in size since we are offsetting into the entire history of the repository.
+Additionally, new objects added to this sorting would invalidate the offset and require a full
+mapping of the entire history.
+To mitigate this, we are going to store an index of meta data over the compressed objects.
+Each object’s id is mapped to a list of its dependencies storing their id’s. The index also
+contains the offset into the database where the object is stored, as well as their original size.
+With this setup, each phrase can store the index into its dependency array as meta data,
+which is bounded in size by the allowed amount of dependencies, and since not all objects
+are assumed to be equally good for compression, these dependency indices will be Huffman
+encoded to further decrease the size of phrase meta data on the most common dependencies
+per object. This Huffman encoding will be added to the Huffman tree of the literals to only
+store a single Huffman tree per object.
+S6 decompression
+To decode a specific commit, we store a handle to the head commit (similar to HEAD in
+git). The state is then extracted by looking up each node in the graph in the index and
+parsing it from disk. Once the graph is parsed we can write all folders and files similar to
+20
+==PAGE:24==
+the previous schemas, tracking changed files and cleaning up deleted files. When checkout
+out earlier commits, the target commit is found in the index instead.
+7
+Experimental results
+Each compression scheme will now be tested and compared to git. Again, we will initially
+be focusing on compression ratio and then performance. First we will be testing all schemes
+on some handcrafted data sets showcasing some typical change patterns, and then S3 and
+S6 will be tested on real data.
+Lastly we will test how we handle data sets with large
+repository states.
+7.1
+Handcrafted tests
+For the handcrafted data sets, the first 4 consists of the 154 sonnets by William Shake-
+speare[20] s0, . . . , s153, and the last is a collection of multiple of his works. Each of the data
+sets are created as follows:
+1. add - Starting with an empty repository, commit number i adds sonnet si in an
+individual file.
+2. remove - Starting with all 154 sonnets in individual files, commit number i removes
+the file containing sonnet s154−i.
+3. overwrite - Starting with the first sonnet in its own file, each commit overwrites the
+file with the next sonnet.
+4. recurring - Similar to add except commit number i adds sonnet si%10 and every 10
+commit clears the repository. Creating a repeating pattern across multiple commits.
+5. big-random - Starting with all sonnets in individual files, including other full works
+combined in single files, we have many files with very different sizes. Each commit
+will perform small random changes in a random file. Primarily used as a big enough
+sample to see relevant performance differences.
+Each test is performed by replaying a git repository onto an empty git and Sx repository,
+where the database size is recorded using the ubuntu disk usage command to ensure that all
+data stored in each repository is tracked independent of format. Execution times is recorded
+by retrieving the span in nanoseconds, using the date command, before and after calling
+commit/checkout on each repository. To compare the commit speed, git is configured to
+disable multiprocessing when processing the packfile.
+S1
+Since S1 does not take advantage of the repetition of content across commits, we do not
+expect this test to be particularly efficient, which is confirmed by the results in figure 6.
+21
+==PAGE:25==
+Figure 6: S1 compression ratio vs git. Values are averaged in groups of 10 to reduce clutter.
+The data set where this scheme performs the best, is overwrite which makes sense, since it
+has the most relative change for each commit.
+S2
+The benefit of RLZ compression as seen in figure 7 compared to S1 in figure 6 clearly shows
+the importance of reusing content for compression across commits.
+Figure 7: S2 compression ratio vs git. Values are averaged in groups of 10 to reduce clutter.
+These results suggest that repositories, such as add and remove, which has relatively small
+changes between commits are efficiently compressed by this scheme.
+But based on big-
+random data set, we also see that the encoding is not very efficient, since the initial commit
+is an unbounded LZ77 compression across the full repository state compared to a reference
+limited and windowed LZ77 compression.
+22
+==PAGE:26==
+The data sets overwrite and recurring show how the scheme performs when commits con-
+tain relatively large changes compared to the size of the repository state. Here the RLZ
+compression has less benefit as less content is common between commits and again we see
+the issue of phrase encoding.
+S3
+The results, as seen in figure 8, shows as expected that reducing the required space per
+phrase, produces a better compression ratio. These results are similar to a scaled down
+version of the results from S2, which is due to the phrase count being identical.
+Figure 8: S3 compression ratio vs git. Values are averaged in groups of 10 to reduce clutter.
+Interestingly, the big-random data set initially is close to the same compressed size as git.
+This will be investigated further under the experimental results in section 7.4.
+S4
+When measuring commit performance we will be focusing on the big-random data set, since
+the other data sets are too small to give us a realistic comparison. In fact S3 on the other
+data sets is comparable or faster than git as seen in figure 9, which is very misleading.
+In general we need to be cautious with reaching for conclusions in terms of performance
+unless if we run a large scale benchmark as test results can be misleading as seen in figure
+9. Instead of micro-optimising routines in S3, to reduce the commit time, we are tracing
+the bottlenecks of the schemes and minimising the amount of work performed, while trying
+to not compromise the compression ratio too much.
+23
+==PAGE:27==
+Figure 9: S3 commit performance
+(a) S4 commit performance
+(b) S4 compression ratio
+Figure 10: S4 compared to git.
+In figure 10a) we see the ratio in commit performance, and 10b) the ratio in compression
+ratio. The head compression, when disallowing phrases to cross file borders and limiting
+the amount of references, as seen in 10b is comparable to the results from S3, suggesting
+that S4 is a useful approach to improve performance.
+S5
+The results from S5 in figure 11 show that sorting by the file name heuristic compared to
+the compression potential further improves the commit performance while still producing
+a comparable compression ratio.
+24
+==PAGE:28==
+(a) S5 commit performance
+(b) S5 compression ratio
+Figure 11: S5 compared to git.
+S6
+The results from figure 12 shows that the performance of S6 is now very comparable to git
+when tested on the big-random data set. We do see a bigger compromise in the compression
+ratio, since the RLZ compression between commits is now also limited as well as adding the
+object index as well as phrase source meta data.
+(a) S6 commit performance
+(b) S6 compression ratio
+Figure 12: S6 compared to git.
+With these results from S6, we expect that the commit performance can be optimised to be
+very comparable with git, as the internal structure requires a similar amount of processing
+as in git, and the reference compression in S6 and git both compress a file towards some
+25
+==PAGE:29==
+limited set of references, where S6 compress using all references at the same time compared
+to git compressing one-by-one. Compared to S5, compression dependencies cannot become
+dirty in S6, since new commits are added by compressing changed objects and not by reusing
+the head compression in S5. The only case where we trigger recompressions is when we add
+new objects to name groups, and generate more efficient RLZ compressions.
+7.2
+Comparing all schemes
+Figure 13 shows the combined results from the previous scheme tests, comparing all 6
+schemes for each set of test data.
+Figure 13: Combined test results from previous sections.
+Here we see that schemes S3-S5 are very similar in compression ratio and S6 is generally
+slightly worse, however for the recurring we see that S6 produces the best compression,
+being able to reuse content across multiple commits.
+7.3
+Random Github repository benchmarks
+Using an api[21] to query random repositories from GitHub, we have collected ∼400 repos-
+itories in an attempt to get a representative sample of the typical repositories found in
+GitHub.
+Figures 14 and 15 contains information regarding the amount of commits and final repository
+state sizes of the sampled repositories. This benchmark limited the amount of commits per
+repository to 50 due to processing time, and according to figure 14 only a few repositories
+had more than this amount of commits. We also see that the far majority of repositories
+26
+==PAGE:30==
+consist of only a few commits, and according to figure 15 the majority also has a final
+repository state size in the order of megabytes, with only around 5 repositories using more
+than 100Mb, and the largest being around 13Gb.
+Figure 14: Amount of repositories contributing to each commit.
+Figure 15: Histogram over the sampled repository state sizes at their last tested commit.
+Axes are logarithmic.
+Based on this sample of repositories, the far majority of GitHub repositories seem to have
+only a small amount of commits, suggesting that the results from the sample show how the
+schemes perform on the average GitHub repository, but not necessarily on large repositories
+both in terms of amount of commits and size of repository state.
+The sampled repositories are replayed similarly to the previous test suite, and all binary
+files from each commit are removed during testing. This is done since these compression
+schemes are focused on compressing text/strings and git handles binary files differently.
+Results are shown in figures 16 and 17.
+27
+==PAGE:31==
+Figure 16: S3 tested on 400 random GitHub repositories.
+Figure 16 shows a stable mean compression ratio between 25% and 50% of the size used
+by git to store the same data. However on some repositories we use up to almost twice the
+space. This could be explained by S3 not being able to reuse content across commits, or
+commit size as will be checked further in 7.4. The mean commit performance is also very
+low, however as we saw when testing S3 on the test data set, if each repository state is
+small enough S3 is faster than git. We know that S3 is processing more data than git when
+the repository state grows compared to the changes in a commit, and we also see a high
+variation in commit performance for S3.
+Figure 17: S6 tested on 400 random GitHub repositories.
+28
+==PAGE:32==
+Interestingly, in 17 we see that the mean compression ratio is again between 25% and 50%
+however the high end is reduced, where the worst recorded cases use around 125% of the
+space used by git. Since S3 should be able to produce more efficient phrases within a single
+commit, it suggests that this difference is due to being able to reuse content across multiple
+commits. The variation in commit performance is also significantly less, going from over
+x20 to under x10.
+It seems that the commit performance of S6 grows with commit history size, however in the
+current implementation we also load the full history of objects which are then re-encoded
+and stored to disc. This is due to new objects being sorted into the ordering of existing
+objects, however the relative placement in the db is in principal not critical as along as
+this ordering is maintained in the index. This way new compressed objects could just be
+appended to the db. Re-compressed objects however, already placed in the middle of the
+db would need to be updated. While developing the replay script for git repositories I also
+investigated some of git’s configuration parameters when manually running the garbage
+collection which forces git to repack the pack file, and here I found that --no-prune had
+a non-trivial impact on size of the final db size, although we are within a single branch.
+The --no-prune parameter instruct git to avoid pruning unreachable objects while packing.
+Unreachable objects are usually explained by changing the head of a branch and continuing
+from a previous step in the history, making the old branch head unreachable, however this
+is never done during our tests. It would therefore seem that git makes another compromise
+between compression ratio and performance by appending compressed objects to the db,
+leaving old objects until some threshold is reached and only then prune the neglected objects
+from history. Git also supports splitting the pack file into multiple files, such that time used
+cleanup up is contained.
+As the internal structure and history management in S6 is so similar to git’s, these changes
+could easily be applied, as well as most other performance improvements.
+7.4
+Commit size benchmarks
+Until now, we have primarily tested consecutive commits, where the RLZ/cross commit
+compression has played a big role. The results for big-random showed that the first commit,
+containing a lot of data, has a similar compressed size in S3 and S6 compared to git, but
+subsequent commits were compressed more effectively.
+Since we use LZ77 compression
+across the entire repository state for S3, it is unlikely that the compression in git is more
+compact/less phrases but the encoding may be more succinct.
+To test this, we will perform 2 tests. 1) a single file of increasing size, and 2) increasing
+amount of same sized files.
+In both cases we are going to use the complete works of
+Shakespeare (∼5Mb), where the single file test uses the first x bytes of the collected works,
+and the multiple file test will divide the text up into 5k files and commit the first x files
+each of size 1kb.
+29
+==PAGE:33==
+(a) Single file of different sizes.
+(b) Different amount of 1K sized files.
+Figure 18: Initial commit only.
+Based on the results in figure 18 it would seem that our intuition was correct.
+Figure
+18b shows that S3 produces a consistently better compression when the commit consists of
+many small files, as it effectively has unbounded reuse between files where git pack and S6
+are limiting the amount of dependencies and keeping phrases within single files. The more
+interesting case is 18a where git pack consistently produces the smallest compression when
+the commit contains large files.
+Here S3 and S6 both compress the single file with LZ77 but S6 also has the object index as
+overhead, and is therefore shown as consistently using slightly more data than S3. Looking
+at git where we have recorded the database size before and after packing the objects, it also
+shows that the packfile must use higher compression parameters for the zlib compressed
+data blocks, using a larger window for the LZ77 compression.
+The fact that 18a has S3 and S6 producing a similar compressed size as git objects suggests
+that the encoding is the dominating factor in this test, as the amount of phrases produced
+by a windowed LZ77 compression is expected to be greater than with unbounded lookback.
+Checkout time
+The compression efficiency is basically worthless if we cant retrieve an entry of the collection,
+so even though it has not been the main focus in this project, we still care about the checkout
+performance.
+30
+==PAGE:34==
+Figure 19: Checkout performance ratio between S3 and git, tested on the test data set
+specified in section 5.
+The results in figure 19 are as expected, since S3 has to decode and decompress starting
+from the head of the collection, it is more costly to checkout commits further back in history.
+Also the repositories with larger state per commit, such as big-random requires more data
+to be decompressed and decoded per step, which is clearly seen in the larger gradient in the
+graph.
+For S6 however, the checkout time looks more comparable to git. Starting from the requested
+commit found in the index, we can lazily decompress the repository structure and their
+compression dependencies. The actual implementation however decompresses the whole
+database and looks up the structure directly, so we see a constant time overhead as seen in
+figure 20.
+Figure 20: Checkout performance ratio between S6 and git, tested on the test data set
+specified in section 5.
+31
+==PAGE:35==
+The main difference in checkout time between S6 and git, other than the less optimised
+code, is that the dependency graph in S6 is allowed to have more dependencies. In git,
+since objects are only allowed to have a single compression dependency, the dependency
+graph necessary to decompress can be viewed as paths/chains originating from the objects
+in the repository structure. In S6, it would instead be a tree of degree up to to the allowed
+amount of dependencies, potentially producing an exponential checkout time compared to
+linear in the size of the repository state and length of the chains.
+7.5
+Large repository test
+Based on the random sample and commit size benchmarks it seems like the S6 scheme
+performs well over time, but falls behind when commits contain many changes/large files.
+To verify that our found conclusions hold for large repositories, we run 100 commits out
+of a total of 122k on Microsoft’s VSCode on GitHub. Each repository state is recorded to
++100Mb.
+(a) S6 vscode commit performance
+(b) S6 vscode compression ratio
+Figure 21: Benchmark on large repository: Microsoft’s VSCode
+Figure 21 shows S6 compared to git, where the commit performance in 21a nicely shows the
+majority of commits are within 5-15x of the time taken by git. The two exceptions shown are
+commits with many inserts/deletions suggesting that the current LZ77/RLZ compression
+implementation could be improved in terms of speed.
+The compression ratio results seen in figure 21b nicely shows the same as in the commit
+size benchmark, that a single large commit is compressed more efficiently by git’s packfile,
+however as discussed previously, this is most likely due to pointer phrase encoding. We will
+evaluate how this can be improved in section 8. The initial commit in this repository seems
+to be a migration from a previous version control system and is therefore a big ∼105Mb
+32
+==PAGE:36==
+commit. Subsequent commits are either managed equally good or better by S6 compared
+to git.
+8
+Conclusion and evaluation
+Going from schema S1 to S3 we have shown that using simple compression techniques we
+can produce an effective compression scheme for highly-repetitive collections, in this case
+tested on the domain of git repositories. When the repository state increased we saw that
+the commit performance of S3 grew compared to git. To improve this we developed schemas
+S4 to S6, which grew in complexity to reduce the amount of processing required per commit,
+but ended up with a structure which could be adapted to perform a similar amount of work
+as the current compression scheme in git, while still allowing the multi-reference reuse across
+commits.
+Since the phrases produced by git and our developed schemes are different, we were not able
+to compare the compression ratio in terms of phrase count, but instead in the final database
+size on disc. This means that phrase encoding became a large factor in the scheme, which
+was the main difference between S2 and S3, but also in the commit size benchmarks with
+large files in 7.4. Here we saw that even the encoding in S3 could be improved further, since
+for larger files zlib compression seems to produce similar compression ratio’s as S3 despite
+it most likely containing more phrases.
+To verify this, we tested 100 commits of Microsoft’s VSCode repository in GitHub as an
+example of a large repository, where commits were still possible to process fully in memory.
+Here we saw the same as with the commit size benchmark, that a commit with a large set of
+changes would be compressed more efficiently by git packfiles than S6. Subsequent commits
+however were managed better by S6, suggesting that S6 produces better compression phrases
+but the encoding needs improvement.
+The most likely culprit here is our pointer phrase encoding, which is not using Huffman
+coding. This choice was made to avoid a too big overhead from the Huffman tree. In the
+zlib documentation[8] they write:
+Length codes or distance codes may actually be a code that represents a base
+value, followed by extra bits that form an integer to be added to the base value.
+meaning length and offset parameters are also Huffman coded, but with custom code man-
+agement to avoid the bloated Huffman tree. Nothing prevents us from developing a similar
+encoding for the developed schemes, meaning the found exceptions, of large individual files,
+could possibly also be compressed more effectively.
+The overhead of the Huffman tree could also be reduced, since the absolute symbol fre-
+quencies are unnecessary. We only need to know the order of symbols for the leaves, and
+structure of the tree. Currently we store a 32-bit frequency along with every 8-bit symbol.
+By using bit encoded parenthesis encoding of the tree, we only need to store the order of
+33
+==PAGE:37==
+symbols together with the encoded tree, going from a total of 40s bits to 8s + 2(s −1) for
+s symbols.
+When storing both literal and pointer phrases using Huffman codes, we could leverage that
+we know the structure of the phrases, so either we could continue using the bit flag for each
+phrase and store 2 different trees, one for literal symbols and one for pointers parameters
+(either full integers or just digits) or alternatively we could include the differentiation be-
+tween literal and pointer parameters in a single tree. These encodings have not been tested,
+but shows that there is still a lot of room for improvement.
+From figure 17 we saw that the commit performance of S6 was comparable to git, and in
+principle both schemes maintain a very similar internal data structure for the history, and
+both perform n to k amount of deltified file compressions, for each of the n files required to
+compress in the commit and window of k reference files evaluated in the compression. The
+difference between these two schemes is that git performs k individual 1 to 1 delta com-
+pressions to determine the best reference, where S6 perform the 1 to k compression directly
+allowing all k files as reference. Arguably the S6 compression could be more performant
+than the method used in git, as a single large phrase found by S6 will skip large portions
+of text in the main file.
+From our tests, we see that checkout time from S3 is progressively slower than git when
+going back in history, but with S6 we get very similar checkout times as git. However, in
+section 7 we also mention the potential difference in asymptotic checkout time, where the
+increase in object compression dependencies spans a tree which needs to be decompressed
+before the object itself can be decompressed, compared to only a length restricted path of
+dependencies in git. This change means that checkout time is potentially exponential in the
+allowed amount of dependencies per object. By caching decompressed objects, the checkout
+time is limited by the size of the database, however limiting the height of the dependency
+tree, as well as adjusting the degree may be important for checkout to not become too slow.
+Overall we have shown that the developed compression schemes are very efficient at com-
+pressing highly-repetitive collections, especially when changes between commits are small.
+Further testing with large repositories where many/large changes are more typically seen,
+we see that git’s packfile compression tends to produce a smaller compression and based
+on the commit size benchmark we deduced that the phrase encoding in pointer phrases are
+sub-optimal for large files. We also saw that the encoding used by zlib scales well for large
+files. Nothing prevents S6 from adapting a better pointer phrase encoding, meaning it could
+probably be more efficient at compressing large repositories also.
+34
+==PAGE:38==
+References
+[1]
+Wikipedia contributors. GitHub — Wikipedia, The Free Encyclopedia. 2024. url:
+https://en.wikipedia.org/w/index.php?title=GitHub&oldid=1222126122
+(visited on 05/06/2024).
+[2]
+J. Ziv and A. Lempel. “A universal algorithm for sequential data compression”. In:
+IEEE Transactions on Information Theory 23.3 (1977), pp. 337–343. doi: 10.1109/
+TIT.1977.1055714.
+[3]
+Jacob Ziv. “The Universal LZ77 Compression Algorithm Is Essentially Optimal for
+Individual Finite-Length N-Blocks”. In: IEEE Transactions on Information Theory
+55.5 (2009), pp. 1941–1944. doi: 10.1109/TIT.2009.2016069.
+[4]
+Philip Bille et al. Hierarchical Relative Lempel-Ziv Compression. 2022. arXiv: 2208.
+11371 [cs.DS].
+[5]
+David A. Huffman. “A Method for the Construction of Minimum-Redundancy Codes”.
+In: Proceedings of the IRE 40.9 (1952), pp. 1098–1101. doi: 10.1109/JRPROC.1952.
+273898.
+[6]
+Git - git-gc Documentation. https://git- scm.com/docs/git- gc. (Visited on
+05/25/2024).
+[7]
+Git - Book. https://git-scm.com/book/en/v2. (Visited on 05/25/2024).
+[8]
+Antaeus Feldspar. An Explanation of the Deflate Algorithm. https://www.zlib.
+net/feldspar.html. (Visited on 03/10/2024).
+[9]
+Concerning Git’s Packing Heuristics. https://github.com/git/git/blob/master/
+Documentation/technical/pack-heuristics.txt. (Visited on 05/28/2024).
+[10]
+Linus Torvalds. Git - fast, scalable, distributed revision control system. https://
+github.com/git/git. 2023. (Visited on 05/07/2024).
+[11]
+Yuriy Chernyshov Edward Thomson. xdiff (via git). https://github.com/libgit2/
+xdiff. (Visited on 05/07/2024).
+[12]
+LibXDiff. http://www.xmailserver.org/xdiff-lib.html. (Visited on 05/07/2024).
+[13]
+Joshua MacDonald. “File System Support for Delta Compression”. In: (July 2003).
+[14]
+M.O. Rabin. Fingerprinting by Random Polynomials. Center for Research in Comput-
+ing Technology: Center for Research in Computing Technology. Center for Research
+in Computing Techn., Aiken Computation Laboratory, Univ., 1981. url: https :
+//books.google.dk/books?id=Emu_tgAACAAJ.
+[15]
+Eugene W. Myers. “An O(ND) difference algorithm and its variations”. In: Algorith-
+mica 1.1 (Nov. 1986), pp. 251–266. issn: 1432-0541. doi: 10.1007/BF01840446. url:
+https://doi.org/10.1007/BF01840446.
+[16]
+Git - pack-format Documentation. https://git- scm.com/docs/pack- format.
+(Visited on 06/01/2024).
+[17]
+The Git Pack Format. https://driusan.github.io/git-pack.html. 2016. (Visited
+on 06/01/2024).
+[18]
+Reimplementing git clone in Haskell from the bottom up. https://stefan.saasen.
+me/articles/git-clone-in-haskell-from-the-bottom-up. 2013. (Visited on
+06/01/2024).
+35
+==PAGE:39==
+[19]
+Paul Jaccard. “THE DISTRIBUTION OF THE FLORA IN THE ALPINE ZONE.1”.
+In: New Phytologist 11.2 (1912), pp. 37–50. doi: https://doi.org/10.1111/j.1469-
+8137.1912.tb05611.x.
+[20]
+The Complete Works of William Shakespeare. https://ocw.mit.edu/ans7870/
+6 / 6 . 006 / s08 / lecturenotes / files / t8 . shakespeare . txt. 1990. (Visited on
+05/21/2024).
+[21]
+git -random — Random GitHub repo generator. https://gitrandom.digitalbunker.
+dev/. (Visited on 05/20/2024).
+36
+==PAGE:40==
+9
+Appendix
+9.1
+All versions overview
+Version 1: Plain LZ77 (S1)
+Current repository state, files and paths, is loaded from disk and serialised to a combined
+blob, where each file has a null terminated path and byte length as meta data.
+The serialised blob is then LZ77 compressed and saved to disk using the commit id as
+handle.
+Version 2: Plain RLZ
+Repository state is loaded and serialised in the same way as in version 1, but instead of
+LZ77 compressing individual commits, we RLZ compress a commit with its successor as
+reference.
+This initial RLZ implementation only allows phrases in the reference, meaning no phrase
+source meta data is included. Literal phrases are used when a new symbol is found or the
+possible phrase is too little. Minimum phrase size is 4.
+Head commit is saved uncompressed as no successor commit exists.
+Version 3: RLZ includes self references
+Extending version 2, now calculating the longest phrase from
+• RLZ phrase from reference
+• LZ77 phrase from self
+Phrase encoding with two sources for a pointer phrase is handled by offsetting self-reference
+phrases with the size of the reference, effectively treating the buffer as the combined buffer
+from reference and source.
+Version 4: LZ77 compressing HEAD (S2)
+Extending version 3, where instead of storing the head raw, its is LZ77 compressed.
+Version 5: Flag bit for phrase type
+We include a leading bit to distinguish between pointer and literal phrases.
+Phrases are now encoded as:
+• Pointer: 1 bit flag and 2x32 bit numbers: |flag : 1||index : 32||length : 32|
+• Literal: 1 bit flag and 8 bit character: |flag : 1||character : 8|
+i
+==PAGE:41==
+Version 6: Pointer index/length size meta data
+As most files do not use the full range of the 32 bit integer for index and length of pointer
+phrases, we calculate the minimum required amount bits to reduce the amount of leading
+zeroes.
+Bit lengths are stored as meta data at the beginning of the encoding.
+Version 7: Huffman coding of literals
+Calculating huffman tree for literals and their frequencies.
+Using huffman codes for encoding literals and storing the symbol frequencies as meta data.
+Huffman tree is recalculated during decoding using stored frequencies.
+Version 8: Rabin-Karp fingerprints (S3)
+Instead of a hash map with symbol arrays as keys, we manually calculate Rabin-Karp
+fingerprints for the string segments, and manage the lookup table with fingerprints as id’s.
+With the rolling property of Rabin-Karp fingerprints, the lookup table construction is faster,
+but more importantly we use less memory to store the hash map.
+Additionally, we also avoid recomputing the lookup table for the repo when compressing
+the head.
+Version 9: Head files compressed in isolation
+Compression speed is much better, but the compression ratio of the head is much worse, no
+longer competing with git.
+This version was discontinued.
+Version 10: Tracking dirty phrases
+Attempting to reuse compression phrases by tracking dirty phrases and only (re)compressing
+changes and phrases dependent on changed data. Phrase boundaries when recompressing
+interleaved phrases cascade if new phrases are matched greedily.
+This version was discontinued.
+Version 11: Restricted lookback for head compression
+Building on version 8. The compression ratio is worse, but better performance. Still beating
+git on many repos not containing binary files.
+Current restrictions, during head compression, are:
+• Lookback threashold: max(100, lg(repo size)).
+ii
+==PAGE:42==
+• If a pointer phrase of length >1000 is found, it is accepted.
+Version 12: File specific search buffers (S4)
+Building on version 10, but working on whole files to avoid cascading phrase boundaries.
+Splitting search buffers for each file. Calculate Rabin-Karp fingerprints for all files with
+(same z and p parameters), and approximating similarity by overlap in unique fingerprints.
+Build topological sorting where the each entry is chosen by the file with the largest similarity
+with remaining files divided by its size, i.e. how much can potentially be compressed of its
+content. The strongest similar files are used for compressing. On subsequent commits, we
+can reuse file compressions where the file and dependencies are unchanged (and are still
+ordered relatively).
+Version 13: Single database file
+Testing the impact of using a single data base file on disc, compared to a file per commit.
+Min disc file size is 4K, and many repos have RLZ compressed commits in history which
+are smaller.
+The effect was negligible when tested, however IO is faster on a single file if the majority
+of the content needs to be retrieved.
+Version 14: Simple sorting by path (S5)
+Testing performance and compression impact of using naive path sorting instead of the LSH
+topological sorting in version 12.
+Version 15: Full topo sort of history
+In v14, we see that RLZ compression of the head is the majority of commit time.
+This version is a POC where we track commit, folder and file objects on changes throughout
+history. Objects are sorted based on type, name and id (i.e. recency order).
+Only changed files and folders are compressed, reusing objects to represent the repo, and
+allowing lookback up to 32 commits back in history.
+This is a similar heuristic as the current git heuristic, but with the RLZ compression between
+objects and allowing phrase on multiple files.
+Version 16 Dependency index and phrase meta data (S6)
+Extending v15 by tracking a list of dependencies by id for each file. The phrase meta data is
+reduced from file index offset to a Huffman coded index in its dependency array, significantly
+reducing the phrase meta data overhead, and sorting new files into the database order does
+not force re-encoding compressed phrases due to offset changes.
+iii
+==PAGE:43==
+9.2
+LZ77 Search data structure
+To perform the LZ77 compression, we need a data structure allowing us to search for the
+following query:
+longest matchS(i)−Longest substring in S starting before i matching the prefix of S[i : n]
+where i is the start index of the remaining uncompressed symbols and n is the size of original
+string S. S[a : b] represents the substring of S spanning from position a to b.
+One choice for such a query is to build a suffix tree over S in O(n) time, with each internal
+node augmented with the smallest suffix index among the leafs in its subtree to ensure that
+the substring match only proceeds along a path where a suffix starting within the limited
+range exists. All longest match queries could then be performed in O(m) where m is the
+size of the found match.
+In practice even though it is linear on n due to the limited alphabet of 256 possible bytes,
+calculating the full suffix tree takes time, as we don’t necessarily need the relation between
+all suffixes in S when searching for phrases.
+Instead we are going to implement our data structure similar to an unbounded version of
+the data structure used in zlib. Here we will calculate the Rabin-Karp fingerprint for each
+k consecutive symbols. I.e. for S = abcabc and k = 3 we will compute the tokens:
+RK(abc), RK(bca), RK(cab), RK(abc)
+Here the Rabin-Karp fingerprints are chosen as way of hashing due to the rolling property
+meaning that the total time to calculate all fingerprints is O(n) compared to O(nk).
+Fingerprints appearing multiple times in S, as well as possible collisions between different
+set of k symbols, will share the same entry in the hash table and each index will therefore
+be stored in an array.
+As the pointer and literal phrases in the developed schemes as different sizes, we are only
+interested in pointer phrases of some minimum length l, as representing smaller substrings
+would be more effective by individual literal phrases. This is easily done by setting the
+token size k = l.
+To perform the longest matchS(i) query, we calculate the token RK(S[i : i + k]) and walk
+the list of indices. For each index j < i we evaluate the common prefix between S[j : n]
+and S[i : n], and output the longest found match.
+To avoid comparing the same prefix for all indices, we track the currently longest found
+match and query that backwards on the next index. If the next index is a shorter match,
+then there is a high probability of an early exit. And the only cases where we compare the
+full prefix is when we find a longer phrase match.
+The value for k used in the developed schemes is 4 based on experiments.
+iv
+==PAGE:44==
+RLZ using LZ77 search data structures
+With a search data structure specified in 9.2, we can easily query for RLZ phrases by
+building it on the reference R and disabling the index filtering j < i. This disabling is just
+a index filtering parameter given to the longest matchR query on R.
+LZ77 search clusters
+With a data structure defined to calculate longest matchS on some string S, and multiple
+sources where a phrase can reference, such as the multi-reference setup in S6, we can create
+an LZ77 search data structure for each source, and the source producing the longest match
+is then returned together with a handle to the source it is referencing.
+This way we can compose a search cluster for a arbitrarily many sources. To limit the
+search to only the allowed dependencies (e.g. as the windowed history lookback in S6) we
+can accept a list of source handles to activate before querying the cluster, such that only
+the activated sources are matched against.
+v

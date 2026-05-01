@@ -1,0 +1,2941 @@
+==PAGE:1==
+Intermittent Computing for Low
+Power Wide Area Networks
+Adam Ømoseg˚ard Bischoff
+Kongens Lyngby 2023
+IMM-M.Sc.-2023
+==PAGE:2==
+Technical University of Denmark
+Department of Applied Mathematics and Computer Science
+Richard Petersens Plads, building 324,
+2800 Kongens Lyngby, Denmark
+Phone +45 4525 3351
+compute@compute.dtu.dk
+www.compute.dtu.dk IMM-M.Sc.-2023
+==PAGE:3==
+Abstract
+This thesis explores the field of IoT through intermittent computing using low
+power wide area networks for cases where several intermittently powered de-
+vices are located in remote areas without direct access to the power grid or
+the internet. These devices perform an action, such as taking a photograph,
+and transmit the result to a central server. Energy that powers the device is
+harvested from the environment and is stored in a small energy buffer like a su-
+percapacitor. The limited energy storage restricts the duration that the device
+can be powered at a time before recharging is needed. These short durations
+of power mean that the device cannot transmit all data at once, and therefore
+have to split the data transmission across multiple power cycles.
+Two problems are explored in this thesis. The first is the issue of accurately pre-
+dicting how much data that can safely be transmitted during a period of power
+based on an early reading of the energy available on the device. The other prob-
+lem explored is how this can be combined with a reliable, duplex communication
+where data is retransmitted if not correctly received by the server. A solution
+to the energy estimation is implemented where no measurement of the energy
+available in the buffer is made, allowing it to be turned off at any point during
+execution assuming a small minimum capacitor size. This is achieved by split-
+ting the data further into small packets that are sent in quick succession while
+checkpointing progress simultaneously. This is further combined with a solution
+to the issue of efficient and reliable duplex communication. By requesting an ac-
+knowledgment from the server at the beginning of the device’s period of power,
+the server can request the retransmission of lost packets, allowing the intermit-
+tently powered device to provide the missing data. The device continuously
+transmits small packets until energy is depleted, utilizing the acknowledgment
+itself as the checkpoint for the next cycle to come.
+==PAGE:4==
+ii
+A total of four versions have been implemented. Having all four versions enables
+us to identify the increased energy consumption that comes with avoiding energy
+estimates and having duplex communication. Through energy measurements of
+the implemented versions and estimations of each version’s energy profile, it is
+found that the energy cost of splitting the data is greatly affected by the sizes
+of the split packets. With sufficiently high split packet sizes, the extra energy
+cost can be justified by the ability to better utilize the full energy stored in the
+energy buffer in a real-world case. Furthermore, the additional cost related to
+reliable duplex communication is found to be relatively small when the packet
+loss ratio is low.
+==PAGE:5==
+Preface
+This thesis was prepared at the Department of Applied Mathematics and Com-
+puter science of the Technical University of Denmark in fulfillment for the re-
+quirements of an MSc in Computer Science and Engineering with a specializa-
+tion in Embedded and Distributed Systems. The thesis was carried out from 29
+August 2022 to 29 January 2023 under the supervision of Assistant Professor
+Luca Pezzarossa, Postdoc Charalampos Orfanidis, and Professor Jan Madsen.
+Kongens Lyngby, 29-January-2023
+Adam Ømoseg˚ard Bischoff
+s174295
+==PAGE:6==
+iv
+==PAGE:7==
+Acknowledgments
+I would like to thank my supervisors for their support and guidance throughout
+the project. In particular, I would like to express my gratitude toward Luca
+Pezzarossa and Charalampos Orfanidis for their inspiring commitment and mo-
+tivation as well as their time and energy spent during the past months.
+==PAGE:8==
+vi
+==PAGE:9==
+Contents
+Abstract
+i
+Preface
+iii
+Acknowledgments
+v
+1
+Introduction
+1
+2
+Background
+5
+2.1
+Intermittent computing
+. . . . . . . . . . . . . . . . . . . . . . .
+5
+2.2
+LoRa . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+2.3
+ESP32 and ESP-IDF . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+2.4
+Analog Discovery 2 and WaveForms
+. . . . . . . . . . . . . . . .
+11
+2.5
+Related work . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+3
+Design
+15
+3.1
+Solution overview . . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+3.1.1
+Alternative solutions . . . . . . . . . . . . . . . . . . . . .
+21
+3.2
+Split granularity
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+22
+3.3
+Packet payload structure . . . . . . . . . . . . . . . . . . . . . . .
+23
+3.4
+Double buffering
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+24
+3.5
+Message creation . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+3.6
+The server . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+3.7
+LoRa vs. LoRaWAN . . . . . . . . . . . . . . . . . . . . . . . . .
+27
+4
+Implementation
+29
+4.1
+Hardware . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+29
+4.2
+Code overview
+. . . . . . . . . . . . . . . . . . . . . . . . . . . .
+30
+4.2.1
+LoRa
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+31
+==PAGE:10==
+viii
+CONTENTS
+4.3
+Flash storage . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+31
+4.3.1
+Double buffer . . . . . . . . . . . . . . . . . . . . . . . . .
+32
+4.4
+Acknowledgment timings . . . . . . . . . . . . . . . . . . . . . . .
+33
+4.5
+Server implementation . . . . . . . . . . . . . . . . . . . . . . . .
+34
+4.5.1
+Simplex versions . . . . . . . . . . . . . . . . . . . . . . .
+34
+4.5.2
+Duplex versions . . . . . . . . . . . . . . . . . . . . . . . .
+35
+4.6
+Managing gaps . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+5
+Evaluation
+39
+5.1
+Test setup . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+39
+5.2
+Models of energy consumption
+. . . . . . . . . . . . . . . . . . .
+41
+5.2.1
+Approach . . . . . . . . . . . . . . . . . . . . . . . . . . .
+42
+5.3
+Estimation of full message transmission
+. . . . . . . . . . . . . .
+51
+5.3.1
+Simplex-budget . . . . . . . . . . . . . . . . . . . . . . . .
+52
+5.3.2
+Simplex-split . . . . . . . . . . . . . . . . . . . . . . . . .
+55
+5.3.3
+Duplex-budget . . . . . . . . . . . . . . . . . . . . . . . .
+56
+5.3.4
+Duplex-split . . . . . . . . . . . . . . . . . . . . . . . . . .
+57
+5.4
+Comparing estimates with measurement . . . . . . . . . . . . . .
+58
+5.5
+Minimum/maximum capacitor sizes
+. . . . . . . . . . . . . . . .
+61
+5.6
+Version comparisons . . . . . . . . . . . . . . . . . . . . . . . . .
+62
+5.7
+Estimating throughput . . . . . . . . . . . . . . . . . . . . . . . .
+67
+6
+Conclusion
+69
+6.1
+Summary
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+69
+6.2
+Future work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+70
+Bibliography
+73
+A Full energy estimations of each version
+77
+A.1 Simplex-budget . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+77
+A.2 Simplex-split
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+77
+A.3 Duplex-budget
+. . . . . . . . . . . . . . . . . . . . . . . . . . . .
+78
+A.4 Duplex-split . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+78
+==PAGE:11==
+Chapter 1
+Introduction
+In this thesis we explore how to improve the efficiency of intermittent computing
+used in the context of long-range communication for low-power IoT devices. This
+is achieved through the development of a system that explores novel approaches
+to the problem of closely estimating an energy budget and achieving energy-
+efficient, reliable duplex communication. To show how the solution performs
+relative to the traditional approaches, different versions have been implemented
+to enable comparisons.
+This chapter provides an overview of the topic and
+problems explored in this thesis, providing context for the project as well as
+presenting an outline of the thesis.
+In recent years, the number of IoT (Internet of Things) devices has seen rapid
+growth, and with the estimated number of devices already in the billions, it
+is a topic of rapid innovation [1]. Coupled with recent years’ development in
+technologies for energy-harvesting and ultra-low-power computers, the field of
+intermittent computing has found its foundation [2]. Intermittent computing
+is a paradigm where devices operate using only energy gathered from their en-
+vironment, such as solar power, without batteries. Instead of batteries, they
+store energy in some other energy buffer, usually a supercapacitor, and instead
+of being powered and running at all times, they are powered only intermit-
+tently. A supercapacitor is a type of capacitor that has a higher capacitance
+compared to regular capacitors. When enough energy is stored in the buffer,
+the device wakes up to perform its operation after which it either goes back
+==PAGE:12==
+2
+Introduction
+to a deep-sleep state or turns off completely. Storing the energy in a capacitor
+instead of a lithium-ion battery has several advantages. One advantage is that
+the materials needed are much more environment-friendly to obtain. Another
+advantage is that capacitors allow for virtually unlimited charge cycles while
+lithium-ion batteries are much more susceptible to wear causing them to lose
+capacity for each charge cycle [3, 4]. Most use cases for intermittent computers
+demand frequent charge cycles causing the battery to lose enough capacity to
+no longer be of use likely within a few years. The system can also be powered by
+a non-rechargeable alkaline or lithium-ion battery, but these typically have an
+expected lifespan of only 1-3 years [5]. Combined with much less wear for each
+charge cycle, improving its life expectancy significantly, capacitors are a great
+direction for making IoT devices in general sustainable. There are, however,
+also drawbacks to this approach. One drawback is a lower energy density which
+significantly lowers the energy that the device can store at a time. This is com-
+pensated for by the ability of capacitors to go from a charged to a discharged
+state much more rapidly compared to e.g. lithium-ion batteries. This allows
+for a much smaller energy buffer, which only has to provide energy for a single
+wake-up cycle. Furthermore, by allowing smaller energy buffers, the price of the
+device can be lowered.
+In general, IoT devices are small machines interacting and communicating with
+other machines, objects, environments, and infrastructure [6]. How exactly this
+is done depends on the application at hand, but in general, it involves doing some
+computation and communicating the result to someplace else, e.g. measuring a
+temperature and transmitting it to another device. Examples are home security
+systems, weather stations, doorbells, light bulbs, etc.
+One key challenge in designing an intermittently powered system is choosing the
+appropriate method of communication. These systems are tightly constrained
+by their energy capacity and generation, making a low-power communication
+system attractive. The use of intermittent computing systems allows for very lit-
+tle maintenance, suggesting that the device can be located far away from people
+and existing infrastructure. This suggests a need for long-range communication
+since a listening device is unlikely to be nearby. Thus, an ideal system would
+be one of low power consumption and long range.
+Several communication protocols have been employed for intermittent comput-
+ing, including short range technologies such as WiFi, Bluetooth Low Energy
+(BLE), and Zigbee. Nevertheless, the choice of protocol for this project is lim-
+ited to being low-power wide area networks (LPWANs), which implies the need
+for it to function at long ranges and excludes the above-mentioned protocols.
+LPWAN protocols include cellular, Sigfox, DASH7, NB-IoT, and LoRa [7]. Both
+cellular and NB-IoT use licensed bands for communication, requiring authoriza-
+tion within the deployment area, complicating deployment.
+Moreover, these
+==PAGE:13==
+3
+technologies are limited by the area covered by cellular network, which reduces
+where a network can be deployed to primarily urban areas [7]. Additionally,
+cellular technology contributes to an increased deployment cost [8]. Depending
+on the setup, DASH7 networks reach a range of 1-2 kilometers whereas LoRa
+achieves ranges up to 5 or 15 km depending on whether it is located in urban
+or rural locations [7, 9]. Sigfox has a significantly longer range of up to 10 or
+even 50 kilometers in rural areas but is limited to packet payload lengths of at
+most 12 bytes [10].
+The nature of intermittent computers means that the device only has energy
+for a short duration, which needs to be considered when designing a program.
+In the time that the system is awake it needs to do some operation useful to
+the application, but also to save its progress if the data is too large to transmit
+in a single packet, which allows it to continue the transmission the next time it
+wakes up. If the system is powered off before its progress is saved, the operation
+performed will not be of use. A common technique is to simply store a checkpoint
+in non-volatile memory such as flash. To ensure that this checkpoint is reached
+before power is lost, the program will need to stop execution when a specific
+amount of energy is estimated to be left.
+If this estimation is too late the
+checkpoint will fail, and if the estimation is too early the remaining energy upon
+completion is wasted and could have been used for a larger transmission. For
+systems communicating over long ranges, the transmission of packets requires
+long transmission times resulting in large amounts of energy. In situations where
+large packets are sent followed by checkpointing, the system must create an
+estimate of the maximum size packet that allows enough energy to be left for
+the following checkpoint. Because the estimate must be done far in advance, it is
+difficult to accurately predict, and must therefore be conservative. This implies
+that this checkpointing approach works poorly in conjunction with applications
+with long packet transmission times. A straightforward approach to addressing
+the prediction of an uncertain energy budget would be to simply equip the
+device with a larger energy buffer. However, this increases the cost per device
+justifying the desire for a system to operate as efficiently as possible within its
+constraints.
+The most energy-efficient way for an intermittently powered computer to trans-
+mit data is to simply wake up, transmit, checkpoint, and turn off again while a
+server continuously listens for incoming packets. This is referred to as simplex
+communication. However, there is no guarantee for each individual packet to
+arrive, e.g. due to noise on the chosen frequency or to the receiving server being
+busy. Imagine an application where a device wishes to transmit some data that
+is too large to transmit in a single packet. The device will need to split it into
+smaller packets, that are transmitted individually during each wake-up cycle. If
+the data is only useful if complete, it will be unusable if at least one packet got
+lost, and the risk of this occurring only increases with data sizes. To ensure all
+==PAGE:14==
+4
+Introduction
+packets are received for some given data, the server will need to acknowledge
+the received packets. This is in turn referred to as duplex communication. For
+an acknowledgment to be received by the transmitting device, it must open the
+radio and listen for a response, consuming precious energy. If the system must
+also ensure enough energy to create a checkpoint upon reception of the acknowl-
+edgment, this addition makes it even harder to estimate the maximum packet
+size before transmission. Additionally, in situations where the server is simply
+too busy to handle the packet, the device has wasted energy transmitting it.
+This thesis explores approaches to the two above-mentioned problems: early,
+precise estimates of your energy budget and energy efficient duplex communi-
+cation for intermittently-powered devices. To address the issue of energy bud-
+geting, we have designed and implemented a system that simply does not make
+any assumptions about the remaining energy in the capacitor at any time during
+execution, allowing it to be powered off at any time. Instead of transmitting
+one large packet, multiple smaller packets are being transmitted in succession
+and checkpointing alongside it. In another version, this approach is combined
+with duplex communication in which the packet acknowledgment is located be-
+fore the data transmissions. By doing so, the device needs no checkpointing
+as the server describes what data is missing while ensuring all data is received
+correctly. Two versions requiring the energy have also been implemented for
+simplex and duplex communication respectively, creating a total of four ver-
+sions. Having all four versions enables us to create useful comparisons between
+them in terms of measuring their relative energy consumption given the same
+message to transmit and their throughput. This provides a basis for considering
+whether the added benefits of the approaches outweigh the added complexity
+and energy required for their implementations. The structure of the thesis is as
+follows:
+• Chapter 2 provides the necessary background to the technologies used for
+the project as well as discusses work related to the topic of this thesis.
+Background is provided on intermittent computing, LoRa, the ESP32 mi-
+crocontroller, the framework ESP-IDF, and the Analog Discovery 2 com-
+bined with the accompanying WaveForms software used for energy mea-
+surements.
+• Chapter 3 specifies and describes the system created for the project.
+• Chapter 4 provides both an overview and specific examples of how the
+system is implemented.
+• Chapter 5 evaluates the system created in terms of energy consumption
+and data throughput.
+• Chapter 6 concludes the thesis.
+==PAGE:15==
+Chapter 2
+Background
+This chapter provides background knowledge for concepts and technologies used
+during the project.
+2.1
+Intermittent computing
+The term intermittent computing refers to a computing paradigm in which a
+program is only executing periodically, separated by periods where the device
+is using little energy in a sleep-state or even powered off completely [11]. These
+devices are usually connected to a power source that is unreliable such as solar
+energy or slow such as electromagnetic energy emitted by radio and TV broad-
+casting. But instead of relying on enough power to be present for waking up
+directly from the source, the energy is stored in some energy buffer, usually a
+supercapacitor.
+While intermittent computing has been studied for years under different names,
+it seems that the term was first coined by Lucia et al. in 2017 [2]. Similar
+terms include Transiently Powered Computers [12], RFID-scale sensing devices
+[13] and batteryless sensing platforms [14].
+==PAGE:16==
+6
+Background
+Figure 2.1: An example of a LoRa module. This is the RF96 transceiver.
+2.2
+LoRa
+LoRa (shorthand for Long-Range) is a system for low-power, low-bitrate, long-
+range wireless communication [15] and is used for this project.
+It has been
+promoted as an infrastructure for the Internet of Things. LoRa networks are
+typically in a star-of-stars topology in which several end devices communicate
+with gateways using LoRa, and these gateways then communicate the data
+further to a central server via the internet [15]. The end devices are often low-
+power sensors where a connection to existing communication infrastructure, such
+as the internet, is difficult.
+LoRa defines the physical layer of communication. The chips are all produced by
+SemTech who own the patent. The LoRa Alliance, however, has developed and
+maintains LoRaWAN as a Media Access Control (MAC) layer protocol that uses
+LoRa as its physical layer [16]. It provides additional features such as message
+encryption, authentication, and device addressing.
+EU law limits the use of frequencies to unlicensed bands like 868 MHz and a
+maximum duty cycle of 1%. I.e. in a continuous one-hour period, the device can
+at most be transmitting for 36 seconds in total.
+LoRa uses chirp spread spectrum (CSS) modulation for transmission. This tech-
+nique encodes data as a linear frequency modulation, where data is encoded in
+symbols. A chirp refers to one frequency modulation, and each chirp represents
+one symbol. The speed of the modulation is determined by the bandwidth. The
+number of times this frequency is adjusted is referred to as the chip rate.
+==PAGE:17==
+2.2 LoRa
+7
+LoRa excels in its ability to communicate over very long distances at a relatively
+low power draw. An example is the SF96 LoRa module, which draws between
+66 and 396 mW while transmitting [17]. An example of this module is seen on
+Figure 2.1. For urban areas it allows for transmission of up to 5 kilometers and
+even up to 15 kilometers for rural areas [9]. The range is determined by several
+settings that can be configured to the given application e.g., by increasing power
+consumption in return for more reliable transmissions. These settings are:
+• Frequency
+Adjusting the center frequency does not affect reliability or energy con-
+sumption.
+However, it is useful as it allows for multiple simultaneous
+transmissions, given that they communicate on different frequencies with-
+out interfering with each other.
+• Bandwidth
+A high bandwidth decreases the time needed for a packet to be transmit-
+ted, which in turn results in lower energy consumption. However, lower
+bandwidth provides higher sensitivity, allowing for more reliable trans-
+missions. The choice of bandwidth is thus a trade-off between reliable
+transmissions vs. transmission speed and, in turn, energy consumption.
+• Explicit/implicit header mode
+One has the choice of either an implicit or an explicit header. The header
+tells the receiver how large the data in the packet is. If all packets are
+of the same size there is no need for this and the implicit header can be
+chosen.
+• Spreading factor
+To put it simply, the spreading factor is the ratio between the chip rate and
+the symbol rate, i.e. how many chips are needed per symbol. With fewer
+chips less time needs to be spent transmitting for each symbol, increasing
+the throughput. However, this makes it harder to distinguish it from noise,
+making it less reliable. The number of chips per symbol is 2SF where SF is
+the spreading factor. Thus, increasing the spreading factor by one doubles
+the number of chips needed, doubling the transmission time. Spreading
+factors must be between 12 and 7, or 6 if using implicit header mode.
+• Coding rate
+The coding rate is likewise a trade-off between energy and reliability. It
+determines the amount of redundancy added to the transmission, which
+makes it more resilient to interference. This can be set such that for every
+4 bits of data sent, 5-8 bits are transmitted.
+• CRC
+At the end of the transmission there is the possibility of adding a cyclic
+==PAGE:18==
+8
+Background
+redundancy check (CRC). It is used to check the integrity of the data re-
+ceived but again comes at the price of increased overhead in transmission.
+Figure 2.2 shows how a LoRa packet is structured. The packet begins with a
+preamble that allows the receiver’s radio to synchronize with the transmitter’s
+radio. It is followed by the header, which describes the size of the payload. Next
+is the payload of the packet, which can be up to 255 bytes long. Finally, the
+payload CRC (cyclic redundancy check) is used to verify the integrity of the
+payload upon reception. Another variation includes an implicit header mode, in
+which the payload must be of a fixed size and the header can thus be omitted.
+The payload CRC can also be omitted.
+However, this increases the risk of
+receiving corrupted data.
+Preamble
+Header
+Payload
+Payload
+CRC
+Figure 2.2: Structure of a LoRa packet [18]. The preamble synchronizes the
+receiver with the incoming packet.
+The header is optional and
+describes the length of the payload. The payload is the actual
+data transmitted between the devices and is up to 255 bytes in
+length. The packet is ended with an optional CRC used to detect
+errors in the received payload.
+2.3
+ESP32 and ESP-IDF
+ESP32 is a series of low-cost, low-power microcontrollers manufactured by Espres-
+sif Systems and are used for this project. They have integrated WiFi as well as
+Bluetooth for communication, but also has a total of 34 programmable GPIO
+(general-purpose input/output) pins that, among other things, can be connected
+to different communication modules. A picture of an ESP32 device can be seen
+in Figure 2.3.
+The Espressif IoT Development Framework, or simply ESP-IDF, is a software
+development framework for the ESP32 microcontroller [19]. It offers a complete
+environment for creating a complete application and is based on the FreeRTOS
+operating system. The framework was developed and is maintained by Espressif
+Systems, which is also the company manufacturing the ESP32 microcontrollers.
+FreeRTOS is a real-time operating system (RTOS) targeted at embedded sys-
+tems. It allows for easy access to API functions that, for instance, create tasks
+==PAGE:19==
+2.3 ESP32 and ESP-IDF
+9
+Figure 2.3: An ESP32 microcontroller.
+with xTaskCreate or delay a task with vTaskDelay [20]. These tasks each rep-
+resent a program running on the device, and multiple tasks are allowed to run
+simultaneously. Each core of the CPU can run its own task simultaneously, but
+if more tasks exist than there are cores, the operating system will need to share
+the processing time among the tasks. How this is done is referred to as the
+operating system’s scheduling policy. Other non real time operating systems
+have kernels that employ a policy in which a fair share of the processing time
+is allocated between tasks. I.e. n tasks shared among a single core will each use
+approximately
+1
+n of its processing time. This is assuming no task is sleeping
+(delayed for a certain time) or blocked (waiting for I/O or a resource to be
+available). The scheduler in FreeRTOS, however, works differently from that.
+Since it is a real-time operating system, it makes use of a scheduling policy that
+can guarantee a maximum execution time for handling urgent events. This is
+achieved by assigning a priority to each task in the system. Instead of sharing
+the execution time equally between the tasks, the task with the highest priority
+that is ready to be executed is always chosen and run until it either finishes, is
+put in a sleep/blocked state, or replaces by a new task with a higher priority.
+If two tasks of equal priority are ready to run, execution time is shared fairly
+between them.
+The kernel of FreeRTOS measures time using a tick variable that is incremented
+at some predefined frequency, e.g. 100Hz. At the specified frequency, the RTOS
+tick interrupt increments this variable. When a task is set to sleep, the duration
+is specified in a specified number of ticks.
+Thus, when the tick variable is
+incremented, the kernel looks for any tasks that are ready to be put in the
+ready state. If a task is resumed that has a higher priority than that of the task
+currently running, the resumed task will take over execution. When the system
+is started, FreeRTOS itself creates an idle task with the lowest possible priority.
+==PAGE:20==
+10
+Background
+This task is always in the ready state, ensuring that there is always at least one
+task to execute. The idle task is responsible for freeing memory allocated by the
+operating system to deleted tasks [21]. Apart from that it has no practical use.
+Real-time operating systems are practical for embedded devices where urgent
+tasks can be executed within a guaranteed time frame, given the task running
+it is of highest priority.
+The system developed in this project has been entirely developed using ESP-
+IDF and written in C. The framework was installed as an extension to Visual
+Studio Code [22]. This extension allows for development as well as easy access
+to building, flashing, monitoring, and more. Once installed, it enables you to
+build the project with the click of a button. By connecting the ESP32 board
+to the computer via USB, the device shows up as a port. By selecting the port
+corresponding to the device-, another button allows for the build of the project
+to be flashed to the device after which a third button allows you to monitor it.
+Different settings of the framework can be modified by opening the command
+palette in Visual Studio Code (Ctrl + Shift + P) and selecting menuconfig. This
+opens ESP-IDF’s SDK Configuration Editor with several settings to modify. An
+example is selecting a partition file when creating a partition in flash for the
+device to manipulate throughout execution or disabling write caching when
+writing to flash through the SPIFFS library.
+SPIFFS is a file system bundled with ESP-IDF for flash devices intended for
+embedded devices and is used throughout this project. Among others, it handles
+wear leveling and file system consistency checks. Basic file handling interacting
+with the flash memory of the ESP32 needs a library like SPIFFS to function.
+By calling the function esp vfs spiffs register(const esp vfs spiffs conf t
+*conf) with a pointer to a pointer to a configuration structure, you can register
+and mount SPIFFS to a virtual file system (VFS). This configuration structure
+lets you specify a file path prefix that will be associated with the file system, the
+label of the partition to use, the maximum number of files that you can have
+open at a time, and whether to format the file system if it fails to mount. Once
+initialized, basic file operations like fopen, fwrite, fread etc. can be used for
+any files having the specified prefix. SPIFFS can afterward be unregistered and
+unmounted with esp vfs spiffs unregister(const char *partition label)
+using the same partition label used to initialize it. If desired, it is possible to
+have multiple partitions mounted at the same time.
+==PAGE:21==
+2.4 Analog Discovery 2 and WaveForms
+11
+Figure 2.4: The Analog Discovery 2.
+2.4
+Analog Discovery 2 and WaveForms
+The Analog Discovery 2 (AD2) is an instrument produced by Digilent that al-
+lows for measuring, visualizing, generating, recording, and controlling mixed
+signal circuits [23]. This project will make use of its two oscilloscopes for mea-
+surements. To create a measurement, the AD2 is plugged into a computer that
+is running the accompanying WaveForms software [24].
+It is through Wave-
+Forms that all interactions with the AD2 are performed. The tool used for this
+project is the Logger. It logs the voltage of the two oscilloscopes at up to 10 Hz.
+Each measurement can then be exported to a csv file for further analysis.
+2.5
+Related work
+In [25] Winkel et al. present an architecture for wireless communication that
+is intermittently powered, and without needing to modify the official protocol
+specification. This is demonstrated with a battery-free Bluetooth Low Energy
+(BLE) smartwatch. This paper is relevant as it combines intermittently powered
+devices with bidirectional (duplex) communication.
+However, it does so for
+BLE, which comes with a different set of problems compared to LoRa used in
+this project. LoRa consumes significantly more power when transmitting and
+has a slower bitrate [26, 17, 27], but can transmit with much larger intervals to
+maintain a connection at much longer ranges [28, 9].
+==PAGE:22==
+12
+Background
+In [29], Winkel et al. present a battery-less Nintendo Game Boy emulator pow-
+ered entirely by solar panels and the energy created from button presses. When
+power is lost and restored, the state of the game is continued through a check-
+pointing system. When checkpointing, the volatile memory in SRAM is moved
+to non-volatile FRAM. The paper contributes as a practical demonstration of
+the capability of intermittent computing in interactive-based systems. To re-
+duce the load of checkpointing, a just-in-time differential checkpointing scheme
+is used to only checkpoint updated values. While the data to checkpoint funda-
+mentally differs from that explored in this project, they are similar in that they
+assume power can be lost at any point in execution.
+The topic of differential checkpointing is explored in detail by Ahmed et al. in
+[30].
+They propose the DICE, which is a software-only system operating in
+volatile memory to determine differentials. The system can work in conjunction
+with any program. Differential checkpointing reduces the correlated energy cost.
+The study shows an order of magnitude improvement in execution time for an
+example case.
+To reduce the number of checkpoints needed, Bhatti et al. present a code in-
+strumentation strategy that improves the efficiency of checkpointing in intermit-
+tently powered systems [31]. The solution examines the control-flow graph of
+the given program to suggest checkpoint positions during execution. In addition
+to needing fewer checkpoints, the system also allows fewer readings of the energy
+buffer, again reducing energy consumption. The study measures this strategy
+to be 19% from optimal checkpoint placements. An approach suggested in this
+thesis consists of continuously checkpointing progress while transmitting data
+in parallel, which would benefit from simply creating a single checkpoint for the
+last transmission. However, this is infeasible with the restriction placed on that
+solution to not allow energy buffer readings.
+In another recent paper [32], Desai et al. investigate how intermittent computing
+and LoRa can be used to create an image sensor capable of capturing and
+transmitting low-resolution images with the platform dubbed Camaroptera. To
+reduce the transmission of uninteresting photos, the platform is equipped with
+a Machine Learning-based processing platform to only transmit photos that
+it deems of interest according to the application. This paper is related in its
+approach to transmitting large amounts of data over several cycles by splitting it
+up into smaller packets. Where the paper differs, however, is in both reliability
+of the transmissions and assumptions about hardware. The paper explains the
+communication to be simplex. This implies that the transmitting device has
+no way of knowing whether a packet was received or not, thus removing the
+possibility for the server to request retransmissions of lost packets. The platform
+transmits images in JPEG format, and while there are ways to encode them
+to mitigate damages of missing or corrupted bytes [33], it will result in some
+==PAGE:23==
+2.5 Related work
+13
+information loss, nonetheless. The proposed system splits certain operations,
+say transmitting a full LoRa packet, into tasks that can be guaranteed completed
+without power loss, which is achieved by waiting until the capacitor is charged
+to a predefined voltage. This differs from the approach suggested in this thesis
+where these budget predictions are omitted and the device can be powered off
+at any time while executing.
+To the best of our knowledge, this paper presents the first system in which in-
+termittently powered devices transmit data using LoRa without the assumption
+that maximum payload sizes can be estimated. Neither are we aware of other
+intermittently powered systems in which the transmitter can omit checkpointing
+by requesting knowledge of what data is missing from the server upon wake-up.
+==PAGE:24==
+14
+Background
+==PAGE:25==
+Chapter 3
+Design
+This chapter describes the specifications of the system developed, how it is
+designed, and the architecture of the system. An overview of the solution is
+first presented in detail.
+This is followed by a brief overview of alternative
+approaches to the problem that, while novel, proved either infeasible in practice
+or inferior to the selected solution. This is followed by elaborations on specific
+design challenges and the scope of the project.
+3.1
+Solution overview
+This thesis serves as an exploration into the field of long-range communication
+of intermittently powered devices. This is done through the development of a
+system, which comes in four different versions. All four versions are capable of
+transmitting data of up to 64 KiB over a series of smaller packets. Sending long
+series of data in a single packet over long distances and using a reasonably sized
+capacitor is simply not feasible at current times. To describe the entire data,
+before it is split, we use the term message. To describe the splits that are sent
+individually in packets, we use the term chunk.
+The general idea for the behavior of all four versions of the system is the fol-
+lowing:
+==PAGE:26==
+16
+Design
+1. Wake up.
+2. Obtain data to send.
+3. Transmit the data to a central server.
+4. Checkpoint the data sent.
+5. Turn off.
+This cycle is referred to as a wake-up cycle. The cause for the device waking up
+can be several. It can be due to a certain voltage reached on the capacitor, a
+predefined time that has passed since it was last awake, or some other external
+trigger. How the data is obtained also differs between cycles. The device first
+reads its flash storage to look for a message.
+If one is present and not yet
+transmitted, its data is used.
+If not, some data is generated specific to the
+use case, e.g., taking a photo with an attached camera.
+Some or all of the
+data obtained is then transmitted wirelessly using LoRa and checkpointed. By
+checkpointing, we ensure that the same data is not retransmitted in the next
+wake-up cycle. In general, with a single exception in one of the four versions,
+all data is transmitted in order. Afterward, the device turns off.
+The first two versions of the solution presented addresses the issue of needing
+to budget the amount of data that the device can afford to transmit during a
+wake-up cycle. The first version presented is one doing exactly that: After the
+device wakes up, the device immediately measures the voltage of its capacitor
+to determine how much energy is available. This is then used to estimate how
+many bytes can at most be safely sent in a chunk without losing power before
+completion. The device looks into its flash memory for a message to send. If
+no message is found, or the stored message has been fully transmitted, a new
+message is created and stored in its place. What data this message contains
+is specific to the application in use. On completion, a new energy budget is
+calculated. This message contains information about its ID, the total size of the
+message, how much of the data has been sent already, and the data itself, as
+can be seen in Figure 3.1. There are no restrictions as to how the message’s ID
+is defined, though it should be unique to the receiver to differentiate between
+multiple connections. One approach is to generate a random ID and assume it
+to be unique, or one could simply assign an ID, or range of IDs, for each device,
+which all messages will use. Using the energy budget previously calculated, the
+according amount of data is sent, consecutive to the data sent in the previous
+wake-up cycle. The device then creates a checkpoint by updating the flash with
+how much data that has been sent and powers off.
+The distinctions between each of the four versions are in two key areas. The
+first distinction is in whether the program should budget how many bytes the
+==PAGE:27==
+3.1 Solution overview
+17
+Message ID
+Byte index
+Message size
+Data
+2 bytes
+2 bytes
+2 bytes
+ ≤ 65535 bytes
+Figure 3.1: The structure of a message stored in flash. The message ID is
+what identifies the message from others when received by the
+server. The byte index tells how many bytes that have already
+been transmitted in the message, indicating what data to trans-
+fer next. Message size simply contains the length of the data to
+transmit, and is followed by said data.
+device can afford to transmit without losing power given the current voltage
+of the capacitor, as in the above-mentioned example. This assumes knowledge
+of the capacitance of the equipped capacitor, the ability to measure its voltage
+reliably, and an accurate estimation of the energy consumed by the program. If
+the relationship between the size of the chunk and the energy used to transmit it
+by the specific device running the program is known, we can assume a maximum-
+size chunk that can be transmitted without interruption. The opposing variation
+to this requires no knowledge of the energy left in the capacitor, and in turn,
+does not rely on calculating estimates of the maximum allowed payload size that
+can be safely sent. It works by splitting the message into smaller chunks and
+continuously transmitting them one at a time until the device simply depletes its
+energy and is powered off. This removes the need to determine the maximum
+safe chunk size from the specific capacitor equipped in the device, and can
+simply be run in any hardware configuration.
+I.e. not only are assumptions
+about the installed capacitor omitted, but the energy profile of the program as
+a whole is not needed, as no energy estimations are calculated. This splitting
+approach allows the system to be turned off at any time without warning if
+desired. These two versions are, in part, named after their approach to this.
+I.e. a solution is named budget if it relies on creating a packet size budget from
+an energy reading or split if it instead split the data into smaller packets which
+are transmitted until energy is depleted.
+With the budget version, the device simply checkpoints how much of the mes-
+sage it has transmitted into non-volatile flash memory on completion since the
+energy required from this checkpoint is calculated into the packet size budget.
+A simple sequence diagram is shown in Figure 3.2. This version is opposed to
+the splitting version, which does not know the energy budget.
+Instead, it
+splits the message up into small chunks which it can send multiple of during the
+same wake-up cycle. Without the energy budget, it does not know when the
+energy is depleted, and must therefore checkpoint between packet transmissions.
+A sequence diagram of this is shown in Figure 3.3. To avoid corruption of the
+checkpoint caused by sudden power-offs while writing, it is done using a double
+==PAGE:28==
+18
+Design
+Transmitter
+Server
+data
+checkpoint
+Figure 3.2: Sequence diagram of the simplex-budget version.
+loop
+Transmitter
+Server
+data
+checkpoint
+[device has power
+and message is
+incomplete]
+Figure 3.3: Sequence diagram of the simplex-split version. The loop contin-
+ues until the device either depletes of power or the entire message
+has been transmitted.
+buffer. During the beginning of a device’s wake-up cycle, the double-buffered
+checkpoint is read, and transmission of the message continues from the stored
+position in the message. This process allows for a packet to be transmitted,
+but not checkpointed before being powered off, which causes the packet to be
+retransmitted in the following wake-up cycle. While retransmission of packets is
+wasteful in energy, it is preferred over skipping a packet entirely (e.g., by check-
+pointing before the transmission). Though the transmission itself is not reliable,
+this ensures that each packet is sent at least once. If transmission reliability is
+of concern, one could look at the other distinction of the four versions, which is
+to use duplex communication as opposed to the simplex communication dis-
+cussed above. This approach assumes that the capacitor holds at least enough
+energy for at least one chunk to be sent and checkpointed.
+==PAGE:29==
+3.1 Solution overview
+19
+By sacrificing some energy in a wake-up cycle, it is possible to have reliable
+communication by not only transmitting some data but also receiving an ac-
+knowledgment of it from the server. A version of the system that implements
+this is referred to as duplex. If data is simply transmitted without acknowledg-
+ment, it is instead referred to as simplex. The two versions earlier mentioned
+are thus called simplex-budget and simplex-split respectively. The remain-
+ing two versions are thus the duplex variant to those, i.e., duplex-budget
+and duplex-split making a total of four versions combined.
+For the duplex-budget version, when the device has transmitted its data,
+instead of going to sleep, the device begins to listen for a response from the
+server. This is shown in Figure 3.4. If the data was received by the server, it
+responds with a packet containing the ID of the message, whether the packet
+was received correctly, which index of the message the received data starts at,
+and the total size of the received packet. If and only if this acknowledgment
+contains the anticipated values, the packet is deemed successfully sent by the
+transmitter, and the device will create a new checkpoint in flash memory, causing
+the device to transmit the next chunk of data in its next wake-up cycle. If no
+acknowledgment is received, the acknowledgment does not match the expected
+byte index, packet length, or simply if requested by the server, the device will
+retransmit the exact same chunk in its next wake-up cycle, which is achieved by
+simply not modifying the existing checkpoint. A third and final scenario is that
+the server requests the device to restart the transmission entirely. This is used
+for rare situations where the server does not recognize the message it receives,
+and the packet is not data for the beginning of a message (byte index not zero).
+The most likely case for this would be a server-side power loss, causing the
+memory, and in effect, the content of the partly received message, to be lost.
+When this response is received, the byte index stored in flash is simply changed
+to zero.
+A fourth and final version of the solution, which combines reliable duplex com-
+munication with split has also been developed and is shown in Figure 3.5. This
+version has no assumptions about its energy budget for sending a packet while
+also enabling data to be sent reliably. This created a challenge as the tradi-
+tional approach to acknowledgments is to send it immediately upon receiving
+some data, i.e. in the end of the wake-up cycle. Instead, the acknowledgment
+has been moved to the beginning of the wake-up cycle by first transmitting a
+short request packet, simply containing the ID of the message, upon wake-up.
+This packet acts as an announcement to the server that the device has woken
+up and is ready to receive its acknowledgment. The server then responds with
+an acknowledgment describing exactly which bytes are yet to be received. Using
+this response, the missing data is transmitted in split packets until either the
+stored energy is depleted or the message is completely sent. Moving the ac-
+knowledgment to the beginning of the wake-up cycle is essential as this version
+==PAGE:30==
+20
+Design
+Transmitter
+Server
+data
+checkpoint
+ACK
+Figure 3.4: Sequence diagram of the duplex-budget version.
+has no way of estimating when to stop transmitting packets and instead listen
+for an acknowledgment.
+A drawback of this approach is that an additional packet needs to be sent during
+each wake-up cycle, contributing to the energy overhead of sending actual data.
+Another solution could be to receive an acknowledgment after every packet or
+once every few transmissions. However, once the second acknowledgment has
+been transmitted, the drawback of the additional request packet is mitigated.
+Thus, any scenario with more than two acknowledgments would require more
+packets than our selected solution of having acknowledgments first. Addition-
+ally, this would put a larger requirement on the minimum capacitor size of
+the device. It is also worth noting that because the acknowledgment tells ex-
+actly which bytes are missing, unlike the other versions, there is no need to
+checkpoint what has already been transmitted to flash. This creates another
+advantage compared to the simplex implementation, namely that data is only
+retransmitted if incorrectly received by the server. The simplex implementation
+cannot guarantee that a checkpoint is created after every packet transmission
+if the power is depleted before this is done, and therefore the last packet sent
+in a wake-up cycle might be retransmitted in the following cycle. In the du-
+plex version, if this last packet is received correctly it will be included in the
+acknowledgment in the following wake-up cycle. When the server responds to a
+request it can anticipate a data packet to be received shortly, which reduces the
+risk of it being too busy to handle it in time. Since the request packet contains
+little data it is not as energy expensive to transmit compared to a data packet.
+This means that the energy wasted by the server being busy might be reduced
+compared to duplex-budget since that version has to transmit a data packet
+before knowing the server to be busy.
+==PAGE:31==
+3.1 Solution overview
+21
+request
+loop
+Transmitter
+Server
+ACK
+data
+[device has power
+and message is
+incomplete]
+Figure 3.5: Sequence diagram of the duplex-split version. The loop contin-
+ues until the device either depletes of power or the entire message
+has been transmitted.
+That makes a total of four versions which each transmit via budget/splitting
+with simplex/duplex communication. Creating four versions is not only useful
+as they may tailor to specific application scenarios but are also useful in com-
+parisons against each other. For applications where the integrity of the received
+data is desired, but not crucial, understanding the impact of adding duplex com-
+munication is of great value. An example later discussed in this thesis is that of
+transmitting a photo. Certain optimizations for images rely on the integrity of
+the file to function, and therefore might not be suitable for simplex communica-
+tion, and more primitive, but larger file formats must be used instead. Thus, it
+is of great value to know whether a large file that can be transmitted at a lower
+energy expense (simplex) has a greater message throughput than a smaller file
+that takes more time to transmit (duplex). The benefit of the split solutions
+is that the energy in the capacitor can be better utilized compared to budget,
+where the estimation is made far in advance and is therefore accompanied by
+a larger margin for error. Because of this error margin, the wake-up cycle will
+often end with energy left in the capacitor that could have been used for trans-
+mitting a larger chunk. The split solution works well for applications where
+energy estimations are difficult or limited, and utilizing the entire energy buffer
+becomes important.
+3.1.1
+Alternative solutions
+In the course of this project, several other approaches have also been considered.
+Though they are not implemented or used for the final product, they provide
+==PAGE:32==
+22
+Design
+different ideas for solving the problems. One approach that we wanted to explore
+was to halt a transmission before a packet was transmitted completely when the
+capacitor reached a certain voltage. Thus, instead of creating an estimate before
+starting the transmission, the device would always attempt to send a packet
+of maximum size.
+This would reduce the need for making an early packet-
+size estimate, and increase its accuracy by moving it closer to the end of the
+wake-up cycle. If the transmitter can determine how much of the payload was
+transmitted, the checkpoint is simply made from that point. The receiving server
+would receive the data correctly up to the point in time that the transmission
+stopped, followed by data created from noise. The server would not be able
+to determine exactly where the actual data stopped, however, the next packet
+received would override the noise data. It is worth noting that this solution
+would not work in conjunction with LoRa’s payload CRC. An implementation
+of this solution was prevented by not being able to determine how much of a
+packet had been transmitted before the transmission was complete with the
+hardware used for this project.
+Several approaches to duplex-split have been considered.
+One of the ap-
+proaches we considered still allowed for an estimation to be made from reading
+the voltage of the capacitor, but while moving this estimation to be as small
+as possible to reduce its uncertainty. The version did not include the acknowl-
+edgment at the beginning of the wake-up cycle. Instead, it would repeatedly
+transmit chunks, each containing a point of time in the future where the de-
+vice would expect an acknowledgment. When a certain voltage threshold in the
+capacitor was reached, the device would stop the transmission and go into a
+low-power state. When the announced time for acknowledgment was reached,
+the device would wake up and listen for it. Since there is no guarantee for each
+packet to be received, the acknowledgment time would be included in every
+packet. Another approach was to simply expect the acknowledgment a fixed
+time after the final packet was transmitted. However, this would not work in
+cases where the final packet was not received, as the timing would be off. This
+idea reduces the number of packets needed compared to transmitting an ac-
+knowledgment for every packet. However, it did not completely exclude the
+need for energy estimations, why it was not used in the final system.
+3.2
+Split granularity
+The two split versions transmit potentially multiple chunks for each wake-up
+cycle. Unless it is the last packet of the message, these chunks are always trans-
+mitted at a fixed length. This length is referred to as the granularity and can
+be modified to fit different setups best. A clear advantage of a large granularity
+==PAGE:33==
+3.3 Packet payload structure
+23
+Message ID
+Byte index
+Message size
+Data
+2 bytes
+2 bytes
+2 bytes
+ ≤ 249 bytes
+Figure 3.6: Packet payload structure for simplex-budget, simplex-split
+and duplex-budget.
+Message ID
+Byte index
+Message size
+Data
+Type
+2 bytes
+2 bytes
+2 bytes
+ ≤ 248 bytes
+1 byte
+Figure 3.7: Packet payload structure for duplex-split.
+is that it involves less overhead to transmit the same data, resulting in faster
+transmission of the same amount of data, and decreasing its energy consump-
+tion. However, if power is lost during transmission (or before checkpointing in
+the case of simplex-split), potentially more data needs to be retransmitted.
+With smaller granularity on average less data needs to be retransmitted after a
+power loss. Therefore the optimal granularity is very dependent on the capacitor
+size.
+3.3
+Packet payload structure
+LoRa allows for a payload of a maximum of 255 bytes. However, some extra
+header information is needed for the system presented in this project to work
+as intended. Figure 3.6 shows the structure of a data packet payload sent by
+both simplex versions as well as duplex-budget. The first two bytes are used
+as ID to identify the message in the server. This allows for multiple devices to
+transmit to the same server simultaneously. The following two bytes encode at
+which index in the total message, the transmitted data is positioned. The next
+two bytes encode the total size of the message. The remaining bytes are then
+used for the actual data. Figure 3.7 shows the structure of the payload sent
+from the duplex-split version, and is very similar. However, since this version
+both transmits packets for announcements and packets for data, an additional
+byte is added to the header, which tells the server that the packet is for data
+transmission. The structure of said request packet is shown in Figure 3.8. It
+simply contains the ID of the message it is transmitting and that this packet is
+of the type request.
+The structure of an acknowledgment received in duplex-budget is shown in
+Figure 3.9. It contains the message’s ID, the server’s response to the previous
+==PAGE:34==
+24
+Design
+Message ID
+Type
+2 bytes
+1 byte
+Figure 3.8: Packet payload structure of announcement in duplex-split.
+Message ID
+ACK
+type
+Byte index
+Packet
+length
+2 bytes
+2 bytes
+1 byte
+1 byte
+Figure 3.9: Payload structure of acknowledgment in duplex-budget.
+packet (acknowledged, retransmit or start over), the byte index of the received
+packet, and the length of said packet payload. The structure of an acknowledg-
+ment in duplex-split is a little more complicated and is shown in Figure 3.10.
+This acknowledgment must describe exactly which bytes need to be transmitted
+in the whole message since the transmitting device does not checkpoint. As with
+all other payloads, the first two bytes describe the ID of the related message.
+The next two bytes encode the index of the last byte received in the entire mes-
+sage. If all packets up to this point have been received correctly, the payload
+stops here. If, however, a packet is lost during transmission and this is followed
+by a packet that is received, there will be a gap in the received data. A gap is
+simply an interval of not-received data in the message1. Each gap is described
+by its start and end index. To provide a maximum size for this packet, at most
+10 gaps can be described per acknowledgment.
+3.4
+Double buffering
+In simplex-split, the device can lose power while writing a checkpoint to flash.
+Since this could potentially corrupt the file it is writing to, a double buffer has
+been implemented. The principle of a double buffer is that two separate files
+1Note that this implies that there is a gap between the last received byte index and the
+message size. However, since this gap will always be present unless the message is completed,
+this gap is instead implied by the last received byte index alone.
+Message ID
+Last received
+byte index
+Gap1
+start
+Gap1
+end
+Gapn
+start
+...
+Gapn
+end
+2 bytes
+2 bytes
+2 bytes
+2 bytes
+2 bytes
+2 bytes
+Figure 3.10: Payload structure of acknowledgment in duplex-split.
+==PAGE:35==
+3.4 Double buffering
+25
+are used to store the same information. Thus, if one file becomes corrupt, the
+other one can be used instead. In this case, the data to be stored is a 16-bit
+integer indicating the index of the next byte to transmit in the message. When
+checkpointing, the index is first written to file 1. When the operation is complete
+and the data is flushed to the actual flash memory, the same data is written to
+file 2. When this data has been flushed to the flash memory, a new checkpoint
+can be made. By ensuring that the write operation is performed completely
+before writing to the next file, we can guarantee that at least one of the files is
+valid at all times.
+One challenge with this approach is knowing whether the value stored in the file
+is correct. If a file was only partially written before power loss, it is possible for
+only some of the bytes to have been overwritten, resulting in a false value. The
+solution to this is to store a checksum of the data at the end of the file and to
+only consider it valid if it matches upon reading. Thus, a partial write would
+result in the checksum no longer matching the data, and the other file is not
+determined intact.
+Despite the checksum matching the content of the file, it is not certain that
+the content of the file is correct.
+When a file is opened to be updated, the
+flash’s file table moves the location of the file to a new address. However, before
+the content of this can be updated, the system might power off. It is possible
+that this new position pointed to by the file table was used at a previous point
+in time. Since at the time these values were written correctly, the checksum
+would make it appear valid. If this old value was written to while transmitting
+the same message, it would return to that index and lose progress, and need to
+retransmit several packets. Alternatively, if the value was from another message
+transmission entirely, it could even jump forward, skipping a lot of data. The
+solution to this is to include a counter in every checkpoint created. Each time a
+new checkpoint is created, this counter is incremented by one. When restoring
+a checkpoint, both files are read and the soonest, valid of the two is returned.
+Each of the two files used for the double buffer takes up a total of 6 bytes.
+The structure of it can be seen in Figure 3.11. Thus, when reading the double
+buffer, both file 1 and file 2 are read. If only one of these is intact its content is
+simply returned. If both files are intact, we decide which file is the newest by
+comparing their counter and returning the byte index of that.
+Another approach to fixing the file table pointing to an old checkpoint would be
+to include the ID of the message in the checkpoint itself. However, this would
+not prevent situations where the old file is from an earlier checkpoint of the
+same message and it would thus reset back to that point, retransmitting a lot
+of data. It also assumes that the IDs of messages are unique, and would thus
+not be robust for situations where messages with the same ID are transmitted
+close to each other.
+==PAGE:36==
+26
+Design
+Byte index
+Count
+Checksum
+2 bytes
+2 bytes
+2 bytes
+Figure 3.11: Structure of a double buffer file.
+3.5
+Message creation
+What data is contained in a message is naturally dependent on the application
+the system is applied to. This data needs only to be generated when the device
+has woken up, and the previous message has been fully transmitted to the server.
+During development, this message generation either consists of generating a
+sequence of random bytes of any length or reading an image file read off of
+the flash. However, in an actual application, this would likely be replaced by
+e.g., using a camera to take a photo. If this operation can not be done using the
+energy stored in the capacitor, it must be able to work intermittently-powered
+like this developed system. Importantly, this message creation is also responsible
+for creating a sensible ID for the message. Whether this ID is generated at
+random, as a hash of the data, or even a constant ID of the device itself etc. is
+of no significance to the system presented in this thesis. However, one should
+avoid cases where multiple devices, communicating with the same server, are
+transmitting messages using the same ID.
+3.6
+The server
+The focus of this thesis is primarily on the intermittently-powered device. How-
+ever, an implementation of the server side is necessary as well. It is needed to
+validate that the system works as intended, and for the duplex versions, it also
+needs to send the expected acknowledgments. The design of the servers used in
+this project will be presented briefly.
+It is assumed that most applications of the system will involve multiple devices
+communicating with the same server simultaneously. Therefore, the servers used
+in this project allow for multiple messages to be stored at once while not yet
+received fully. This is made possible by distinguishing all packets received by
+the ID of the message for which they are containing data. The server must also
+be able to determine when a message has been fully sent by the transmitting
+device. This is easy to determine for the duplex versions, as it is simply when
+all data has been received. For the two simplex versions, however, there is no
+==PAGE:37==
+3.7 LoRa vs. LoRaWAN
+27
+guarantee of all packets being received. Therefore, determining the message to
+be complete by this condition is not sufficient for these. However, because the
+message is transmitted from start to finish, if a packet is received containing
+data for the final byte of the message, the message must have been sent (albeit
+not necessarily received) completely. In the simplex server implementations for
+this project, a message is deemed received completely if either the last byte is
+received, or a new packet with byte index 0 is received. The latter indicates that
+the previous message was sent completely, and a new one has been created. It
+should be noted that this approach is vulnerable to cases where both the first
+and final packets of the message are lost. One approach to address this, though
+not implemented for this project, would be to use a timeout system, in which
+a message is always considered complete if no new packet regarding it has been
+received within a certain time frame. This time frame could be determined from
+the expected maximum sleep period of the transmitting device. For a given
+hardware configuration, one could determine an upper bound on this period
+from its energy-harvest rate and capacitor size and simply determine a message
+to be complete if no packets regarding it has has been received within that time
+frame. If no two devices can transmit messages with the same ID, and each
+device ensures the time between using the same ID is never exceeding the upper
+bound of sleep periods, this issue can be avoided.
+3.7
+LoRa vs. LoRaWAN
+While LoRa defines the physical layer, LoRaWAN is a MAC layer protocol built
+on top of it. Among other benefits, LoRaWAN provides message encryption,
+authentication, and device addressing. While these features are desired in a
+real application, they are not related to the scope of this project and would
+only complicate the implementation process. Creating an application that uses
+LoRa directly is simply easier to implement and get working for this purpose. To
+enable this functionality, LoRaWAN adds extra data to each packet. Therefore
+all packets sent within this project will have less overhead compared to using
+LoRaWAN. However, the method used in this thesis is equivalent, and can thus
+also be used if LoRaWAN was used. Furthermore, this added overhead can be
+considered during project evaluation in chapter 5 by simply considering each
+packet to contain the extra overhead.
+==PAGE:38==
+28
+Design
+==PAGE:39==
+Chapter 4
+Implementation
+This section describes details regarding the implementation of the four versions
+of the solution. Not all aspects of the implementation are described in detail.
+Rather a general overview of the implementation is given combined with details
+of where interesting solutions were found. All development is carried out in C
+using the Espressif IoT Development Framework (ESP-IDF) [19].
+4.1
+Hardware
+The platform for both the transmitting unit and the server is run on an ESP32
+microcontroller connected to a LoRa transceiver as shown in Figure 4.1. The
+choice of transceiver was limited by the choice of using LoRa. However, the
+choice of microcontroller was less restricted.
+We chose the ESP32 as it is a
+good compromise of user-friendliness to develop on and a power consumption
+that was feasible to run from a supercapacitor.
+The development board is
+the Adafruit HUZZAH32 - ESP32 Feather board with a 240 MHz dual-core
+microcontroller fitted with 32 KB cache, 16 MB flash storage, and 250 KB
+SRAM. The microcontroller is connected to an RF96 LoRa transceiver.
+As this implementation serves as an exploration and not a final product, the
+choice in hardware is not necessarily corresponding to what would be used for
+==PAGE:40==
+30
+Implementation
+Adafruit HUZZAH32 - ESP32 Feather
+240 MHz dual-
+core
+microcontroller
+250 KB SRAM
+16 MB flash
+LoRa RF96
+transceiver
+Figure 4.1: Diagram of the hardware used to run the platform.
+an actual use case. However, the characteristics in terms of how they operate
+are close enough for the comparisons between the versions to be valid.
+All LoRa packets are transmitted using CRC, and we, therefore, assume the
+data of received packets to be correct.
+4.2
+Code overview
+While the four program versions are different in some very specific ways, the
+same logic can often be shared across two or more versions. Because of this, a
+lot of functionality is placed in shared files, which are:
+• main
+The main function of the program. It has the job of initializing LoRa and
+selecting its frequency, spreading factor, and bandwidth.
+• budget-utils
+Contains functions that benefit both the simplex-budget and duplex-budget
+versions.
+• split-utils
+Similarly contains functions benefiting the simplex-split and duplex-split
+versions.
+• utils
+Contains useful functions for all program versions.
+==PAGE:41==
+4.3 Flash storage
+31
+• flash
+Contains all functions needed to interact with the flash memory on the
+ESP32.
+• capacitor alarm
+Is used to simulate the capacitor mounted on an actual prototype of the
+platform. For the budget versions, it simulates an estimate of a payload’s
+size considering the energy stored in the capacitor from a voltage reading.
+It also contains a function that restarts the ESP (wiping its volatile mem-
+ory) after some time, which is useful when simulating the split versions.
+• constants
+Defines various constants used between the versions, such as the size of a
+data packet’s header or an acknowledgment.
+• structs
+Defines a series of structures used throughout the program, such as a
+header that contains an ID, the byte index of the data it is carrying, and
+the total size of the message it is transmitting.
+4.2.1
+LoRa
+Interaction with the LoRa transmitter is done through the esp32-lora-library
+component [34]. This component provides an interface for all basic functionality
+such as adjusting the frequency, spreading factor, etc., and of course, sending
+and receiving data. The component handles reading and writing to registers
+in the transceiver.
+To use the library, you first call the lora init() func-
+tion. Afterward, you can set the desired settings using lora set frequency(long
+frequency), lora set spreading factor(int sf) etc. If you have an array of
+bytes you wish to transmit, you simply do it by calling lora send packet(uint8 t
+*buf, int size). To receive data, the module must first be put into receive
+mode by calling lora receive(). lora received() can afterward be called to
+check if a packet has been received. Once a packet has arrived, the lora receive
+packet(uint8 t *buf, int size) function can be called to put said packet into
+the provided buffer.
+4.3
+Flash storage
+When a message is created it is stored in the ESP32’s non-volatile flash memory,
+which allows the transmission to be continued in the following wake-up cycles.
+==PAGE:42==
+32
+Implementation
+Interactions with the flash memory are done through the SPIFFS file system.
+Before data can be read from or stored to flash, SPIFFS must first register and
+mount a flash partition to a virtual file system. The first time data is read from
+or stored to flash the related partition is registered and mounted, ensuring this
+is only done only once per wake-up cycle to improve efficiency.
+When data for a message is read from flash, not all data is used for the trans-
+mission and can therefore be ignored. In the two budget versions, the device
+knows how many bytes it can afford to transmit for its given wake-up cycle.
+Therefore, only that exact amount of bytes are read from the flash memory. For
+the two split versions, exactly how much data needs to be read is not known.
+Simplex-split, however, will simply continue the transmission from the last
+checkpointed byte, meaning no data before that is read from flash. On average
+this results in approximately half the bytes read from flash compared to reading
+everything. In the case for duplex-split all data is read during every wake-up
+cycle.
+Since there is no checkpointing system on the device itself, it cannot
+tell which byte to transmit next. Furthermore, if a checkpointing was actually
+introduced for this purpose the server could request data before the checkpoint,
+which would then not have been read.
+4.3.1
+Double buffer
+As described in section 3.4, each file in the double buffer contains a counter,
+which is used to determine their relative age. To read the double buffer, both files
+are read, and the value of the soonest file, determined by its count is returned.
+But determining this proves to be an interesting problem. The first approach
+could be to simply use the file with the greatest count, or any of the two if
+they are equal. However, this would no longer work when the count overflowed.
+The count is stored in a 16-bit variable, and thus has a maximum value of
+216 −1 = 65535. When this happens, the newest file would not necessarily have
+the largest count. To address this issue, the newest file is instead determined
+as the one whose count has the lowest positive distance from the other, with
+positive distance meaning the value you would need to add to one value to
+get to the other (also considering overflow). Figure 4.2 shows examples where
+two different are read from flash. In Figure 4.2a the distance from Count1 to
+Count2 is simply 50000 −10000 = 40000. The distance from Count2 to Count1
+is the distance from Count2 to its maximum value plus the distance from 0 to
+Count1: (65535 −50000) + 10000 = 25535. Since the positive distance from
+Count2 to Count1 is the smallest, the file containing Count1 is considered the
+most recent. Likewise in Figure 4.2b the distance from Count1 to Count2 is
+smallest, implying the file containing Count2 is most recent.
+Note that this
+implementation assumes the old files to be no more than half of the maximum
+==PAGE:43==
+4.4 Acknowledgment timings
+33
+0
+65535
+10000
+Count1
+50000
+Count2
+(a) In this example, it appears that
+Count1
+has
+recently
+overflowed
+and is the latest of the two.
+0
+65535
+30000
+Count1
+50000
+Count2
+(b) In this example, no recent over-
+flows appear to have happened,
+and Count2 appears to be the lat-
+est of the two.
+Figure 4.2: Examples of two counts placed on a number line used to determine
+the latest checkpoint in a double buffer.
+count value old. However, due to wear leveling on the flash and a generally
+small storage capacity, this assumption seems reasonable and appears safe under
+testing.
+When a file in the double buffer has been written to, it is flushed and synced
+using fflush and fsync on the file pointer and file descriptor respectively before
+closing the file and opening the next.
+This is to ensure that the file being
+closed is complete and correct in the actual flash memory (and not only a
+buffer waiting to write its content) before writing to the next. However, during
+testing, it was noticed that at times both files would be corrupt at the same
+time, indicating that these functions were not flushing a write buffer properly,
+despite the flash write buffer being disabled on the device. The issue seems to
+involve the standard C file operation functions and would require resources not
+fit for the scope of this thesis. To circumvent the problem, a single task delay
+of 50 milliseconds is introduced between closing file 1 and opening file 2, and
+between closing file 2 and opening file 1 for a new checkpoint. This delay limits
+the frequency at which the system can checkpoint and highlights an area that
+would benefit from more work.
+4.4
+Acknowledgment timings
+When duplex-split has sent a data packet or when duplex-split has trans-
+mitted its request packet, an acknowledgment packet is expected in return. To
+reduce time spent waiting for the packet, and in turn reduce energy consump-
+tion, the device would ideally go to sleep right after sending its packet and wake
+up just in time to receive the response.
+It would then listen for a response
+for a period defined by an upper bound of response time. In duplex-split,
+by measuring the time between the request packet being transmitted and the
+==PAGE:44==
+34
+Implementation
+acknowledgment is received, this upper bound can be found. This is naturally
+specific to the hardware used by both the transmitting device and the server
+during testing, as well as how many devices are communicating with the server
+as this can cause it to be busy and have a delayed response time. It is also
+important to consider the size of the acknowledgment packet, as large packets
+have a greater time on air, increasing the duration the device needs to listen for.
+With the ESP32 used for this project, the response was often received faster
+than the boot time itself. Therefore there is no sleep between transmitting the
+packet and starting to listen for the response. Additionally, a one-tick delay was
+introduced to the server before transmitting the acknowledgment, as it would
+oftentimes not be possible to start listening for the packet in time to receive it.
+4.5
+Server implementation
+While the implementation of the server greatly depends on the application sce-
+nario at hand, this section describes how it was made for this project to serve
+as an example of how it can be done in this environment.
+4.5.1
+Simplex versions
+The server implementation for simplex-budget and simplex-split are exactly
+alike. When powered, they immediately begin listening for LoRa packets. When
+a packet is received, it first checks that the packet is at least the size of the header
+shown in Figure 3.6, which is 6 bytes. If smaller, the packet is discarded and
+the server simply returns to listening for new packets. If not, it further checks
+whether, with the given byte index and data length, the size of the total message
+would be exceeded. If this check passes, the server looks up the message received
+so far in a hash table with the message ID as the key, and if no message is found,
+indicating this is the first packet received for the message, it is created. The
+data of the packet is then put into the message appropriately. If the received
+packet contains data for the last part of the message, it is determined to be
+finished and for demonstration purposes printed to the terminal.
+As mentioned, the messages are stored in a hash table, which there is no default
+implementation of in C. For this, the implementation named uthash has been
+used for this project [35].
+It simply consists of a single header file which is
+placed in the project, providing the functionality needed. The content of the
+table can be any structure, containing a field of type UT hash handle and an
+ID of some sort, in this case, an integer with the message ID. The macro in
+==PAGE:45==
+4.5 Server implementation
+35
+uthash HASH FIND INT(messages, id, message), where messages is the structure
+containing the table, id is a pointer to the field of the structure used as key and
+message is a pointer to where the message stored with the given id will be if
+found. A macro named HASH ADD INT(messages, id, message) with similar
+parameters can be used to add entries to the table.
+4.5.2
+Duplex versions
+The server implementation for the duplex-budget version is at first similar to
+that of the simplex. However, the data of the received packet must not cause
+gaps in the data already received. I.e. a packet must either be the beginning of
+a new packet, data already received, or an exact continuation of data already
+received. By following this protocol, new data is only sent if the previous packet
+has been confirmed. And since transmission always begins with a byte index of
+0, following the protocol cannot cause any gaps. Therefore, if a gap appears,
+something else must have gone wrong, e.g. the server rebooting and wiping its
+memory. If a gap is found, the server’s response to the packet will instruct the
+transmitting device to restart the message entirely. As mentioned previously,
+there are three types of acknowledgments: ACK, RETRANSMIT and START OVER,
+used for acknowledging that a packet was received correctly, instructing the
+transmitter to retransmit the previous packet or to restart the message trans-
+mission respectively. For this server implementation, the RETRANSMIT type is
+never used, though it is understood by the transmitter. For some applications
+of the system, it might be useful to have, which is why it exists. An example
+could be a case where the server receives a packet but is too busy to respond in
+time. Instead of ignoring the packet, the server can respond with a RETRANSMIT
+packet.
+This shortens the duration that the transmitter has to wait for the
+response, thus shortening its energy consumption. One thing to note is that the
+server would sometimes respond with an acknowledgment before the transmitter
+was ready to receive it. Therefore, a small delay had to be added to the server.
+However, since these timings are dependent on the hardware in use, they might
+not be needed for other implementations. In many ways, the implementation of
+duplex-split is similar to that of duplex-budget. A key distinction is that
+the server must first look at the content of the packet before knowing whether it
+is a request or a data packet. The other key distinction is that for every packet
+received, it has to update the list of gaps in the data.
+==PAGE:46==
+36
+Implementation
+4.6
+Managing gaps
+As discussed in section 3.3, duplex-split manages the index of the last received
+byte as well as a list of gaps. This list is stored by the server and managed for
+every packet received. When a packet is received, it iterates over all the known
+gaps. For each packet, one of six cases must be true.1 These cases are visualized
+in Figure 4.3:
+Case 1 The packet covers a gap entirely.
+Case 2 The packet covers a gap’s beginning but not its end.
+Case 3 The packet does not cover a gap’s beginning but covers its end.
+Case 4 The packet covers data in a gap but neither its beginning nor its end.
+Case 5 The packet covers data later than the last received byte.
+Case 6 The packet is a continuation of the last received byte.
+(a) Case 1
+(b) Case 2
+(c) Case 3
+(d) Case 4
+(e) Case 5
+(f) Case 6
+Figure 4.3: Visualization of how a packet can cover gaps in the received data.
+Green blocks represent data already received, and gray blocks rep-
+resent data not yet received. The line below them represents the
+data covered by the received packet.
+In Case 1, the covered gap is simply deleted from the list. In Case 2 the gap’s
+beginning index is simply modified, and likewise for Case 3 and its end index.
+For Case 4 the gap’s end index is modified and a new gap is created. For Case
+1It is not possible for multiple cases to apply for the same packet received. The gap sizes
+are always a multiple of the granularity, assuming the granularity is constant.
+==PAGE:47==
+4.6 Managing gaps
+37
+5 a new gap is simply created. Case 6 simply modifies the last received index
+without modifying any gap.
+There is a maximum of 10 gaps included in every acknowledgment sent by the
+server. Though the server is able to store an unlimited number of gaps, only
+the first 10 are transmitted. This limit is enforced to allow assumptions about
+the maximum packet length that the intermittently powered device receives.
+==PAGE:48==
+38
+Implementation
+==PAGE:49==
+Chapter 5
+Evaluation
+This chapter evaluates the four solutions in terms of energy usage and through-
+put. An energy profile is created for each of the four versions. These energy
+estimates are used to determine the minimum and maximum energy needed for
+the system to work for a given application. They furthermore provide insight
+into how changing different parameters of the versions affects energy consump-
+tion across an entire message transmission. All this allows us to compare the
+relative energy cost of implementing the different solutions discussed in this
+thesis.
+5.1
+Test setup
+The selection of LoRa settings to use is based on a combination of law reg-
+ulations, the application in use, and a consideration of the reliability of the
+communication compared to the energy required for transmission.
+How the
+range and reliability of LoRa transmissions are affected by these settings are
+outside the scope of this thesis, and where possible have been adjusted to the
+value that results in the lowest energy consumption. All tests in this project are
+performed with the following LoRa settings:
+==PAGE:50==
+40
+Evaluation
+Analog Discovery 2
+ESP32
+Power source
++V
++I
+-I
+-V
+1Ω
+LoRa
+module
+Figure 5.1: Schematic of setup for measuring the power consumption of the
+ESP32.
+• Spreading factor: 7
+• Bandwidth: 125 kHz
+• Coding rate: 4/5
+• Frequency: 868 MHz
+• CRC enabled
+• Explicit header mode
+To measure the energy consumption of the device, we use the Analog Discovery
+2 (AD2) developed by Digilent [23]. It is equipped with two oscilloscopes that
+can be used to measure voltage. To measure energy consumption, we must first
+measure its power by measuring voltage and current. Figure 5.1 displays the
+setup used to achieve this with the AD2. Measuring voltage is done by simply
+measuring between the positive and negative sides of the ESP32. Since the AD2
+can only measure voltage, we can derive it by measuring the voltage across a
+resistor and using Ohm’s law. It states that V = RI where V is voltage, R is
+resistance and I is current. By using a 1Ωresistor, voltage is equal to current.
+Multiplying the voltage and current then gives us the power in watts.
+The
+power measurements of the oscilloscopes are logged once every 100ms using the
+associated WaveForms software [24]. The energy consumption over a certain
+period can then be found by finding the integral of the power over the time
+frame, which gives us a result in joule.
+==PAGE:51==
+5.2 Models of energy consumption
+41
+5.2
+Models of energy consumption
+To enable the prediction of energy consumption under a wide range of circum-
+stances, an energy model has been created for each of the four versions. This
+allows the ability to predict the relative energy cost accompanied by implement-
+ing each of the four versions and can be done for any use case desired. These
+energy models predict the energy consumption of transmitting a full message
+for each version under various circumstances such as the message size, capacitor
+size, etc. To do this each of the four programs has been split up into segments
+that contribute the most to energy consumption. These segments are:
+Segment 1 (Boot, sleep, LoRa init)
+Booting the ESP, Initializing LoRa, and going to sleep.
+Segment 2 (SPIFFS init)
+Initializing the flash library SPIFFS.
+Segment 3 (Creating message)
+Creating a message of various sizes.
+Segment 4 (Store message)
+Saving a message to flash of various sizes.
+Segment 5 (Read message)
+Reading a message frem flash of various sizes.
+Segment 6 (Transmit packet)
+Transmitting packets with LoRa of various sizes.
+Segment 7 (Listen for packets)
+Listening for packets with LoRa if various durations.
+Segment 8 (Receive packet)
+Receiving packets with LoRa of various sizes.
+Segment 9 (Store checkpoint)
+Storing a checkpoint to flash. I.e. storing the next byte index to transmit
+from.
+Segment 10 (Transmit while DB checkpointing)
+Storing a double buffered (DB) checkpoint while transmitting packets in
+parallel.
+Segment 11 (Read DB checkpoint)
+Reading a double buffered checkpoint.
+==PAGE:52==
+42
+Evaluation
+Note that since the logic is shared between the four versions, one does not have to
+repeat each test for every version. The goal is that by combining the segments
+that are used in each version its total energy consumption can be gathered.
+However, this is not just a simple addition, as the size of the capacitor can
+limit the effectiveness of the program in a wake-up cycle. I.e. a larger capacitor
+would mean less energy spent on overhead operations such as initializing LoRa,
+reading from flash, etc. and more time spent transmitting the actual data.
+5.2.1
+Approach
+When testing the energy consumption of these segments, a dedicated function
+is created which performs the segment and any other operation necessary to
+perform it. E.g. to test the segment of transmitting a packet using LoRa, some
+data is required which might be read from flash. However, by also testing the
+energy consumption of reading from flash, one can deduce the energy profile of
+the packet transmission itself simply as the difference between the two. When
+the device is connected to power, it wakes up to execute the function once and
+put the device into deep sleep mode for a short period. When the device wakes,
+the function is executed once again and goes back to deep sleep. This repeats
+a set number of times after which the device sleeps indefinitely and power is
+cut. To keep track of how many tests have been performed, a counter variable
+is kept in the ESP’s RTC memory. This RTC memory is not wiped while the
+device is sleeping, which the rest of the program’s memory is.
+Running the test involves first flashing the ESP32 with a program running the
+desired function to test. The WaveForms software is set to begin logging the
+measured voltage and current. The power source is then plugged into a power
+brick, and the setup now resembles that of Figure 5.2.
+By monitoring the
+power in WaveForms, we can determine when the test is finished, and logging
+is stopped. WaveForms now appears as shown in Figure 5.3. The data is then
+exported to a CSV file containing the voltage and current measured as well
+as the power (by multiplying the voltage and current). Because each test is
+separated by a period of deep sleep, one can distinguish each test as the peaks
+separated by power measurements below some threshold. A single test’s energy
+consumption can then be calculated as the integral over this peak, and as we
+know the measurements are made at a frequency of 10 Hz, this is done by simply
+multiplying the sum of powers in the peak by
+1
+10.
+Many segments vary on the size of what we are testing, e.g. transmitting data
+with LoRa depends on how much data is sent. Thus, when testing, the energy
+consumption is measured with multiple different sizes. The resulting CSV file of
+similar tests with different sizes are placed in the same folder. A Python script
+==PAGE:53==
+5.2 Models of energy consumption
+43
+Figure 5.2: Actual setup for measuring the power consumption of the ESP32.
+This follows the schematic shown in Figure 5.1.
+Figure 5.3: Screenshot of WaveForms after running a series of measurements.
+Yellow indicates voltage, green (though difficult to see) indicates
+current and purple indicates power. Note that the values on the
+y-axis only apply to the power.
+==PAGE:54==
+44
+Evaluation
+Segment
+Energy (Joule)
+Segment 1 (Boot, sleep, LoRa init)
+0.02553
+Segment 2 (SPIFFS init)
+0.05062
+Segment 3 (Creating message)
+2.036 · 10−7m + 0.002815
+Segment 4 (Store message)
+5.564 · 10−6m + 0.004533
+Segment 5 (Read message)
+6.154 · 10−7m + 0.001564
+Segment 6 (Transmit packet)
+1.126 · 10−3c + 0.02248
+Segment 7 (Listen for packets)
+2.364 · 10−4p + 0.006622
+Segment 8 (Receive packet)
+0
+Segment 9 (Store checkpoint)
+0.006944
+Segment 10 (Transmit while DB checkpointing)
+0.0310 c
+g + 0.001160c
++0.0003740g + 0.0901
+Segment 11 (Read DB checkpoint)
+0.01326
+Table 5.1: Overview of the energy profile of each segment. m refers to a mes-
+sage’s size in bytes, c refers to a chunk size in bytes, p refers to the
+listening duration in milliseconds and g refers to the granularity
+size in bytes.
+is used to automatically read each CSV file in a folder, detect the peaks in
+power and calculate their energy consumption. It then determines the average
+and standard deviation and combines all tests into a single output file. After
+subtracting energy overhead from segments other than the one being tested,
+the energy profile can be determined. Following is a discussion on each of the
+energy profiles found for the segments. These energy profiles can all be seen in
+Table 5.1.
+Segment 1 (Boot, sleep, LoRa init) is to test simply booting the ESP, initializing
+LoRa, and going to deep sleep. Across 150 measurements, the average energy
+cost was found to be X ≈25.53 mJ with s ≈4.286 mJ. Another test was
+performed where LoRa was not initialized upon boot, which resulted in an
+average energy cost of X ≈22.85 mJ with s ≈3.782 mJ. By subtracting these,
+we find that initializing LoRa on average only uses about 2.684 mJ of energy.
+Segment 2 (SPIFFS init) is determining the energy cost of initializing SPIFFS.
+Since it only needs to be done once every wake-up cycle, but each of these cycles
+can involve multiple reads/writes to flash, it cannot be determined from testing
+the flash segments alone. Similar to the approach in determining energy for the
+initialization of LoRa, This initialization cost is found by measuring the test’s
+energy consumption and subtracting the overhead of booting the ESP, etc. The
+average cost of initializing SPIFFS is found to be X ≈50.62 mJ.
+==PAGE:55==
+5.2 Models of energy consumption
+45
+0
+10,000
+20,000
+30,000
+40,000
+50,000
+60,000
+70,000
+0
+0.01
+0.02
+Message size (Bytes)
+Energy (Joules)
+Message creation
+Trendline
+Figure 5.4: 3rd segment. The energy required to create a message of a given
+size. Overhead from booting the ESP and sleeping has been sub-
+tracted. Each point is an average of 50 measurements. The trend-
+line follows the equation: 2.036 · 10−7x + 0.002815. R2 = 0.9839.
+Segment 3 (Creating message) is the segment for creating random data for a
+message. This is useful when determining the energy required to store it to flash
+in the fourth segment, as the data saved is first generated randomly. A chart of
+the required energy for each test can be seen on Figure 5.4.
+Segment 4 (Store message) is storing a message of a given size to flash memory.
+The resulting chart of the tests is shown in Figure 5.5. There is a big difference
+in standard deviation between the tests. For instance, the measurements at
+16384 B come with a standard deviation of 0.113 while the measurements at
+10240 B only have a standard deviation of 0.00743. It is worth noticing that for
+messages of 10240 B and lower, there is little variation in energy consumption
+between measurements. However, with larger messages the variation as well as
+the average increases dramatically. One possible explanation for this is that for
+small messages when the data is written to flash it is still present in the cache
+from when it was generated, but not when the message gets sufficiently large.
+The ESP32 used for testing has a cache of 32 kB. This appears reasonable as
+this cache is shared across the entire system and also contains the executed code
+etc. Despite this jump in required energy, the energy profile is still considered
+linear.
+However, it is important to consider the uncertainty associated with
+using it and to use a greater margin for error.
+While testing Segment 4 (Store message), the time required for the data to be
+==PAGE:56==
+46
+Evaluation
+0
+10,000
+20,000
+30,000
+40,000
+50,000
+60,000
+70,000
+0
+0.2
+0.4
+Message size (Bytes)
+Energy (Joules)
+Storing message in flash
+Trendline
+Figure 5.5: 4th segment. The energy required to store a message of a given
+size in flash. Overhead from booting, sleeping, creating the data,
+and initializing SPIFFS has been subtracted. Each point is an
+average of 15 measurements. The trendline follows the equation:
+5.564 · 10−6m + 0.004533. R2 = 0.971. m is the total message size
+in bytes.
+stored in flash varied wildly from one time to another. Despite the ESP being
+powered off completely between tests, the order in which they were performed
+seemed to influence the result. Furthermore, at certain points in time, the flash
+memory would stop working entirely on the board, resulting in it not being able
+to open any files for either reading or writing. However, by erasing the entire
+flash on the board and reflashing the program, this problem could be fixed.
+There is no clear indication as to when this problem would arise, but it seems
+more likely to happen when a large amount of large files has just been written.
+The issue appears to be from the library’s implementation and is out of the
+scope of this project. Furthermore, the writing times themselves appear to be
+affected greatly by when the flash was last erased. This could cause the energy
+consumption to double compared to when the flash had recently been erased.
+Because of this, the flash was erased completely between all measurements of
+segment 4.
+A chart showing the measurements of Segment 5 (Read message) is shown in
+Figure 5.6. As with Segment 4 (Store message), the energy required for initial-
+izing SPIFFS has not been included. And as multiple interactions with flash
+may happen during the same wake-up cycle, the library needs only be initialized
+once and is therefore added separately when estimating the energy pattern of
+an application case.
+==PAGE:57==
+5.2 Models of energy consumption
+47
+0
+10,000
+20,000
+30,000
+40,000
+50,000
+60,000
+70,000
+0
+0.02
+0.04
+Message size (Bytes)
+Energy (Joules)
+Reading message from flash
+Trendline
+Figure 5.6: 5th segment.
+The energy required to read a message from the
+flash of a given size. Overhead from booting, sleeping, and ini-
+tializing SPIFFS has been subtracted.
+Each point is an aver-
+age of 50 measurements.
+The trendline follows the equation:
+6.154 · 10−7m + 0.001564. R2 = 0.9434. m is the total message
+size in bytes.
+Measurements of Segment 6 (Transmit packet) are shown in the chart on Fig-
+ure 5.7. It shows the energy required to transmit a packet of various sizes using
+LoRa. It follows a very clear linear relationship between the bytes transmit-
+ted and the energy consumed. It is important to note that this step consumes
+significantly more energy than the other segments tested considering the much
+smaller sizes compared to, for instance, Segment 4 (Store message).
+The energy profile of Segment 7 (Listen for packets) is shown in Figure 5.8. Here
+is shown the energy consumption of listening for LoRa packets compared to the
+duration that the device is listening. This relationship is observed to be very
+linear and with very little variation between measurements. It is also noticed
+that the operation is very energy consuming, emphasizing the importance of
+minimizing this duration when listening for acknowledgments.
+While 5.8 describes the energy cost of simply listening with the radio, Figure 5.9
+shows Segment 8 (Receive packet). For these measurements, a packet is received
+of different sizes while the overhead of requesting a packet and listening for it
+has been subtracted.
+I.e. if the device had to wait 1000ms for a packet to
+be received, this overhead is subtracted using the energy profile of Segment 7
+(Listen for packets). What this chart indicates is that the energy consumed from
+receiving is not correlated to the size of the packet received. However, because
+==PAGE:58==
+48
+Evaluation
+0
+50
+100
+150
+200
+250
+0
+0.1
+0.2
+0.3
+Payload size (Bytes)
+Energy (Joules)
+Transmitting packet with LoRa
+Trendline
+Figure 5.7: 6th segment. The energy required to transmit a packet with LoRa
+of a given payload size. Overhead from booting, sleeping, and gen-
+erating the transmitted data has been subtracted. Each point is an
+average of 50 measurements. The trendline follows the equation:
+1.126 · 10−3c + 0.02248. R2 = 0.9997. c is the packet’s payload
+size.
+0
+1,000
+2,000
+3,000
+4,000
+5,000
+0
+0.5
+1
+Listen duration (Milliseconds)
+Energy (Joules)
+Listening for packet with LoRa
+Trendline
+Figure 5.8: 7th segment. The energy required to listen for a LoRa packet for
+different time durations. Overhead from booting and sleeping has
+been subtracted. Each point is an average of 30 measurements.
+The trendline follows the equation: 2.364·10−4p+0.006622. R2 =
+0.9998. p is the duration that the device is listening in milliseconds.
+==PAGE:59==
+5.2 Models of energy consumption
+49
+larger packets take more time to transmit, more time spent listening for the
+packet is needed, increasing energy consumption. Thus, instead of profiling the
+energy required to receive the packet, we will profile the time spent receiving a
+packet and use the energy profile of Segment 7 (Listen for packets). Instead of
+measuring the transmission times, we use a calculator provided by the producer
+of the LoRa chips, Semtech [36]. Using the calculator given the parameters used
+for these measurements, the transmission times (time on air), ptoa, closely follow
+the equation
+ptoa(n) = 1.4635ms · n + 25.769ms
+(5.1)
+with n being the packet’s payload length. Assuming that the time to transmit
+a packet is equal to the time it takes to receive it, the duration calculated from
+this equation is added to the LoRa listening duration. Furthermore, it is useful
+when determining the minimum listening duration required to receive a packet
+of a given length. The measurements on Figure 5.9 do not correlate with payload
+size. It seems this segment does not even consume a constant amount of energy,
+as the average of all measurements is around 1 mJ. However, this is likely just
+from random variation and is therefore omitted. I.e. the segment of receiving a
+packet will not contribute to the overall energy profile.
+The energy consumption of Segment 9 (Store checkpoint) was found by mea-
+suring the energy needed to modify the byte index of a single message in flash
+and subtracting the overhead from booting, sleeping, and initializing SPIFFS.
+Its cost was found to be only X ≈6.944 mJ. Note that this checkpoint is stored
+in the message file itself, which is why it is not necessary to measure reading a
+checkpoint as a segment by itself.
+The energy consumption of Segment 10 (Transmit while DB checkpointing)
+depends on two variables: how much data is transmitted, c and the granularity
+with which this is done, g. However, the relationship between the granularity
+and energy consumption is not linear with a fixed c.
+However, the energy
+consumption does scale with the number of packets required to transmit c bytes.
+To estimate the energy profile, a multi-linear regression is thus performed on
+both c and g, but also c
+g, as the latter is a calculation of the number of packets
+needed.
+The energy consumption of Segment 11 (Read DB checkpoint) was found to
+be a constant of 13.26 mJ over an average of 50 measurements with overhead
+subtracted.
+==PAGE:60==
+50
+Evaluation
+0
+50
+100
+150
+200
+250
+−0.01
+0
+0.01
+Payload size (Bytes)
+Energy (Joules)
+Receiving packet with LoRa
+Figure 5.9: 8th segment. The energy required to receive a LoRa packet from
+different packet payload sizes. Overhead from booting, sleeping,
+and time spent with the radio open has been subtracted. Each
+point is an average of 30 measurements. No trendline has been
+added since the measurements do not seem to follow one. The
+average energy consumption measured is found to be only 1 mJ.
+However, this is likely due to random variation in measurements.
+It is instead assumed that this segment does not consume energy
+in itself.
+==PAGE:61==
+5.3 Estimation of full message transmission
+51
+0
+20
+40
+60
+80
+100
+120
+2
+4
+Number of packets to transmit ( c
+g)
+Energy (Joules)
+c = 250
+c = 500
+c = 1000
+Figure 5.10: 10th segment. By multi-linear regression, the measurements were
+found to closely follow the equation:
+0.0310 c
+g + 0.001160c +
+0.0003740g + 0.0901. R2 = 0.9994. Where g is the granular-
+ity of each packet payload in bytes and c is the total number of
+bytes transmitted in sequence.
+5.3
+Estimation of full message transmission
+This section presents the developed models of energy consumption for each of
+the four versions. This is done by combining the energy profiles of each segment
+appropriately.
+Creating an equation that simply returns the total energy consumption for one
+of the four versions is difficult. Each version is only limited by a specific number
+of variables, e.g. for simplex-budget the message size and how much energy
+the capacitor can store. But how these variables impact the total consumption
+is not straightforward. One example is that the very first wake-up cycle in a
+message transmission will transmit less data compared to the others since it
+has spent some of the energy creating and storing the data for the message.
+Conversely, the last wake-up cycle will usually transmit less data than what its
+capacitor allows, since it only needs to send what is remaining. This means that
+we cannot simply assume the same amount of data to be transmitted in each
+wake-up cycle. Furthermore, only whole bytes can be transmitted at a time,
+i.e. if the budget estimates 99.9 B to be transmitted, it must be rounded down
+to 99. LoRa also restricts packets to have a payload maximum payload length
+of 255 B. Since the versions include a header of 6-7 bytes for each data packet,
+this max is limited to either 248 B or 249 B for these versions. Finally, if the
+==PAGE:62==
+52
+Evaluation
+total energy is found by just multiplying the energy consumed by one wake-up
+cycle with the number of cycles needed, this would be off if the number of cycles
+is not found to be an integer, e.g. if the number of cycles is found by dividing
+the total message size by how much data is sent each cycle. It would be off since
+you would then assume the constant overhead of every wake-up cycle to scale
+with the amount of data it sends, which is not the case.
+With large message sizes, however, these deviations are likely not as significant.
+To get an idea of the impact, the difference it makes will be evaluated for the
+duplex-split estimation.
+Because the combined estimations are found as a combination of real-world
+measurements, the equations they result in are difficult to interpret and not
+very useful to read. For completeness, all the combined equations are found in
+Appendix A, but will not be written in this chapter. However, the approach for
+their derivation is described here.
+5.3.1
+Simplex-budget
+We will split this version up into segments to estimate the energy required. The
+first wake-up cycle will include Segment 1 (Boot, sleep, LoRa init), Segment
+2 (SPIFFS init), Segment 5 (Read message)1, Segment 3 (Creating message),
+Segment 4 (Store message), Segment 6 (Transmit packet), and Segment 9 (Store
+checkpoint). Then for each following wake-up cycle Segment 1 (Boot, sleep,
+LoRa init), Segment 2 (SPIFFS init), Segment 5 (Read message), Segment 6
+(Transmit packet) and Segment 9 (Store checkpoint) will execute.
+Simple estimate
+First, we will create a combined energy model which results in an equation that
+can be calculated by inputting the message and capacitor size.
+The energy cost of a single cycle depends on how large the chunk to transmit
+is. Let Ecycle(c) describe this relationship, where c is the chunk size. Note that
+the message size is of no concern, as only the bytes to transmit are read from
+flash. It is calculated by simply adding the relevant segments mentioned above.
+1In order for the system to realize it must create a new message, it must first read the
+existing message in flash to find it missing or complete. Only the header and no actual data
+is read from flash in this case.
+==PAGE:63==
+5.3 Estimation of full message transmission
+53
+The 6-byte header is included in all transmissions.
+Ecycle = 0.1309 + 0.001127c
+In the very first cycle, some additional energy is spent on creating and storing
+the message. Let the energy used in the first wake-up cycle, including that used
+for creating the message, be Efirst(m, c), with m being the size of the message.
+In the cycle where the message is created, no message data is read from flash,
+and this is omitted.
+EcreateCycle = 0.001126c + 5.7675 · 10−6m + 0.1382
+Now we would like to describe the relationship between capacitor size and the
+energy budget. Let ccycle describe the chunk size that can be transmitted in any
+cycle except for the first. Let k be the capacitor size in joules. By assuming all
+the energy of the capacitor to be utilized, we set Ecycle(c) = k and solve for c.
+Ecycle = k =⇒ccycle = 887.38k −116.13
+We would also like to determine the chunk size in the first cycle. Because of the
+overhead from message creation, this is expected to be smaller. Let this chunk
+size be cfirst.
+EcreateCycle = k =⇒cfirst = 887.87k −0.005121m −122.72
+We have now determined how many bytes can be transmitted in each wake-up
+cycle, and we would now like to determine how many cycles are needed for the
+full message to be transmitted. Let the number of wake-up cycles needed be
+ncycles.
+ncycles = m −cfirst
+ccycle
++ 1
+The fraction is added by one since the message size in the numerator is sub-
+tracted by the first wake-up cycle’s chunk size.
+Knowing the number of cycles, and assuming the capacitor is completely utilized
+in each wake-up cycle, the total energy consumption, Esimplex−budget is then:
+Esimplex−budget = ncycles · k
+When the capacitor size is sufficiently large, the device would simply transmit
+the full 249 B every wake-up cycle. However, this is not accounted for in this
+model. For this estimate to be valid, we must ensure that all chunk sizes are
+estimated between 0 and 249 B. This is verified by calculating ccycle and cfirst.
+We will now go through a rather manual approach in which tighter restrictions
+are enforced throughout the calculations. This includes that chunk sizes and
+the number of cycles must be integer values.
+==PAGE:64==
+54
+Evaluation
+Strict estimate
+This estimation is based on a setup with a message of 10,000 B and a capaci-
+tor that stored 0.4 J. The energy profile of the first wake-up cycle follows the
+function:
+EcreateCycle(m, cfirst) = 5.768 · 10−6m + 0.001126cfirst + 0.1382
+with m being the size of the message and cfirst being how many bytes of data
+are included in the payload of the first cycle. Since we assume the capacitor
+to provide 0.4 J of energy, and we assume all energy to be utilized, we can set
+the equation equal to this. We also know the size of m to be 10,000 B. We can
+then solve for cfirst to determine how much data can be transmitted in the first
+wake-up cycle:
+EcreateCycle(10000, cfirst) = 0.4 =⇒⌊cfirst⌋= 181
+Of course, one cannot transmit partial bytes, so we must round down cfirst to
+be 181. This also means the capacitor is not utilized completely, which will be
+accounted for.
+The energy profile of the following wake-up cycles is similarly found to follow
+the function:
+Ecycle(ccycle) = 0.1309 + 0.001127ccycle
+with ccycle being the bytes of data transmitted in the following cycles. Note that
+the size of the message does not impact this energy profile. Since the system
+can estimate how many bytes to transmit before the message is read, only the
+relevant bytes are actually read from flash. We find the maximum number of
+bytes to transmit in these cycles:
+Ecycle(ccycle) = 0.4 =⇒⌊ccycle⌋= 238.82
+Which is again rounded down to 238 B.
+We now know how many bytes are transmitted in the first wake-up cycle and the
+remaining except for the last, since the last wake-up cycle only needs to transmit
+the remaining bytes, it might not be the full 238 that its budget allows. First,
+we will calculate how many wake-up cycles are needed after the first to reach
+the final cycle. Let this number be n −2 as it denotes the number of wake-up
+cycles excluding the first and last that are needed to fully transmit the message.
+n −2 =
+m −cfirst
+ccycle
+
+=
+10000 −181
+238
+
+= 41
+I.e. when the system has been executing the first wake-up cycle and 41 following
+that, only one cycle is needed to transmit the remaining data. How much data
+==PAGE:65==
+5.3 Estimation of full message transmission
+55
+remains, clast, can be found as the remainder of the amount of data already sent
+and the data remaining:
+clast = m
+(mod cfirst + (n −2)ccycle) = 10000
+(mod 181 + 41 · 238) = 61
+I.e. 61 B of data is transmitted in the final wake-up cycle. We can now combine
+this to estimate the total energy consumption of transmitting a message of
+10,000 B using simplex-budget and a capacitor providing 0.4 J.
+EcreateCycle(m, cfirst) + (n −2)Ecycle(ccycle) + Ecycle(clast)
+= EcreateCycle(10000, 181) + 41 · Ecycle(238) + Ecycle(61)
+= 16.00J
+This estimates the transmission of a complete message of 10,000 B would require
+16.96 J of energy.
+Comparison of simple vs. strict estimate
+Using the equation which is not restricted to integer values for the number of
+cycles and packet sizes, the estimated energy consumption to transmit a 10,000
+B message with a 0.4 J capacitor is 15.85 J. Compared to the 16.00 J determined
+by the strict approach, this is a relatively small difference. Considering the extra
+work and the inability to create a simple formula, the simple estimate seems the
+favored approach to the strict.
+5.3.2
+Simplex-split
+The first wake-up cycle for simplex-split will execute the following segments:
+Segment 1 (Boot, sleep, LoRa init), Segment 2 (SPIFFS init), Segment 11 (Read
+DB checkpoint), Segment 3 (Creating message), Segment 4 (Store message) and
+Segment 10 (Transmit while DB checkpointing) until energy depletes. Every fol-
+lowing wake-up cycle will execute: Segment 1 (Boot, sleep, LoRa init), Segment
+2 (SPIFFS init), Segment 11 (Read DB checkpoint) Segment 5 (Read message)
+and Segment 10 (Transmit while DB checkpointing) until energy depletes.
+The approach to finding the total energy consumption is similar to that of
+simplex-budget.
+One distinction, however, is the energy required to read
+the message in flash. The device has no knowledge of its energy budget, and
+therefore cannot determine the number of bytes it is going to transmit in each
+wake-up cycle.
+However, from the checkpoint, it knows from which byte to
+transmit next, and all data before that byte are thus not going to be read.
+==PAGE:66==
+56
+Evaluation
+Because only data from that point and further are read at each cycle, it is
+assumed that half of the message is on average read across an entire message
+transmission.
+5.3.3
+Duplex-budget
+The first wake-up cycle will execute: Segment 1 (Boot, sleep, LoRa init), Seg-
+ment 2 (SPIFFS init), Segment 5 (Read message), Segment 3 (Creating mes-
+sage), Segment 4 (Store message), Segment 6 (Transmit packet), Segment 7
+(Listen for packets), Segment 8 (Receive packet) and Segment 9 (Store check-
+point). Every following wake-up cycle will execute: Segment 1 (Boot, sleep,
+LoRa init), Segment 2 (SPIFFS init), Segment 5 (Read message), Segment 6
+(Transmit packet), Segment 7 (Listen for packets), Segment 8 (Receive packet),
+and Segment 9 (Store checkpoint).
+Ecycle is determined by simply adding the relevant segments together, and sim-
+ilarly for EcreateCycle. How much energy is spent per cycle is correlated to the
+message size (for message creation only), how many bytes are to be transmit-
+ted as well as the duration for which the device will have its radio open when
+listening for the acknowledgment. However, this duration is uncertain. When
+the system creates its data length budget, it must do so from the worst possible
+scenario, i.e. listening for precisely the maximum duration before receiving the
+packet. Therefore there is a distinction between the listening period for Ecycle
+and ccycle as they operate from the expected and worst-case period respectively.
+If the acknowledgment is received early in the listening window, energy is clearly
+saved. However, this energy could have been spent transmitting a larger packet
+which would in turn increase overall energy efficiency.
+The number of cycles needed is naturally determined by how much data needs to
+be transmitted compared to how much data is transmitted each cycle, similar to
+simplex-budget. However, packets that are lost in transmission will need to be
+retransmitted, costing additional energy. Given a packet loss ratio, r : 0 ≤r < 1,
+the transmission-factor a can be calculated as
+a =
+∞
+X
+i=0
+ri
+(5.2)
+assuming that the retransmission is equally likely to be lost as the original
+transmission.
+When i = 0, this calculates the number of packets that need
+to be transmitted in the first attempt, which is naturally all packets, why this
+equals to a factor of 1. When i = 1 we assume a factor of r packets need to
+be retransmitted, why this equals r. For each increment of i we consider a new
+attempt at retransmission, which is in theory infinitely many.
+==PAGE:67==
+5.3 Estimation of full message transmission
+57
+By multiplying the number of cycles needed assuming no packet loss by this
+transmission factor, we get the expected number of wake-up cycles needed.
+ncycles =
+m −cfirst
+ccycle
++ 1
+
+· a
+The total energy consumption of duplex-budget can now be combined. How-
+ever, because the budget is determined from the maximum listening duration
+instead of the actual duration, the energy spent for each wake-up cycle cannot
+simply be assumed to be the full size of the capacitor k. Instead, the energy
+spent in a cycle should be determined from the expected listening period, while
+the budget is created from the maximum listening period.
+Eduplex−budget = (ncycles −1) · Ecycle + EcreateCycle
+(5.3)
+When we perform the measurements, the only device communicating with the
+server is the device we are measuring on. Therefore, the response times are
+usually very consistent and close to the best case. By using Equation 5.1 we
+estimate the response packet to be on air for ≈35 milliseconds. Because of the
+implementation of listening for acknowledgments, we furthermore expect around
+10 milliseconds of overhead, and an additional 10 millisecond wait has been
+introduced to the server to avoid the server responding before the transmitting
+device was ready to receive. This adds up to a wait time of 55 milliseconds,
+which is close to the observed 60 milliseconds during testing.
+5.3.4
+Duplex-split
+The first wake-up cycle will execute: Segment 1 (Boot, sleep, LoRa init), Seg-
+ment 2 (SPIFFS init), Segment 5 (Read message), Segment 6 (Transmit packet),
+Segment 7 (Listen for packets), Segment 8 (Receive packet), Segment 3 (Creat-
+ing message), Segment 4 (Store message) and then Segment 6 (Transmit packet)
+until energy depletes. The following wake-up cycles will execute: Segment 1
+(Boot, sleep, LoRa init), Segment 2 (SPIFFS init), Segment 5 (Read message),
+Segment 6 (Transmit packet), Segment 7 (Listen for packets), Segment 8 (Re-
+ceive packet), and then Segment 6 (Transmit packet) until energy depletes.
+We similarly find Ecycle and EcreateCycle. For duplex-budget we would need
+to assume the maximum allowed listen duration for the acknowledgment when
+determining how many bytes could be transmitted in a cycle. However, this
+split version will simply use the remaining energy to transmit as much data as
+possible. Therefore, determining how much data to transmit is limited by the
+==PAGE:68==
+58
+Evaluation
+actual, average listening duration opposed to the maximum. Otherwise ccycle
+and cfirst are determined similarly.
+To account for packet loss, we calculate the transmission factor a similarly to
+duplex-budget. When a > 1, the device will need to wake up for an additional
+number of cycles to retransmit. This number of cycles to wake up also scales with
+a. Therefore, the number of cycles, ncycles is calculated in the same approach
+as before.
+ncycles =
+m −cfirst
+ccycle
++ 1
+
+· a
+The device keeps transmitting until it depletes the capacitor of energy. Thus,
+the total energy consumption is the number of wake-up cycles multiplied by the
+capacitor size:
+Eduplex−split = ncycles · k
+(5.4)
+5.4
+Comparing estimates with measurement
+This section compares estimated energy consumption to actual measurements.
+For each test, data containing the image on Figure 5.11a is transmitted. Ta-
+ble 5.2 displays the measured energy of the full message transmission and com-
+pares it to the estimation created. Each version thus transmits the full message
+of 27254 B (≈27 KB) with a simulated capacitor size providing up to 0.35 J
+for each cycle. The granularity of both split versions is 32 B. For duplex-
+budget the packet loss rate is estimated as 0% as this was the observed value
+while testing. However, in duplex-split a packet loss rate of ≈21% was ob-
+served, and this was used for the estimation calculation. This packet loss rate is
+significantly higher, as the server is not always ready to receive the next packet
+before the previous packet has been handled. It is observed that the packet loss
+rate declines with higher granularities and is naturally dependent on the hard-
+ware used for the server. The maximum listen duration for duplex-budget is
+250 milliseconds, while both duplex versions have an average, actual listening
+duration of 60 milliseconds.
+As expected, the budget versions perform better compared to split. However,
+at this capacitor size, duplex-split surprisingly consumes less energy than
+simplex-split. A key difference between the two versions is that once a packet
+has been transmitted and received by the server in duplex-split, it does not
+need to be retransmitted. However, for simplex-split if a packet is transmitted
+but not yet checkpointed it will need to be transmitted again. No matter how
+==PAGE:69==
+5.4 Comparing estimates with measurement
+59
+(a) The original uncompressed image
+used for transmission in energy
+measurements.
+The image is ap-
+proximately 27 KB and stored in
+an uncompressed bitmap (BMP)
+format.
+(b) A version of the same image in
+Figure 5.11a,
+but in the com-
+pressed JPG format. This image is
+of significantly better quality and
+even takes up less space with ap-
+proximately 19 KB. However, as
+this image is in a compressed for-
+mat, it might not be able to be dis-
+played if data is lost during trans-
+mission, why it is better suited for
+the duplex versions.
+Figure 5.11: The image used for transmission in energy measurements [37].
+For best comparison, the image in Figure 5.11a is used across
+measurements of all four versions. This version is stored in an
+uncompressed format which allows for any packet to be lost with-
+out corrupting the image enough to prevent it from being viewed.
+However, an advantage of the duplex versions is that all pack-
+ets are eventually received allowing for compressed images to be
+safely sent. The compressed version is seen in Figure 5.11b.
+==PAGE:70==
+60
+Evaluation
+Version
+Measured energy
+Estimated energy
+Difference
+simplex-budget
+47.21 J
+45.77 J
+3%
+simplex-split
+127.86 J
+145.36 J
+14%
+duplex-budget
+52.75 J
+55.08 J
+4%
+duplex-split
+116.61 J
+119.70 J
+3%
+Table 5.2: Measured and estimated energy consumption of transmitting the
+same data for each version. The image transmitted is seen in Fig-
+ure 5.11a.
+Figure 5.12: Estimations of total energy, E, required to transmit the same
+message for both split versions compared to the given capacitor
+size k in joules. Both estimations are made based on transmitting
+the image in Figure 5.11a with a granularity of 32 B. Duplex-
+split assumes a listening duration of 60 milliseconds and a packet
+loss rate of 21%.
+many packets have been transmitted so far in a given wake-up cycle, the amount
+of data that must be retransmitted because of this is the same. Because this
+overhead scales with the number of wake-up cycles needed for a full transmis-
+sion, it is more significant for low capacitor sizes. Furthermore, since the flash
+partitions are mounted and unmounted for every checkpoint, the energy cost
+associated with it increases as well. For the given packet loss ratio, when the
+capacitor size increases sufficiently, simplex-split consumes less energy than
+duplex-split as seen in Figure 5.12.
+==PAGE:71==
+5.5 Minimum/maximum capacitor sizes
+61
+5.5
+Minimum/maximum capacitor sizes
+Using the energy estimations, we can determine the minimum size capacitor
+required for the system to function. To function, the capacitor must be large
+enough to create a message and store it in flash and able to transmit at least
+one byte of data for each of the following wake-up cycles.
+As an example, we will calculate the minimum capacitor required for simplex-
+budget. The segments needed to create the message are Segment 1 (Boot,
+sleep, LoRa init), Segment 2 (SPIFFS init), Segment 3 (Creating message) and
+Segment 4 (Store message). By adding the energy of each of these segments you
+get the energy required to create the message, which in this case is:
+5.768 · 10−6m + 0.0850
+where m is the message size.
+Using the energy estimation for each cycle calculated earlier, Ecycle, we can
+determine the energy needed to transmit a single byte in the following wake-up
+cycles. This is found to be 0.1150 J. For a given message size, the largest of
+these determines the minimum energy needed for each wake-up cycle, which is
+used to determine the capacitor size needed. Figure 5.13 shows these two energy
+requirements relative to the message size.
+For the two simplex versions, a similar maximum needed capacitor can be
+calculated.
+Because only one packet is sent for each wake-up cycle, this is
+simply the capacitor size required to send a full packet in all cycles. Since the
+first wake-up cycle where the message is created will always use more energy
+outside of transmitting actual data, if a full packet is transmitted here, it will
+also be able to do so in the following cycles. By adding the energy required for
+the first wake-up cycle in simplex-budget to transmit a full packet of 249 B,
+we get the energy this cycle would require, i.e. the maximum amount of energy
+needed for the capacitor to hold, which is:
+5.768 · 10−6m + 0.4017.
+Table 5.3 shows the minimum and maximum estimations of each version based
+on the same parameters as in section 5.4. That is a message of 27254 B, 32
+B granularity, and a 250 milliseconds maximum listen duration. Since there is
+no limit on the number of packets that can be transmitted during one wake-up
+cycle for both split versions, the maximum capacitor size is calculated as the
+energy required to transmit the full message in the first cycle. For duplex-
+split there can of course be dropped packets, but as these are retransmitted
+during a different wake-up cycle, they are not relevant to this.
+==PAGE:72==
+62
+Evaluation
+0
+10,000
+20,000
+30,000
+40,000
+50,000
+60,000
+70,000
+0.2
+0.4
+Message size (Bytes)
+Energy in capacitor (Joules)
+Energy to create message
+Energy to transmit one byte
+Figure 5.13: Minimum energy needed from the capacitor for simplex-budget
+to function at different message sizes. For the system to function
+it must both have enough energy to create the message and to
+transmit at least one byte of data in the following wake-up cycles.
+The two estimations intersect at a message size of 5195 B.
+5.6
+Version comparisons
+Developing the four versions of the system allows us to more accurately compare
+the energy cost associated with them.
+It is no surprise that the split versions consume more energy compared to
+budget. However, they can better utilize larger capacitors as they can transmit
+several packets each wake-up cycle. Figure 5.14 shows a comparison between the
+total energy, E, required to transmit the image on Figure 5.11a compared to the
+capacitor size k. With 32 B granularity at all capacitor sizes, the budget version
+consumes significantly more energy. However, split can utilize larger capacitors
+significantly better where budget quickly flattens when the maximum size of
+the LoRa payload is reached. When the granularity is set to a full 249 B payload,
+the split version even outperforms budget.
+Figure 5.15 shows the estimated energy required to transmit the same message
+for all four versions given the same settings as in section 5.4. There is a sig-
+nificant increase in energy consumption between budget and split. However,
+the difference between the budget versions is quite small as the capacitors get
+larger, which is because the packet loss rate is assumed to be 0% for duplex-
+==PAGE:73==
+5.6 Version comparisons
+63
+(a) The split is done with a granularity
+of 32 B.
+(b) The split is done with a granularity
+of 249 B.
+Figure 5.14: Energy required to fully transmit a message of 27254 B at differ-
+ent capacitor sizes.
+Figure 5.15: Estimated energy in joules required to send a 27254 B message
+compared to the capacitor size for all four versions. All settings,
+except for capacitor sizes, are similar to that of section 5.4.
+==PAGE:74==
+64
+Evaluation
+Version
+Minimum energy
+in capacitor
+Maximum energy
+in capacitor needed
+simplex-budget
+0.2423 J
+0.5590 J
+simplex-split
+0.2780 J
+58.42 J
+duplex-budget
+0.2423 J
+0.6246 J
+duplex-split
+0.3057 J
+56.91 J
+Table 5.3: Minimum/maximum energy needed in the capacitor for each solu-
+tion version to work based on the same parameters as in section 5.4.
+Figure 5.16: Estimated energy in joules required to send a 27254 B message
+compared to the packet loss rate. The capacitor is assumed to
+provide 0.5 J. The remaining settings are similar to those in sec-
+tion 5.4. Since simplex-budget does not retransmit, the packet
+loss rate does not affect its energy consumption.
+budget. Figure 5.16 shows how the energy cost increases with the packet loss
+rate. As expected, a higher packet loss rate makes the duplex version signifi-
+cantly more energy expensive.
+On Figure 5.15 it is seen that simplex-split outperforms duplex-split for
+higher capacitor sizes.
+However, this is considering a 21% packet loss ratio.
+Figure 5.17 compares the energy required for these two versions considering dif-
+ferent packet loss ratios. The intersection occurs at r = 10.35%. The estimates
+are based on a capacitor providing 1 J of energy for each wake-up cycle. For
+this example, duplex-split outperforms simplex-split at any capacitor level
+given a sufficiently low packet loss rate. This highlights the before-mentioned
+issues with the implementation of simplex-split.
+Until now, all estimates for duplex-split have been based on a packet loss
+==PAGE:75==
+5.6 Version comparisons
+65
+Figure 5.17: Estimated energy in joules required to send a 27254 B message
+compared to the packet loss rate. The capacitor is assumed to
+provide 1 J. The remaining settings are similar to those in sec-
+tion 5.4.
+rate of 21%, but a 0% packet loss rate has been estimated for duplex-budget.
+This was due to what was observed when testing. To provide a fair comparison
+between the two duplex versions, Figure 5.18 shows how they relate given the
+same packet loss rate. As expected, the split version is estimated to always use
+more energy. However, these estimations assume a perfectly accurate estimation
+of how many bytes to transmit for a given energy reading, which is not possible
+for a real-world application. For this, a more conservative estimate will need to
+be made, thereby utilizing less of the available energy. As this is not the case
+for the split versions, it will always fully consume the available energy during
+any wake-up cycle that does not finish the message, leading to better energy
+efficiency.
+As the message size increases, the total energy required likewise increases for
+all four versions of the solution. Figure 5.19 compares the required energy to
+the size of the message to transmit. The largest difference in energy seems to
+be between budget and split, while the choice between simplex or duplex
+is not as influential.
+==PAGE:76==
+66
+Evaluation
+Figure 5.18: Estimated energy in joules required to send a 27254 B message
+compared to the packet loss rate. The capacitor is assumed to
+provide 1 J. The remaining settings are similar to those in sec-
+tion 5.4.
+Figure 5.19: Estimated energy in joules required to send messages of different
+sizes. The capacitor is assumed to provide 1 J. The remaining
+settings are similar to those in section 5.4.
+==PAGE:77==
+5.7 Estimating throughput
+67
+5.7
+Estimating throughput
+We will use the energy estimates to determine throughput as a unit of bytes
+transmitted per hour. The size of the capacitor decides how many bytes can be
+transmitted per wake-up cycle. The power generation determines how often a
+wake-up cycle can occur.
+With the energy model created for each version, we can simply estimate the
+throughput as a function of the existing variables related to their energy estimate
+as well as the energy harvest rate. By dividing the message size by the total
+energy spent, we get the bytes per joule required for complete transmission.
+The final parameter to include in this calculation is the power generation rate,
+which can be expressed in watts (joule per second). By multiplying the bytes per
+joule with watts, we thus get a throughput measured in bytes/second. In cases
+where the power source is inconsistent, say solar power throughout 24 hours,
+the throughput will be correspondingly inconsistent, i.e. high throughput with
+high power generation and conversely. If throughput is to be measured across
+an entire day, the power inputted must be the average power generation during
+that day.
+bytes
+joule · joule
+second = bytes
+second
+Let Etotal be the total energy consumption of transmitting m bytes and h be
+the harvest rate in watts. The throughput T is then
+T =
+m
+Etotal
+· h
+(5.5)
+This approach applies to all four versions.
+==PAGE:78==
+68
+Evaluation
+==PAGE:79==
+Chapter 6
+Conclusion
+This chapter concludes the thesis with a summary of the project and a highlight
+of the primary contributions to the field of intermittent computing using low
+power wide area networks. This is finished by a brief discussion on where work
+on the project could be continued given more time.
+6.1
+Summary
+This thesis has succeeded in creating novel approaches to two problems related to
+intermittent computing used for low power wide area networks: Namely the issue
+of accurately determining how much data can be safely transmitted from a given
+energy buffer and performing energy-efficient, reliable duplex communication.
+To avoid the need to budget the data that can be safely transmitted, an approach
+has been developed which splits data into smaller packets that are sent in rapid
+succession and allows the device to be powered off at any time during these
+transmissions. This approach is combined with reliable duplex communication
+by beginning each wake-up cycle of the intermittently powered device with an
+acknowledgment from the server, from which the device determines the data
+that needs to be (re)transmitted.
+==PAGE:80==
+70
+Conclusion
+Four versions of this system have been implemented, each either budgeting or
+splitting the data to transmit using either simplex or duplex communication.
+Having all four versions implemented allows for a fair comparison of the energy
+consumption required by these approaches under similar conditions. When test-
+ing, the energy cost associated with the splitting approach at low packet size
+granularities is found to be relatively high compared to making an energy bud-
+get. However, this distance is lessened as the granularity increases. The energy
+cost associated with duplex communication is found to be very low when the
+proportion of lost packets is small.
+For each version, a model of its energy consumption has been created, which
+accounts for a given message size, granularity, etc. These models are useful to
+provide an easy estimate of each version’s energy consumption given a specific
+use case scenario, allowing a better-informed reason for deciding an approach
+for real applications. Additionally, a similar approach can be used to estimate
+the minimum/maximum capacitor size needed for a given application. Finally,
+it is shown how these estimates can be used to determine the throughput of
+each version from a given power generation rate.
+6.2
+Future work
+While this thesis serves as an exploration, some aspects could be improved by
+further work.
+One aspect is how simplex-split checkpoints with a double
+buffer. Since the approach used for the implementation in this project would
+not properly flush the write buffer to flash when instructed to do so, the flash
+partition needs to be mounted and unmounted between writes, and a 50 mil-
+lisecond delay was added between writing to the first and second file.
+This
+introduces a significant amount of energy overhead for each write compared to
+the energy consumed by the flash write itself. As well as costing more energy
+per write, it prevents checkpointing from happening more frequently which, in
+turn, results in less data being checkpointed, thereby needing retransmission.
+This issue was investigated during the project. However, as it was caused by a
+core component of the framework it would be too time consuming to investigate
+in depth and fix considering the scope of this project.
+Another aspect that would be interesting to explore would be LoRa communi-
+cation where the intermittently powered device acts as the receiver as opposed
+to the transmitter. This would be interesting for the transmission of large files
+such as firmware updates. The protocol for this would need to work in cases
+where the device would not necessarily be able to receive full-length packets.
+As the server is not able to measure the remaining energy of the capacitor, a
+==PAGE:81==
+6.2 Future work
+71
+special solution must be implemented to ensure that the intermittently powered
+device has enough energy available to receive data from the server and to store
+it in non-volatile memory. When the full message is received, the device can
+then process it. The data received for each wake-up cycle should be maximized
+to optimize energy efficiency. Inspired by the approaches explored in this thesis,
+a method could be for the device to transmit a request when it wakes up con-
+taining the number of bytes that it can at most safely receive and store given
+how much energy it currently holds. Another approach could be for the server
+to transmit data in small packets that can be individually stored by the device.
+==PAGE:82==
+72
+Conclusion
+==PAGE:83==
+Bibliography
+[1] Rafeeq Ahmad, Mohd Asim Asim, Safwan Zubair Khan, and Bharat Singh.
+Green iot—issues and challenges. In Proceedings of 2nd international con-
+ference on advanced computing and software engineering (ICACSE), 2019.
+[2] Brandon Lucia, Vignesh Balaji, Alexei Colin, Kiwan Maeng, and Emily
+Ruppel. Intermittent computing: Challenges and opportunities. 2nd Sum-
+mit on Advances in Programming Languages (SNAPL 2017), 2017.
+[3] Battery
+University.
+Bu-209:
+How
+does
+a
+supercapacitor
+work?
+-
+battery
+university.
+https://batteryuniversity.com/article/
+bu-209-how-does-a-supercapacitor-work, 2021.
+Accessed:
+January
+2023.
+[4] Alan Millner. Modeling lithium ion battery degradation in electric vehicles.
+In 2010 IEEE Conference on Innovative Technologies for an Efficient and
+Reliable Electricity Supply, pages 349–356. IEEE, 2010.
+[5] Milesight. Lorawan sensor battery — long lifespan sensor battery — mile-
+sight. https://www.milesight-iot.com/blog/lorawan-sensor-battery/,
+2022. Accessed: January 2023.
+[6] Kaivan Karimi and Gary Atkinson. What the internet of things (iot) needs
+to become a reality. White Paper, FreeScale and ARM, pages 1–16, 2013.
+[7] Wael Ayoub, Abed Ellatif Samhat, Fabienne Nouvel, Mohamad Mroue,
+and Jean-Christophe Pr´evotet.
+Internet of mobile things: Overview of
+lorawan, dash7, and nb-iot in lpwans standards and supported mobility.
+IEEE Communications Surveys & Tutorials, 21(2):1561–1581, 2018.
+==PAGE:84==
+74
+BIBLIOGRAPHY
+[8] Mads Lauridsen, Benny Vejlgaard, Istvan Z Kovacs, Huan Nguyen, and
+Preben Mogensen. Interference measurements in the european 868 mhz ism
+band with focus on lora and sigfox. In 2017 IEEE Wireless Communications
+and Networking Conference (WCNC), pages 1–6. IEEE, 2017.
+[9] Lora
+and
+lorawan:
+Technical
+overview
+—
+developer
+por-
+tal.
+https://lora-developers.semtech.com/documentation/
+tech-papers-and-guides/lora-and-lorawan/.
+Accessed:
+December
+2022.
+[10] Lukas Krupka, Lukas Vojtech, and Marek Neruda.
+The issue of lpwan
+technology coexistence in iot environment. In 2016 17th international con-
+ference on mechatronics-Mechatronika (ME), pages 1–8. IEEE, 2016.
+[11] Sumanth Umesh and Sparsh Mittal. A survey of techniques for intermittent
+computing. Journal of Systems Architecture, 112:101859, 2021.
+[12] Hrishikesh Jayakumar, Arnab Raha, and Vijay Raghunathan.
+Quickre-
+call: A low overhead hw/sw approach for enabling computations across
+power cycles in transiently powered computers. In 2014 27th International
+Conference on VLSI Design and 2014 13th International Conference on
+Embedded Systems, pages 330–335. IEEE, 2014.
+[13] Josiah Hester, Kevin Storer, Jacob Sorber, and Lanny Sitanayah. Towards
+a language and runtime for intermittently powered devices. In Workshop
+on Hilariously Low-Power Computing, 2016.
+[14] Josiah Hester, Nicole Tobias, Amir Rahmati, Lanny Sitanayah, Daniel Hol-
+comb, Kevin Fu, Wayne P Burleson, and Jacob Sorber. Persistent clocks
+for batteryless sensing devices. ACM Transactions on Embedded Computing
+Systems (TECS), 15(4):1–28, 2016.
+[15] Alo¨ys Augustin, Jiazi Yi, Thomas Clausen, and William Mark Townsley. A
+study of lora: Long range & low power networks for the internet of things.
+Sensors, 16(9):1466, 2016.
+[16] Jaco M Marais, Reza Malekian, and Adnan M Abu-Mahfouz. Lora and
+lorawan testbeds: A review. 2017 Ieee Africon, pages 1496–1501, 2017.
+[17] Hope RF.
+Rf96/97/98 - 137 mhz to 1020 mhz low power long range
+transceiver. https://datasheetspdf.com/pdf-file/748002/HOPERF/RF96/
+1, 2012. Accessed: December 2022.
+[18] Congduc Pham and Muhammad Ehsan. Dense deployment of lora net-
+works: Expectations and limits of channel activity detection and capture
+effect for radio channel access. Sensors, 21(3):825, 2021.
+==PAGE:85==
+BIBLIOGRAPHY
+75
+[19] Esp-idf programming guide - esp32 - — esp-idf programming guide lat-
+est documentation. https://docs.espressif.com/projects/esp-idf/en/
+latest/esp32/. Accessed: December 2022.
+[20] Real Time Engineers Ltd.
+Rtos - free professionally developed and ro-
+bust real time operating system for small embedded systems development.
+https://www.freertos.org/RTOS.html, 2022. Accessed: January 2023.
+[21] Real Time Engineers Ltd. Rtos idle task and the freertos idle task hook
+function.
+https://www.freertos.org/RTOS-idle-task.html, 2022.
+Ac-
+cessed: January 2023.
+[22] Espressif
+Systems.
+Espressif
+idf
+-
+visual
+studio
+marketplace.
+https://marketplace.visualstudio.com/items?itemName=espressif.
+esp-idf-extension, 2022. Accessed: January 2023.
+[23] Analog discovery 2 - digilent reference. https://digilent.com/reference/
+test-and-measurement/analog-discovery-2/start. Accessed: December
+2022.
+[24] Digilent.
+Waveforms.
+https://digilent.com/shop/software/
+digilent-waveforms/, 2022.
+Accessed: December 2022. Version: 3.18.1
+64-bit Qt5.12.9 Windows 10 (10.0) Qt5.12.9.
+[25] Jasper
+De
+Winkel,
+Haozhe
+Tang,
+and
+Przemys law
+Pawe lczak.
+Intermittently-powered bluetooth that works.
+In Proceedings of the
+20th Annual International Conference on Mobile Systems, Applications
+and Services, pages 287–301, 2022.
+[26] Matti Siekkinen, Markus Hiienkari, Jukka K Nurminen, and Johanna
+Nieminen. How low energy is bluetooth low energy? comparative mea-
+surements with zigbee/802.15. 4. In 2012 IEEE wireless communications
+and networking conference workshops (WCNCW), pages 232–237. IEEE,
+2012.
+[27] Ferran Adelantado, Xavier Vilajosana, Pere Tuset-Peiro, Borja Martinez,
+Joan Melia-Segui, and Thomas Watteyne.
+Understanding the limits of
+lorawan. IEEE Communications magazine, 55(9):34–40, 2017.
+[28] 3
+common
+myths
+about
+bluetooth
+technology
+—
+blue-
+tooth®
+technology
+website.
+https://www.bluetooth.com/blog/
+3-common-mythsabout-bluetooth/. Accessed: December 2022.
+[29] Jasper De Winkel,
+Vito Kortbeek,
+Josiah Hester,
+and Przemys law
+Pawe lczak. Battery-free game boy. Proceedings of the ACM on Interac-
+tive, Mobile, Wearable and Ubiquitous Technologies, 4(3):1–34, 2020.
+==PAGE:86==
+76
+BIBLIOGRAPHY
+[30] Saad Ahmed, Naveed Anwar Bhatti, Muhammad Hamad Alizai, Ju-
+naid Haroon Siddiqui, and Luca Mottola. Efficient intermittent comput-
+ing with differential checkpointing. In Proceedings of the 20th ACM SIG-
+PLAN/SIGBED International Conference on Languages, Compilers, and
+Tools for Embedded Systems, pages 70–81, 2019.
+[31] Naveed Anwar Bhatti and Luca Mottola. Harvos: Efficient code instrumen-
+tation for transiently-powered embedded sensing. In 2017 16th ACM/IEEE
+International Conference on Information Processing in Sensor Networks
+(IPSN), pages 209–220. IEEE, 2017.
+[32] Harsh Desai, Matteo Nardello, Davide Brunelli, and Brandon Lucia. Ca-
+maroptera:
+A long-range image sensor with local inference for remote
+sensing applications. ACM Transactions on Embedded Computing Systems
+(TECS), 2022.
+[33] Tien-Hsu Lee, Hsiu-Hua Hsu, and Pao-Chi Chang. Restart marker regula-
+tion technique for progressive jpeg image coding in mobile communications.
+IEEE communications letters, 4(12):411–413, 2000.
+[34] Bruno Basseto.
+esp32-lora-library.
+https://github.com/Inteform/
+esp32-lora-library, 2022.
+[35] Troy D. Hanson and Arthur O’Dwyer.
+uthash.
+https://github.com/
+troydhanson/uthash, 2022.
+[36] Semtech.
+Lora modem calculator tool.
+https://www.semtech.com/,
+2013.
+Accessed:
+December
+2022.
+Version:
+1.1.
+Direct
+down-
+load link: https://semtech.my.salesforce.com/sfc/p/E0000000JelG/a/
+2R000000HUhK/6T9Vdb3 ldnElA8drIbPYjs1wBbhlWUXej8ZMXtZXOM.
+[37] Ralphs Fotos. Squirrel rodent mammal - free photo on pixabay. https:
+//pixabay.com/photos/squirrel-rodent-mammal-wildlife-7678830/,
+2022. Accessed: January 2023.
+==PAGE:87==
+Appendix A
+Full energy estimations of
+each version
+A.1
+Simplex-budget
+Esimplex−budget(m, k) ≈
+ 1.005120775m −887.8662217k + 107.6595756
+887.3813739k −101.0799525
++ 1
+
+k
+Where m is the message size in bytes and k is the capacitor size in joules.
+A.2
+Simplex-split
+Esimplex−split(m, g, k) ≈
+1000 ·  g2 −1.165973775 · 1010mg −7.348398700 · 1010g −3.103182048 · 1011m
+k
+(−1016k + 1.810888740 · 1015 + 6.153857713 · 109m + 3.740385851 · 1012g) g
+Where m is the message size in bytes, g is the granularity with which data is
+transmitted in bytes and k is the capacitor size in joules.
+==PAGE:88==
+78
+Full energy estimations of each version
+A.3
+Duplex-budget
+Eduplex−budget(m, p, q, k, r) ≈
+  1.005120775m −887.8662217k + 113.5387900 + 0.2098784342p
+887.3813739k −106.9559564 −0.2097638233p
++ 1
+
+·
+ ∞
+X
+i=0
+ri
+!
+−1
+!
+·  2.0 · 10−11 + k −0.0002363851997p + 0.000236385199776298q
++ 6.4 · 10−11 + k −0.0002363851998p + 1.86 · 10−16m + 0.000236385199776298q
+Where m is the message size in bytes, p is the worst-case listening duration for
+acknowledgment, q is the average listening duration for acknowledgment, k is
+the capacitor size in joules and r is the fraction of packets that are lost and
+needs to be retransmitted.
+A.4
+Duplex-split
+Eduplex−split(m, p, g, k, r) ≈
+ 1.132063311 · 1013mg + 7.348398700 · 1013g + 3.036620147 · 1014m
+· (P∞
+i=0 ri)k
+(1016k −1.102065279 · 1015 −6.153857713 · 109m −2.363851998 · 1012p) g
+Where m is the message size in bytes, p is the average listening duration for
+acknowledgment, g is the granularity with which data is transmitted in bytes,
+k is the capacitor size in joules and r is the fraction of packets that are lost and
+needs to be retransmitted.

@@ -1,0 +1,5026 @@
+==PAGE:1==
+An Efficient p-Multigrid Method for High-Order Spectral
+Incompressible Free surface Navier-Stokes solver
+Author
+Chen Dong s212356
+Master’s student, DTU Construct
+Supervised by
+Allan Peter Engsig-Karup
+Associate Professor, DTU Compute
+Harry B. Bingham
+Professor, DTU Construct
+Anders Dalsgaard Melander
+Ph.D. student, DTU Compute
+A thesis presented for partial fulfillment of the degree of
+Master of Science in Mechanical Engineering
+DTU Construct
+Department of Civil and Mechanical Engineering
+DTU Compute
+Department of Applied Mathematics and Computer Science
+August 2023
+==PAGE:2==
+Abstract
+A two-dimensional high-order free surface Navier-Stokes solver based on the spec-
+tral method is developed with the geometric flexibility to simulate wave flow with
+arbitrary seabed geometries given the first and second derivative of still water
+depth.
+This solver supports explicit low storage Runge-Kutta fourth-order five-
+stage method and implicit first-order backward Euler method as a time integration
+method. The test case ’Luth experiment (1994) [8]’ validates the accuracy of the im-
+plemented model. The comparison with wave boundary theory and the computed
+wave boundary indicates its accuracy in simulating the boundary layer, which is
+the significance of using more expansive Navier-Stokes solvers instead of potential
+solvers. The linear dispersion analysis shows that by the high-order spectral method,
+the required number of grids per wavelength is much less than in the traditional
+finite difference model. The pressure Poisson equation derived from the pressure-
+velocity coupling process is the most expensive step in each time step. Therefore,
+a p-multigrid method is developed to accelerate the computation of the dense, non-
+symmetric, non-positive definite matrix that is derived from the pressure Poisson
+equation. The matrix-free Gauss-Seidel method is adopted as smoother during each
+relaxation sweep to significantly save the storage.
+While the point Gauss-Seidel
+method converges slowly because of the bad eigenspectra property of iterative ma-
+trix discretized by the spectral method so that its smoothing property is not sat-
+isfactory, an efficient block Gauss-Seidel smoother is developed that has a superior
+smoothing effect than point Gauss-Seidel smoother and speedup the convergence
+remarkably. Among the multigrid structure, F-cycle and W-cycle archive optimal
+scalability O(N 2) in both vertical and horizontal directions. V-cycle multigrid has
+worse scaling except for grid refinement in the horizontal direction by using point
+Gauss-Seidel as smoother which has much better O(Nlog(N)) scalability. The full
+multigrid method is implemented to speed up the convergence by generating an
+accurate initial guess efficiently. Since the matrix operator in each grid level is dif-
+ferent, pure multigrid might not be robust in some cases. Therefore, the developed
+p-multigrid is combined with the Krylov subspace method to make it more robust.
+Results show that full multigrid preconditioned GMRES is the most robust solver
+among preconditioned conjugate gradient, bi-conjugate gradient stabilized method,
+and GMRES.
+1
+==PAGE:3==
+Acknowledgements
+I would like to thank Allan Peter Engsig-Karup for supporting me with the endless
+idea in numerical methods and guiding me out when things are stuck for a long time,
+and Harry B.Bingham for supporting the endless idea of fluid mechanics, so that
+I can complete the project with less difficulty. And I would like to thank Anders
+Dalsgaard Melander as well, for his patience in helping me debug the code and solve
+my problems with numerical methods. The most important thing that I get inspired
+by Allan, Harry, and Anders, is the methodology to develop advanced things, which
+would be of lifelong benefit to me.
+2
+==PAGE:4==
+Contents
+1
+Introduction
+1
+2
+Mathematical Model of Free surface Flow
+4
+2.1
+Free surface Navier-Stokes equation . . . . . . . . . . . . . . . . . . .
+4
+3
+Unsteady Incompressible Free Surface Navier-Stokes Equation
+Solver
+6
+3.1
+σ coordinates . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+3.2
+Explicit time integration . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+3.2.1
+Pressure Poisson equation . . . . . . . . . . . . . . . . . . . .
+9
+3.2.2
+Projection method
+. . . . . . . . . . . . . . . . . . . . . . . .
+11
+3.2.3
+Solution procedure . . . . . . . . . . . . . . . . . . . . . . . .
+12
+3.3
+Implicit time integration . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+3.3.1
+Solving nonlinear system of equations . . . . . . . . . . . . . .
+14
+4
+High-Order Spectral Method for Solving Differential Equation
+16
+4.1
+Fourier spectral methods . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+4.2
+Polynomial spectral method . . . . . . . . . . . . . . . . . . . . . . .
+18
+4.3
+Spectral derivative
+. . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+4.3.1
+Fast Fourier derivative . . . . . . . . . . . . . . . . . . . . . .
+22
+4.3.2
+Fast Chebyshev derivative . . . . . . . . . . . . . . . . . . . .
+22
+4.4
+Spectral integration and interpolation . . . . . . . . . . . . . . . . . .
+24
+4.5
+Filtering and de-aliasing . . . . . . . . . . . . . . . . . . . . . . . . .
+24
+4.5.1
+Orszag’s 3/2 de-aliasing technique . . . . . . . . . . . . . . . .
+25
+4.5.2
+Exponential filtering
+. . . . . . . . . . . . . . . . . . . . . . .
+25
+4.6
+Extension to higher dimension . . . . . . . . . . . . . . . . . . . . . .
+26
+4.7
+Mapping from standard domain to arbitrary domain . . . . . . . . . .
+27
+4.8
+Grid compression near boundary
+. . . . . . . . . . . . . . . . . . . .
+27
+5
+Spectral Iterative Solver for Solving Pressure Poisson’s Equation
+29
+5.1
+Stationary iterative method
+. . . . . . . . . . . . . . . . . . . . . . .
+31
+5.1.1
+Jacobi and Gauss-Seidel iterative method . . . . . . . . . . . .
+31
+5.1.2
+Eigenvalue analysis and error analysis of Gauss-Seidel method
+31
+5.1.3
+The block Gauss-Seidel method . . . . . . . . . . . . . . . . .
+34
+5.2
+Krylov subspace iterative method . . . . . . . . . . . . . . . . . . . .
+36
+5.2.1
+Conjugate gradient method
+. . . . . . . . . . . . . . . . . . .
+37
+i
+==PAGE:5==
+CONTENTS
+ii
+5.2.2
+Biconjugate gradient stabilized method . . . . . . . . . . . . .
+40
+5.2.3
+General Minimal RESidual method (GMRES) . . . . . . . . .
+41
+5.3
+Discussion of Krylov subspace method
+. . . . . . . . . . . . . . . . .
+46
+6
+Spectral Multigrid Method
+48
+6.1
+Spectral multigrid vs classic multigrid . . . . . . . . . . . . . . . . . .
+48
+6.2
+Multigrid structure . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+49
+6.2.1
+V-cycle Multigrid algorithm . . . . . . . . . . . . . . . . . . .
+53
+6.2.2
+F-cycle Multigrid algorithm . . . . . . . . . . . . . . . . . . .
+55
+6.2.3
+W-cycle Multigrid algorithm . . . . . . . . . . . . . . . . . . .
+58
+6.2.4
+Discussions of multigrid structure . . . . . . . . . . . . . . . .
+60
+6.3
+Acceleration by the full multigrid algorithm (FMG) . . . . . . . . . .
+61
+6.4
+Geometrical validation of the multigrid method
+. . . . . . . . . . . .
+64
+6.5
+Effect of hydrodynamics on multigrid solver
+. . . . . . . . . . . . . .
+65
+6.6
+p-Multigrid preconditioned Krylov subspace method . . . . . . . . . .
+66
+6.6.1
+Multigrid preconditioned conjugate gradient method
+. . . . .
+66
+6.6.2
+Multigrid preconditioned bi-conjugate gradient stabilized method 68
+6.6.3
+Multigrid preconditioned GMRES method . . . . . . . . . . .
+69
+6.6.4
+Discussion of different multigrid preconditioned Krylov sub-
+space method . . . . . . . . . . . . . . . . . . . . . . . . . . .
+71
+7
+Validation of the Laminar Free Surface Flow Model
+73
+7.1
+Small-amplitude wave problem . . . . . . . . . . . . . . . . . . . . . .
+73
+7.2
+Finite amplitude nonlinear wave . . . . . . . . . . . . . . . . . . . . .
+74
+7.3
+Linear dispersion analysis
+. . . . . . . . . . . . . . . . . . . . . . . .
+76
+7.4
+Laminar wave boundary layer . . . . . . . . . . . . . . . . . . . . . .
+77
+7.5
+Numerical wave tank . . . . . . . . . . . . . . . . . . . . . . . . . . .
+80
+7.6
+2D wave over a submerged bar . . . . . . . . . . . . . . . . . . . . . .
+82
+8
+Conclusions and Future Works
+84
+8.1
+Conclusion . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+84
+8.2
+Future work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+84
+==PAGE:6==
+Chapter 1
+Introduction
+Free surface wave dynamics is the field of study that describes the behavior of
+the free surface flow. The study field can be applied to earth science, naval archi-
+tecture, ocean engineering, and even the movie industry, where the special effect
+of water waves is the most challenging thing to overcome. It is indispensable for
+the marine industry to perform numerical modeling of free surface flow during the
+research and development process of a new marine architecture since the numeri-
+cal experiment is the cheapest and safest way to yield data with acceptable accuracy.
+The difficulty in modeling the wave flow in marine phenomena is its large scale
+of the physical domain and the need for long time integration, especially for the
+study of coastal processes that govern the long-term period formation mechanisms
+of coastal dunes, which is important in constructing naval and offshore structures.
+There are an abundant amount of numerical models that describe the free surface
+wave dynamics. The shallow water wave model models the three-dimensional flow
+under the two-dimensional computational domain by integrating the variables along
+the vertical direction, and it is a hydrostatic model. Although it has good simplic-
+ity and computational efficiency, its application and robustness are limited within
+shallow water wave cases and the flow, where details and other physical phenom-
+ena such as reflection and diffraction are not important. Another alternative to the
+hydrostatic wave model is the Boussinesq equation, which keeps the computational
+efficiency of the shallow water wave model at the cost of implementation complexity.
+The reasons that make it a popular water wave model compared with shallow-water
+equation are its capability of capturing most of the important flow field detail like
+interaction with structure, reflection, and diffraction, which shallow-water equation
+fails to describe and model a wide range of wave scenarios. While the essence of the
+hydro-static of the Boussinesq model still limits its application for the case where the
+change of vertical direction needs to be investigated. The fully nonlinear potential
+flow model is a non-hydrostatic model that is aimed at describing the wave model
+where the study is interested in the change in flow field characteristics along the ver-
+tical direction. It captures the vertical change by the cost of doing three-dimensional
+computation, which is suitable for the widespread scientific and engineering appli-
+1
+==PAGE:7==
+2
+cation.
+However, none of the models introduced above can describe the boundary layer.
+The boundary layer plays an important role in investigating phenomena such as
+sediment transport, friction force, drag force, and wave load. What is more, when
+the turbulence effect needs to be considered, only the mathematical model that
+incorporates the boundary layer effect is capable of simulating turbulence.
+The
+Navier-Stokes equation model is one popular solution to modeling boundary layers.
+For the free surface flow, there are three approaches to modeling the surface effect:
+• Interface fitting;
+• Interface tracking; and
+• Interface Capturing
+All of these methods are solving another transport equation to describe the position
+of the free surface. While the latter two method methods are more robust by simu-
+lating the fluid flow on both sides of the interface, it introduces extra computational
+cost. Since in most of the application applications in the ocean and offshore engi-
+neering, the benefit of simulating the breaking wave effect does not outweigh the
+computational performance, the current study only focuses on the interface fitting
+method.
+Li et. al. [3] implemented the three-dimensional free surface wave model by us-
+ing the projection method and the solver was accelerated by the multigrid method.
+However, this model is based on a low-order finite difference method, the truncation
+error of which could have non-negligible order of magnitude that could result in
+large dissipation and dispersion error when long-time integration is required. This
+is why the high-order method shows its advantage. Max et. al. [1] developed a
+two-dimensional spectral method version of [3]. However, in the real Navier-Stokes
+scheme, because the viscosity term is getting prohibitively stiff if the requirement
+of the grid resolution in the boundary layer is high, explicit time integration of [3]
+and [1] will be impractical. Besides, even for the non-stiff whereas the simulation
+case is a large scale which is the often case in marine engineering, classical high-
+order Runge-Kutta time integration of [1] would be memory-hungry. Therefore, in
+the current study, low-storage Runge-Kutta fourth-order five-stage time integration
+[19] is implemented for explicit time integration, and the backward-Euler method is
+implemented for implicit time integration.
+So far, although abundant models have been developed to accelerate the simu-
+lation of potential wave models such as Allen et. al. [9], no existing literature men-
+tioned the multigrid method for the spectral Navier-Stokes solver in hydrodynamics
+application, which has the matrix of dense non-symmetric, non-positive definite
+equations. Therefore, in addition to the spectral Navier-Stokes model, to speed up
+the computation performance of the dense, non-symmetric, and non-positive definite
+==PAGE:8==
+3
+matrics, which is resulted from the discretization pressure Poisson equation of im-
+plemented spectral free surface Navier-Stokes solver, an efficient p-multigrid method
+based on matrix-free strategy is developed and is combined with Krylov subspace
+method to accelerate the computation significantly and lower the required storage
+from O((NxNz)2) to O(NxNz) and it achieves the optimal scalability of O(N 2) in
+both horizontal and vertical direction. The smoother of the p-multigrid is based on
+Gauss-Seidel iteration. A block Gauss-Seidel method is developed to improve the
+smoothing efficiency.
+==PAGE:9==
+Chapter 2
+Mathematical Model of Free
+surface Flow
+The most ubiquitous phenomenon in fluid flow that occurs in the natural en-
+vironment is the free surface wave and turbulent flow.
+The investigation of the
+boundary layer is important in the sediment transport process at the river and sea
+bed and especially near the surf zone where the water wave is significantly influ-
+enced by the rapidly changing seabed geometry. Although the bulk region beneath
+the nonbreaking waves could be justifiably described by the potential flow model, it
+fails to resolve the characteristics of the wave boundary layer. Therefore, in appli-
+cation where the boundary layer detail is of interesting to study, the Navier-Stokes
+model should be applied.
+2.1
+Free surface Navier-Stokes equation
+For almost all free surface flow, the flow can be considered as incompressible
+flow. The free surface treatment of the current study is the surface fitting, in which
+the surface is explicitly tracked and the position of the free surface is governed by
+a transport equation. The limitation of this surface treatment is that it fails to
+describe the wave overturning. However, the assumption of assuming wave over-
+turning free is reasonable for describing the flow which is not in the sloshing region.
+Besides, the free surface model that is capable of describing the wave overtuning
+such as volume of fluid and level-set method will either increases the computational
+cost of the model since the fluid in the two sides of the free surface interface should
+be computed and the mesh should be in high resolution at the interface region to
+avoid numerical dissipation, or makes the implementation much more difficult. Be-
+sides, the discontinuity at the interface poses another difficulty under the framework
+of spectral method. Therefore, the surface fitting method is the best choice in the
+current study for treating the free surface.
+In the surface fitting method, the divison of the pressure term in the momentum
+equation could make the modeling and computation more convenient. The total
+4
+==PAGE:10==
+2.1. FREE SURFACE NAVIER-STOKES EQUATION
+5
+pressure P is devided into hydrodynamic pressure Pd and the hydro-static pressure
+Ps. The expansion form of free surface Navier-Stokes equation is given as
+∂η
+∂t + u∂η
+∂x + v∂η
+∂y = w
+(2.1.1a)
+∂u
+∂x + ∂v
+∂y + ∂w
+∂z = 0
+(2.1.1b)
+ρ
+ ∂u
+∂t + u∂u
+∂x + v∂u
+∂y + w∂u
+∂z
+!
+= −∂(Pd + Ps)
+∂x
++ µ
+ ∂2u
+∂x2 + ∂2u
+∂y2 + ∂2u
+∂z2
+!
+(2.1.1c)
+ρ
+ ∂v
+∂t + u∂v
+∂x + v∂v
+∂y + w∂v
+∂z
+!
+= −∂(Pd + Ps)
+∂y
++ µ
+ ∂2v
+∂x2 + ∂2v
+∂y2 + ∂2v
+∂z2
+!
+(2.1.1d)
+ρ
+ ∂w
+∂t + u∂w
+∂x + v∂w
+∂y + w∂w
+∂z
+!
+= −∂(Pd + Ps)
+∂z
++ µ
+ ∂2w
+∂x2 + ∂2w
+∂y2 + ∂2w
+∂z2
+!
+−ρg
+(2.1.1e)
+In the current study, because it is limited by computational resources, only the two-
+dimensional free surface flow models are implemented and studied. The 2-D free
+surface Navier-Stokes equation is therefore given as
+∂η
+∂t + u∂η
+∂x = w
+(2.1.2a)
+∂u
+∂x + ∂w
+∂z = 0
+(2.1.2b)
+ρ
+ ∂u
+∂t + u∂u
+∂x + w∂u
+∂z
+!
+= −∂(Pd + Ps)
+∂x
++ µ
+ ∂2u
+∂x2 + ∂2u
+∂z2
+!
+(2.1.2c)
+ρ
+ ∂w
+∂t + u∂w
+∂x + w∂w
+∂z
+!
+= −∂(Pd + Ps)
+∂z
++ µ
+ ∂2w
+∂x2 + ∂2w
+∂z2
+!
+−ρg
+(2.1.2d)
+The main difficulty in solving the incompressible Navier-Stokes equation is the
+velocity-pressure coupling. In terms of the boundary condition, the non-slip and
+impermeable condition is applied for the velocity field, the total pressure at the free
+surface is set to be P = 0 at the free surface and the Neumann boundary condition is
+applied at the sea bottom. The details are to be derived and discussed in Chapter 3.
+==PAGE:11==
+Chapter 3
+Unsteady Incompressible Free
+Surface Navier-Stokes Equation
+Solver
+This chapter introduces an effective strategy about how to implement the Navier-
+Stokes solver that is capable of handling the geometry flexibility of the seabed and
+how to deal with the problem of time dependant physical domain which poses diffi-
+culty in meshing and makes the direct simulation on physical coordinate inefficient
+because it has to update mesh each time step.
+3.1
+σ coordinates
+The motion of fluid flow is described by the Navier-Stokes equation. The two-
+dimensional Navier-Stokes equation for free surface fitting treatment is presented
+as:
+∂η
+∂t + u∂η
+∂x = w
+(3.1.1a)
+∂u
+∂x + ∂w
+∂z = 0
+(3.1.1b)
+ρ
+ ∂u
+∂t + u∂u
+∂x + w∂u
+∂z
+!
+= −∂(Pd + Ps)
+∂x
++ µ
+ ∂2u
+∂x2 + ∂2u
+∂z2
+!
+(3.1.1c)
+ρ
+ ∂w
+∂t + u∂w
+∂x + w∂w
+∂z
+!
+= −∂(Pd + Ps)
+∂z
++ µ
+ ∂2w
+∂x2 + ∂2w
+∂z2
+!
+−ρg
+(3.1.1d)
+where the hydro-static pressure Ps is expressed as
+Ps = ρg(η −z)
+(3.1.2)
+While if the transient wave flow is computed directly on the physical domain, the
+mesh has to be regenerated each time step. As a result, the numerical model will
+6
+==PAGE:12==
+3.1. σ COORDINATES
+7
+be prohibitively inefficient. To avoid regeneration of mesh each time step and make
+the computational domain time-invariant, σ transform is applied
+σ = 2z + 2h(x) −d(x, t)
+d(x, t)
+(3.1.3)
+where h is the depth of still water and d = η + h is the depth of free surface. This
+treatment transforms the computational domain from dynamic to fixed [−1, 1] ×
+[0, L], As Figure 3.1 depicts.
+Figure 3.1: σ-transform
+By coordinate transform, the system of equation in [x, σ] coordinate is now
+expressed as
+∂η
+∂t + u∂η
+∂x = w
+(3.1.4a)
+∂u
+∂x + ∂σ
+∂x
+∂u
+∂σ + ∂σ
+∂z
+∂w
+∂σ = 0
+(3.1.4b)
+ρ
+ ∂u
+∂t + u∂u
+∂x + wσ
+∂u
+∂σ
+!
+= −
+ ∂Pd
+∂x + ∂σ
+∂x
+Pd
+∂x + g ∂η
+∂x
+!
++ µ∇2
+σu
+(3.1.4c)
+ρ
+ ∂w
+∂t + u∂w
+∂x + wσ
+∂w
+∂σ
+!
+= −∂σ
+∂z
+∂Pd
+∂σ + µ∇2
+σw
+(3.1.4d)
+where the Laplacian in the new coordinate is written as
+∇2
+σ = ∂2
+∂x2 + 2∂σ
+∂x
+∂2
+∂x∂σ + ∂2σ
+∂x2
+∂
+∂σ +
+
+
+ ∂σ
+∂x
+!2
++
+ ∂σ
+∂z
+!2
+∂2
+∂σ2
+(3.1.5)
+Note that the Laplacian is expressed as the expanded form to avoid the expansive
+matrix-matrix multiplication and the derivatives of geometry coefficients can be
+computed by fast algorithms to make it a scalable operator. The new advection
+velocity wσ in the computational domain is expressed as
+wσ =
+ ∂σ
+∂t + u∂σ
+∂x + w∂σ
+∂z
+!
+(3.1.6)
+==PAGE:13==
+3.2. EXPLICIT TIME INTEGRATION
+8
+The gravitational effect in the z direction is offset by the static pressure gradi-
+ent. The main difficulty in solving the incompressible Navier-Stokes equation is the
+pressure and velocity coupling, since there is no specific governing equation for the
+pressure term, and the pressure exists as a constraint for the system of equation.
+3.2
+Explicit time integration
+The method of dealing with temporal terms in partial differential equations is a
+method of lines, where the model differential equation is semi-discretized in which
+only the spacial term is discretized, the partial differential equations are therefore
+transferred to systems of ordinary differential equations:
+du
+dt = f(u, t)
+u(t0) = u0
+(3.2.1)
+where u0 is the initial condition of the boundary value problem. For the practical
+problem encountered in fluid dynamics where the differential equation describing
+the system is not in the catalog of the stiff equation and the smallest time scale is
+not much larger than the Courant-Friedrichs-Lewy (CFL) condition (the maximum
+time step size limit), the explicit time integration method is more suitable compared
+to implicit since it only needs the information of the current time step which avoids
+solving a linear system of equations at each time step. For problems with long time
+integration, the high-order method is required for the physical correctness of the
+solution. Multi-stage Runge-Kutta (RK) method is a popular method in both in-
+dustrial and academic applications.
+The general s-stage explicit Runge-Kutta method takes the form
+u(0) = yn,
+u(k) =
+k
+X
+i=0
+αkiu(i−1) + βki∆tf(u(i−1), tn + γi∆t),
+k = 1, 2, ....s,
+(3.2.2)
+u(s) = u(n+1)
+The order of accuracy depends on the coefficients α, β, and γ. A popular form is
+the explicit Runge-Kutta fourth-order scheme given by
+α =
+
+
+1
+0
+0
+0
+1
+0
+0
+0
+1
+0
+0
+0
+1
+0
+0
+0
+
+,
+β =
+
+
+1/2
+0
+0
+0
+0
+1/2
+0
+0
+0
+0
+1
+0
+1/6
+1/3
+1/3
+1/6
+
+,
+γ =
+
+
+0
+0
+0
+0
+0
+1/2
+0
+0
+0
+1/2
+1/2
+0
+0
+1/2
+1/2
+1
+
+
+(3.2.3)
+while for large-scale problems where memory storage could affect the performance of
+the algorithm, low storage explicit Runge-Kutta fourth-order five-stage (LSERK45)
+time integration method which is proposed by M. Carpenter [19] is a solution as it
+==PAGE:14==
+3.2. EXPLICIT TIME INTEGRATION
+9
+only stores the residual once for each inner loop during time iteration. The scheme
+of LSERK45 is given as
+tlocal = t + Ck∆t
+∂u(k) = Ak∂u(k−1) + ∆tf(u, tlocal)
+(3.2.4)
+u(k) = u(k−1) + Bk∂u(k),
+k = 1, 2, ...5
+which has five stages in each time loop with fourth-order accuracy.
+It also has
+a larger stability region compared with the classical explicit RK4 method.
+The
+coefficients for Ak, Bk, and Ck are given as
+k
+Ak
+Bk
+Ck
+1
+0
+1
+0
+2 −567301805773
+1357537059087
+5161836677717
+13612068292357
+1432997174477
+9575080441755
+3 −2404267990393
+2016746695238
+1720146321549
+2090206949498
+2526269341429
+6820363962896
+4 −3550918686646
+2091501179385
+3134564353537
+4481467310338
+2006345519317
+3224310063776
+5 −1275806237668
+842570457699
+2277821191437
+14882151754819
+2802321613138
+2924317926251
+The LSERK45 time integration method is adopted throughout this thesis for its com-
+putational performance and high accuracy. The low-storage Range-Kutta fourth-
+order time integration method is written as
+∂u(k) = Ak∂u(k−1) + ∆tf(x)
+(3.2.5a)
+u(k) = u(k−1) + Bk∂u(k)
+(3.2.5b)
+Where Ak and Bk are low-storage Runge-Kutta fourth-order parameters. The ve-
+locity field is updated by the expressions
+u(k) = u(k−1) + Bk(Ak∂u(k−1) + ∆tRHSu)
+(3.2.6a)
+w(k) = w(k−1) + Bk(Ak∂w(k−1) + ∆tRHSw)
+(3.2.6b)
+3.2.1
+Pressure Poisson equation
+As seen in the Navier-Stokes equation, there exists no governing equation for the
+pressure term and the pressure exists as a constraint, meaning the pressure should
+be solved implicitly. Taking the divergence of the velocity field in the new time step
+==PAGE:15==
+3.2. EXPLICIT TIME INTEGRATION
+10
+ ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!
+u(k) =
+ ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!
+u(k−1)
++ Bk
+ 
+Ak
+ ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!
+∂u(k−1)
++ ∆t
+"
+−1
+ρ
+ ∂Pd
+∂x + ∂σ
+∂x
+∂Pd
+∂x + g ∂η
+∂x
+!
++ ν∇2
+σu
+−1
+ρ
+ 
+u∂u
+∂x + wσ
+∂u
+∂σ
+!#
+(3.2.7a)
+ ∂σ
+∂z
+∂
+∂σ
+!
+w(k) =
+ ∂σ
+∂z
+∂
+∂σ
+!
+w(k−1)
++ Bk
+ 
+Ak
+∂σ
+∂z
+∂
+∂σ∂w(k−1) + ∆t
+"
+−1
+ρ
+ ∂σ
+∂z
+∂Pd
+∂σ
+!
++ ν∇2
+σw
+−1
+ρ
+ 
+u∂w
+∂x + wσ
+∂w
+∂σ
+!#
+(3.2.7b)
+Add Equation (3.2.7a) and Equation (3.2.7b) and force the divergence of the
+new time step to be zero to guarantee continuity and isolate dynamic pressure Pd,
+the pressure Poisson equation is obtained.
+∇2
+σPd =
+ρ
+∆tBk
+  ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!
+u(k−1) +
+ ∂σ
+∂z
+∂
+∂σ
+!
+w(k−1)
+!
++ ρAk
+∆t
+  ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!
+∂u(k−1) +
+ ∂σ
+∂z
+∂
+∂σ
+!
+∂w(k−1)
+!
++ µ
+  ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!
+∇2
+σu + ∂σ
+∂z
+∂
+∂σ∇2
+σw
+!
+−ρg
+ ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+! ∂η
+∂x
+−ρ
+  ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!  
+u∂u
+∂x + wσ
+∂u
+∂σ
+!
++ ∂σ
+∂z
+∂
+∂σ
+ 
+u∂w
+∂x + wσ
+∂w
+∂σ
+!!
+(3.2.8)
+The Dirichlet boundary condition is imposed for free surface
+Pd = 0 at σ = 1
+(3.2.9)
+The Neumann boundary condition is imposed for the sea bottom for impermeable
+==PAGE:16==
+3.2. EXPLICIT TIME INTEGRATION
+11
+condition
+n · u = 0
+n · u(k−1) + Bkn · ∂u(k) = 0
+Bkn · ∂u(k) = 0
+= nz
+ 
+BkAk∂w(k−1) + ∆tBkρ
+ 
+ν∇2 (k−1)
+σ
+w −u∂w
+∂x −wσ
+∂w
+∂σ −∂σ
+∂z
+∂Pd
+∂σ
+!!
++ nx
+ 
+BkAk∂u(k−1) + ∆tBkρ
+ 
+ν∇2 (k−1)
+σ
+u −u∂u
+∂x −wσ
+∂u
+∂σ −∂Pd
+∂x −∂σ
+∂x
+∂Pd
+∂σ
+!!
+(3.2.10)
+Consequently, the expression for the bottom Neumann boundary condition is
+nz∂σ
+∂z
+∂Pd
+∂σ + nx
+ ∂Pd
+∂x + ∂σ
+∂x
+∂Pd
+∂σ
+!
+= nz
+ 
+BkAk∂w(k−1) + ∆tBkρ
+ 
+ν∇2 (k−1)
+σ
+w −u∂w
+∂x −wσ
+∂w
+∂σ
+!!
++ nx
+ 
+BkAk∂u(k−1) + ∆tBkρ
+ 
+ν∇2 (k−1)
+σ
+u −u∂u
+∂x −wσ
+∂w
+∂σ
+!!
+at σ = −1
+(3.2.11)
+where [nx, nz] is the outer normal component.
+3.2.2
+Projection method
+Another effective method for numerically solving the incompressible unsteady
+Navier-Stokes equation is the projection method (Chorin [3]), the key advantage
+of which is that the computations of the velocity field and the pressure field are
+decoupled. Besides, when the spectral method is used, there is only one projection
+of nonlinear term on the basis function. The projection procedure is described below.
+The provisional velocity field [u∗, w∗] is calculated explicitly by temporally remove
+the pressure term:
+∂u
+∂t + u∂u
+∂x + wσ
+∂u
+∂σ = ∇2
+σu
+(3.2.12)
+consequently, the provisional velocity field is substituted into the momentum equa-
+tion without the velocity term
+∂u
+∂t = −
+ ∂Pd
+∂x + ∂σ
+∂x
+∂Pd
+∂σ + g ∂η
+∂x
+!
+(3.2.13)
+∂w
+∂t = −∂σ
+∂z
+∂Pd
+∂σ
+(3.2.14)
+and substitute Equation (3.2.13) and Equation (3.2.14) into the continuity equation
+by taking the divergence of both equations respectively. Therefore, the pressure
+==PAGE:17==
+3.3. IMPLICIT TIME INTEGRATION
+12
+Poisson equation can be constructed by the same process as
+∇2
+σPd =
+ρ
+∆tBk
+  ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!
+u∗+
+ ∂σ
+∂z
+∂
+∂σ
+!
+w∗
+!
++ ρAk
+∆t
+  ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!
+∂u∗+
+ ∂σ
+∂z
+∂
+∂σ
+!
+∂w∗
+!
+−ρg ∂2η
+∂x2
+(3.2.15)
+similarly, the Neumann boundary condition for the bottom is instead expressed as
+−nx
+ ∂Pd
+∂x + ∂σ
+∂x
+∂Pd
+∂σ
+!
+−nz∂σ
+∂z
+∂Pd
+∂σ = −nz (BkAk∂w∗) −nx (BkAk∂u∗)
+at σ = −1
+(3.2.16)
+3.2.3
+Solution procedure
+Therefore, the explicit Navier-Stokes equations can be solved by the following
+summarized procedure
+1. Obtained the initial value for velocity field u, w, and free surface position η;
+2. Update the free surface position by Equation (3.1.4a);
+3. Solve for the pressure field at the current time step implicitly by Equation (3.2.8);
+4. Update the velocity field for the next time step by Equation (3.1.4c) and
+Equation (3.1.4d).
+3.3
+Implicit time integration
+Although the low storage Runge-Kutta fourth-order five-stage is robust and ac-
+curate, it will be prohibitive to use when the problem is stiff. Since the small time
+scale of the stiff system makes the step size to be very small so that the numeri-
+cal scheme is stable if explicit time integration method is applied, which could be
+inefficient.
+For convection-diffusion types of problems such as the Navier-Stokes
+equation and RANS turbulence model that is studied in the current study, the time
+scale might differ for each term and equation. In the discretized system, the time
+scale of the convection term and diffusion term are scaled as
+τc = O
+ ∆x
+||u||
+!
+τd = O
+ ∆x2
+ν
+!
+(3.3.1)
+When the mesh near the wall is fine enough, the convection time scale is much
+larger than the diffusion time scale, which makes the system stiff. To make the
+Navier-Stokes solver more robust and stable, an implicit time integration method is
+==PAGE:18==
+3.3. IMPLICIT TIME INTEGRATION
+13
+implemented as well. The implicit semi-discretized form of Navier-Stokes equation
+for the current study is written in this form
+un+1 −un
+∆t
++ un+1∂un+1
+∂x
++ wn+1
+σ
+∂un+1
+∂σ
+= −1
+ρ
+ ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!
+P n+1
+d
++ ν∇σun+1
+(3.3.2a)
+wn+1 −wn
+∆t
++ un+1∂wn+1
+∂x
++ wn+1
+σ
+∂wn+1
+∂σ
+= −1
+ρ
+∂σ
+∂z
+∂P n+1
+d
+∂σ
++ ν∇σwn+1
+(3.3.2b)
+ ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!
+un+1 + ∂σ
+∂z
+∂wn+1
+∂σ
+= 0
+(3.3.2c)
+The implicit method requires that all the valuables in the new time step should be
+obtained simultaneously. Therefore, it is equivalently to solve a system of equations
+"
+A
+D
+DT
+0
+# "
+un+1
+pn+1
+#
+=
+"
+RHS
+0
+#
+(3.3.3)
+it is a coupled and non-linear system of equations. The coupled solver results in
+O(3N ·3N) which could be very expensive if the system is large although it converges
+faster when the non-linearity is dealt with. An alternative to save the storage is by
+using a sequential solver. That is iterating the three equations in Equation (3.3.2)
+sequentially until converge. But this method results in slow convergence and suffers
+from numerical instability from the hands-on experience of the author. Therefore,
+the current study sticks to coupled solver for the implicit Navier-Stokes solver. To
+save the storage requirement, the system Equation (3.3.3) can be manipulated with
+LU decomposition
+"
+A
+D
+DT
+0
+#
+=
+"
+A
+0
+DT
+−DTA−1D
+# "
+I
+A−1D
+0
+I
+#
+(3.3.4)
+where I is the identity matrix with the size of the local velocity vector and pressure
+vector. By exact splitting of the LU decomposition form, the pressure and velocity
+can be separated and therefore computed sequentially, while in the perspective of
+mathematics, the system is still computed in coupled form.
+"
+A
+0
+DT
+−DTA−1D
+# "
+u∗
+p∗
+#
+=
+"
+RHS
+0
+#
+(3.3.5)
+"
+I
+A−1D
+0
+I
+# "
+un+1
+pn+1
+#
+=
+"
+u∗
+p∗
+#
+(3.3.6)
+The boundary condition for the momentum equation and the pressure Poisson equa-
+tion is the same as the explicit projection method. Therefore, the sequential process
+is written as
+• Momentum prediction: Au∗= RHS;
+• Pressure prediction: DTu∗−DTA−1Dp∗= RHS;
+==PAGE:19==
+3.3. IMPLICIT TIME INTEGRATION
+14
+• Pressure & Velocity correction: u∗+ A−1Dpn+1 = u∗;
+• pn+1 = p∗
+By doing this manipulation, the original coupled system of equations with the ma-
+trix size O(3N · 3N) is boiled down to a matrix with size O(2N · 2N) plus a ma-
+trix with size matrix size O(N · N).
+The higher-order time integration method
+for implicit Navier-Stokes solver is achieved by linear multi-step methods such as
+Adams-Moulton methods. However, as is proved by [5], the boundary condition
+of high-order time integration for the implicit spectral Navier-Stokes solver is un-
+stable except being written as the skew-symmetric form of Navier Stokes equation
+in which the aliasing error can be mitigated [6]. However, in the σ coordinate of
+the current study, because the convective term has different physical meanings and
+dimensions, it fails to find a way to express the skew-symmetric form of the Navier-
+Stokes equation, to the author’s knowledge. Only the first order of time integration
+is implemented for the implicit Navier-Stokes solver.
+3.3.1
+Solving nonlinear system of equations
+The discretized non-linear system of equations Equation (3.3.3) could be rewrit-
+ten as
+G(ϕ) = 0
+(3.3.7)
+where ϕ = [u p]T and the matrix G is dependent on ϕ. This results in a nonlinear
+form and can not be solved directly and exactly. Solving the nonlinear problem
+should always resort to the iterative method. In the current study, the Newton
+iterative method is adopted in dealing with nonlinearity.
+For Newton’s iterative method. It starts with guessing an initial value. The
+update of each iteration is derived by Taylor expansion truncated in the second
+order term:
+G(ϕk+1) ≈G(ϕk) + G′(ϕk)(ϕk+1 −ϕk)
+(3.3.8)
+where G′ is expressed by the Jacobian matrix of the discretized system of equation
+J ij(ϕk) =
+∂
+∂ϕj
+Gi(ϕ)
+(3.3.9)
+consequently the update term δk can be calculated by linear system
+J(ϕk)δk = −G(ϕk)
+(3.3.10)
+This process keeps repeating until the changes in the variables are below tolerance.
+While in the real application, the nonlinear convection term can be treated by
+the Picard method but without iteration, i.e.
+un+1∂un+1
+∂x
+= un∂un+1
+∂x
+(3.3.11)
+==PAGE:20==
+3.3. IMPLICIT TIME INTEGRATION
+15
+This treatment has some advantages compared with Newton iteration under some
+conditions. When large time steps are needed, due to the long stencil and relatively
+weak diagonal dominance of the Jacobian resulted from the long stencil and rel-
+atively weak diagonal dominance of high-order spectdiscretizationtion scheme, the
+Newtons method is vulnerable to diverge. The author tried several attempt to sta-
+bilize the Newton method, such as continuation, Newton bisection hybrid method,
+and under-relaxation, but none of the above methods can stabilize the Newton solver
+when the time step is large.
+Therefore, because the convection term is not stiff, the treatment of Equa-
+tion (3.3.11) is reasonable and the modified problem is more computationally ef-
+ficient since no iteration for dealing with nonlinearity has to perform.
+The author has attempted to implement other two popular implicit Navier-Stokes
+solvers that are more robust and universal in coupling with other physical effects
+such as turbulence (The RANS model) and heat transfer, SIMPLE (Semi-Implicit
+Method for Pressure-Lined Equation) and PISO (Pressure Implicit with Splitting
+Operators), but the solvers keep diverging. So the details are not presented here.
+==PAGE:21==
+Chapter 4
+High-Order Spectral Method for
+Solving Differential Equation
+In this chapter, the single domain spectral method is present where the Fourier
+basis and polynomial basis that serves as the fundamental numerical scheme for the
+incompressible Navier-Stokes equation are derived and how the model and the nodal
+expansion could be used for the construction of differential matrix and mass matrix
+which is then the fundamental of pseudo-spectral collocation method. In the hori-
+zontal direction, the Fourier-type operator is adopted to exploit the effectiveness of
+the Fast Fourier Transform (FFT) because the problem can be defined as periodic
+problems by tricks; In the vertical direction, the Jacobi-type operator is adopted.
+The spectral method shares high accuracy and computational efficiency because
+it takes advantage of orthogonality. Therefore, contrary to the traditional finite
+difference method, finite volume method, and finite element method which has an
+algebraic rate of convergence as the spatial resolution is refined, the spectral method
+has an exponential rate of convergence until machine error.
+Furthermore, the filter is presented to mitigate the instability due to the aliasing
+error resulting from nonlinear convolution.
+According to functional analysis, any function can be represented as the sum of
+a set of basis times coefficients.
+f(x) =
+∞
+X
+k=0
+ˆfkϕ(x)
+(4.0.1)
+The basis with orthogonal property is used to solve the expansion coefficient effi-
+ciently. Orthogonality is defined as
+(ϕn, ϕm)L2 = δn,m
+(4.0.2)
+where
+(ϕn, ϕm)L2 =
+Z b
+a ϕnϕmdx
+(4.0.3)
+16
+==PAGE:22==
+4.1. FOURIER SPECTRAL METHODS
+17
+ϕ is the basis, δn,m is the Kronecker’s delta with the property
+δn,m =
+
+
+
+0
+if n ̸= m
+1
+if n = m
+(4.0.4)
+The expansion coefficient ˆfk is solved by the projection of the function into the basis
+space
+ˆfk = (f, ϕk)L2
+(4.0.5)
+Among the orthogonal basis, Jacobi type and Fourier type basis are considered in
+the current thesis.
+4.1
+Fourier spectral methods
+The basic function of the Fourier spectral method is trigonometric functions with
+wave numbers of different nonnegative integers since they are orthogonal to each
+other. From the computational point of view, it is more convenient to represent the
+Fourier basis as complex exponential functions
+ϕ = exp(ikx),
+x ∈[0, 2π]
+(4.1.1)
+where i = √−1 and k are non-negative integer. The Fourier expansion coefficient
+can be obtained numerically by the trapezoidal rule, which is the discrete Fourier
+transform (DFT), of truncated Fourier expansion
+f(x) ≈
+N/2
+X
+k=−N/2
+fk
+ck
+eikx
+(4.1.2)
+fk ≈1
+N
+N
+X
+j=0
+f(xj)e−ikxj
+(4.1.3)
+where N is the number of data points.
+While the computational complexity of
+(DFT) is O(N 2), fast Fourier transform (FFT) is a salable algorithm as it has the
+computational complexity of O(N). The logic of FFT is to keep doing odd and even
+decomposition and multiply the even terms by the exponential term, which is the
+result of algebraic manipulation until no further decomposition can be performed.
+Therefore, it only cost O(Nlog2(N)) operation.
+The Fourier expansion can be expressed as a nodal representation
+f(x) ≈
+N
+X
+j=0
+f(xj)hj(x)
+(4.1.4)
+where
+hj(x) = 1
+N
+N/2
+X
+k=−N/2
+eik(x−xj)
+ck
+(4.1.5)
+==PAGE:23==
+4.2. POLYNOMIAL SPECTRAL METHOD
+18
+According to the concept of Dirichlet kernel, the Lagrange polynomial hj can be
+represented as
+hj(x) =
+
+
+
+
+
+
+
+1
+N
+sin( 1
+2 N(x−xj))cos( 1
+2 (x−xj))
+sin( 1
+2 (x−xj))
+N=even
+1
+N
+sin((N−1
+2)(x−xj))
+sin( 1
+2 (x−xj))
+N=odd
+(4.1.6)
+Which has the cardinal property that for point x = xj, hj = 1. For the Fourier
+collocation method, a Fourier differential matrix is required to construct. The nodal
+expansion is in the form
+INf(x) =
+N
+X
+j=0
+hj(x)f(xj)
+(4.1.7)
+Therefore the derivative of the nodal expansion is
+INu′(x) =
+N−1
+X
+j=0
+h′
+j(x)u(xj)
+(4.1.8)
+=
+N−1
+X
+j=0
+u(xj) 1
+N
+(4.1.9)
+
+
+
+
+
+
+
+Ncos( N
+2 (x−xj))sin( 1
+2 (x−xj))−cos( 1
+2 (x−xj))sin( N
+2 (x−xj))
+2Nsin
+2( 1
+2 (x−xj))
+, N = odd
+cos( N
+2 (x−xj))cos( 1
+2 (x−xj))
+2sin( 1
+2 (x−xj))
+−sin( N
+2 (x−xj))
+2N
+−sin( N
+2 (x−xj))cos2( 1
+2 (x−xj))
+2Nsin
+2( 1
+2 (x−xj))
+, N = even
+(4.1.10)
+Therefore, the Fourier differentiation matrix is
+Dij = 1
+2(−1)i+jcot
+ (i −j)π
+N
+!
+(4.1.11)
+4.2
+Polynomial spectral method
+The polynomial spectral method is derived from the Sturm-Liouville problem:
+d
+dx
+ 
+p(x)du
+dx
+!
++ (q(x) + λw(x))u = 0
+(4.2.1)
+where x ∈[a, b] with boundary condition
+α1u(a) + α2u′(a) = 0
+(4.2.2)
+β1u(b) + β2u′(b) = 0
+(4.2.3)
+It can be proved that all the eigenfunctions un of the Sturm-Liouville equation form
+complete orthogonal polynomial basis in L2(a, b) by multiplying one Equation (4.2.1)
+un and the other Equation (4.2.1) um and algebraic manipulation.
+==PAGE:24==
+4.2. POLYNOMIAL SPECTRAL METHOD
+19
+Let λ = n(n + α + β + 1), w(x) = (1 −x)α(1 + x)β and x ∈[−1, 1], and by setting
+the first two eigenfunction of Equation (4.2.1):
+P (α,β)
+0
+= 1
+(4.2.4)
+P (α,β)
+1
+= 1
+2 (α −β + (α + β + 2)x)
+(4.2.5)
+the eigenfunctions of Equation (4.2.1) can be expressed recursively
+α(α,β)
+n+1,nP (α,β)
+n+1 (x) = (aα,β
+n,n + x)P (α,β)
+n
+(x) −a(α,β)
+n−1,nP (α,β)
+n−1 (x)
+(4.2.6)
+where
+a(α,β)
+n−1,n =
+2(n + α)(n + β)
+(2n + α + β + 1)(2n + α + β)
+(4.2.7)
+a(α,β)
+n,n
+=
+α2 −β2
+(2n + α + β + 2)(2n + α + β)
+(4.2.8)
+a(α,β)
+n+1,n =
+2(n + 1)(n + α + β + 1)
+(2n + α + β + 2)(2n + α + β + 1)
+(4.2.9)
+P (α,β)
+n
+s form Jacobi polynomial. The Chebyshev polynomial is scaled from the Jacobi
+polynomial by a factor of
+Tn(x) =
+Γ(n + 1)Γ
+
+1
+2
+
+Γ
+
+n + 1
+2
+
+P (−0.5,−0.5)
+n
+(x)
+(4.2.10)
+where
+Γ
+
+n + 1
+2
+
+= (2n)!√π
+n!4n
+(4.2.11)
+The nodal expansion and modal expansion are related by
+f(xi) =
+N
+X
+k=0
+ϕk(xi) ˆfk
+(4.2.12)
+therefore, the transformation matrix (generalized Vandermonde matrix) from modal
+expansion to nodal representation can be written as:
+f = V ˆ
+f
+(4.2.13)
+The approximation of the polynomial method can be written as Lagrange form as
+it is used in the Fourier method for polynomial method interpolation.
+f(x) ≈
+j
+X
+0
+f(xj)hj(x)
+(4.2.14)
+hj(x) =
+N
+X
+k=0
+1
+γk
+ϕk(xj)ϕk(x)wj
+(4.2.15)
+==PAGE:25==
+4.2. POLYNOMIAL SPECTRAL METHOD
+20
+The Lagrange polynomial can be obtained by multiplying Equation (4.2.12) by poly-
+nomial basis ϕ(x)
+f Th(x) = ˆ
+f Tϕ(x)
+(4.2.16)
+by some mathematical manipulation
+h(x) = (VT)−1ϕ(x)
+(4.2.17)
+From Equation (4.2.14), the first derivative can be written as
+df
+dx = d
+dx
+
+
+N
+X
+j=0
+fjhj(x)
+
+=
+N
+X
+j=0
+fj
+d
+dxhj(x)
+(4.2.18)
+therefore it can be expressed as
+df
+dx = Df
+(4.2.19)
+where
+Dij = dhj
+dx |x=xi
+(4.2.20)
+By modal expansion, the first derivative can be expressed as
+d
+dx
+
+
+N
+X
+j=0
+ˆfjϕj(x)
+
+=
+N
+X
+j=0
+ˆfj
+d
+dxϕj(x)
+(4.2.21)
+df
+dx = Vxˆf, Vx,ij = dϕj
+dx |x=xi
+(4.2.22)
+Combine Equation (4.2.13) with Equation (4.2.22), the first differentiation matrix
+can be expressed as:
+D = VxV−1
+(4.2.23)
+The Lagrange polynomial for the Fourier method and polynomial method are pre-
+sented in Section 4.2 and Section 4.2 respectively for order of N = 6.
+Figure 4.1: Left: Lagrange polynomial based on Fourier expansion on 6 equidistant
+nodes; Right: Lagrange polynomial based on Legendre Gauss Lobatto grid for N = 6
+==PAGE:26==
+4.3. SPECTRAL DERIVATIVE
+21
+When using a polynomial spectral method, selecting the interpolating grid with
+care is important to ensure numerical stability. Besides, The selection of the colloca-
+tion points could affect the condition number of the resulting differentiation matrix.
+The importance of selecting a good set of collocation points can be illustrated by
+an example. Consider the exact function
+f =
+1
+1 + 16x2,
+x ∈[−1, 1]
+(4.2.24)
+and the function is expressed by Chebyshev polynomial collocation expansion. The
+equidistant point and Chebyshev-Lobatto point are selected as collocation points.
+The results are shown on the left and right of Figure 4.2 respectively. By comparison,
+equidistant collocation points are a bad choice since it exhibits high-frequency oscil-
+lation near the boundary. In real applications, this oscillation results in numerical
+instability.
+Figure 4.2: Function f expressed by Chebyshev polynomial expansion on the equidis-
+tant collocation points (Left), and Chebyshev Lobatto points (Right)
+The spectral method has a much higher accuracy than the traditional finite dif-
+ference method with the same stencil point. The idea of the orthogonality of the
+spectral method makes it more efficient than the classical finite difference method.
+As can be seen in Figure 4.3, the rate of convergence of the spectral method the-
+oretically approaches infinity as the degree of freedom tend to infinity, which is a
+much fast spectral convergence compared with finite difference constant algebraic
+rate of convergence.
+4.3
+Spectral derivative
+Although the matrix-based spectral differentiation is easy to implement, it could
+be very computationally expansive for large-scale systems with the complexity of
+O(N 2), which means it’s not a scalable scheme. To computationally effectively cal-
+culate the derivatives, the fast Fourier and Chebyshev derivatives are implemented
+and presented here.
+==PAGE:27==
+4.3. SPECTRAL DERIVATIVE
+22
+Figure 4.3: Rate of convergence example
+4.3.1
+Fast Fourier derivative
+The Fourier expansion of function is given as
+u′(x) =
+N/2
+X
+k=−N/2
+ˆuk
+
+e(ikx)′ =
+N/2
+X
+k=−N/2
+ikˆuke(ikx)
+(4.3.1)
+The second derivative is similarly expressed as
+u′′(x) =
+N/2
+X
+k=−N/2
+ˆuk(e(ikx))′′ =
+N/2
+X
+k=−N/2
+−k2ˆuke(ikx)
+(4.3.2)
+Therefore, the first and second derivatives can be solved using the fast Fourier
+transform
+u′ = iFFT(ikFFT(u))
+(4.3.3)
+u′′ = iFFT(−k2FFT(u))
+(4.3.4)
+The computational complexity can be reduced to O(Nlog(N)) by using the fast
+Fourier derivative.
+4.3.2
+Fast Chebyshev derivative
+The Chebyshev polynomial can be transposed to cos series
+Tn(θ) = cosnθ,
+θ ∈[0.2π]
+(4.3.5)
+The Chebyshev polynomial is related by the recurrence relation
+Tn+1(x) = 2xTn(x) −Tn+1(x)
+(4.3.6)
+==PAGE:28==
+4.3. SPECTRAL DERIVATIVE
+23
+The Chebyshev grid is defined as the sine wave "wrapped around a cylinder and
+view from the side."
+xj = cos(θj)
+(4.3.7)
+The differentiation of the objective function is done by applying the chain rule
+u′(x) =
+N
+X
+n=0
+anT ′(x) =
+PN
+n=0 anT ′(θ)
+dθ(x)/dθ
+=
+PN
+n=0 nansin(nθ)
+−
+√
+1 −x2
+(4.3.8)
+For the two endpoints x = ±1 when the denominator of Equation (4.3.8) is zero,
+L’Hôpital’s rule
+u′(1) =
+N
+X
+n=0
+n2an,
+u′(−1) =
+N
+X
+n=0
+(−1)n+1n2an
+(4.3.9)
+The coefficient an is solved by doing the fast Fourier transform of a mirrored u,
+the aim of which is to make a period function, and times ik, consequently doing an
+inverse fast Fourier transform back to physical space
+an = ˆumirror = real(FFT(u0 u1...uN uN−1 uN...u1))
+(4.3.10)
+Thus, the numerator of Equation (4.3.8) can be expressed as
+N
+X
+n=0
+nansin(nθ) = u′
+mirror(θ) = real(iFFT(ikˆumirror))
+(4.3.11)
+Similarly, the second-order derivative is solved by exploiting the recurrence relation
+u′′(x) =
+−x
+(1 −x2)3/2
+N
+X
+n=0
+anT ′(θ) +
+1
+1 −x2
+N
+X
+n=0
+anT ′′(θ)
+(4.3.12)
+Again, the for the two endpoints x = ±1 when the denominator of Equation (4.3.8)
+is zero, L’Hôpital’s rule
+u′(1) = 1
+3
+N
+X
+n=0
+n4an,
+u′(−1) = 1
+3
+N
+X
+n=0
+(−1)n+1n4an
+(4.3.13)
+The expansion of the second-order derivative at the right-hand side of Equation (4.3.13)
+N
+X
+n=0
+anT ′′(θ) = u′′
+mirror(θ) = real(iFFT(−k2ˆumirror))
+(4.3.14)
+It can be concluded that the computational cost of the fast Chebyshev first derivative
+is O(4Nlog(2N)) (twice FFT of 2N matrix) and the fast Chebyshev second deriva-
+tive is O(6Nlog(2N)) (thrice FFT of 2N matrix), which means the fast Chebyshev
+derivative is much cheaper than the matrix-based method.
+==PAGE:29==
+4.4. SPECTRAL INTEGRATION AND INTERPOLATION
+24
+4.4
+Spectral integration and interpolation
+Based on aforementioned derived Lagrange polynomial hj(x) and the Vander-
+monde matrix V, the spectral integration can be derived as
+(f, g) =
+Z 1
+−1(f Th(x))(h(x)Tg)dx
+(4.4.1)
+= f T
+Z 1
+−1(VT)−1ϕ(x)ϕ(x)T(V(x)T)dx
+
+g
+(4.4.2)
+since the basis ϕk(x) are orthogonal to each other according to its definition, Equa-
+tion (4.4.2) can be expressed as
+(f, g) = f T(V)−1(V
+T)−1g
+(4.4.3)
+The interpolation between grid points is achieved by using Lagrange polynomial
+h(x)
+INf(x) =
+N
+X
+i=0
+f(xi)hi(x)
+(4.4.4)
+4.5
+Filtering and de-aliasing
+The nature of the spectral method is to project the function itself to the basis
+as mentioned above. When projecting nonlinear terms such as the convection term
+in Navier-Stokes equation ∂ujui/∂xi which has an exact expression of the order of
+2N to the polynomial basis of order 0 −N
+(ujui, ϕq)2N =
+
+
+N
+X
+p=0
+ˆ
+ujuiϕp, ϕq
+
+
+N
++
+
+
+2P
+X
+p=p+1
+ˆ
+ujuiϕp, ϕq
+
+
+N
+(4.5.1)
+The first term in the right-hand sides of Equation (4.5.1) can be projected exactly,
+while the second term cannot be projected exactly since the highest order of the
+basis is lower than the lowest order of the projected term, the convolution of two
+polynomial series is under-projected.
+For Fourier spectral method, the nonlinear term is projected to a trigonometric
+function with wave numbers of different non-negative integers. Taking ∂ujui/∂xi
+again as the example. Therefore, the wave number of k > N/2 is aliased to k −N
+in Fast Fourier Transform (FFT) due to the periodicity. When a nonlinear term
+is treated, the error will remarkably impact the accuracy of the numerical solution
+when computing the FFT of uiuj
+ui =
+N/2
+X
+k=−N/2
+ˆuieikx, uj =
+N/2
+X
+k=−N/2
+ˆujeikx
+(4.5.2)
+uiuj =
+N/2
+X
+p=−N/2
+N/2
+X
+q=−N/2
+ˆuip ˆujqei(p+q)x
+(4.5.3)
+==PAGE:30==
+4.5. FILTERING AND DE-ALIASING
+25
+p + q may lie outside the range of [−N/2, N/2] and as a result, the available Fourier
+amplitudes get aliased.
+Therefore, the high-frequency error resulting from the under-projected nonlinear
+convolution term and aliasing will affect the numerical stability of the whole scheme
+and this phenomenon is much more significant in turbulence modeling. To mitigate
+this problem, de-aliasing and filtering are applied. The high-order discretization
+scheme is more vulnerable to being unstable compared with the classic low-order
+method where the low-order truncation term may serve as the effect, which is the
+same as viscosity stabilization because the truncation error is high-order and the
+significance is negligible so is its viscosity stabilization effect.
+4.5.1
+Orszag’s 3/2 de-aliasing technique
+Orszag’s de-aliasing rule is applied to cope with the aliasing introduced by the
+nonlinear convolution product. Define new U and V
+U =
+N/2
+X
+k=−N/2
+ˆueikx +
+M/2
+X
+|k|=N/2
+Uk, V =
+N/2
+X
+k=−N/2
+ˆveikx +
+M/2
+X
+|k|=N/2
+Vk
+(4.5.4)
+where
+M = 3N
+2 , U =
+
+Uj|Uj = 0, |j| > N
+2
+
+, V =
+
+Vj|Vj = 0, |j| > N
+2
+
+(4.5.5)
+The de-aliased FFT coefficient for uv then becomes
+ˆuv = M
+N FFT(real(iFFT(U). ∗real(iFFT(V ))))
+(4.5.6)
+In this way, the error from aliased frequency is eliminated.
+4.5.2
+Exponential filtering
+The idea of an exponential cutoff filter is to keep the energy of the mode lower
+than the cutoff order unchanged and exponentially decrease the energy of the mode
+higher than the cutoff order. For example, as is shown in Figure 4.4, the cut-off
+mode is P = 8, the energy of modes larger than which is decreased exponentially to
+zero. The filter is defined as
+σ(i, Nc, α, s) =
+
+
+
+1
+0 ≤i ≤Nc
+exp
+
+α
+
+i−Nc
+P+1−Nc
+s
+Nc ≤i ≤P
+(4.5.7)
+where i is the model number, Nc is the cut-off frequency, and s is the filter order. In
+the current study, Nc is set to be the half of the highest order, α = 12, and s = 36.
+==PAGE:31==
+4.6. EXTENSION TO HIGHER DIMENSION
+26
+The exponential filter for the polynomial expansion of time-dependent parameters
+is expressed as
+f = V ˆf
+(4.5.8)
+σV−1f = σ ˆf
+(4.5.9)
+VσV−1f = Vσ ˆf = V ˆffiltered = ffiltered
+(4.5.10)
+ffiltered = VσV−1f
+(4.5.11)
+where σ is the diagonal matrix of σ and V is the Vandermonde matrix that serves
+as the numerical integration feature.
+The exponential filter can be applied to Fourier expansion as well by post-process
+the time-dependent parameters after each time iteration
+ufiltered = iFFT(σFFT(u))
+(4.5.12)
+Note that for computational efficiency the ordering of the FFT routine is
+kx =
+
+0, 1, 2, ..., Nx
+2 −1, −Nx
+2 , ..., −2, −1
+
+(4.5.13)
+the filter matrix σ is also ordered accordingly.
+Figure 4.4: Damping profile of exponential cut-off filter, P = 10
+The de-aliasing and exponential filtering are very computationally cheap, making
+them realizable in the real application.
+4.6
+Extension to higher dimension
+For the real application, most of the problem is at least 2-dimensional. The
+presentations of polynomial basis in higher dimension is obtained by tensor product,
+which is expressed as
+ϕi(xj) = Πn
+j=1ϕn
+ij(xj)
+(4.6.1)
+==PAGE:32==
+4.7. MAPPING FROM STANDARD DOMAIN TO ARBITRARY DOMAIN
+27
+where n is the dimension. The matrix-based operators, taking the 2-dimensional
+case as an example, are given as
+Ax,2D = I ⊗Ax,1D
+(4.6.2)
+Az,2D = Az,1D ⊗I
+(4.6.3)
+where I is the identity matrix with the length of the diagonal equal to the size of
+the direction different from the operation direction, and A could be mass matrix
+M, derivative matrix D, and the Vandermonde matrix V.
+4.7
+Mapping from standard domain to arbitrary
+domain
+As is shown previously, the domain of definition of the orthogonal basis is [0, 2π]
+and [−1, 1] for Fourier spectral method and polynomial method, respectively. In the
+real application, the mapping from arbitrary domain [a, b] to the definition domain
+is required. The mapping procedure is expressed as
+• Fourier Method:
+f(x) = f
+ b −a
+2π ξ + a + b
+2π
+!
+(4.7.1)
+d(n)f(x)
+dx(n)
+= d(n)
+dξ(n)
+ b −a
+2π ξ + a + b
+2π
+!  dξ
+dx
+!(n)
+(4.7.2)
+dξ
+dx =
+2π
+b −a
+(4.7.3)
+• Polynomial Method:
+f(x) = f
+ b −a
+2
+ξ + a + b
+2
+!
+(4.7.4)
+d(n)f(x)
+dx(n)
+= d(n)
+dξ(n)
+ b −a
+2
+ξ + a + b
+2
+!  dξ
+dx
+!(n)
+(4.7.5)
+dξ
+dx =
+2π
+b −a
+(4.7.6)
+4.8
+Grid compression near boundary
+The grid resolution near the boundary has a significant effect on the accuracy of
+viscous flow simulation, and the grid requirement for turbulence simulation becomes
+more stringent. Although the Chebyshev-Lobatto grid has compression characteris-
+tics near the boundary, the mapping scheme can be used to compress the grid near
+the boundary to improve computational performance.
+==PAGE:33==
+4.8. GRID COMPRESSION NEAR BOUNDARY
+28
+The grid compression function for the current study is only applied in the vertical
+direction, which is expressed as
+z = tanh(aξ)
+tanh(a)
+(4.8.1)
+Therefore, the computation is mapped from the compressed grid to the Chebyshev
+Lobatto grid and the coordinate transform is expressed as
+∂
+∂z = ∂ξ
+∂z
+∂
+∂ξ
+(4.8.2)
+∂2
+∂z2 = ∂
+∂z
+ ∂ξ
+∂z
+∂
+∂ξ
+!
+(4.8.3)
+= ∂2ξ
+∂z2
+∂
+∂ξ + ∂ξ
+∂z
+∂
+∂z∂ξ
+(4.8.4)
+= ∂2ξ
+∂z2
+∂
+∂ξ +
+ ∂ξ
+∂z
+!2 ∂2
+∂ξ2
+(4.8.5)
+By using implicit function differentiation, the Jacobian matrix is written as
+∂ξ
+∂z =
+atanh(a)
+a2 −tanh(aξ)2
+(4.8.6)
+∂2ξ
+∂z2 = 2atanh(a)2tanh(aξ)
+(a2 −tanh(aξ)2)2
+(4.8.7)
+==PAGE:34==
+Chapter 5
+Spectral Iterative Solver for
+Solving Pressure Poisson’s
+Equation
+As can be seen in Chapter 3, the hydrodynamic pressure Pd is implicitly solved
+at each time step by Poisson’s type equation.
+If the direct solver is applied to
+solve the resulting linear system of equations of simulating case with resolution
+Nx ×Nz = N ×N, the storage requirement is O(N 4) if the resolution in the vertical
+and horizontal directions is the same, and the solution procedure takes operations
+O(N 6), which makes the computation of a large-scale simulation out of the ques-
+tion. While the time integration only takes O(N 2), the most computational time
+is spent on implicitly solving the pressure Poisson equation. That means the direct
+solver is infeasible for large-scale simulation in two and three dimension problems.
+Therefore, the iterative solver is required to both save storage and speed up the
+solver. In addition, the difference in hydrodynamic pressure between the last time
+step and the current time step is small, thus the linear interpolation of the solutions
+from the previous two time step can be used as the initial guess of the pressure field
+of the current time step, so the convergence is faster.
+The main difficulty in making the spectral iterative method scalable method is
+the fact that the resulting system of equations is dense, non-symmetric and it has no
+fixed and structured stencil. Figure 5.1 show the metrics structure of both systems
+of the equation derived from pressure Poisson equation and derived from implicit
+momentum equation respectively for the case with Nx ×Nz. Both of them are dense
+matrices, which makes the direct solver even more impractical because neither the
+algorithm for sparse matrix nor the matrix structure could be taken advantage of o
+accelerate the direct solver.
+29
+==PAGE:35==
+30
+Figure 5.1: Left: Matrix structure of pressure Poisson equation; Right: Matrix
+structure of implicit system, both for Nx × Nz = 8 × 8
+The pressure Poisson equation is an elliptic partial differential equation, and its
+expanded form of the pressure Poisson equation from the Chapter 3 is written as
+∇2
+σPd = ∂2Pd
+∂x2 +
+ ∂σ
+∂x + ∂σ
+∂x
+! ∂2Pd
+∂x∂σ + ∂2σ
+∂x2
+∂Pd
+∂σ +
+
+
+ ∂σ
+∂x
+!2
++
+ ∂σ
+∂z
+!2
+∂2Pd
+∂σ2
+=
+ρ
+∆tBk
+  ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!
+u(k−1) +
+ ∂σ
+∂z
+∂
+∂σ
+!
+w(k−1)
+!
++ ρAk
+∆t
+  ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!
+∂u(k−1) +
+ ∂σ
+∂z
+∂
+∂σ
+!
+∂w(k−1)
+!
++ µ
+  ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!
+∇2
+σu + ∂σ
+∂z
+∂
+∂σ∇2
+σw
+!
+−ρg
+ ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+! ∂η
+∂x
+−ρ
+  ∂
+∂x + ∂σ
+∂x
+∂
+∂σ
+!  
+u∂u
+∂x + wσ
+∂u
+∂σ
+!
++ ∂σ
+∂z
+∂
+∂σ
+ 
+u∂w
+∂x + wσ
+∂w
+∂σ
+!!
+(5.0.1)
+with the boundary condition
+n · ∇σ =nz∂σ
+∂z
+∂Pd
+∂σ + nx
+ ∂Pd
+∂x + ∂σ
+∂x
+∂Pd
+∂σ
+!
+(5.0.2)
+= nz
+ 
+BkAk∂w(k−1) + ∆tBkρ
+ 
+ν∇2 (k−1)
+σ
+w −u∂w
+∂x −wσ
+∂w
+∂σ
+!!
+(5.0.3)
++ nx
+ 
+BkAk∂u(k−1) + ∆tBkρ
+ 
+ν∇2 (k−1)
+σ
+u −u∂u
+∂x −wσ
+∂w
+∂σ
+!!
+at σ = −1
+(5.0.4)
+Pd = 0 at σ = 1
+(5.0.5)
+The left and right boundaries are cyclic periodic boundary conditions.
+==PAGE:36==
+5.1. STATIONARY ITERATIVE METHOD
+31
+5.1
+Stationary iterative method
+Iterative schemes can be constructed as matrix-free, which means that they only
+require O(Nx × Nz) for storage.
+The iterative method for the spectral method
+is usually not as efficient as that in a low-order scheme. This section presents the
+most commonly used stationary iterative methods, Jacobi and Gauss-Seidel iterative
+methods.
+These iterative methods build the foundation for the more advanced
+multigrid method.
+5.1.1
+Jacobi and Gauss-Seidel iterative method
+The Jacobi and Gauss-Seidel iteration method is the most basic iterative method
+that is used to solve the linear system of equations
+Ax = F
+(5.1.1)
+The solution is updated iteratively by the form
+x(k+1) = Bx(k) + C
+(5.1.2)
+where
+B = D−1(L + U)
+(5.1.3)
+C = D−1F
+(5.1.4)
+if it is the Jacobi method, where L, U and D are upper triangle, lower triangle, and
+the diagonal of the matrix A and
+B = A−1U
+(5.1.5)
+C = A−1F
+(5.1.6)
+if it is Gauss-Seidel method. The Gauss-Seidel method converges much faster than
+the Jacobi method since it uses the latest value during the iteration. Besides, the old
+variable is not required to store in the Gauss-Seidel method, the storage requirement
+of the Gauss-Seidel method only takes half of the storage compared to the Jacobi
+iteration. In the meantime, however, if the iterative matrix suffers from instability,
+the Gauss-Seidel method is more unstable.
+5.1.2
+Eigenvalue analysis and error analysis of Gauss-Seidel
+method
+For the convergence of iterative solvers, the error should be wiped out for each
+iteration. Taking the iterative scheme Equation (5.1.2) error is updated by the form
+e = x −x(k)
+(5.1.7)
+e(k+1) = Be(k)
+(5.1.8)
+e(k+1) = V−1ΛVe(k)
+(5.1.9)
+==PAGE:37==
+5.1. STATIONARY ITERATIVE METHOD
+32
+The error will not grow up unboundedly if the maximum eigenvalue of B ≤1.
+The spectral radius, which is the maximum absolute eigenvalue of B, should satisfy
+ρ(B) < 1 for the iterative solver to converge. To save storage space, the iterative
+matrix B does not need to be constructed, the iterative process can be done by
+exploiting the structure of the matrix A. The spectral radius of the Fourier method
+and Chebyshev method as functions of grid numbers obtained by increasing hor-
+izontal and vertical grid numbers while keeping the other direction constant are
+shown in the left of Figure 5.2. It is observed that the Chebyshev method has a
+worse scaling of the spectral radius than the Fourier method, as the error damping
+speed decreases as the number of the grid increases with the order of magnitude of
+O(N −2.2). Therefore, with the full stencil property of the spectral method which
+means that the number of operations of each grid is O(N), the theoretical total
+computational cost of the standard Gauss-Seidel method is scaled by O(N 3.2) as
+the vertical grid number increases, which is in good agreement with the right of
+Figure 5.2.
+Figure 5.2: Left: Spectral radius of Fourier and Chebyshev method; Right: CPU
+time as function of grid numbers
+Figure 5.3: Left: Convergence history for different Nz; Right: Convergence history
+for different Nx
+==PAGE:38==
+5.1. STATIONARY ITERATIVE METHOD
+33
+The error after kth iterations can be presented as Fourier expansion
+e =
+∞
+X
+n=−∞
+ˆen · e(−inx)
+(5.1.10)
+e(k) =
+∞
+X
+n=−∞
+(ˆen)k · e(−inx)
+(5.1.11)
+where i = √−1 and ˆek is the expansion coefficients which converges to zero as
+k →∞if the error function satisfies the following conditions
+• e satisfies a Holder condition;
+• e is a bounded function;
+• e is continuous and its Fourier coefficients are summable.
+Figure 5.4: Initial error
+Figure 5.5: Error after 8 iterations
+Figure 5.6: Error after 32 iterations
+Figure 5.7: Error after 128 iterations
+==PAGE:39==
+5.1. STATIONARY ITERATIVE METHOD
+34
+Therefore, as the scheme iterates, the error components with high wave number
+is damped out the most rapidly. As can be seen in the error plot of figures from Fig-
+ure 5.4 to Figure 5.7, with the initial guess of random values, the error components
+with high wave numbers are eliminated rapidly in the first few iterations. While
+after the first few iterations, the Gauss-Seidel method is not that efficient.
+5.1.3
+The block Gauss-Seidel method
+As was reasoned in the previous subsection, due to the worse scaling of the
+eigenspectral of the Chebyshev-based expansion in the vertical direction, the slow
+convergence in the vertical direction would hinder the overall performance of the
+iterative solver. To make the solver robust, this problem has to be solved. One solu-
+tion to speedup up the convergence in the vertical direction is the block Gauss-Seidel
+method. The Gauss-Seidel block partitions the computational domain by blocking
+each vertical column, and the values of each block are updated simultaneously, which
+is the block-wise Gauss-Seidel method instead of the point-wise iterative method in
+the standard Gauss-Seidel method. The block method generally has a larger con-
+vergence rate than the point-wise method, because the local iterative operator B for
+each operation contains more information about the global iterative operator B.
+The block Gauss-Seidel method in which the computational domain is divided
+into Nx blocks is expressed as
+x(k+1) = A−1
+r,r
+ 
+f r −
+r−1
+X
+s=1
+Ar,sx(x+1)
+s
+−
+n
+X
+s=r+1
+Ar,sx(x)
+s
+!
+(5.1.12)
+where Ai,i, i = 1, 2, ......, m are square and non-singular matrix, which is all rows in
+the global A that corresponds to each value in the block. The blocking effect takes
+advantage of the fact that for a small system of equations, a direct solver is much
+faster than an iterative solver.
+Better smoothing property
+The block Gauss-Seidel method has a much better smoother property than the
+point Gauss-Seidel method, especially for the boundary with the Neumann boundary
+condition. As can be seen in Figure 5.8 and Figure 5.9 and comparing them with
+Figure 5.5 to Figure 5.7, after the first iteration of block Gauss-Seidel iteration, its
+smoothing effect and the error reduction is much better than that of the solution
+after 128 point Gauss-Seidel iteration. Besides, from Figure 5.8 and Figure 5.9,
+one can observe that the error in the vertical direction is eliminated just after one
+iteration. In a multigrid algorithm, the grid-level selection can take advantage of
+this property.
+==PAGE:40==
+5.1. STATIONARY ITERATIVE METHOD
+35
+Figure 5.8: Error after 1 iterations
+Figure 5.9: Error after 8 iterations
+Grid independence in vertical direction
+The blocking effect makes the numerical method grid independent in z-direction
+since the computation is equivalent to Nx × 1 problems. As can be observed on the
+left of Figure 5.10, the convergence history of block Gauss-Seidel method is Nz grid
+independent. While in the horizontal direction, this phenomenon is not exhibited,
+and the iterations to convergence increase as the number of grids increases. One
+might consider using the horizontal block Gauss-Seidel method to achieve grid inde-
+pendence in the horizontal direction and accelerate its computation. Unfortunately,
+although succeeding in achieving grid independence in the horizontal direction to
+some extent, the implemented horizontal block Gauss-Seidel method of the current
+study does not converge to an acceptable residual.
+Figure 5.10: Left: Convergence history for different Nz by using vertical block GS
+method; Right: Convergence history for different Nx by using horizontal block GS
+method
+The scalability of the block Gauss-Seidel method in the blockwise direction is
+==PAGE:41==
+5.2. KRYLOV SUBSPACE ITERATIVE METHOD
+36
+about O(Nlog(N)), which is much more scalable than O(N 3) of the point Gauss-
+Seidel method, as Figure 5.11 depicts in terms of CPU-time. While for the computa-
+tional domain with large Nx/Nz ratio, the computational performance of the point
+Gauss-Seidel method outperforms the block method, as the right of Figure 5.11.
+It is also observed that both of the Gauss-Seidel methods have worse scalability
+O(N 3log(N)). To achieve a scalable solver, one should either avoid a large Nx/Nz
+ratio or transfer the problem with a large Nx/Nz ratio to a problem with a relatively
+small Nx/Nz ratio. The multigrid method takes advantage of the latter idea.
+Figure 5.11: Left: CPU time as a function of the number of the vertical grid; Right:
+CPU time as a function of the number of horizontal grids
+5.2
+Krylov subspace iterative method
+The Krylov subspace methods are robust methods for solving the system of
+equations
+Ax = b,
+A →Rn×n
+(5.2.1)
+Assuming A is invertible. The Krylov subspace of rank m of the problem is spanned
+by the set of column vectors which is written as
+Km(A, b) = span{b, Ab, A2b ..., Am−1b}
+(5.2.2)
+The idea of the Krylov subspace method is to transform an approximately equiva-
+lent system of equations of size m with m ≪n, in which the column spaces of the
+new system of equations are orthonormal to each other. Therefore, the new sys-
+tem can be solved much more efficiently by exploiting the orthogonality property.
+The Krylov subspace method searches for an approximate solution ˆx within this
+Krylov subspace, which is based on the fact that the solution of the linear system of
+equations a is represented naturally by the Krylov subspace so that the linear com-
+bination coefficient of each orthonormal vector decreases relatively rapidly. On the
+other hand, the Krylov subspace method does not require the A matrix to be explic-
+itly known, but the matrix-vector product Ab. In the current study, this property
+==PAGE:42==
+5.2. KRYLOV SUBSPACE ITERATIVE METHOD
+37
+of the Krylov subspace method reduces the storage requirement from O(M 2 × N 2)
+of the direct method to O(M × N), and the computational complexity of it is re-
+duced from O(M 2 × N 2) of the direct method and the Gauss-Seidel and Jacobi
+method to O(Nlog(N) × Mlog(M)) since the fast Fourier method (FFT) and the
+fast Chebyshev method (FCT) are applied in the horizontal and vertical direction,
+respectively.
+5.2.1
+Conjugate gradient method
+One popular Krylov subspace method is the conjugate gradient method [11], this
+method chooses a good approximation of ˆx in K by the criterion that the residual
+satisfies
+rj = b −Axj ⊥Kj
+(5.2.3)
+The idea of conjugate grade the ent method starts from the quadratic form of Equa-
+tion (5.2.1)
+f(x) = 1
+2xTAx −bTx
+(5.2.4)
+The minimum of the function f(x) is at the condition when its first derivative is
+zero
+f ′(x) = 1
+2ATx + 1
+2Ax −b = 0
+(5.2.5)
+If matrix A is symmetric positive definite, which means it is satisfied for any x
+vector
+xTAx > 0, and AT = A
+(5.2.6)
+consequently, the space defined by f(x) is shaped like a paraboloid bowl and Equa-
+tion (5.2.4) is therefore written as
+f ′(x) = Ax −b = 0
+(5.2.7)
+which is just the linear system to be solved, the system is guaranteed to converge to
+the true solution. It is natural to choose the steepest gradient direction as a search-
+ing direction with variable step size. The method of the steepest descent method
+suffers from slow convergence when the condition number κ(A) is large, and the
+merit of the solution bounces back and forth because each search direction might
+be highly linear dependent on the other. Therefore, to speed up convergence, the
+conjugate search direction is applied.
+The direction of the conjugate gradient is that the residual at the current solution
+rk = b−Axk should be orthogonal to all vectors in Krylov subspace Kk. rk will be
+in the next Krylov subspace Kk+1. Therefore, the residual of the current iterative
+step is orthogonal to the previous one.
+rT
+i rk = 0,
+i < k
+(5.2.8)
+==PAGE:43==
+5.2. KRYLOV SUBSPACE ITERATIVE METHOD
+38
+The iterative step is written as
+xi+1 = xi + αidi
+(5.2.9)
+Ideally, to find the length of the step αi, the error vector ei+1 at the new iterative
+step should be orthogonal to searching direction di such that the future searching
+direction never steps in the same direction again. Therefore, the step size is obtained
+by
+dT
+i ei+1 = 0
+(5.2.10a)
+dT
+i (ei + αdi) = 0
+(5.2.10b)
+αi = −dT
+i ei
+dT
+i di
+(5.2.10c)
+But the error vector e could never be known in the iterative method. The alternative
+method is to make the search direction conjugate. If two non-zero vector dk and di
+are said to be conjugate with respect to the matrix A if it satisfied the relation
+dT
+k Adi = 0
+(5.2.11)
+Therefore, the ei+1 should be conjugate to di. Following the same procedure of
+Equation (5.2.10), αi in conjugate direction is derived as
+αi = −dT
+i Aei
+dT
+i Adi
+(5.2.12)
+= −dT
+i ri
+dT
+i Adi
+(5.2.13)
+And the residual can be updated using a recurrence relation
+ri+1 = Aei+1
+= A(ei + αidi)
+(5.2.14)
+= ri + αiAdi
+The set of A conjugate searching direction is generated by the conjugate Gram-
+Schmidt process. Assuming there is a set of n linear independent vectors (u0, u1, ..., un−1),
+and set the first searching direction to be u0, the following searching direction can
+be expressed as
+di = ui +
+i−1
+X
+k=0
+βikdk
+(5.2.15)
+where βik is selected such that the searching direction satisfies A conjugate
+dT
+i Adj = uT
+i Adj +
+i−1
+X
+k=0
+βikdT
+k Adj
+0 = uT
+i Adj + βijdT
+j Adj
+(5.2.16)
+βij = −uT
+i Adj
+dT
+i Adj
+==PAGE:44==
+5.2. KRYLOV SUBSPACE ITERATIVE METHOD
+39
+While this process is computationally expansive, it can be manipulated to make it
+computationally cheap. By combining the inner product between ri Equation (5.2.14)
+and Equation (5.2.17)
+rT
+i rj+1 = rT
+i rj −αirT
+i Adj
+αirT
+i Adj = rT
+i rj −rT
+i rj+1
+αirT
+i Adj =
+
+
+
+
+
+
+
+
+
+1
+αirT
+i ri, i=j
+−
+1
+αi−1rT
+i ri, i=j+1
+0, otherwise
+(5.2.17)
+By rearranging the expression of βij and substitute the expression of αi−1, the
+expression of βi is given as the form
+βi =
+rT
+i ri
+dT
+i−1ri−1
+=
+rT
+i ri
+rT
+i−1ri−1
+(5.2.18)
+and the searching direction at the next iteration step is written as
+di+1 = ri+1 + βi+1di
+(5.2.19)
+The pure conjugate gradient method might suffer from slow convergence and even
+divergence if the system is ill-conditioned, which makes it impractical in the real
+application where the system of equations is ill-conditioned resulting from the large
+system. It is necessary to use preconditioning to ensure fast convergence. The linear
+system of equations can be modified to an equivalent problem
+(M LAM R)(M −1
+R x) = M Lb
+(5.2.20)
+where the new matrix M LAM R has a much smaller condition number, which means
+the new system is much faster to converge. The best preconditioning matrix is ex-
+actly A−1, while it is too expansive to be obtained; the worst preconditioning matrix
+is just an identity matrix, which is useless in lowering the condition number. The
+philosophy of obtaining preconditioning is to approximate M −1 ≈A−1. The matrix
+M −1 is practically not needed to be computed. The effect of M −1 can be (incom-
+plete) LU factorization, (incomplete) Cholesky decomposition, or one or several
+iterations of other iterative methods. In the current study, only the left precondi-
+tioning is applied, which means M R = I, and the p-multigrid that will be discussed
+in Chapter 6 is adopted as a preconditioner. The procedure of the conjugate gradi-
+ent method is summarized as algorithm 1. The red text denotes the preconditioning
+step, and the system is not preconditioned if M L = I.
+==PAGE:45==
+5.2. KRYLOV SUBSPACE ITERATIVE METHOD
+40
+Algorithm 1: (Preconditioned) Conjugate Gradient Algorithm
+Data: A, b, initial guess vector x0, preconditioning matrix M −1, and
+tolerance ϵ
+Result: Solution vector x
+r0 ←b −Ax0;
+˜r0 ←M −1r0 (Preconditioning step);
+d0 ←˜r0;
+k ←0;
+while ∥rk∥> ϵ do
+αk ←
+˜r⊤
+k rk
+d⊤
+k Adk ;
+xk+1 ←xk + αkdk;
+rk+1 ←rk −αkAdk;
+˜rk+1 ←M −1rk+1 (Preconditioning step);
+βk ←
+˜r⊤
+k+1rk+1
+r⊤
+k rk
+;
+dk+1 ←˜rk+1 + βkdk;
+k ←k + 1;
+end
+It is worth mentioning that in the current study, the systems of equations re-
+sulting from the spectral discretized pressure Poisson equation are not symmetric
+positive definite, which results in imperfect computational performance of the con-
+jugate gradient, and convergence of the solution is not guaranteed.
+5.2.2
+Biconjugate gradient stabilized method
+A variant of the conjugate gradient method that could be generalized to nonsym-
+metric systems of equations is the biconjugate gradient stabilized method [12]. In
+this method, the residual of each iteration step rj is required to be orthogonal to a
+different space ATKj(AT) instead of Kj(A) in the conjugate gradient method. This
+method has faster and smoother convergence than both the conjugate gradient and
+the original biconjugate gradient method. The idea behind the biconjugate gradient
+method is to use two different sequences of residuals, in which they are conjugate to
+each other. The stabilized version of the biconjugate gradient method is to include
+an additional stabilization process in each iteration. The biconjugate gradient sta-
+bilized method has better performance for solving systems with ill-conditioned and
+non-symmetric metrics, which means this method is more suitable for linear systems
+of equations studied in the current study.
+==PAGE:46==
+5.2. KRYLOV SUBSPACE ITERATIVE METHOD
+41
+Algorithm 2: (Preconditioned) Biconjugate Gradient Stabilized Method
+Input: A matrix, b vector, initial guess x0, preconditioning matrix M −1,
+maximum iterations Nmax, tolerance ϵ
+Output: Approximate solution x
+r0 = b −Ax0 ;
+p0 = r0 ;
+r = r0 ;
+ρ = α = ω = 1 ;
+k = 0 ;
+while k < Nmax and ∥r∥> ϵ do
+k = k + 1 ;
+ρ = ⟨r0, r⟩;
+β = (ρ/ρprev)(α/ω) ;
+ρprev = ρ ;
+p = r + β(p −ωv) ;
+p = M −1p (Preconditioning step);
+v = Ap ;
+α = ρ/⟨r0, v⟩;
+s = r −αv ;
+s = M −1s (Preconditioning step);
+if ∥s∥< ϵ then
+x = x0 + αp ;
+break ;
+end
+t = As ;
+ω = ⟨t, s⟩/⟨t, t⟩;
+x = x0 + αp + ωs (stabilization term) ;
+r = s −ωt ;
+end
+5.2.3
+General Minimal RESidual method (GMRES)
+The general minimal residual method (GMRES) [13] is relatively more robust
+than the conjugate gradient method for general problems because it can handle dense
+and nonsymmetric positive definite matrices. Therefore, GMRES is best suitable
+for solving the pressure Poisson equation in the current study. Besides, the prop-
+erty of guaranteeing convergence makes it very popular in solving linear systems of
+equations. While for the ill-conditioned system where the number of iteration steps
+to convergence is large, GMRES requires far more amount of memory than another
+iterative method if the number of iteration steps is large.
+The approximate solution to x is assumed to be within the space spanned by the
+Krylov subspace. The GMRES criterion is to solve a minimization problem in which
+==PAGE:47==
+5.2. KRYLOV SUBSPACE ITERATIVE METHOD
+42
+the residual ri in each iteration step has the minimum norm for the approximation
+of each iteration step xj in Kj. Therefore, the GMRES is summarized as: for each
+iteration, find the vector c, such that this c is the solution to the minimization
+problem
+min||AKnc −b||
+(5.2.21)
+As mentioned at the beginning of this section, the best basis [v1, ..., vj] for the
+Krylov subspace Kj should be orthonormal. The idea of this process is QR decom-
+position, where Q denotes all orthonormal vectors and R denotes the permutation
+matrix. Equation (5.2.21) therefore becomes
+min||AQny −b||,
+y = Rc
+(5.2.22)
+While this method is impractical to perform due to its computational cost and not
+all of the basis is necessary to be obtained to reach the desired accuracy, Arnoldi’s
+iteration [14] is considered to be a practical method as an alternative to QR decom-
+position. The Arnoldi’s iteration generates each new basis vector vj+1 by orthog-
+onalizing Avj to the vectors [v1, ...vj] that is already obtained from the previous
+iteration, such that the computational cost is cheap and the basis can be chosen to
+the number where the generated basis is enough to span the accurate approximation
+ˆx. The idea of Arnoldi’s iteration acts as a partial QR decomposition that uses the
+modified Gram-Schmidt model, where the projection of Avj onto the previous basis
+is subtracted one at a time.
+To perform Arnoldi’s iteration, the matrix A is written as a self-similar form
+A = QHQ∗
+AQ = QH
+(5.2.23)
+where Q is unitary matrix with the property QQ∗= I, and H is the upper Hes-
+senberg matrix. To express Equation (5.2.23) as a partial decomposition form such
+that there is a recurrence relation of which the iterative method can take advantage,
+the relation between the Q matrices in subsequent iterations is given by
+AQn = Qn+1 ˜Hn
+(5.2.24)
+with the structure of the upper Hessenberg matrix (an example of 3 × 3 Hessenberg
+matrix Section 5.2.3),
+
+
+h11
+h12
+h13
+h21
+h22
+h23
+0
+h32
+h33
+
+
+for any orthonormal vector qn, it can be expressed as
+Aqn = h1,nq1 + ... + h1,nqn + h1,n+1qn+1
+(5.2.25)
+in which the only unknown is qn+1 and it can be calculated explicitly. The first or-
+thonormal basis is commonly chosen as the normalized residual vector r0 = Ax0−b.
+==PAGE:48==
+5.2. KRYLOV SUBSPACE ITERATIVE METHOD
+43
+The Arnoldi iteration method is summarized as algorithm 3.
+Algorithm 3: Arnoldi Iteration (with preconditioning)
+Data: A, x0, preconditioning matrix M −1, b,maximum iteration m
+Result: Orthonormal basis {v1, v2, . . . , vm}, Hessenberg matrix Hm
+r0 = Ax0 −b;
+β ←∥r0∥;
+v1 ←v0/β;
+Hm ←zeros(m, m);
+for j ←1 to m do
+w ←Avj;
+vi = M −1vi (Preconditioning step);
+for i ←1 to j do
+Hi,j ←vT
+i w;
+w ←w −Hi,jvi;
+end
+Hj+1,j ←∥w∥;
+if Hj+1,j = 0 then
+break;
+end
+vj+1 ←w/Hj+1,j;
+end
+After Arnoldi’s iteration, the norm of the residual Equation (5.2.22) is multiplied
+with QT
+n+1 and taking the property of unitary matrix, the minimization problem
+becomes
+||rn|| = ||Qn+1 ˜
+Hn+1,ny −b||
+||rn|| = || ˜
+Hn+1,ny −QT
+n+1b||
+||rn|| = ||Qn+1(βe1 −˜
+Hny)||
+||rn|| = ||βe1 −˜
+Hny||
+(5.2.26)
+where β = ||r0|| and e = (1, 0, ...0). The last two steps make sense due to the
+definition.
+(QTAQ)(Qx) = QTb
+Qx = y
+QTb = (||b||, 0, ...0)
+(5.2.27)
+The only remaining problem is how to solve the minimization problem in vector form,
+which is impossible to solve directly without manipulation, as Equation (5.2.26)
+argmin||βe1 −˜
+Hny||
+(5.2.28)
+==PAGE:49==
+5.2. KRYLOV SUBSPACE ITERATIVE METHOD
+44
+which is commonly solved using QR decomposition. QR decomposition decomposes
+a matrix A into a Unitary matrix Q, and a right upper triangular matrix R. In
+this way, transforming the upper Hessenberg matrix ˜
+Hn into an upper triangular
+matrix is fast.
+The best method to transform the matrix ˜
+Hn is the Givens rotation. The first
+step is find an (n + 1) −by −(n + 1) orthogonal matrix Ωn and an (n + 1) −by −n
+upper triangular matrix ˜
+Rn that satisfies
+Ωn ˜
+Hn = ˜
+Rn
+(5.2.29)
+since the upper triangular matrix ˜
+Rn has one more row than its columns, it can be
+written as
+˜
+Rn =
+"
+Rn
+0
+#
+(5.2.30)
+The next ˜
+Hn+1 is updated only at the last column by using Arnoldi’s iteration
+˜
+Hn+1 =
+" ˜
+Hn
+hn
+0
+hn+1,n
+#
+(5.2.31)
+It indicates that right multiplying ˜
+Hn+1 with Ωn enlarged by 1, an upper triangular
+with one more row than a column is obtained
+"
+Ωn
+0
+0
+1
+#
+˜
+Hn+1 =
+
+
+Rn
+rn+1
+0
+ρ
+0
+σ
+
+
+(5.2.32)
+Applying the Givens rotation to Equation (5.2.32),
+Ωn+1 =
+
+
+In−1
+0
+0
+0
+cn
+sn
+0
+−sn
+cn
+
+
+"
+Ωn
+0
+0
+1
+#
+cn =
+ρ
+√ρ2 + σ2
+sn =
+σ
+√ρ2 + σ2
+(5.2.33)
+and from Equation (5.2.29), the equation of the next iteration is written as
+Ωn+1 ˜
+Hn+1 =
+
+
+Rn
+rn+1
+0
+√ρ2 + σ2
+0
+0
+
+
+(5.2.34)
+Consequently, the minimization problem Equation (5.2.28) can be transformed to
+||βe1 −˜
+Hny||
+=||Ωn(βe1 −˜
+Hny)||
+=||βΩne1 −˜
+Rny||
+=
+
+βΩne1 −
+"
+Rn
+0
+#
+y
+
+
+(5.2.35)
+==PAGE:50==
+5.2. KRYLOV SUBSPACE ITERATIVE METHOD
+45
+written βΩne1 as
+βΩne1 =
+"
+gn
+γn
+#
+(5.2.36)
+the vector y that minimize the problem is given by
+y = R−1
+n gn
+(5.2.37)
+The final GMRES algorithm can be summarized as algorithm 4.
+Algorithm 4: (Preconditioned) GMRES Method
+Data: A (the coefficient matrix), b (the right-hand side vector), x0 (the
+initial guess), preconditioning matrix M −1, k (the maximum
+number of iterations), tol (tolerance)
+Result: x (the solution to the linear system)
+r ←b −Ax;
+v1 ←
+r
+∥r∥;
+g = β, Q = 1 k ←0;
+while k ≤maximum iterations do
+(H(1 : k + 1, k), Q(:, k)) ←Arnoldi’s iteration(Q, M −1, Maxiter);
+if hk+1,k ≤tol then
+break;
+else
+ρ = H(k, k);
+H(k, k) =
+q
+ρ2 + H(k + 1, k)2 c = ρ/H(k, k);
+s = H(k + 1, k)/H(k, k);
+H(k + 1, k) = 0;
+Q(k + 1, :) = −sQ(k, :);
+Q(k, :) = cQ(k, :);
+Q(k + 1, k + 1) = c;
+Q(k, k + 1) = s;
+g(k + 1) = −sg(k);
+g(k) = −cg(k);
+end
+k ←k + 1;
+end
+y = H(1 : k, :, k)−1g(1 : k);
+Qy = M −1Qy (Preconditioning step);
+x = x0 + Qy;
+==PAGE:51==
+5.3. DISCUSSION OF KRYLOV SUBSPACE METHOD
+46
+5.3
+Discussion of Krylov subspace method
+The conjugate gradient method for non-symmetric, non-positive definite met-
+rics, which are the cases of the current study, diverges most of the time. In the
+numerical experiment, the conjugate gradient method generally converges until
+Nx × Nz = 2 × 2. The biconjugate gradient stabilized method behaves much better
+than the conjugate gradient method and converges until the simulation case reaches
+about Nx × Nz = 16 × 16 with a much better rate of convergence than the con-
+jugate gradient method. Both the conjugate gradient method and the biconjugate
+gradient staggered method do not guarantee convergence and diverge for slightly
+large problems, which makes the pure conjugate gradient type method useless. The
+GMRES method does guarantee that the divergence could be avoided, and it natu-
+rally has the maximum iteration step which is the size of the matrix, while GMRES
+suffers from slow convergence when the system is ill-conditioned. As a consequence,
+the method requires a stringent storage requirement. Although there is a restart
+version of GMRES where the number of orthonormal vectors of Krylov subspace is
+restricted, and the algorithm restarts the Krylov subspace after a certain number of
+iterations, selecting the latest approximation as the initial guess and constructing
+a new orthonormal basis. But treatment might not only increase the iteration to
+convergence.
+The convergence history of three Krylov subspace methods for the test case
+Nx × Nz = 2 × 2 is shown in Figure 5.12. It is observed that the conjugate gradient
+method has the worst performance compared to GMRES and the biconjugate gradi-
+ent stabilized method. Besides, the conjugate gradient method shows a highly high
+oscillation, which indicates that it is highly unstable and prompts us to mention
+being diverged. It is worth mentioning that even for such a small case, the GMRES
+and biconjugate gradient stabilized method still takes around ten iterations to reach
+a reasonable tolerance. Such a slow convergence is unacceptable in real applications.
+To solve this problem, one can resort to preconditioning.
+==PAGE:52==
+5.3. DISCUSSION OF KRYLOV SUBSPACE METHOD
+47
+Figure 5.12: Convergence history of three Krylov subspace methods, for Nx × Nz =
+2 × 2
+==PAGE:53==
+Chapter 6
+Spectral Multigrid Method
+As mentioned in the preceding section, the error component with the highest
+wave number is damped out the fastest in the Gauss-Seidel method. For the error
+component with low wave number numbers, which is called the smooth error, the
+Gauss-Seidel method slowly removes them. The main task of accelerating the con-
+vergence of the iterative solver could be to eliminate the error component of a low
+wave number. The largest wave number on the computational grid is described by
+its minimum grid size. Therefore, the error component of low wave numbers in fine
+grids can be represented by the error component of high wave numbers in coarse
+grids, which could be eliminated efficiently given that the coarse problem can be
+solved much faster. The multigrid algorithm exploits this property which solves the
+system of equations by keeping transferring the residual from fine grids to coarse
+grids and efficiently eliminating the error of the error equations by a few smoothing
+of the Gauss-Seidel method at each grid level until reaching the coarsest grid level,
+and consequently, interpolating the error from the from coarse grids to fine grid and
+followed by post smoothing of a few iterations of Gauss-Seidel method. Above pro-
+cedure completes one iteration of the multigrid cycle. [16] generally introduces the
+idea of spectral multigrid without specific detail. To make the idea of the spectral
+multigrid method suitable for the free surface Navier-Stokes wave model, in this
+chapter, an efficient spectral multigrid is implemented.
+6.1
+Spectral multigrid vs classic multigrid
+The basic idea behind the spectral multigrid and classic multigrid is the same,
+which efficiently removes the smooth error by transferring residuals to different grid
+levels. The transferring process for the spectral discretization scheme, which is a
+global scheme, is much different from the low-order discretization schemes, which are
+local schemes. Because the interpolation should preserve the high-order accuracy of
+the spectral method (otherwise the spectral method will lose its significance), the
+spectral interpolation has to be used for the interpolation. Besides, unlike the classic
+low-order method the operator of the spectral method is not fixed, the generation of
+which is by a black-box process. To illustrate this difference, here the discretization
+48
+==PAGE:54==
+6.2. MULTIGRID STRUCTURE
+49
+by spectral method and finite difference method for a one-dimensional ishas taken
+as an example.
+Unlike the second-order finite difference method with the fixed
+stencil, the spectral method has no fixed structure of the stencil as the grid number
+increases.
+DN=3 =
+
+
+−1.5
+2.0
+−0.5
+−0.5
+0
+0.5
+0.5
+−2.0
+1.5
+
+→DN=4 =
+
+
+−3.1667
+4.0
+−1.3333
+0.5
+−1.0
+0.3333
+1.0
+−0.3333
+0.3333
+−1.0
+−0.3333
+1.0
+−0.5
+0.3333
+−4.0
+3.1667
+
+
+DN=3 =
+
+
+0
+1
+0
+−1
+0
+1
+0
+−1
+0
+
+→DN=4 =
+
+
+0
+1
+0
+0
+−1
+0
+1
+0
+0
+−1
+0
+1
+0
+0
+−1
+0
+
+
+This property indicates that for each grid level, the differential operator should be
+reconstructed. Besides, as was mentioned in Section 4.2, for the stability of the poly-
+nomial method, in the vertical direction Gauss-Lobatto point is chosen. Therefore,
+the Gauss-Lobatto point is used for each grid level.
+As a result, the interpola-
+tion process is relatively computationally expansive, with the cost of O(N 2
+x × N 2
+z ).
+The overall computational complexity is determined by the most expansive step.
+Therefore, among Gauss-Seidel iteration with the cost of O(N 2
+x × N 2
+z ) (standard)
+or O(N 2
+x × Nzlog(Nz)) (block) and spectral interpolation O(N 2
+x × N 2
+z ), the most
+expansive process is O(N 2
+x × N 2
+z ). In the multigrid solver, grid independence is ex-
+pected, that is, no matter how large the grid number, the iterations to convergence
+are approximately fixed. Therefore, in the current chapter, the goal is to achieve
+the optimized multigrid solver with scalability O(N 2
+x × N 2
+z ) or even better.
+6.2
+Multigrid structure
+The general structure of the multigrid method is presented as follows, taking
+four levels of grid hierarchy as an example
+• Smoothing: a few iterations of the Gauss-Seidel method, which takes advan-
+tage of the property that the Gauss-Seidel method eliminates error components
+with high wave numbers rapidly in the first few iterations.
+• Residual Computation: computing residual after smoothing R = f −AU
+• Residual Transferring (Restriction): transfer the residual down to the coarser
+grid.
+• Error Interpolation (Prolongation): Interpolating the error computed on coarser
+grids into finer grids.
+• Correction: subtract the error from the approximate solution.
+• Post-smoothing: A few iterations of the Gauss-Seidel method.
+==PAGE:55==
+6.2. MULTIGRID STRUCTURE
+50
+After the smoothing process, the residual of the smoothed procedure is interpolated
+to the next finer grid, and the error equation Ae = R is smoothed. This restriction
+process is carried out until the coarsest level of the grid is reached. The solution
+of the error e at the coarsest grid level is solved exactly by either direct solver or
+iterative solver. Consequently, the error e is interpolated back to the next finer grid
+until the upper bound of the fine grid is reached. During the prolongation, the error
+is subtracted from the intermediate solution to correct the solution closer to the true
+solution. The above steps complete one multigrid iteration.
+It is noticeable that the interpolation method applied in p-multigrid is the spec-
+tral interpolation method described in Section 4.4 instead of doing a linear averaging
+as is adopted in the multigrid method of the low-order method since the linear in-
+terpolation will destroy the fast convergence of the spectral accuracy. Taking the
+grid levels of Ω4p = 32, Ω2p = 16, Ωp = 8 for the horizontal and Fourier grids and the
+vertical Chebyshev grid as an example, which is shown in Figure 6.1. It is depicted
+that, unlike the classical geometrical multigrid, the coarser grid is not the subset of
+the fine grid, but the Chebyshev and Fourier grid with a different order for the sake
+of stability and the avoiding ill-conditioned resulted matrix.
+Figure 6.1: Upper: Grid level for Fourier expansion; Lower: Grid level for Chebyshev
+expansion
+The outer multigrid cycle is illustrated in algorithm 5, it starts with an initial
+==PAGE:56==
+6.2. MULTIGRID STRUCTURE
+51
+guess of the solution to the linear system of equations, and enters the multigrid cycle
+consequently until the residual reaches the stopping criterion.
+Algorithm 5: Multigrid algorithm for solving a linear system of equations
+Input: Guess an initial solution u0;
+Output: Solution u;
+while Residual ≥tolerance do
+u(k+1) = MGCYC(u(k), f);
+Compute residual R = f −Au(k+1);
+Check if the norm of residual ||R|| ≤tol;
+The most popular multigrid structures are V-cycle, F-cycle, and W-cycle, the
+structure of which are shown in the first three sub-figures in Figure 6.2, taking the
+total grid level equal to four. These types of structures start at the finest grid level.
+The last sub-figure in Figure 6.2 is full multigrid, which is the most efficient type of
+multigrid. The full multigrid starts at the finest grid and consequently interpolates
+the solution from the last V-cycle into the next finer grid and the interpolated
+solution is input to the next V-cycle iteration. After the V-cycle at the finest grid is
+complete, the solution is used as an input initial guess for another type of multigrid
+cycle. For example, the full multigrid can be combined as FMG+V-cycle, FMG+F-
+cycle, FMG+W-cycle, and FMG+Krylov subspace method.
+Figure 6.2: Multigrid structures of V-cycle, F-cycle, W-cycle, and Full multigrid.
+s-smoothing, r-restriction, p-prolongation, e-solved exactly
+The visualization of a single V-cycle multigrid is shown in Figure 6.3 and is
+compared with the solution from the direct solver.
+The left branch of the ’V’-
+shape is the residual field, and the right branch of the ’V’-shape is the solution
+==PAGE:57==
+6.2. MULTIGRID STRUCTURE
+52
+field. The residual is quickly eliminated to a very small magnitude by smoothing
+and transferring to a coarser grid level. As a result, the solution after one V-cycle
+iteration is a good approximation of the true solution.
+Figure 6.3: Visualization of V-cycle multigrid
+When the geometry shape is irregular, some care should be taken to best cap-
+ture the information during restriction and prolongation. Taking the wave over a
+submerged bar test as an example, the coarsest grid level should still contain enough
+information on the bar geometry, otherwise, the smoothing on the further coarse grid
+loses significance in both residual and error calculation and makes no physical sense.
+For the cases in which the grid number in a different direction is not identical,
+the grid level has to be carefully considered so that each level represents the smooth
+error.
+For example, for a wave over a submerged bar test case with resolution
+Nx × Nz = 512 × 32, the grid level is listed in Table 6.1. In numerical experiments,
+however, if the block smoother is used, the grid number of the vertical direction could
+remain unchanged which also yields a good computational performance, since the
+block treatment has a smoothing effect, which is already discussed in Section 5.1.3.
+In the discussion of the following section, the hydrodynamics parameter is kh =
+0.5, L = 36.21 m, and T = 2.02 s.
+==PAGE:58==
+6.2. MULTIGRID STRUCTURE
+53
+Level
+1
+2
+3
+4
+5
+Nx
+512
+256
+128
+64
+32
+Nz
+32
+32
+32
+16
+8
+Table 6.1: Grid level for Nx × Nz = 512 × 32
+6.2.1
+V-cycle Multigrid algorithm
+V-cycle is the simplest structure among all multigrid methods and is the funda-
+mental structure of the multigrid F cycle and the full multigrid methods. It operates
+by performing restriction from the finest grids to the coarsest grids and prolongation
+from the coarsest grid to the finest grid directly. Therefore, the V-cycle structure
+takes the least time in a single multigrid iteration. Besides, with its property of the
+least operations in one cycle, V-cycle has relatively low memory requirements. But
+when a problem with highly oscillatory and rapid changes in the solution is faced,
+the V-cycle might not be as efficient. The algorithm 6 shows the pseudo-code for
+the multigrid structure of the V cycle.
+Algorithm 6: V-cycle multigrid method
+Function Vcycle(u, f):
+if coarsest grid is reached then
+Solve the system directly on a coarse grid;
+Return;
+coarsestcontaion
+Pre-smoothing step;
+Compute residual r = f −Au;
+Restrict residual to coarser grid: rc = Rr;
+Set initial guess of error ec = 0 on the coarser grid;
+Call V-cycle recursively: Vcycle(ec, rc);
+Interpolate correction to finer grid: e = Iec;
+Correct solution: u = u + e;
+Post-smoothing step;
+The CPU time as functions of time by using point smoother and block smoother
+respectively, with different grid number N in horizontal and vertical direction are
+shown in Figure 6.4, where the grid number in unchanged direction is N = 8 and the
+stopping criterion is the relative residual norm relres ≤1e −8. It can be observed
+that the V-cycle multigrid has a scalability of O(Nxlog(Nx)) in horizontal direc-
+tion and O(N 3
+z ) in vertical direction, if the smoother is point Gauss-Seidel method,
+and the V-cycle algorithm has grid independence property in horizontal direction
+but not in vertical direction, as is shown in Figure 6.5. The poor performance in
+vertical direction is because of the poor scaling of eigenspectra of Chebyshev poly-
+nomial method. One may try to apply block Gauss-Seidel smoother to improve the
+==PAGE:59==
+6.2. MULTIGRID STRUCTURE
+54
+computational speed, the results of which is shown in the right part of Figure 6.4.
+However, although the scalability in the vertical direction is improved from O(N 3
+z )
+to O(N 2
+z log(Nz)) and the grid independence property is achieved in vertical direc-
+tion, the grid independence in horizontal direction is no longer exist, and the good
+scalability in horizontal direction is destroyed regardless the computational speed is
+faster when Nx/Nz ration is small.
+Figure 6.4: Left: CPU time as functions of grid number for point GS smoother;
+Right: CPU time as functions of grid number for block GS smoother, for block GS
+smoother for W-cycle multigrid
+Figure 6.5: Iterations to convergence as functions of grid number for W-cycle multi-
+grid
+The CPU time for the case Nx × Nz from 8 × 8 to 256 × 256 computed by
+V-cycle using block smoother are shown in Table 6.2. V-cycle structure becomes
+==PAGE:60==
+6.2. MULTIGRID STRUCTURE
+55
+prohibitively slow to compute large cases. The V-cycle does not achieve the optimal
+multigrid performance. Therefore, to find the desired computational performance,
+it is natural to try other multigrid structures.
+Table 6.2: Pure V-cycle CPU time (Unit: (sec)), relres = 1e −8
+Nx = 8
+Nx = 16
+Nx = 32
+Nx = 64
+Nx = 128
+Nx = 256
+Nz = 8
+0.08
+0.14
+1.92
+10.98
+106.08
+842.98
+Nz = 16
+0.09
+0.66
+5.77
+31.16
+204.15
+1418.20
+Nz = 32
+0.45
+2.11
+8.53
+48.55
+425.78
+3070.70
+Nz = 64
+2.11
+3.75
+26.42
+125.88
+969.31
+6850.40
+Nz = 128
+9.34
+15.92
+74.45
+460.95
+3949.00
+38345.00
+Nz = 256
+54.87
+59.45
+222.45
+1318.10
+8947.80
+NaN
+6.2.2
+F-cycle Multigrid algorithm
+The F-cycle multigrid is a more complex multigrid structure than the V-cycle
+multigrid. The prolongation of the error in the F-cycle is combined with another
+V-cycle. This feature eliminates error components with low wave numbers more
+efficiently. Therefore, the F-cycle has a faster convergence rate than the V-cycle.
+However, the F-cycle takes a much longer time in one multigrid iteration, and the
+memory requirement is much higher than that of the V-cycle.
+The algorithm 7
+shows the pseudo-code for the F-cycle multi-grid structure.
+The CPU time as functions of time by using point smoother and block smoother
+respectively, with different grid number N in the horizontal and vertical direction
+are shown in Figure 6.6, where the grid number in unchanged direction is N = 8 and
+the stopping criterion is the same as test cases of Section 6.2.1. The F-cycle with
+both of the point Gauss-Seidel and block Gauss-Seidel smoother have the desired
+scalability O(N 2) in both horizontal and vertical directions. In the meanwhile, the
+F-cycle multigrid has grid independence as the grid number increases, which is shown
+in Figure 6.7. Similarly, block Gauss-Seidel smoother speedup the computational
+speed, except for the case with large Nx/Nz.
+==PAGE:61==
+6.2. MULTIGRID STRUCTURE
+56
+Algorithm 7: F-cycle multigrid method
+Function Fcycle(u, f):
+if coarsest grid is reached then
+Solve the system directly on coarse grid;
+return;
+Pre-smoothing step;
+Compute residual r = f −Au;
+Restrict residual to coarser grid: rc = Rr;
+Set initial guess of error ec = 0 on the coarser grid;
+Call V-cycle recursively: Fcycle(ec, rc);
+Interpolate correction to finer grid: e = Iec;
+Correct solution: u = u + e;
+Post-smoothing step;
+Compute residual r = f −Au;
+Restrict residual to coarser grid: rc = Rr;
+if coarsest grid is reached then
+Solve system exactly on coarse grid;
+return;
+Call V-cycle recursively: Vcycle(uc, rc);
+Correct solution: u = u + e;
+Post-smoothing step;
+Figure 6.6: Left: CPU time as functions of grid number for point GS smoother;
+Right: CPU time as functions of grid number for block GS smoother, for block GS
+smoother for W-cycle multigrid
+==PAGE:62==
+6.2. MULTIGRID STRUCTURE
+57
+Figure 6.7: Iterations to convergence as functions of grid number for F-cycle multi-
+grid
+The CPU time for the case Nx ×Nz from 8×8 to 256×256 computed by F-cycle
+using block smoother are shown in Table 6.3. Compared with the V-cycle multigrid,
+although F-cycle has worse performance for small simulation cases, it has good scal-
+ability in both directions such that it has much better computational performance
+when the simulation case is large. The qualitative difference between the compu-
+Table 6.3: Pure F-cycle CPU time (Unit: (sec)), relres = 1e −8
+Nx = 8
+Nx = 16
+Nx = 32
+Nx = 64
+Nx = 128
+Nx = 256
+Nz = 8
+0.08
+0.28
+2.28
+13.08
+84.56
+276.66
+Nz = 16
+0.19
+0.78
+6.48
+37.88
+144.98
+407.48
+Nz = 32
+1.03
+2.67
+9.73
+56.95
+310.05
+932.45
+Nz = 64
+4.20
+7.08
+26.69
+141.11
+713.78
+2252.60
+Nz = 128
+18.31
+28.95
+69.72
+463.42
+2534.60
+11380.00
+Nz = 256
+77.63
+173.17
+254.81
+1045.20
+8142.00
+29171.00
+tational performance of V-cycle and F-cycle results from the multigrid structure
+difference. In the V-cycle structure, all grid level has the same amount of smoothing
+sweeps. While in the F-cycle structure, the coarser grid level has much amount of
+smoothing sweeps. Therefore, it can be concluded that the elimination of smooth
+error is much more efficient on the coarser grid level for the wave simulation which
+is because the wave simulation cases do not contain many error components with
+low frequency. Therefore, the next subsection the W-cycle multigrid is investigated
+because it has even more smoothing sweeps on the coarser grid.
+==PAGE:63==
+6.2. MULTIGRID STRUCTURE
+58
+6.2.3
+W-cycle Multigrid algorithm
+The W-cycle multigrid is the most complex multigrid structure among the three
+multigrid structures. The prolongation of the error in the F-cycle is combined with
+another W-cycle. This feature eliminates the error components with low wave num-
+bers more efficiently even than the F-cycle multigrid. Therefore, the W-cycle has
+a similar rate of convergence as F-cycle. However, since the path of the W-cycle
+multigrid is the longest among the three structures, the W-cycle takes a much longer
+time in one multigrid iteration, and the memory requirement is the highest among
+the three multigrid structures. The algorithm 8 shows the pseudo-code for W-cycle
+multigrid structure.
+The CPU time as functions of time by using point smoother and block smoother
+respectively, with different grid number N in the horizontal and vertical directions
+are shown in Figure 6.8, where the grid number in unchanged direction is N = 8
+and the stopping criterion is the same as test cases of Section 6.2.1. Similar to
+the F-cycle multigrid, the W-cycle with both of the point Gauss-Seidel and block
+Gauss-Seidel smoother have the desired scalability O(N 2) in both horizontal and the
+vertical direction. The overall performance of the W-cycle multigrid is qualitatively
+the same as the F-cycle multigrid.
+Algorithm 8: W-cycle multigrid method
+Function Wcycle(u, f):
+if coarsest grid is reached then
+Solve the system directly on coarse grid;
+return;
+Pre-smoothing step;
+Compute residual r = f −Au;
+Restrict residual to coarser grid: rc = Rr;
+Set initial guess of error ec = 0 on the coarser grid;
+Call V-cycle recursively: Wcycle(ec, rc);
+Interpolate correction to finer grid: e = Iec;
+Correct solution: u = u + e;
+Post-smoothing step;
+Compute residual r = f −Au;
+Restrict residual to coarser grid: rc = Rr;
+if coarsest grid is reached then
+Solve system exactly on coarse grid;
+return;
+Call V-cycle recursively: Wcycle(uc, rc);
+Correct solution: u = u + e;
+Post-smoothing step;
+==PAGE:64==
+6.2. MULTIGRID STRUCTURE
+59
+Figure 6.8: Left: CPU time as functions of grid number for point GS smoother;
+Right: CPU time as functions of grid number, for block GS smoother for W-cycle
+multigrid
+Figure 6.9: Iterations to convergence as functions of grid number for W-cycle multi-
+grid
+The CPU time for the case Nx×Nz from 8×8 to 256×256 computed by W-cycle
+using block smoother are shown in Table 6.4. Compared with V-cycle multigrid and
+F-cycle multigrid, although W-cycle has the worst performance for small simulation
+cases, it has the best performance for large cases.
+==PAGE:65==
+6.2. MULTIGRID STRUCTURE
+60
+Table 6.4: Pure W-cycle CPU time (Unit: (sec)), relres = 1e −8
+Nx = 8
+Nx = 16
+Nx = 32
+Nx = 64
+Nx = 128
+Nx = 256
+Nz = 8
+0.09
+0.18
+2.20
+14.16
+79.00
+268.39
+Nz = 16
+0.25
+0.98
+7.97
+44.67
+138.64
+440.28
+Nz = 32
+1.19
+3.02
+10.53
+65.00
+265.75
+933.88
+Nz = 64
+3.66
+11.64
+29.14
+140.52
+578.97
+2165.10
+Nz = 128
+16.25
+80.41
+80.16
+378.45
+1831.90
+8567.90
+Nz = 256
+75.50
+120.11
+273.86
+1074.50
+5806.90
+24642.00
+6.2.4
+Discussions of multigrid structure
+The convergence history of V-cycle, F-cycle, and W-cycle multigrid method with
+block Gauss-Seidel smoother for Nx × Nz = 40 × 40 is shown in Figure 6.10. F-
+cycle and W-cycle, which have almost identical performance to each other, show a
+superior rate of convergence per iteration over the V-cycle.
+Figure 6.10: Convergence history of V, F, W-cycle
+One of the criteria for checking if an implemented multigrid method achieves the
+optimal rate of convergence is to check the number of iterations to a given tolerance.
+Generally speaking, the ideal rate of convergence is around ROC = 1 or even less
+and the multigrid method should have grid independence property, which means
+the relative residual norm decreases one order of magnitude each iteration, and the
+number of iterations to convergence should not increase with grid number. As is
+listed in Table 6.5 the iterations to convergence for V-cycle, F-cycle, and W-cycle
+with the block Gauss-Seidel are smoother. V-cycle does not satisfy the criterion of
+the optimal multigrid method since its number of iterations to convergence increases
+with the refinement in the horizontal direction. It is worth mentioning that in some
+==PAGE:66==
+6.3. ACCELERATION BY THE FULL MULTIGRID ALGORITHM (FMG)
+61
+cases, all three multigrid structures exhibit the phenomenon that the iterations to
+convergence do not increase with the increasing vertical number of the grid, on
+the contrary, it decreases. The poor performance of the V-cycle structure does not
+mean it has no research value in the current study since it has the fastest speed for
+a single iteration, some other strategies take advantage of this property, such as the
+full multigrid and preconditioned Krylov subspace method.
+Table 6.5: Iterations to convergence for pure V/F/W cycle, relres = 1e−8
+Nx = 8
+Nx = 16
+Nx = 32
+Nx = 64
+Nx = 128
+Nx = 256
+Nz = 8
+2/1/1
+4/2/2
+7/4/4
+11/7/7
+26/9/7
+60/9/7
+Nz = 16
+2/1/1
+4/2/2
+7/4/4
+11/7/7
+26/9/7
+63/9/7
+Nz = 32
+2/1/1
+3/1/1
+7/4/4
+11/7/7
+26/9/7
+63/9/7
+Nz = 64
+2/1/1
+2/1/1
+5/2/2
+11/7/7
+26/9/7
+51/9/7
+Nz = 128
+2/1/1
+2/1/1
+4/1/1
+8/4/3
+26/9/6
+51/9/7
+Nz = 256
+2/1/1
+2/1/1
+3/1/1
+6/2/2
+8/6/5
+NaN/8/7
+6.3
+Acceleration by the full multigrid algorithm
+(FMG)
+The full multigrid method could be used to speed up the convergence of the
+multigrid, especially when the system of equations to be solved is large, where start-
+ing from the finest grid with a random initial guess is computationally expansive.
+The initial guess of the multigrid method is pretty important for the convergence
+speed, which is the idea of the full multigrid that speeds up the convergence by
+providing an accurate initial guess. The full multigrid method starts at the coarsest
+grid level, which could be considered to be the cheapest way to obtain a good initial
+guess.
+The full multigrid use the V-cycle as the solver on each grid level. The algorithm
+for full multigrid is relatively simple and is presented in algorithm 9. Since in the
+numerical experiment, the full multigrid generates the initial condition that has a
+relative residual norm of the magnitude of O(10−8), subsequent ordinary multigrid
+iteration will make the relative residual norm below the tolerance 1e−8. Therefore,
+only the combination of FMG + V cycle is studied in this subsection. It starts at
+the coarsest grid and keeps doing a V-cycle multigrid at each grid level so that the
+initial guess is obtained with high accuracy. The reason for the high efficiency can
+be explained by calculating the cost of the full multigrid method. The cost of a
+single iteration is
+
+2
+1 −2−2
+
+(1 + 2−2 + 2−4 + ... + 2−2n) <
+2
+(1 −2−2)2 = 32
+9
+(6.3.1)
+==PAGE:67==
+6.3. ACCELERATION BY THE FULL MULTIGRID ALGORITHM (FMG)
+62
+where one sweep on the finest grid is defined as unity. While the cost of a single
+iteration of the V-cycle is
+2(1 + 2−2 + 2−4 + 2−6 + ... + 2−2n) <
+2
+1 −2−2 = 8
+3
+(6.3.2)
+It is observed that the full multigrid method achieves the accuracy of about 7 iter-
+ations of optimized V-cycle multigrid but with the cost of only around 1.3 working
+unit of a single V-cycle iteration.
+Algorithm 9: Full multigrid method
+Function FMG(u, f):
+for l=1:FinestLevel do
+u = Vcycle(u, rc);
+u = Pl+1
+l
+u, interpolate the solution to next finer grid;
+u = Vcycle(u, r)
+The full multigrid mitigates the aforementioned issue that the block effect of the
+Gauss-Seidel smoother would negatively impact the computational performance, as
+Figure 6.11 indicates. The computational performance of full multigrid with block
+Gauss-Seidel smoother is better than that with standard Gauss-Seidel smoother.
+Besides, the standard Gauss-seidel smoother will become badly salable when the
+horizontal grid keeps increasing. With the block smoother, the solver is still well-
+scalable. The full multigrid speeds up the computation significantly compared to
+the pure V-cycle.
+Figure 6.11: CPU time of FMG+V-cycle with point and block GS smoother
+The convergence history of the full multigrid combined with V-cycle is shown in
+==PAGE:68==
+6.3. ACCELERATION BY THE FULL MULTIGRID ALGORITHM (FMG)
+63
+Figure 6.12. The convergence is much faster than that of the pure ordinary multi-
+grid method. The already very high accuracy of the initial guess makes the faster
+convergence of F-cycle and W-cycle less advantageous, which makes the combina-
+tion of the full multigrid and V-cycle multigrid the best choice. The computational
+performances of these full multigrid methods are shown in Figure 6.12. The full
+multigrid method is more robust than the pure V-cycle, as it takes much fewer it-
+erations to reach desired tolerance. Its computational complexity is O(N 2), which
+is better than the O(N 3) exhibits the pure V-cycle multigrid. One may ask that
+given that the full multigrid generates a very high accuracy within the shortest time
+compared with the ordinary multigrid method, why doesn’t one just use pure full
+multigrid? That means the output of the last full multigrid is the input of the next
+full multigrid. The reason is that the output of the first full multigrid iteration
+already reaches the most accurate level the iterative solver can achieve; the second
+full multigrid does not lower the residual as efficiently as the first full multigrid.
+On the other hand, a full multigrid cycle is much more expensive than a V-cycle.
+Therefore, it is more efficient to use the V-cycle multigrid method in the following
+iterations.
+Figure 6.12: Left: Convergence history of full multigrid; Right: CPU time as func-
+tions of grid number in the horizontal and vertical direction, where the grid number
+is 8 in unchanged direction
+The CPU time as functions of time by using point smoother and block smoother
+respectively, with different grid number N in horizontal and vertical directions are
+shown in Table 6.6, where the grid number in unchanged direction is N = 8 and
+the stopping criterion is the same as test cases of Section 6.2.1. It can be concluded
+that full multigrid significantly speed up the convergence 10 times faster than that
+of the pure ordinary multigrid method.
+==PAGE:69==
+6.4. GEOMETRICAL VALIDATION OF THE MULTIGRID METHOD
+64
+Table 6.6: One full multigrid+one V-cycle CPU time (Unit: (sec)), relres = 1e −8
+Nx = 8
+Nx = 16
+Nx = 32
+Nx = 64
+Nx = 128
+Nx = 256
+Nz = 8
+0.09
+0.17
+0.39
+1.59
+5.80
+26.86
+Nz = 16
+0.16
+0.50
+1.06
+3.95
+11.34
+47.98
+Nz = 32
+0.84
+0.78
+1.80
+7.38
+26.22
+83.02
+Nz = 64
+2.78
+2.92
+6.53
+13.25
+57.72
+174.14
+Nz = 128
+8.91
+13.52
+24.30
+59.81
+156.73
+891.23
+Nz = 256
+46.88
+52.45
+146.20
+212.82
+618.78
+2023.70
+6.4
+Geometrical validation of the multigrid method
+To validate the geometrical flexibility of the multigrid solver, the numerical wave
+tank is adopted as the test case, the set-up of which is to be introduced and in
+Section 7.5, and the numerical solution is validated by the experiment to be correct
+in the same section. The hydrodynamic pressure field of the wave over a submerged
+bar calculated by the direct solver and the multigrid solver designed by the current
+study are shown in Figure 6.13 for the Nx × Nz = 400 × 10 mesh. The difference
+between the two solutions is small, concluding that the multigrid solver is correctly
+implemented. Note that for complex geometry like this, especially where there is
+discontinuity, the parameters related to geometry such as dh/dx and
+Figure 6.13: Hydrodynamic pressure field of the wave over a submerged bar case:
+(a) Solution by direct solver; (b) Solution by multigrid solver; (c) Difference between
+the solutions of direct solver and multigrid solver.
+==PAGE:70==
+6.5. EFFECT OF HYDRODYNAMICS ON MULTIGRID SOLVER
+65
+d2h/dx2 should be given explicitly without using spectral interpolation. Other-
+wise, the Gibbs phenomenon near discontinuity will destroy the spectral accuracy.
+Besides, the coarsest grid level should contain enough information to describe the
+geometry, which is the submerged bar in this case, which means, the geometric
+smooth error is preferably represented by the coarsest grid.
+6.5
+Effect of hydrodynamics on multigrid solver
+The hydrodynamics parameters affect the performance of the multigrid. The
+convergence history of the V, F, and W cycles, for shallow (kh = 0.5), medium (kh =
+1.0), and deep water waves (kh = 4.0), and with mild nonlinearity (H/L = 10%),
+medium nonlinearity (H/L = 50%) and high nonlinearity (H/L = 90%) is shown in
+Section 6.5. The results show that non-linearity has little impact on the performance
+of all multigrid structures. Furthermore, the effect of non-dimensionalized water
+depth kh on the performance of the computation is insignificant except for the V
+cycle multigrid which has poor performance for deep water waves. Therefore, for
+deep-water wave simulation, the F- and W-cycles outperform the V-cycle.
+(a) V-cycle
+(b) F-cycle
+(c) W-cycle
+==PAGE:71==
+6.6. P-MULTIGRID PRECONDITIONED KRYLOV SUBSPACE METHOD
+66
+6.6
+p-Multigrid preconditioned Krylov subspace
+method
+The pure multigrid might suffer from some issues since it does not use the in-
+formation of the system of the matrix when the relaxation is not performed on the
+finest grid level. Since the generation of the system of metrics is by a black-box
+process, the system could be very ill-conditioned. As a result, the pure multigrid
+method could not reach the desired accuracy for certain cases, as is shown in Fig-
+ure 6.21. Therefore, it is natural to combine multigrid with other methods that
+efficiently solve the system of equations by using the information of the system of
+metrics. Therefore, in this section, the preconditioned Krylov subspace method of
+multigrid is investigated and the aim is to find a method with the optimal scalability
+O(N 2) and should be able to converge to a desired accuracy when the pure multigrid
+cannot.
+6.6.1
+Multigrid preconditioned conjugate gradient method
+The pure conjugate gradient method generally diverges without using precondi-
+tioning. Therefore, the multigrid method is used as a preconditioner to improve the
+performance and feasibility. The preconditioned conjugate gradient has the cheapest
+computational cost for each iteration since only one preconditioning step is required
+for each outer iteration of the conjugate gradient method. The CPU time as func-
+tions of the grid number for the full multigrid preconditioned conjugate gradient
+method is shown in Figure 6.15, where the grid number in the unchanged direction
+is N = 4, the desired accuracy is 1e −8. It is observed that it achieves the optimal
+Figure 6.15: CPU time as functions of grid number of full multigrid preconditioned
+conjugate gradient method
+==PAGE:72==
+6.6. P-MULTIGRID PRECONDITIONED KRYLOV SUBSPACE METHOD
+67
+rate of convergence in both horizontal and vertical directions. The left of Figure 6.16
+shows the convergence history of the conjugate gradient method preconditioned by
+different multigrid methods for case Nx × Nz = 100 × 100. The results show that
+the full multigrid is the best preconditioner. However, after the first iteration of the
+full multigrid preconditioned conjugate gradient, the convergence is slow. The right
+of Figure 6.16 shows that only the V-cycle can be accelerated significantly by the
+conjugate gradient.
+Figure 6.16: Left: Convergence history of the conjugate gradient method precondi-
+tioned by different multigrid method; Right: Convergence history for the precondi-
+tioned conjugate gradient method of multigrid and the pure multigrid method for
+case Nx × Nz = 100 × 100. Direct LU cputime = 2.4028e + 04 s
+Besides, even for the full multigrid preconditioned conjugate gradient, it does
+not reach the desired accuracy when the case is large, as Table 6.7 lists.
+The
+reason behind the poor behavior of the preconditioned conjugate gradient method
+is that the conjugate is designed for symmetric positive definite systems, which
+is not the case in the current study.
+Therefore, in the next subsection the bi-
+conjugate stabilized method, which is designed for non-symmetric systems of metric,
+is investigated.
+Table 6.7: FMG preconditioned CG CPU time (Unit: (sec)), relres = 1e −8
+Nx = 8
+Nx = 16
+Nx = 32
+Nx = 64
+Nx = 128
+Nx = 256
+Nz = 8
+0.13
+0.28
+1.72
+6.91
+21.03
+71.98
+Nz = 16
+0.22
+0.63
+4.06
+12.80
+29.20
+93.05
+Nz = 32
+1.19
+2.42
+3.34
+11.23
+43.23
+190.06
+Nz = 64
+5.16
+5.50
+12.77
+22.02
+86.58
+438.14
+Nz = 128
+23.53
+23.41
+50.56
+116.05
+291.86
+3682.5
+Nz = 256
+107.92
+107.08
+193.83
+461.41
+NaN
+NaN
+==PAGE:73==
+6.6. P-MULTIGRID PRECONDITIONED KRYLOV SUBSPACE METHOD
+68
+6.6.2
+Multigrid preconditioned bi-conjugate gradient stabi-
+lized method
+Similar to the conjugate gradient, the pure biconjugate gradient stabilized method
+generally diverges without using preconditioning. Therefore, the multigrid method
+is used as a preconditioner. The scalability is the optimal O(N 2) in both horizontal
+and vertical directions, as Figure 6.17 shows. However, because the preconditioned
+biconjugate gradient stabilized method has two preconditioning steps in each outer
+iteration of the Krylov subspace method, the bi-conjugate stabilized method takes
+about twice the time per iteration.
+Figure 6.17: CPU time as functions of grid number of full multigrid preconditioned
+biconjugate gradient stabilized method
+The left of Figure 6.18 depicts the convergence history of the multigrid precon-
+ditioned bi-conjugate gradient stabilized method, from which it can be concluded
+that the full multigrid method speedups the computational performance remark-
+ably compared to that with ordinary multigrid as preconditioners. The right of
+Figure 6.18 shows that ordinary multigrid as preconditioner is not efficient for the
+bi-conjugate gradient stabilized method.
+Table 6.8 depicts the CPU time of different grid sizes for the full multigrid pre-
+conditioned biconjugate gradient stabilized method. The multigrid preconditioned
+biconjugate gradient stabilized method is superior to the multigrid preconditioned
+conjugate gradient method, even though the former takes twice as much time as the
+latter per outer iteration.
+==PAGE:74==
+6.6. P-MULTIGRID PRECONDITIONED KRYLOV SUBSPACE METHOD
+69
+Figure 6.18:
+Left:
+Convergence history of the bi-conjugate gradient stabilized
+method preconditioned by different multigrid method; Right:
+Convergence his-
+tory for the multigrid preconditioned biconjugate gradient stabilized method and
+the pure multigrid method for the case Nx × Nz = 100 × 100.
+Direct LU
+cputime = 2.4028e + 04 s
+Table 6.8: FMG preconditioned BiCGSTAB CPU time (Unit: (sec)), relres = 1e−8
+Nx = 8
+Nx = 16
+Nx = 32
+Nx = 64
+Nx = 128
+Nx = 256
+Nz = 8
+0.13
+0.34
+1.86
+2.13
+10.77
+41.34
+Nz = 16
+0.23
+0.48
+2.19
+7.63
+21.59
+67.84
+Nz = 32
+0.70
+1.86
+3.20
+11.25
+42.73
+135.59
+Nz = 64
+4.00
+5.06
+12.75
+21.11
+87.32
+287.06
+Nz = 128
+13.20
+24.45
+49.38
+117.94
+318.56
+1157.60
+Nz = 256
+62.72
+105.42
+191.63
+463.30
+1242.10
+3753.70
+6.6.3
+Multigrid preconditioned GMRES method
+The multigrid preconditioned GMRES method achieves the optimal scalability
+in both horizontal and vertical direction directions, as Figure 6.19 depicts. Although
+the pure GMRES guarantees the convergence, the multigrid can accelerate the con-
+vergence in order of magnitude of about 50 to 100 times to achieve. Consequently,
+the multigrid preconditioner not only speeds up the convergence but also signifi-
+cantly saves the storage. Different from the conjugate gradient family, all multigrid
+structures significantly speed up the GMRES method compared with corresponding
+pure multigrid structures, which is proved in Section 6.6.3. Besides, full multigrid
+is the best preconditioner among the four multigrid preconditioners. The precon-
+ditioned GMRES contains one preconditioning step per outer GMRES iteration,
+but due to its relatively high cost and storage requirement compared to the conju-
+gate gradient family, sometimes GMRES does not as efficiently as the bi-conjugate
+gradient stabilized method.
+==PAGE:75==
+6.6. P-MULTIGRID PRECONDITIONED KRYLOV SUBSPACE METHOD
+70
+Figure 6.19: Left: CPU time for different Nx; Right: CPU time for different Nz
+Figure 6.20: Left: Convergence history of the GMRES preconditioned by differ-
+ent multigrid method; Right: Convergence history for the multigrid preconditioned
+GMRES and pure multigrid method for the case Nx × Nz = 100 × 100. Direct LU
+CPU time=2.4028e + 04 s
+Table 6.9 depicts the CPU time of different grid numbers for full multigrid pre-
+conditioned GMRES. It is generally faster and more robust than preconditioned
+conjugate gradient method, but less efficient than preconditioned bi-conjugate gra-
+dient stabilized method.
+==PAGE:76==
+6.6. P-MULTIGRID PRECONDITIONED KRYLOV SUBSPACE METHOD
+71
+Table 6.9: FMG preconditioned GMRES CPU time (Unit: (sec)), relres = 1e −8
+Nx = 8
+Nx = 16
+Nx = 32
+Nx = 64
+Nx = 128
+Nx = 256
+Nz = 8
+0.23
+0.32
+1.05
+3.38
+17.94
+65.84
+Nz = 16
+0.31
+0.64
+3.78
+12.00
+34.88
+100.96
+Nz = 32
+1.13
+2.20
+4.91
+16.75
+65.80
+210.97
+Nz = 64
+4.14
+8.19
+18.28
+33.63
+130.38
+433.22
+Nz = 128
+20.88
+36.39
+73.89
+171.55
+435.89
+2319.50
+Nz = 256
+92.72
+159.69
+291.80
+610.47
+1920.90
+5590.70
+6.6.4
+Discussion of different multigrid preconditioned Krylov
+subspace method
+The cost to achieve given tolerance for different iterative strategies is listed in
+Table 6.10 for the case Nx × Nz = 50 × 50, and they are compared with the LU
+direct solver. All of the iterative schemes remarkably accelerate the computation,
+and the combination of full multigrid with the Krylov subspace method has even
+better performance than the pure multigrid because the Krylov subspace method
+makes use of the original matrix better than the pure multigrid. Although in the
+previous section, the full multigrid preconditioned biconjugate gradient stabilized
+method generally has the best performance, in certain cases like this, the multigrid
+preconditioned GMRES has the best performance.
+Table 6.10: Cost to achieve given tolerance in CPU time (s), Nx × Nz = 50 × 50
+Method
+1e −4
+1e −6
+1e −8
+1e −10
+Pure V-cycle
+29.28
+40.31
+52.16
+64.19
+Pure F-cycle
+37.84
+46.98
+55.95
+74.41
+Pure W-cycle
+40.36
+50.53
+60.47
+80.04
+FMG+V-cycle
+7.14
+12.89
+24.39
+29.51
+FMG+GMRES
+7.17
+13.73
+20.86
+27.52
+FMG+CG
+13.72
+20.28
+33.97
+47.36
+FMG+BiCGSTAB
+13.84
+13.84
+40.61
+40.61
+Direct, LU
+129.56
+The reason for the relatively poor performance is that the conjugate gradient
+family is designed for positive definite systems.
+However, the systems resulting
+from the discretization of the spectral method do not necessarily satisfy the require-
+ment, which results in relatively poor performance for certain cases. As Figure 6.21
+indicates. For the test case, Nx × Nz = 21 × 20 which is a relatively small case
+and it should ideally reach the high accuracy fast and within a small iteration step,
+but only full multigrid preconditioned GMRES reaches the desired convergence in
+a small number of iterations. The pure multigrid stop at relres ≈1e −6, and
+the F-cycle, W-cycle, and full multigrid preconditioned conjugate gradient method
+==PAGE:77==
+6.6. P-MULTIGRID PRECONDITIONED KRYLOV SUBSPACE METHOD
+72
+has better performance than the pure multigrid while they still fail to reach desired
+accuracy level. The preconditioned bi-conjugate gradient stabilized method reaches
+the desired accuracy level, while they take prohibitively many iteration steps which
+is not acceptable for such a small simulation case.
+Figure 6.21: Convergence histories for Nx × Nz = 21 × 20
+In conclusion, the p-multigrid method for the pressure Poisson equation of the
+free surface Navier-Stokes solver accelerates the convergence significantly compared
+to LU direct solver and pure Gauss-Seidel method. The multigrid can be further ac-
+celerated by combining with the Krylov subspace method and still keeps the optimal
+scalability O(N 2). The bi-conjugate gradient stabilized method has the potential to
+be the most efficient, however, because the system is not necessarily positive definite
+the bi-conjugate gradient stabilized method does not have a stable high performance.
+Therefore, for the general purpose, the p-multigrid preconditioned GMRES which
+does not have the requirement of matrix property is the best choice since it always
+keeps high computational efficiency although for certain cases it is less efficient than
+preconditioned bi-conjugate gradient stabilized method.
+==PAGE:78==
+Chapter 7
+Validation of the Laminar Free
+Surface Flow Model
+The nonlinear Navier-Stokes equation has no analytical solution. For the wave
+problem, the potential wave theory can be used as the exact solution to validate the
+implemented model if the viscosity µ is set to zero.
+7.1
+Small-amplitude wave problem
+The free surface nature poses some difficulty in the development of the numerical
+model, especially for the non-hydrostatic model. The first step in implementing a
+wave model is to implement the linearized one. The small-amplitude wave problem
+describes the linearized monochromatic periodic wave in which the convection term
+is neglected. The small-amplitude property makes the assumption η ≈0. The exact
+solution to the potential wave is given by Svendsen [21], in which the pressure is
+split into the hydro-static and hydrodynamic contribution
+p+ = p + ρgz
+(7.1.1)
+And the monochromatic waves the total pressure can be expressed as
+p+ = ρgH
+2
+cosh(k(z + h))
+cosh(kh)
+cos(ωt −kx)
+(7.1.2)
+where the ω is the frequency of the wave progression. The pressure total p is deter-
+mined by the Bernoulli equation
+gz + p
+ρ + 1
+2(u2 + w2) + ϕt = 0
+(7.1.3)
+substitute Equation (7.1.2) into Equation (7.1.3)
+p+
+ρ + 1
+2(u2 + w2) + ϕt = 0
+(7.1.4)
+73
+==PAGE:79==
+7.2. FINITE AMPLITUDE NONLINEAR WAVE
+74
+For small amplitude waves, the dynamic pressure of the wave is negligible compared
+with hydro-static and hydrodynamic pressure
+p+ = −ρϕt
+(7.1.5)
+hence, for small amplitude wave
+ϕ = Hc
+2
+cosh(k(z + h))
+sinh(kh)
+sin(ωt −kx)
+(7.1.6)
+ϕt = −ωH
+2
+cosh(k(z + h))
+sinh(kh)
+cos(ωt −kx)
+(7.1.7)
+The dispersion relation is
+c = g
+ωtanh(kh) = ω
+k
+(7.1.8)
+ω =
+q
+gktanh(kh)
+(7.1.9)
+Therefore, the dynamic pressure is written as
+pD = p+ −PS −ρgz ≈p+
+(7.1.10)
+from the definition of potential flow,
+[u, w] =
+"∂ϕ
+∂x, ∂ϕ
+∂z
+#
+(7.1.11)
+the velocity field is then
+u = πH
+T
+cosh(k(z + h))
+sinh(kh)
+cos(ωt −kx)
+(7.1.12)
+w = −πH
+T
+sinh(k(z + h))
+sinh(kh)
+sin(ωt −kx)
+(7.1.13)
+Substituting Equation (7.1.13) into the governing equation for simplified surface
+position
+∂η
+∂t = w −u∂u
+∂x
+(7.1.14)
+the expression for the free surface position is given as
+η = H
+2 cos(ωt −kx)
+(7.1.15)
+7.2
+Finite amplitude nonlinear wave
+For the fully nonlinear free surface wave which is the finite amplitude nonlin-
+ear wave, the benchmark solution here for validation is from Fenton (1990)[7], the
+Matlab function script of which is implemented by Allan P. Engsig-Karup for DTU
+==PAGE:80==
+7.2. FINITE AMPLITUDE NONLINEAR WAVE
+75
+lecture 02689. The long-term propagation of a periodic monochromatic is the sim-
+plest form of wave dynamics. This test should be passed before an implemented
+CFD model proceeds to more complicated applications.
+The time convergence tests of the implemented nonlinear free surface Navier-
+Stokes solver are shown in Figure 7.1 for the case with kh = 0.5 and H/L = 5%,
+which is a mildly nonlinear case. As can be seen in Figure 7.1, the convergence rate
+is O(∆t1) for implicit backward Euler method and O(∆t4) for the LSERK45 time
+integration method until the error reaches O(10−10), which is due to the aliasing
+error due to non-linear convolution. The figure to the right of Section 7.2 shows
+the free surface position after the 200 wave period. It can be seen that the spectral
+method retains high accuracy for long-time integration.
+Figure 7.1: Left: Error as a function of time step number; Right: Free surface
+elevation after the wave period 200
+The superiority of the spectral method with surface fitting over the classical low-
+order method with the volume of fluid method (VOF) was shown in Figure 7.2, where
+the free surface elevation computed by the spectral method and second-order finite
+volume method are compared. The initial condition for both cases is a numerically
+exact stream function potential flow solution of Fenton [7] with period T = 2.0 s,
+the still water depth h = 0.4 m, and wave height H = 0.125 m. It is noticeable that
+the computed wave amplitude by the OpenFOAM wave2foam module simulated by
+Larsen [23] et. al which the second order finite volume Navier-Stokes solver of use the
+second order finite volume Navier-Stokes solver with the first order implicit backward
+Euler method exhibits a remarkable decrease in wave amplitude after about 50 wave
+periods while the solution computed by the high-order spectral method Navier-
+Stokes solver which uses the first order implicit backward Euler method as well
+keeps the essentially constant wave amplitude after long time integration which is
+physically correct.
+Although Larsen [23] uses the turbulence model to compute
+the solution with the initial viscosity equal to the molecular viscosity, but above
+==PAGE:81==
+7.3. LINEAR DISPERSION ANALYSIS
+76
+argument still makes sense if the initial condition is potential wave flow. According
+to the vector identity, the viscosity term that the turbulence effect takes contributes
+to the RANS turbulence model
+µ∇2u = µ(∇(∇· u) −∇× ω) = µ(∇(∇· u) −∇× (∇× u))
+(7.2.1)
+where ω is the vorticity and ∇(∇· u) = 0 due to the incompressible flow. However,
+the potential flow is irrotational, ∇× u = 0. In conclusion, turbulence does not
+affect the potential wave flow.
+Figure 7.2: Upper: Periodic finite amplitude progressive wave after 100 wave period
+computed by the the OpenFOAM by Larsen [23] et.
+al; Lower: Periodic finite
+amplitude progressive wave after 100 wave period computed by the current spectral
+Navier-Stokes solver
+7.3
+Linear dispersion analysis
+The numerical property of diffusion and dispersion is the main source of the er-
+ror of the computed solution. Therefore, the analysis of dispersion and kinematics
+is conducted in this section, which is significant to identify how much resolution is
+required for a single wavelength for high accuracy. A non-dimensional parameter
+is required to perform the analysis. From the definition of potential flow Equa-
+tion (7.1.13), the velocity in the vertical direction at the free surface is
+wz=0 = −πH
+T sin(ωt −kx)
+(7.3.1)
+and the velocity potential at the free surface is
+ϕz=0 = Hc
+2
+cosh(kh)
+sinh(kh) sin(ωt −kx)
+(7.3.2)
+==PAGE:82==
+7.4. LAMINAR WAVE BOUNDARY LAYER
+77
+Therefore, the relation of the non-dimensional parameter for the linear dispersion
+operator can be obtained as
+wz=0
+kϕz=0
+= tanh(kh)
+(7.3.3)
+For each simulation, the computed velocity potential ϕc and the exact velocity po-
+tential ϕe are used to assess the linear dispersion error
+ϵ = −||ϕe −ϕc||2
+||ϕe||2
+(7.3.4)
+Figure 7.3 show the computed results of Nx = 2 and Nx = 5 with different vertical
+resolution. It is obvious that with a Fourier basis in the horizontal direction, the
+resolution of three nodes (0,1, and 2) for one wavelength is enough to achieve very
+high accuracy since the difference between Nx = 2 and Nx = 5 is trivial. It is
+straightforward since the analytical solution is a trigonometry function. For the
+vertical direction, the resolution requirement is much higher. Approximately Nz =
+20 grids in the vertical direction are enough resolution. The dispersion analysis is
+compared with section 4.3 of Allan et. al. [9], which shows the current spectral
+model is much more efficient than the finite difference model.
+Figure 7.3: Dispersion errors as a function of kh for different resolutions
+7.4
+Laminar wave boundary layer
+Although the potential wave theory can be accurate and computationally effi-
+cient, it fails to describe the boundary layer which could be indispensable in sedi-
+ments transport and resistance on ships and coastal and offshore structures. The
+significance of using a much more expansive Navier-Stokes wave solver instead of
+a potential wave solver is that the information in the boundary layer is interesting
+to be investigated. In this section, the laminar wave boundary layer of the imple-
+mented model is validated by a simplified but justifiable wave model.
+==PAGE:83==
+7.4. LAMINAR WAVE BOUNDARY LAYER
+78
+The idea of a simplified wave boundary layer is splitting the fluid flow into two
+parts, wherein the boundary layer viscous flow is solved and the free stream away
+from the boundary layer the potential wave assumption is made. The momentum
+equation in x-direction is written as
+∂u
+∂t + u∂u
+∂x + w∂u
+∂z = −1
+ρ
+∂p
+∂x + ν
+ ∂2u
+∂x2 + ∂2u
+∂z2
+!
+(7.4.1)
+In the boundary layer, the variation of u in x-direction and v is negligible then the
+simplified Equation (7.4.1) is written as
+∂u
+∂t = −1
+ρ
+∂p
+∂x + ν ∂2u
+∂z2
+(7.4.2)
+The velocity at the interface between the boundary layer and the free stream is
+approximated as u(0) of Equation (7.1.12).
+The velocity outside the boundary
+layer is calculated from Equation (7.1.12) and Equation (7.1.13). For the sake of
+simplicity, the velocity at u(0) is expressed as
+U0 = U0mcos(ωt −kx)
+(7.4.3)
+U0m = πH
+T
+cosh(z + h)
+sinh(kh)
+(7.4.4)
+The shear stress ν∂2u/∂z2 can be neglected outside the boundary layer, therefore
+∂U0
+∂t = −1
+ρ
+∂p
+∂x
+(7.4.5)
+through this treatment, the pressure gradient can be expressed as a function of
+velocity
+∂u
+∂t = ∂U0
+∂t + ν ∂2u
+∂z2
+(7.4.6)
+Substituting Equation (7.4.2) and Equation (7.4.4) into Equation (7.4.6)
+∂u
+∂t = ∂(U0mcos(ωt −kx))
+∂t
++ ν ∂2u
+∂z2
+(7.4.7)
+imposing the boundary condition
+u = U0,
+y →∞
+(7.4.8)
+u = 0,
+y = 0
+(7.4.9)
+the solution to Equation (7.4.6) is
+u(z, t) = U0mcos(ωt −kx) −U0mexp
+
+−z
+δ1
+
+cos
+
+ωt −kx −z
+δ1
+
+(7.4.10)
+where δ1 is the Stokes length, and the boundary layer thickness δ is expressed as
+δ1 =
+2ν
+ω
+0.5
+,
+δ = 3π
+4 δ1
+(7.4.11)
+==PAGE:84==
+7.4. LAMINAR WAVE BOUNDARY LAYER
+79
+To identify if the flow field is laminar or transition/turbulent, the Reynolds number
+Re is defined as
+Re = aU0m
+ν
+= U 2
+0m
+ων
+(7.4.12)
+where a = U0m/ω is the amplitude of the oscillation of the periodic wave flow. The
+boundary layer thickness is therefore related to Re by
+δ
+a = 3π
+4
+ 2ν
+ωa2
+0.5
+= 3π
+4
+ 2νω
+U 2
+0m
+!0.5
+= 3π
+4
+ 2
+Re
+0.5
+(7.4.13)
+According to Jensen et. al [22], the oscillatory wave flow is laminar for Re < 1.5×105,
+transition for 1.5 × 105 < Re < 1 × 106, and Re < 1 × 106 the flow will be fully
+turbulent according to the experiment of Jensen et. al. The flow in the current
+study is in the laminar region.
+The friction force on the bottom, therefore, can be obtained by inserting Equa-
+tion (7.4.10) to the shear stress equation
+τ0 = µ∂u
+∂z = −µU0m
+δ1
+[cos(ωt) + sin(ωt)] = −µU0m
+δ1
+sin(ωt + 45◦)
+(7.4.14)
+The computed velocity profile of the oscillatory laminar wave boundary layer is
+shown in Figure 7.4 for the entire wave period, and the results show good agreement
+with the simplified analytical solution. It is also worth mentioning that even for
+the boundary layer where the density of information is highest in the flow field, the
+current study’s spectral method can catch most of the important detail with only
+one grid in the wave boundary layer.
+Figure 7.4: The laminar wave boundary layer velocity profile at different phase
+angles. Solid lines: simplified analytical solutions; circle lines: computed solutions.
+The computed free stream velocity U0 and the bed shear stress are illustrated in
+Figure 7.5. The phase difference between the two parameters agrees well with the
+==PAGE:85==
+7.5. NUMERICAL WAVE TANK
+80
+theoretical phase difference 45◦. The implemented model has been proven to have
+high precision of stress prediction.
+Figure 7.5: Bottom friction τ0 vs. free stream velocity U0.
+7.5
+Numerical wave tank
+The numerical wave tank is a strategy to simulate the natural wave of water that
+is important in naval and ocean engineering. From the numerical point of view, the
+point is how waves are generated and damped after they pass the target zone since
+undamped waves could reflect and propagate to the target zone so that the simula-
+tion results could be affected and even the energy of generated wave accumulated
+unboundedly which leads to numerical instability. The idea of a numerical wave
+tank is to split the computational domain into the generation zone, the target zone,
+the absorption zone, and the generation zone as depicted in Figure 7.6. Note that
+the absorption in the rightmost is to make the computational domain periodic such
+that the numerical scheme is still able to exploit a fast Fourier transform.
+Figure 7.6: Schematics of the numerical wave tank
+The wave tank is designed based on, where the numerical wave tank was proposed
+==PAGE:86==
+7.5. NUMERICAL WAVE TANK
+81
+as a relaxation function:
+u(x) = Γa(x)u(x) + Γg(x)ue(x)
+(7.5.1)
+where ue(x) is the exact wave function, usually the Stokes wave theory is applied
+for wave generation, Γa(x) and Γg(x) are absorption and generation functions re-
+spectively which should be chosen carefully such that the continuity criterion should
+remain satisfied. According to Allan et al [10], one choice for generation and ab-
+sorption function is given as
+fg(x) = −2x3 + 3x2
+(7.5.2)
+fa(x) = 1 −(1 −x)p
+(7.5.3)
+Γa =
+
+
+
+
+
+
+
+1 −fg
+x ∈generation zone
+1
+x ∈target zone
+fa
+x ∈absorption zone
+(7.5.4)
+Γg =
+
+
+
+
+
+
+
+fg
+x ∈generation zone
+0
+x ∈target zone
+0
+x ∈absorption zone
+(7.5.5)
+where p is set to be 11 in this study. The relaxation function is shown Figure 7.7.
+The numerical experiment indicates that the length of the generation zone and
+absorption zone are the length of the wavelength will yield reasonable results.
+Figure 7.7: Schematics of the numerical wave tank
+In the experiment setup, the constant waveform can be generated and conse-
+quently propagates to the still water, while from the numerical point of view, the
+sudden disturbance of the still water will probably introduce numerical instability.
+To mitigate this problem, the wave can be generated smoothly from still water by
+a slight modification of the relaxation function
+τ(t) =
+
+
+
+t
+nT
+t ≤nT
+1
+t > nT
+(7.5.6)
+u(x) = Γa(x)u(x) + Γg(x)ue(x)τ(t)
+(7.5.7)
+==PAGE:87==
+7.6. 2D WAVE OVER A SUBMERGED BAR
+82
+7.6
+2D wave over a submerged bar
+In real engineering applications, the bottom of the water floor is commonly not
+flat. The test case is the wave over a submerged bar which was originally proposed by
+Luth et. al (1993) [8], and it is widely used as the benchmark test of an implemented
+wave model. The schematics are as Figure 7.8 shows, the still water height is 0.4
+m, the length of the experiment is 25 m, and the four vertexes of the trapezoid
+submerged bar are located at (6, −0.4) m, (12, −0.1) m, (14, −0.1) m and (17, −0.4)
+m. The dimensionless depth of the generated single waveform is kh = 0.67, the
+wave height is H = 0.02 m, and the wave period is T = 2.02 s. Therefore, the
+resulting wavelength is L = 3.75 m. The linearized small amplitude potential wave
+theory is applied as an exact generation function, but as the wave propagates, it
+will automatically become the nonlinear Stokes wave.
+Figure 7.8: Schematics of the wave over a submerged bar
+The resolution has to be carefully chosen to obtain a reasonable simulation re-
+sult. Besides, filtering is indispensable for the stability of the numerical scheme,
+since the wavelength becomes smaller in the region of the plateau of the submerged
+bar, and physical quantity fluctuation in the wake region after the flow passes the
+submerged bar becomes more intensive, resulting in the erroneous numerical fluctu-
+ation. Therefore, the numerical scheme is vulnerable to instability. The numerical
+experiment indicates that simulation with an order of resolution Nx = 500 in the
+horizontal direction and Nz = 15 in the vertical direction gives an accurate predic-
+tion, as Figure 7.9 shows.
+The Navier-Stokes solver and Euler solver are tested against the experimental
+results. After the effect of the initially generated waves disappears, the simulation
+results of the two solvers show good agreement with the experiment. It could be
+concluded that for a low Re laminar wave flow over a submerged bar, the viscous
+effect is negligible and the viscosity dissipation term can be eliminated to reduce
+computational cost and improve numerical stability.
+==PAGE:88==
+7.6. 2D WAVE OVER A SUBMERGED BAR
+83
+Figure 7.9: Time series of free surface elevation at different positions
+==PAGE:89==
+Chapter 8
+Conclusions and Future Works
+This chapter lists the achievement of the current study and the future study that
+is based on the current study.
+8.1
+Conclusion
+In the current study, a two-dimensional free surface Navier-Stokes solver based
+on spectral method with explicit fourth-order low storage Runge-Kutta and implicit
+first-order backward Euler as time integration method is developed. Results show
+high accuracy in simulating complex seabed geometry (without submerged objects)
+by the validation of Luth’s experiment [8]. It has high performance in terms of
+keeping low dispersion and dissipation error. To accelerate the computation, an effi-
+cient p-multigrid is developed, which achieves the optimal scalability of O(N 2) and
+is accelerated by full multigrid. It is worth mentioning that when the ratio Nx/Nz
+is large, V-cycle multigrid structure is the best choice since it has the scalability
+O(Nlog(N)). The smoother of the relaxation step is improved by using the block
+Gauss-Seidel method, which has a much better smoothing ability. However, in the
+numerical experiment, it is discovered that the pure multigrid method sometimes
+fails to converge to the desired accuracy, with a relative residual of less than 1e −8.
+Therefore, the p-multigrid method is combined with the Krylov subspace method
+to keep the robustness. It is concluded that the full multigrid preconditioned GM-
+RES is the most robust method, while the full multigrid preconditioned biconjugate
+gradient stabilized method can be the fastest method for certain cases.
+8.2
+Future work
+This subsection lists some valuable studies that are based on the current study.
+• Implementation of the high-order time integration method of the
+implicit free surface Navier-Stokes model:
+The model will be unstable when the linear multistep method (Adam-Moulton)
+is used as implicit time integration.
+The instability is from the Neumann
+84
+==PAGE:90==
+8.2. FUTURE WORK
+85
+boundary condition of pressure Poisson equation [5]. This instability can be
+circumvented by writing the Navier-Stokes equation in the skew-symmetric
+form [6]. However, the σ coordinates pose difficulty in doing so because the
+vertical velocity of the convection term has a different physical meaning and
+dimension.
+• Fix the SIMPLE and PISO algorithm for Navier-Stokes:
+The SIMPLE and PISO method is the most popular velocity-pressure cou-
+pling method because of their relatively cheap computational cost and is more
+suitable for RANS turbulence modeling. However, in the current study, the
+implemented SIMPLE and PISO solver fail to converge.
+• RANS turbulence modeling:
+RANS turbulence modeling is important for sediment transport study in in-
+dustry and is relatively computationally expansive. The spectral method has
+the potential to improve the efficiency of the RANS model.
+• Extension to three dimensional:
+Most of the flow phenomenon is three-dimensional, and the currently developed
+two-dimensional has very limited application in real engineering problems.
+• Spectral element solver:
+Although the current Navier-Stokes solver is geometric flexible, it is not ca-
+pable to solve the flow with objects submerged in the water.
+Because the
+single-domain spectral method will experience a strong Gibbs phenomenon if
+there is a submerged object in the middle of the water, the multi-domain spec-
+tral method or discontinuity spectral element method can solve this problem.
+• Improvement of the multigrid:
+According to Heinrichs [18], the algebraic multigrid method has theoretically
+much better performance than geometric multigrid.
+However, the classical
+algebraic multigrid method [17] which is implemented by the author and is
+validated to be correct by a matrix of the system resulting from a low-order
+discretized elliptical PDE problem, fails to converge. Future work could de-
+velop an algebraic multigrid method that could solve the problem of the current
+study.
+• Parallelization of the Navier-Stokes solver:
+Parallelization of the solver is indispensable for large problems since the de-
+gree of freedom could be the magnitude of at least a million, which means
+serial computing will be super slow. The currently developed model can be
+translated to high-performance code such as C++, Fortran, Java, and Julia
+and then parallelize the code to speed up the computation.
+==PAGE:91==
+Bibliography
+[1] M. BITSCH, A. MELANDER, A. P. ENGSIG-KARUP, A High-order Pseudo-
+spectral Incompressible Navier-Stokes free surface model in 2D. In: Proceedings
+of the 37th IWWWFB. Giardini Naxos. 2022.
+[2] D. A. KOPRIVA, Implementing spectral methods for partial differential
+equations:
+Algorithms for scientists and engineers, Springer, DOI10.1007/
+978-90-481-2261-5.
+[3] A. J. CHORIN, A numerical method for solving incompressible viscous flow
+problems, J. Compt. Physics. Vol. 135
+[4] B. LI, C. A. FLEMING, Three-dimensional model of Navier-Stokes equations
+for water waves.J. Waterway, Port, Coastal, Ocean Eng., 2001
+[5] S. A. ORSZAG, M. ISRAELI, AND M. 0. DEVILLE, Boundary conditions for
+incompressible flows, J. Sci. Comput. 1 No. 1, 75 (1986).
+[6] G. E. KARNIADAKIS, M. ISRAELI, S. A. ORSZAG, High-Order Splitting
+Methods for the Incompressible Navier-Stokes Equations, J. Compt. Physics.
+Vol. 97, Issue 2, December 1991
+[7] J. D. FENTON, Nonlinear Wave Theories, The Sea, Vol.9: Ocean Engineering
+Science, 1990.
+[8] H. R. LUTH, G KLOPMAN, N KITOU, Kinematics of waves breaking partially
+on an offshore bar: LDV measurements of waves with and without a net onshore
+current, In: Report H-1573, Delft Hydraulics 40 (1994).
+[9] A. P. ENGSIG-KARUP, H.B. BINGHAM; O. LINDBERG, An efficient flexible-
+order model for 3D nonlinear water waves, J. Compt. Physics, Vol. 228, Issue 6,
+1 April 2009.
+[10] A. P. ENGSIG-KARUP, Unstructured nodal DG-FEM solution of high-order
+Boussinesq-type equations, Ph.D. thesis, DTU MEK, August 2006
+[11] M. R. HESTENES, E. STIEFEL, Methods of conjugate gradients for solving
+linear systems, Journal of Research of the National Bureau of Standards, Vol.
+49, No. 6, December 1952.
+86
+==PAGE:92==
+BIBLIOGRAPHY
+87
+[12] VAN DER VORST, H. A. (1992), Bi-CGSTAB: A Fast and Smoothly Converg-
+ing Variant of Bi-CG for the Solution of Nonsymmetric Linear Systems. SIAM
+J. Sci. Stat. Comput. 13 (2).
+[13] Y. SAAD and M.H. SCHULTZ, GMRES: A generalized minimal residual al-
+gorithm for solving nonsymmetric linear systems, SIAM J. Sci. Stat. Comput.,
+7:856-869, 1986.
+[14] B. III, DAVID; TREFETHEN, LLOYD N. (1997), Numerical linear algebra,
+Philadelphia: Society for Industrial and Applied Mathematics.
+[15] ARNOLDI, W. E. (1951). The principle of minimized iterations in the solution
+of the matrix eigenvalue problem, Quarterly of Applied Mathematics. 9 (1): 17-
+29
+[16] T. A. ZANG, Y. S. WONG, M. Y. HUSSAINI, Spectral multigrid methods for
+elliptic equations, J. Compt. Physics, Vol., 485-501 (1982).
+[17] U TROTTENBERG, C. W. OOSTERLEE, A. SCHULLER, Multigrid 1st Edi-
+tion, ISBN: 9780127010700.
+[18] W. HEINRICHS, Algebraic spectral multigrid method, Computer Methods in
+Applied Mechanics and Engineering 80 (1990)
+[19] M. CARPENTER, C. KENNEDY, Fourth-order 2N-storage Runge-Kutta
+schemes. In: Nasa reports TM, 109112, (July 1994).
+[20] A. P. ENGSIG-KARUP, W. LASKOWSKI, Efficient p-multigrid spectral ele-
+ment model for water waves and marine offshore structures, Numerical Methods
+in Fluids, Vol. 93, Issue 9, September 2021
+[21] I. SVENDSEN, I. G. JONSSON, Hydrodynamics of costal regions, ISBN 87-
+87245-57-4.
+[22] B. L. JENSEN, B. M. SUMER, J. FREDSØE, Turbulent oscillatory boundary
+layers at high Reynolds numbers, J. Fluid Mech. (1989), vol. 206, pp . 265-297.
+[23] B. E. LARSEN, D. R. FUHRMAN, On the over-production of turbulence be-
+neath surface waves in Reynolds-averaged Navier-Stokes models, J. Fluid Mech.
+(2018), vol. 853, pp. 419-460.

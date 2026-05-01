@@ -1,0 +1,1300 @@
+==PAGE:1==
+Streaming in the I/O model
+Snorre Clasen
+s164416@student.dtu.dk
+MSc in Computer Science and Engineering
+DTU Compute
+Advisors:
+Inge Li Gørtz
+Philip Bille
+January 2022
+==PAGE:2==
+Abstract
+This thesis describes and examines a relatively new computation model ﬁrst introduced by Ben-
+der et al in 2018 based on combining the streaming model and the external memory (I/O) model.
+It discusses some challenges inherent to and techniques available in this model, including dictio-
+nary queries and query batching. A new model for the family of on-line event detection problems
+is introduced, and the time-stretch ﬁlter is described and analyzed in this model in more de-
+tail and more exhaustively than in its original introduction. Several extensions, including more
+predictable behavior in case of very high frequency items, weighted items, and string preﬁx
+matching are introduced. Each of these data structures can for time-stretch α > 0 be main-
+tained in O((1/α + 1) logM/B(T/B)/B) amortized I/Os per item/symbol for window size T, or
+O((1/α + 1) logN/B(N/B)/B) amortized I/Os per item/symbol without windowing. To facili-
+tate preﬁx matching, operations on a certain serialization of tries are introduced and analyzed.
+Finally, a novel algorithm for an on-line version of the classic union–ﬁnd/connectivity problem
+is introduced and analyzed. This algorithm in particular supports solving the on-line union–
+ﬁnd/connectivity problem for query delay Θ(V ) with the same I/O-complexity as the oﬀ-line
+minimal spanning tree problem.
+2
+==PAGE:3==
+Contents
+1
+Introduction
+4
+1.1
+Structure of the report
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4
+1.2
+Contributions
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4
+2
+External streaming model
+5
+2.1
+Parallel scanning and merging . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+2.2
+Dictionaries
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+2.2.1
+Batch queries. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+2.3
+Heaps . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+3
+Event detection
+7
+3.1
+Time-stretch ﬁlter . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+3.1.1
+Structure and operation . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+3.1.2
+Correctness . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+9
+3.1.3
+Analysis . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+10
+3.1.4
+Results . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+3.2
+Reducing the number of reported items . . . . . . . . . . . . . . . . . . . . . . .
+11
+3.2.1
+Implementation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+3.3
+Weights . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+3.4
+Preﬁx matching . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+3.4.1
+Representing and walking tries . . . . . . . . . . . . . . . . . . . . . . .
+16
+3.4.2
+Merging serialized tries
+. . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+3.4.3
+Removing strings from tries . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+3.4.4
+Using tries with the time-stretch ﬁlter . . . . . . . . . . . . . . . . . . .
+23
+4
+On-line union–ﬁnd
+24
+4.1
+External streaming algorithm . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+4.1.1
+Step 1: Apply ρ to B . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+4.1.2
+Step 3: Combine ρ and σ . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+4.1.3
+Results . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+5
+Conclusion
+28
+5.1
+Future work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+28
+6
+References
+29
+A Non-recursive trie merging
+30
+3
+==PAGE:4==
+1
+Introduction
+This thesis examines the external memory streaming model introduced in [5], where a large
+stream of items or operations is processed using the external memory model. In particular, it
+examines event detection problems, where we want to detect high-frequency items, and an on-
+line version of the union–ﬁnd problem. For both kinds of problems, we will be achieving better
+I/O performance by allowing queries to be answered after a bounded delay.
+This model and these problems have applications in situations where a high-throughput stream
+of items or operations must be processed and handled on the ﬂy, especially where the latency
+of performing an external memory transfer for each item is unacceptable. Possible applications
+thus include anomaly detection (whether of networked communication or of devices, such as in
+industrial settings) and processing of social data.
+1.1
+Structure of the report
+This report is divided into three main parts.
+• Section 2 describes the algorithm examined in this thesis. It also discusses some of the
+challenges inherent to working in this model, and some of the techniques available.
+• Section 3 presents the family of problems related to doing on-line event detection of streams
+of items, and gives an adapted description of the time-stretch ﬁlter from [5]. It then de-
+scribes and examines some extensions to this data structure, including more predictable
+handling of very heavy events, and a version of the time-stretch ﬁlter for strings with
+preﬁx matching.
+• Section 4 describes the well-known union–ﬁnd problem, albeit in a way adapted to the
+particular approach used in the section, and introduces a novel on-line external memory
+union–ﬁnd algorithm with delayed responses based on a batched algorithm from [1].
+Finally, Section 5 summarizes the main ﬁndings of this project.
+1.2
+Contributions
+The primary contributions of this thesis are the following:
+• An adapted and more exhaustive description of the time-stretch ﬁlter data structure from
+[5].
+• An extension of the time-stretch ﬁlter with more predictable handling of very heavy events.
+• Algorithms for merging and subtracting serialized tries.
+• An extension of the time-stretch ﬁlter to allow string events with preﬁx matching and
+diﬀerent thresholds for diﬀerent preﬁx lengths.
+• A novel algorithm based on an algorithm from [1] for answering union–ﬁnd problems
+on-line with ﬁxed delay for responses.
+4
+==PAGE:5==
+2
+External streaming model
+In the streaming model [3], an input stream S consisting of N items is processed sequentially
+to produce some result, either in real time or after the fact, maintaining only O(polylog N) bits
+of memory. In other words, the streaming model is focused on processing S with less memory
+than it takes to store S.
+In the external streaming model introduced in [5], on the other hand, we are still interested in
+processing an input stream S of N items, but instead of strictly limiting the available memory,
+we will measure external memory use as in the I/O model of [2]. In other words, we assume an
+internal memory of M words and an unlimited external memory with memory transfer oper-
+ations (I/Os) that move contiguous blocks of B words at a time between internal and external
+memory. Based on the assumption that memory is much slower than computation, we will only
+count the number of I/Os used by an algorithm and thus consider computation to be free.
+As argued in [5], when processing high-throughput streams, data ingestion is not the bottleneck.
+Rather, several write-optimized data structures exist, where writes are batched such that they
+required amortized less than one I/O per update, but generally require at least one I/O per query.
+In this thesis, however, we are in particular interested in trying to solve certain problems with a
+possible less-than-one amortized I/Os per operation, even for queries.
+While problems in this model are very similar to dynamic problems in the ordinary I/O model,
+a major diﬀerence between the two is, that in the external streaming model we will be allowing
+queries to be answered, and events to be reported, with some bounded delay. This is the principal
+reason why it is possible to answer queries in less-than-one amortized I/Os.
+We will generally assume N > M, as otherwise the problem can be solved without using external
+memory at all.
+2.1
+Parallel scanning and merging
+One of the most fundamental building blocks used in this thesis is that of parallel scanning of
+two or more arrays. It is a well known technique and the deﬁning building block of merge-based
+sorting algorithms, but I will nonetheless deﬁne the technique semi-formally here.
+Let R be some totally ordered set of values, e.g., integers or bit strings. Then consider two sets
+A1 and A2 equipped with sort-key functions r1 : A1 →R and r2 : A2 →R and stored as arrays
+sorted according to these functions. If a1 ∈A1 and a2 ∈A2 satisfy r1(a1) = r2(a2), then we
+will call (a1, a2) a matching pair. If a1 ∈A1 for which no a2 ∈A2 satisﬁes r2(a2) = r1(a1),
+then (a1, ⊥) is the matching pair for a1, and similarly (⊥, a2) is the matching pair in the opposite
+situation. This is illustrated in Figure 1.
+Then it is possible to construct a new array by applying some function f : (A1 ∪{⊥}) × (A2 ∪
+{⊥}) →C∪{⊥} (with a returned ⊥indicating an element should be left out of the new array) to
+the matching pairs of A1 and A2 in O((|A1|+|A2|)/B) I/Os. This is done by simply maintaining
+an index i1 into A1, an index i2 into A2, and a pointer to the end of the array being constructed.
+Then at each step, if r1(A1[i1]) = r2(A2[i2]), then f(a1, a2) is written to the new array (unless
+⊥) and i1 and i2 are both incremented. If, on the other hand, r1(a1) < r2(a2), then f(a1, ⊥) is
+written and only i1 is incremented, and otherwise f(⊥, a2) is written and only i2 is incremented.
+This technique is also readily extensible to more than two input arrays, as long as one block of
+memory for each array plus one block of memory for the resulting array can ﬁt in main memory.
+This means that it in general is only possible to merge up to M/B −1 arrays at a time.
+5
+==PAGE:6==
+Figure 1: Matching for two arrays of integers where r1 = r2 = id is the identity func-
+tion. The matching pairs are: (⊥, 1), (3, 3), (4, ⊥), (⊥, 5), (7, ⊥), (8, 8), (9, ⊥), (10, 10),
+(12, 12).
+2.2
+Dictionaries
+Many data structures depends on some sort of dictionary look-up to function, whether this be
+trough direct indexing in large arrays, or through binary search trees or hash maps. The simple
+problem of looking up entries in a large enough section of memory, however, proves to be more
+troublesome to do eﬃciently in the external streaming model. Given a dictionary of N items
+stored in Θ(N) words (i.e., without signiﬁcant duplication or compression), at most a ratio of
+O(M/N) of it can be loaded into internal memory at any given time. In the worst case, a query
+will thus require at least one I/O.
+While several write-optimized dictionary solutions exist, like Bε-trees [7], cache-oblivious looka-
+head arrays (COLAs) [6], and external hash maps [10], these are still too slow to query, if a query
+is needed for every item of the stream.
+2.2.1
+Batch queries.
+When it is possible to gather and batch suﬃciently many queries, however, we can achieve a
+better bound: If we maintain the dictionary as a list of key/value pairs sorted by key, then we
+can perform k batched queries by sorting the queries by key and then scanning through them
+and the dictionary in parallel, reporting matches as they occur. This thus takes O(sort(k) +
+scan(k) + scan(N)) = O(sort(k) + scan(N)) = O( k
+B logM/B
+k
+B + N
+B ) I/Os.
+Whether this is cheaper than doing k point queries depends on how large k is compared to N
+and the point query I/O cost of the dictionary structure used. For k = Θ(N), in particular, batch
+queries give an an amortized O( 1
+B logM/B
+N
+B ) I/Os per query.
+We will be using this technique in Section 4.
+2.3
+Heaps
+Heaps can be used to sort or maintain order of N items in optimal O(sort(N)) = O(N
+B logM/B
+N
+B )
+I/Os, or amortized O( 1
+B logM/B
+N
+B ) I/Os per item (see, e.g., [8]).
+This, however, turned out to not be needed for the data structures and algorithms covered in this
+thesis, so, while most likely useful for other problems in the external streaming model, we will
+go into no further details here.
+6
+==PAGE:7==
+3
+Event detection
+In the event-detection family of problems we are interested in processing a stream of items over
+some universe of types U and reporting those item types whose count reaches some threshold.
+We will a little atypically model the stream S as a set of stream items. Each stream item is a tuple
+(t, s) consisting of a timestamp t and a type s ∈U. The timestamps are unique and sequential.
+Thus the sequence of types s1, s2, . . . , sN gives the stream S = {(1, s1), (2, s2), . . . , (N, sN)}.
+While this scheme can model inﬁnite streams, doing so in our external streaming model would
+imply inﬁnite bit-width words, so this is not particularly useful. It is, however, a useful limitation
+to assume that the exact length of the stream is not known at processing time, even if an upper
+bound is implied by the bit-width of the pointers used.
+Let S(t1, t2] denote {(t, s) ∈S | t1 < t ≤t2}, that is, the substream of items strictly after time
+t1 up to and including time t2.
+Deﬁnition 3.1. A (τ, T)-event is a tuple (t, s) for integer t and s ∈U, such that S(t −T, t]
+contains at least τ items of type s. A τ-event is a (τ, T)-event with T = N.
+In other words, each (τ, T)-event is a witness for a set of τ items of the same type within a
+window of T items, while each τ-event does the same but without the windowed restriction.
+The objective for the event-detection problems we will be considering in these section is then to
+process the stream and report (τ, T)-events. To make the association between items and (τ, T)-
+events more concrete, we will use the following deﬁnition as well:
+Deﬁnition 3.2. For an item type s ∈U and integers τ, T ≥0, an (s, τ, T)-substream is a
+substream S(t1, t2] for integers 0 ≤t2 −t1 ≤T such that:
+(i) S(t1, t2] contains exactly τ items of type s; and
+(ii) S(t1, t2] is minimal in the sense that any strict substream S(t′
+1, t′
+2] ⊊S(t1, t2] contains
+fewer than τ items of type s.
+A (s, τ)-substream is a (s, τ, T)-substream with T = N.
+When t2 ̸= t1 (which it is for τ ̸= 0), condition (ii) is equivalent to the boundary items S[t1 + 1]
+and S[t2] both having type s.
+Figure 2: A stream S with events of a certain type s ∈U marked as crosses. With τ = 4
+and T as indicated, S[t1, t2) and S[t3, t4) are (s, τ, T)-substreams and (t4, s) is a (τ, T)-
+event (and so is (t2, s)).
+We can now introduce a ﬁrst iteration of the problem we aim to solve in this section:
+7
+==PAGE:8==
+Problem 3.1 (Windowed time-stretch event detection with overlap). Given integers τ > 0 and
+T ≥0, and real number α > 0, process a stream S sequentially, and for each (s, τ, T)-substream
+S(t1, t2], report at some time t ≥t2 a (τ, T)-event (t, s) such that t −t2 < α(t2 −t1).
+Problem 3.2 (On-line time-stretch event detection with overlap). Given integer τ > 0 and real
+number α > 0, process a stream S sequentially, and for each (s, τ)-substream S(t1, t2], report
+at some time t ≥t2 a τ-event (t, s) such that t −t2 < α(t2 −t1).
+Note that for these versions of the problem, the same item type may be reported multiple times.
+We will look into strategies to mitigate this in Section 3.2, including how the original article
+handles it, after presenting the basic data structure.
+3.1
+Time-stretch ﬁlter
+The article [5] introduces a few diﬀerent event detection data structures (“ﬁlters”) with the same
+general structure but diﬀerent properties.
+Each ﬁlter consists of a sequence of levels C0, C1, . . . , CL−1 of increasing size, where only C0 ﬁts
+in main memory. Events are ﬁrst inserted into C0, then later ﬂushed from C0 to C1, from C1 to C2,
+and so on. As a consequence, no I/O operations are needed until a ﬂush is triggered. The exact
+size, structure, and ﬂushing behavior diﬀers between ﬁlters.
+We will in this thesis describe and examine the time-stretch ﬁlter anew, in diﬀerent terms and
+with diﬀerent parameters than in the original formulation in [5]. In particular, we will here prefer
+the use of concrete, integer parameters, with a straight-forward structural interpretation, to the
+more abstract real parameters used in [5].
+Thus, the time-stretch ﬁlter takes as parameters integers T, τ, q > 0. We will additionally use
+derived integer parameters L, m > 0 and real constant r ≥2, all of which we will determine
+later. The integer T gives a lower bound for the number of stream items that can ﬁt in the
+ﬁlter, τ gives the reporting threshold, q gives the number of subdivisions of each level (as will be
+explained shortly), L gives the number of levels, and m is a derived parameter, that ensures the
+ﬁrst level C0 ﬁts in main memory.
+3.1.1
+Structure and operation
+The time-stretch ﬁlter then consists of L levels C0, . . . , CL−1 of increasing capacity stored as
+arrays of stream items sorted by type. Stream items are inserted into C0, and when a level becomes
+full, some of its items are transferred to the next level. The proportion of how many items
+get transferred at a time is what determines our time-stretch guarantee. For simplicity, we will
+pretend that there is an extra level CL. Moving items to this ﬁctitious level then amounts to
+discarding them. Note that this is the only way items can be deleted from the ﬁlter.
+Let ki for i = 0, . . . , L−1, L be the number of stream items transferred at a time to Ci, and let the
+capacity of each level be |Ci| = qki+1. The general structure is illustrated in Figure 3. Since single
+items are inserted into C0, we set k0 = 1. Then we will have each level receive roughly r times
+more stream items than the previous level. To have each level evenly hold an integer number
+of transfers from the previous level, however, we will set ki+1 = ⌈rim/ki⌉ki. We thus (since
+m ≥1, r ≥2, and thus rim/ki ≥1) have rim ≤ki+1 < 2rim and hence ki+1 = Θ(rim).
+Thus |Ci| = Θ(qrim). We then ﬁx a positive integer m = Θ(M/q) such that C0 ﬁts in main
+memory, and get |Ci| = Θ(riM). Note that this restricts the possible value of q in relation to
+M, as suﬃciently large q can make it impossible to ﬁnd a suitable m. This is discussed further
+in Section 3.1.4.
+8
+==PAGE:9==
+Figure 3: The ﬁrst two levels C0 and C1 illustrated for q = 4.
+Let L = ⌈logr(T/qm)⌉+ 1. Then
+|CL−1| ≥qrL−1m = qr⌈logr(T/qm)⌉m ≥T.
+The ﬁlter can thus contain at least T stream items, and L = Θ(logr(T/M)).
+For each stream item (t, s) ∈S, insert it into C0. If C0 is not full, report s if its count in C0 is τ
+or greater. Otherwise, let k be the index such that C0, . . . , Ck−1 are all full, and Ck is not. Then
+perform a ﬂush:
+1. Merge C0, . . . , Ck−1, Ck into sorted array R.
+2. Scan through R and count each type. If a type has count τ or greater, report it.
+3. For i = k −1, . . . , 0, scan through Ci to move the ki+1 oldest items to Ci+1.
+After this, C0 is no longer full and the next stream item can be inserted.
+3.1.2
+Correctness
+Lemma 3.3. For s ∈U, given an (s, τ, T)-substream S(t1, t2], at some time t a (τ, T)-event (t, s)
+is reported, where t2 ≤t < t2 + (t2 −t1)/(q −1).
+Proof. When a ﬂush of levels C0, . . . , Ci−1 occurs, all of these levels are full. They thus together
+contain |C0| + · · · + |Ci−1| stream items. After a ﬂush, only the ki items transferred from Ci−1
+leave these levels, so the next ﬂush of C0, . . . , Ci−1 occurs after ki new items are inserted. Thus,
+after being ﬁlled for the ﬁrst time, each level Ci−1 experiences a ﬂush every ki inserted stream
+items, meaning the items in C0, . . . , Ci−1, Ci are counted every ki inserted stream items. At any
+time, the maximum time before an item in Ci is included in a count is thus ki.
+Since ki+1 stream items are removed from level Ci per ﬂush, and Ci has capacity qki+1, a stream
+item inserted into Ci experiences q ﬂushes before being moved to Ci+1. Since the ﬁrst ﬂush may
+occur immediately after its insertion into Ci, at least (q −1)ki+1 further items must be inserted
+before an item is moved from Ci to Ci+1. Hence, for a newly inserted item to end up in Ci, at least
+(q −1)k1 + (q −1)k2 + · · · + (q −1)ki ≥(q −1)ki further insertions are needed.
+Since t2 −t1 ≤T, and the ﬁlter contains at least T stream items, immediately before inserting
+(t2, s) into the C0, the stream item (t1 + 1, s) must still be in the ﬁlter, and must thus be in some
+9
+==PAGE:10==
+level Ci. The next (τ, T)-event (s, t) with type s must thus be reported at the latest as soon as
+a ﬂush of levels C0, . . . , Ci−1 occurs, as this ﬂush will count all τ items of type s in S(t1, t2]. By
+the above, we thus have t −t2 ≤ki. In order for the stream item (t1 + 1, s) to end up in Ci, at
+least (q −1)ki items must have been inserted between stream items (t1 +1, s) and (t2, s). Hence
+t2 −t1 −1 ≥(q −1)ki. Together, we thus have t −t2 ≤ki < (t2 −t1)/(q −1), concluding the
+proof.
+3.1.3
+Analysis
+Since C0 ﬁts in main memory, I/Os are only needed if a ﬂush occurs.
+Lemma 3.4. A ﬂush of levels C0, . . . , Ck−1 can be done in O(rkM/B) I/Os.
+Proof. (Step 1.) It turns out simply merging the arrays pairwise (i.e., 2-way) is suﬃcient. Thus,
+let R0 be an empty array. Then, for each i = 0, . . . , k, produce Ri+1 by merging Ri and Ci
+(by scanning through them in parallel), such that R = Rk+1. Thus |Ri+1| = |Ri| + |Ci| =
+|Ri| + qki+1. Since |R0| = 0, this recursion has solution |Ri+1| = q(k1 + · · · + ki+1). By
+construction, ki+1 < 2rim, so
+|Ri+1| < 2qm(r0 + · · · + ri) = 2qmri+1 −1
+r −1
+≤2qmri.
+In total, we can thus compute T in O(qmr0/B + qmr1/B + · · · + qmrk/B) = O(qmrk/B) =
+O(rkM/B) I/Os.
+(Step 2.) This is simply a scan of R, so it takes O(scan(|R|)) = O(scan(rkM)) = O(rkM/B)
+I/Os.
+(Step 3.) For each i, we can perform this step by scanning through Ci and Ci+1 in parallel, and
+moving the oldest stream items from Ci to Ci+1. This thus takes O(qki+1/B + qki+2/B) =
+O(qki+2/B) I/Os. In total, this step thus takes
+O
+qk2
+B + qk3
+B + · · · + qkk+1
+B
+
+= O
+qkk+1
+B
+
+= O
+qrkm
+B
+
+= O
+rkM
+B
+
+I/Os.
+A ﬂush of levels C0, . . . , Ck−1 thus takes O(rkM/B) I/Os.
+In a ﬂush, exactly k1 + · · · + kk = Θ(rk−1M/q) items are moved down one level. Each item can
+be moved down at most L times. Hence, the amortized I/O complexity per stream item is
+O
+LrkM/B
+rk−1M/q
+
+= O
+qrL
+B
+
+= O
+qr logr(T/M)
+B
+
+I/Os.
+This is minimized for r = e (although other choices yield the same asymptotic complexity). We
+thus have:
+Corollary 3.5. We can maintain the time-stretch ﬁlter in O(q log(T/M)/B) amortized I/Os per
+stream item.
+10
+==PAGE:11==
+3.1.4
+Results
+For suﬃciently large q, it impossible for C0 to ﬁt in main memory, if it is to contain qm items for
+some positive integer m. To reason about this situation, consider the boundary case m = 1. If
+m = 1, then k1 = ⌈r0m/k0⌉k0 = ⌈m⌉= 1, meaning that items are moved individually from C0
+to C1. A ﬂush of C0 thus occurs every stream item (after it has been ﬁlled once), so the levels C0
+and C1 are eﬀectively always counted together. The clear solution is thus, that if q is too great
+for C0 to ﬁt in main memory, we just ﬁx m = 1, place both C0 and C1 in external memory, and
+insert item into both by ﬂushing.
+Unfortunately, this means that we require at least one I/O per stream item, somewhat defeating
+the purpose. Expanding the internal memory of the machine should thus be considered instead,
+if greater values of q are required.
+We are now ready to combine the above lemmas into the following results:
+Theorem 3.6. For integers T, τ > 0 and real α > 0, the time-stretch ﬁlter with q = ⌈1/α⌉+ 1
+solves Problem 3.1 (windowed time-stretch event detection with overlap) in amortized O((1/α +
+1) log(T/M)/B) I/Os per stream item.
+Proof. From Lemma 3.3, we know that for each s ∈U, given a (s, τ, T)-substream S(t1, t2], at
+some time t a (τ, T)-event (t, s) is reported, where t2 ≤t < t2 + (t2 −t1)/(q −1). From this,
+we have
+t −t2 < t2 −t1
+q −1 = t2 −t1
+⌈1/α⌉≤α(t2 −t1),
+why the time-stretch ﬁlter solves Problem 3.1 for α. The I/O-complexity follows from Corol-
+lary 3.5 with q = Θ(1/α + 1).
+We can then also solve the non-windowed version of the problem:
+Corollary 3.7. For integer τ > 0 and real α > 0, the time-stretch ﬁlter with q = ⌈1/α⌉+
+1 solves Problem 3.2 (on-line time-stretch event detection with overlap) in amortized O((1/α +
+1) log(N/M)/B) I/Os per stream item.
+Proof. This follows directly from Theorem 3.6 with T = N.
+3.2
+Reducing the number of reported items
+So far, we have been considering only the requirement, that if a (s, τ, T)-substream exists, an
+event with type s must be reported. However, this means, that once an event has been reported,
+it may be re-reported repeatedly—in fact, the ﬁlter as described so far will cause the event to be
+re-reported every time a ﬂush of the levels containing the corresponding items occurs. In other
+words, there may be reported many more than one event per τ items.
+To avoid this and to give some guarantees on the event throughput, we will now consider the
+event detection problems with the additional requirement, that the substreams corresponding to
+each reported (τ, T)-event must be non-overlapping.
+We will however, even further require that the algorithm must report as many such events as
+possible, and thus get as close as possible to having every τ items of the same type produce a
+event—a goal that will, in fact, be achieved in the non-windowed version. In other words, we want
+the reported events to correspond to a maximum family of non-overlapping (s, τ, T)-substreams,
+in the sense, that no other other such family contains more substreams.
+11
+==PAGE:12==
+Figure 4: A stream of events of a certain type s marked with crosses with a non-maximum
+(top) and a maximum (bottom) family of (s, τ, T)-substreams for τ = 4 and T indicated
+in the middle. Time goes left to right.
+Problem 3.3 (Windowed time-stretch event detection (maximum non-overlapping)). Given in-
+tegers τ > 0 and T ≥0, and real number α > 0, process a stream S sequentially. For each
+s ∈U, consider a maximum set of non-overlapping (s, τ, T)-substreams, and for each of these
+substreams S(t1, t2], report a (τ, T)-event (t, s) at time t such that t −t2 ≤α(t2 −t1).
+Problem 3.4 (On-line time-stretch event detection (maximum non-overlapping)). Given integer
+τ > 0, and real number α > 0, process a stream S sequentially. For each s ∈U, consider
+windowed maximum set of non-overlapping (s, τ)-substreams, and for each of these substreams
+S(t1, t2], report a τ-event (t, s) at time t such that t −t2 ≤α(t2 −t1).
+It should be noted, that this approach diﬀers from that of [5]; in the original article, items are
+simply marked in a way only temporarily prevents re-reporting.
+To ﬁrst satisfy the non-overlapping criteria, we do the following: Each stream item in each level
+C0, . . . , CL−1 is stored with an additional bit indicating whether the item counted towards an
+event that has already been reported. Stream items that have this bit set are not included when
+counting items for each item type in R. Initially, the bit is unset for all items. When a (τ, T)-
+event (t, s) is reported, perform an additional scan of the items of type s and mark the oldest
+τ of them as used by setting the bit. As this at worst consists of a second scan of R, the total
+I/O complexity is unchanged. This partial solution corresponds closely to the one in [5]. It does,
+however, not satisfy the maximum criteria of Problems 3.3 and 3.4.
+Lemma 3.8. For s ∈U and integers τ > 0 and T ≥0, greedily allocating non-overlapping
+(s, τ, T)-substreams yields a maximum family.
+Proof. We will show by induction on the length N of the stream a strengthening of the claim,
+namely that the timestamp of the latest event covered by a substream in the greedy allocation
+is minimal among the maximum families. In the base case N = 0, since τ > 0, clearly no
+(s, τ, T)-substreams exist, so the claim holds trivially.
+Now assume that for a stream of length N, a family of non-overlapping (s, τ, T)-substreams
+contains at most k substreams, and that the greedy approach has produced such a family. If a
+stream item (t, s′) is then appended to S, either the maximal number of possible non-overlapping
+(s, τ, T)-substreams increases by one, or it remains unchanged. In the second case, the claim
+holds trivially, so we will focus on the ﬁrst.
+12
+==PAGE:13==
+If appending an item causes the maximal number of non-overlapping substreams to increase,
+then that must be because there is a (s, τ, T)-substream that ends with (t, s′). Let this unique
+substream be given by S(t1, t]. Since this substream caused the maximal number of (s, τ, T)-
+substreams to increase, there must be a family A of k non-overlapping (s, τ, T)-substreams for
+which none of the substreams in A intersect S(t1, t]. Hence, t′
+2 ≤t1 for all S(t′
+1, t′
+2] in A, but
+then, by the strengthened induction hypothesis, this also holds for the greedy allocation. Thus,
+the greedy allocation produces a maximum family of k + 1 substreams.
+The induction is thus complete.
+Now all we need to do is adapt the time-stretch ﬁlter to actually (eventually) report events cor-
+responding to a maximum family of substreams.
+The basic problem with the simple marking solution introduced so far is, that within a span
+of stream items there may be 2τ items of the same type, but depending on the exact timing, a
+ﬂush may cause τ items “in the middle” of this span to be marked as used for the corresponding
+reported event. If the earliest and latest of these 2τ items have a time diﬀerence of T or greater,
+the remaining τ events will not be able to cause a report.
+In other words, assume that a stream S contains 2τ items with some type s ∈U, and for in-
+tegers τ, T > 0 maximally contains two non-overlapping (s, τ, T)-substreams S(t11, t12] and
+S(t21, t22] for t11 ≤t12 ≤t21 ≤t22. Assume now instead, that a ﬂush causes an event to
+be reported for some (s, τ, T)-substream S(t1, t2] “in the middle”, i.e., for t11 < t1 < t21 and
+t12 < t2 < t22.
+We know, that since S(t11, t12] is a (s, τ, T)-substream, t12 −t11 ≤T. Thus, at time t12 the time-
+stretch ﬁlter is guaranteed to still contain the stream item (t11, s), and thus exactly τ stream items
+with type s. Thus, if a ﬂush of all the levels C0, . . . , CL−1 occurs, a (τ, T)-event must be reported.
+Further, a stream item cannot leave the ﬁlter completely before such a ﬂush occurs, as only items
+in the last level CL−1 can be deleted. Hence, at time t2, the events in the substream S(t11, t12]
+are all guaranteed to still be in the ﬁlter.
+Lemma 3.9. Fix s ∈U. Let S(t−1, t0] be the (s, τ, T)-substream corresponding to the last reported
+(τ, T)-event with type s, or t−1 = t0 = 0 if no such event has been reported. Let then S(t1, t2]
+be the earliest (s, τ, T)-substream with t0 ≤t1. Assume now that a (τ, T)-event with type s is
+reported, and the elements corresponding to the (s, τ, T)-substream S[t3, t4) are marked as used by
+it. Then the stream item (t1+1, s), and thus the entire substream S(t1, t2], is still in the time-stretch
+ﬁlter at time t4.
+Proof. Since S(t1, t2] is a (s, τ, T)-substream, we have t2 −t1 ≤T. Thus, at time t2, the entire
+substream, and thus τ stream items of type s, is guaranteed to be in the time-stretch ﬁlter. A
+(τ, T)-event will thus at the latest be reported when a ﬂush of all levels C0, . . . , CL−1 occurs. As
+stream items can leave the ﬁlter only when such a ﬂush happens, we can conclude that S(t1, t2]
+must still be in the ﬁlter when the event corresponding to S(t3, t4] is reported, and thus at time
+t4.
+The key to the adapted time-stretch ﬁlter is then, to observe, that we can eventually detect when
+an event marks stream items in a non-greedy fashion. With the setup from Lemma 3.9, the non-
+greedy attribution of the (τ, T)-event to S(t3, t4] when t3 > t1, means that the stream items in
+S(t3, t4] get marked as used, while the earlier items S(t1, min{t2, t3}] do not. However, since
+these items are guaranteed to be in the ﬁlter, we will eventually be able to simply re-mark the
+items by performing another scan of the levels.
+13
+==PAGE:14==
+3.2.1
+Implementation
+In order to allow stream items in the ﬁlter to be marked and unmarked, we need to make changes
+to the structure and ﬂushing procedure.
+Firstly, we will need each level to be sorted primarily by item type, but now also secondarily by
+timestamp in descending order, such that the latest items appear ﬁrst in each level.
+Secondly, we will adapt the ﬂushing procedure to keep track of marked and unmarked stream
+items, as well as to be able to write back changes to the levels. To ﬂush levels C0, . . . , Ck−1, do
+the following:
+1. Merge C0, . . . , Ck−1, Ck into sorted array R.
+2. Scan through each type s in R, and then:
+2.1 Scan through the items of type s, and count the unmarked items. Set c to this count.
+2.2 While c ≥τ, set c ←c −τ, and report a (τ, T)-event with type s.
+2.3 Scan through the items of type s again, unmark the ﬁrst c items, and mark the rest.
+3. Construct new levels C′
+k, C′
+k−1, . . . , C′
+0 from R.
+Step 3 requires further explanation. The general idea is, that we go through the merging proce-
+dure from step 1 in reveres, and thus ﬁrst separate out the new C′
+k, then C′
+k−1, etc. If k = L, we
+simply discard the constructed C′
+L.
+Each level contains stream items corresponding to a continuous range of timestamps. Let t0 >
+t1 > · · · > tk be the timestamps of the newest item in respectively C0, C1, . . . , Ck before the latest
+stream item was inserted into C0. Hence, each level Ci before the insertion corresponded to the
+substream S(ti+1, ti] for i = 0, . . . , k −1. Then, moving ki+1 items from Ci to Ci+1 corresponds
+to increasing ti+1 by ki+1. Hence each new level C′
+i for i = 0, . . . , k −1 should correspond
+to the substream S(t′
+i+1, t′
+i], where for j = 0, . . . , k −1, k we set t′
+j = tj + kj, and C′
+k should
+correspond to those items in R that have timestamps at most t′
+k.
+We can thus ﬁnd each t0, . . . , tk by scanning C0, . . . , Ck (or maintaining it separately), and then
+construct each C′
+0, . . . , C′
+k by the following procedure: Let R′
+k+1 = R. Then for each i = k, . . . , 0,
+construct C′
+i and R′
+i by scanning through R′
+i+1 and copying those items (t, s) where t ≤t′
+k to C′
+i,
+and the remaining items to R′
+i. By the analysis for step 1 in the proof of Lemma 3.4, a full ﬂush
+still uses O(rkM/B) I/Os.
+3.3
+Weights
+An straight-forward extension to the event detection problems and the time-stretch ﬁlter is item
+weights. Here, each stream item is equipped with a real weight. In other words, each weighted
+stream item is a tuple (t, s, w) with timestamp t, type s ∈U, and weight w ∈R. (In practice, a
+practical subset of the reals, like a set of integers or rationals, would be used.)
+Given a substream S(t1, t2] and s ∈U, let WsS(t1, t2] denote the sum of weights of items in
+S(t1, t2] of type s. In other words,
+WsS(t1, t2] =
+X
+(t,s,w)∈S
+t1<t≤t2
+w.
+We then redeﬁne the concepts of (τ, T)-events and (s, τ, T)-substreams (as well as τ-events and
+(s, τ)-substreams) to take weights into account:
+14
+==PAGE:15==
+Deﬁnition 3.10. A weighted (τ, T)-event is a tuple (t, s) for integer t and s ∈U, such that the
+sum of weights for the items in a substream S(t−T, t] of type s is at least τ, that is WsS(t−T, t] ≥
+τ. A weighted τ-event is a weighted (τ, T)-event with T = N.
+Deﬁnition 3.11. For an item type s ∈U, a real number τ > 0, and an integer T ≥0, a weighted
+(s, τ, T)-substream is a substream S(t1, t2] for integers 0 ≤t2 −t1 ≤T, such that:
+(i) WsS(t1, t2] ≥τ; and
+(ii) S(t1, t2] is minimal in the sense that for S(t′
+1, t′
+2] ⊊S(t1, t2], we have WsS(t′
+1, t′
+2] < τ.
+A weighted (s, τ)-substream is a weighted (s, τ, T)-substream with T = N.
+Note that by limiting weights to {1, −1}, we essentially get a time-stretch ﬁlter that supports
+deletions.
+To combine weighted stream items with the previous idea of marking stream items as “used”,
+it is necessary to be able to mark stream items as partially used. We can do so quite simply by
+simply replacing the “used” bit with a number indicating how much of the item’s weight has
+contributed to an event. When transferring which stream items are considered used during a
+ﬂush, these values are then accumulated and consolidated into the oldest relevant items.
+When scanning R and counting whether an event should be reported, it is important to do so
+while scanning, as otherwise negative item weights can bring the count back down below the
+threshold, even if a substream should trigger an event.
+We can thus conclude that we can solve the weighted versions of the problems in the same I/O
+complexity as the ordinary versions, i.e., in O((1/α + 1) log(T/M)/B), respectively O((1/α +
+1) log(N/M)/B), amortized I/Os per stream item.
+3.4
+Preﬁx matching
+It is also possible to extend the time-stretch ﬁlter to support small string types with preﬁx match-
+ing. This can be useful for situations where more speciﬁc (longer) preﬁxes should be weighted
+more than less speciﬁc (shorter) preﬁxes. It is important to note, that in this extension preﬁxes
+rather than full types are reported.
+In other words, if we let Σ be some alphabet, then our type universe U will be the set of strings
+over Σ, i.e., U = Σ∗. We will, however, in the following generally assume that the strings are
+nonempty. This is not a problem, as we can simply handle empty strings separately—either with
+a single counter, or, if strict handling of window widths is important, an array of counts, such
+that the exact count for any given interval can be determined as a simple diﬀerence.
+There are diﬀerent ways the concept of events can be extended to preﬁx matches, but one simple
+approach is the following: Rather than considering the count for each full type, counts are done
+per preﬁx. Thus, a stream item with type abc counts towards a counter for a, a counter for ab,
+and a counter for abc. This can be combined with the above extension of weighted stream items.
+Instead of a single threshold value τ, each preﬁx length ℓis assigned a threshold τℓ, such that
+a preﬁx P is reported if the (possibly weighted) count for P reaches or exceeds τ|P|. We will
+assume that these thresholds are non-increasing τ1 ≥τ2 ≥· · · , so that shorter preﬁxes don’t
+get reported before longer ones with the same count.
+A direct but powerful generalization, which is the approach the rest of this section will use,
+is to let the thresholds depend arbitrarily on the preﬁx being considered. In other words, let
+τ : Σ∗→Z≥0. Then a preﬁx P should be reported if the count for P reaches or exceeds
+15
+==PAGE:16==
+τ(P). The previous scheme is then given by τ(P) = τ|P|. Again, we will typically want shorter
+preﬁxes to have higher reporting thresholds than longer preﬁxes, which we can then formalize
+as τ(s1s2) ≤τ(s1) for all s1, s2 ∈Σ∗.
+In order to apply the previous idea of marking items as “used” for a report, so that repeated events
+are less common and more consistent, it is necessary to store the length of the preﬁx that was
+reported together with the bit/value used to indicate that/how much of the item has been used.
+Otherwise, it is impossible to determine whether it, for example, is sound to transfer the used
+bit/value from an item with type aabc to an item with type aabde. This also makes it possible to
+make more longer preﬁxes being reported, even if the corresponding stream items have already
+been used for a shorter preﬁx. Doing so is both more consistent (since which exact stream items
+that get used for an event becomes less important), and useful, since longer and more speciﬁc
+preﬁxes would likely be more interesting to report than shorter and less speciﬁc ones.
+We will be modelling the stream slightly diﬀerently, since we for the sake of the analysis want
+timestamps to be in terms of symbols rather than stream items. Thus the stream of nonempty
+item types s1, . . . , sN ∈Σ+ with weights w1, . . . , wN are then represented by the set of tuples
+S given by
+S = {(|s1|, s1, w1), (|s1| + |s2|, s2, w2), . . . , (|s1| + · · · + |sN|, sN, wN)}.
+The timestamps are thus still unique and increasing, but now indicate at which time in terms of
+symbols the stream item has fully been read. We will also update the interpretation of substreams
+S(t1, t2], such that the individual symbols must be completely included in the half-open interval.
+In other words, since the ﬁrst symbol of an item (t, s, w) must correspond to the time t−|s|+1,
+we set
+S(t1, t2] = {(t, s, w) | t1 < t −|s| + 1, t ≤t2}.
+The deﬁnitions of (weighted) (τ, T)-event and (weighted) (s, τ, T)-substream are then adapted
+to ﬁt this new model.
+We will then be solving problems analogous to Problems 3.3 and 3.4, but with these string preﬁx
+matching scheme, and with both timestamps and the parameters N, T, α expressed in terms of
+symbols instead of stream item counts. In particular, we have N = P
+(t,s,w)∈S |s|. The size limits
+of C0, . . . , CL−1 and parameters k0, . . . , kL are similarly now interpreted in terms of symbols
+instead of items.
+3.4.1
+Representing and walking tries
+Let A be a preﬁx-free set of nonempty strings over an alphabet Σ, and T be the (uncompressed)
+trie over A. We will represent the edges in T as pairs e = (u, v) oriented downwards such that u
+is the parent node of v. For each edge e in T, let γ(e) ∈Σ denote its label. For each node u in T,
+let π(v) ∈Σ∗denote the preﬁx of v, deﬁned as the concatenation of the labels on the path from
+the root to v, and ν(v) denote the number of leaves in the subtrie rooted at v (or, equivalently,
+the number of strings in A with π(v) as preﬁx).
+We will then construct a serialization σ(T) of T. To serialize a subtrie rooted at u, perform the
+following steps for each outgoing edge e = (u, v) in order of their label γ(e):
+1. Write (γ(e), ν(v)).
+2. Recursively serialize v.
+3. Write the special value ♦.
+16
+==PAGE:17==
+As an example, the trie over {abab, abbab, abbb, ba}, as visualized in Figure 5, gets serialized to
+(a, 3)(b, 3)(a, 1)(b, 1)♦♦(b, 2)(a, 1)(b, 1)♦♦(b, 1)♦♦♦♦(b, 1)(a, 1)♦♦.
+Figure 5: The trie over {abab, abbab, abbb, ba}.
+Let n = Σw∈A|w| be the combined lengths of the strings in A. Then, as each symbol in each
+string contributes at most one edge to the trie, and thus at most a constant number of words to
+the serialization, the length of σ(T) is Θ(n).
+It is possible to save space in the serialization by basing it on a compressed trie or by compressing
+runs of ♦’s, but in the worst-case this will still require Ω(n) space and make working with the
+serialization more tedious.
+This serialization σ(T) can be interpreted as instructions for a left-to-right Euler walk of T,
+where a pair indicates going down an edge, and a ♦indicates going back up a level. This means
+that we can scan through σ(T) to walk T, visiting each node v in order according to the corre-
+sponding preﬁx π(v).
+Consider a node p in T with outgoing labels e1 = (p, v1), e2 = (p, v2), . . . , ek = (p, vk) in order
+by label (i.e., γ(e1) < γ(e2) < · · · < γ(ek)). For each i = 1, 2, . . . , k, let the subtrie rooted at
+vi be denoted by Ti, and let γi = γ(ei) and νi = ν(vi). The situation is illustrated in Figure 6.
+Then the recursive nature of the serialization means we have:
+σ(T) = (γ1, ν1)σ(T1)♦(γ2, ν2)σ(T2)♦· · · (γk, νk)σ(Tk)♦.
+(With juxtaposition meaning concatenation.)
+Consider the serialization Z = σ(T). We will then in the following refer to the entries in Z
+by Z[i] for zero-indexed 0 ≤i ≤|Z|; in the special case i = |Z|, we will set Z[i] = ♦as
+convention. Furthermore, given 0 ≤a ≤b ≤|Z|, let Z[a, b) refer to the half-open subsequence
+Z[a], Z[a+1], . . . , Z[b−2], Z[b−1]. Then the Euler-walk nature of the serialization means that
+for each node v in T, the subtrie rooted at v (not including any edges between v and its parent)
+corresponds to a speciﬁc such subsequence; in particular the subtrie rooted at the root of T, i.e.,
+T itself, corresponds to Z[0, |Z|) = Z.
+Interpreting Z as an Euler walk, each entry Z[i] (in this case i < |Z|) instructs us to move
+from a node u to a diﬀerent node v, which is either a child of u or the parent of u. We will in
+17
+==PAGE:18==
+Figure 6: A node p with outgoing edges (p, v1), . . . , (p, vk) in order by their labels γ1 <
+· · · < γk. For each i = 1, 2, . . . , k, Tk is the subtrie rooted at vi.
+the following refer to u as the node before Z[i] and to v as the node after Z[i]. For the special
+case i = |Z|, we can say that the node before Z[i] is the root of T, while the node after Z[i] is
+necessarily undeﬁned. The node before Z[0] is always the root of T.
+We will for convenience identify the subtrie rooted at a node v with the itself, so that σ(v) is the
+serialization of said subtrie.
+3.4.2
+Merging serialized tries
+In order to use tries in the time-stretch ﬁlter, we must be able to merge tries together eﬃciently.
+To do so, we will ﬁrst consider a subprocedure:
+copySubtrie(Z, i):
+1. Set d ←0.
+2. Repeatedly:
+(a) If Z[i] = ♦and d = 0: Return i.
+(b) If Z[i] = ♦and d > 0: Set d ←d −1, write Z[i], and increment i.
+(c) If Z[i] ̸= ♦: Set d ←d + 1, write Z[i], and increment i.
+Lemma 3.12. Let A be a preﬁx-free set of nonempty strings over Σ, T its trie, and Z = σ(T) the
+serialization of T. Let p be a node in T with subtrie serialized to Z[a, b). Then copySubtrie(Z, a)
+copies Z[a, b) to the output and returns b.
+Proof. First, we will show that at the start of each iteration, d is the depth of the node before Z[i]
+relative to p (such that p has depth 0). Initially this holds because the node before Z[i = a] is p
+with depth d = 0. At the beginning of an iteration, let u and v be respectively the node before
+and after Z[i], and assume the claim holds such that d is the depth of u relative to p. Case (a)
+does not impact the loop-invariance of the claim as the loop terminates here. In case (b), v must
+be the parent of u, and hence have depth d −1, so the claim is maintained. In case (c), v must
+be a child of u, and thus have depth d + 1, so the claim is maintained. The claim is thus in fact a
+loop invariant.
+As d is only decremented in case (b), before which it must be positive, d ≥0 is also a loop
+invariant. Thus no strict ancestors of p is ever the node before Z[i], why we can conclude, by
+18
+==PAGE:19==
+the Euler-walk nature of the serialization, that at the beginning of an iteration the node before
+Z[i] is in the subtrie rooted at p. Thus, since p itself is the only node in this subtrie for which
+d = 0, we can conclude, that if case (a) applies, then the node before Z[i] is p and that either
+i = |Z| or the node after Z[i] is the parent of p. In either case, i = b, so we can conclude that if
+the procedure terminates b is returned.
+Since thus a ≤i ≤b and i is incremented for each iteration of the loop until it is terminated, that
+the loop eventually does terminate. As exactly each entry in Z[a, b) is thus written to output,
+the proof is complete.
+In the following, we will let A1 and A2 be disjoint preﬁx-free sets of nonempty strings over Σ,
+and T1 and T2 be their corresponding tries. Let Z1 = σ(T1) and Z2 = σ(T2) be the serialization
+of respectively T1 and T2. Let T be the trie over A1 ∪A2.
+We are then ready to consider the main merging algorithm:
+mergeTries(Z1, Z2, i, j):
+1. While Z1[i] ̸= ♦or Z2[j] ̸= ♦:
+(a) If Z1[i] = (γ, ν1) and Z2[j] = (γ, ν2) for some γ ∈Σ:
+1. Write (γ, ν1 + ν2).
+2. Invoke (i′, j′) = mergeTries(Z1, Z2, i+1, j+1) and set i ←i′+1 and j ←j′+1.
+3. Write ♦.
+(b) If Z1[i] = (γ1, ν1) and either Z2[j] = ♦or Z2[j] = (γ2, ν2) for some γ2 > γ1:
+1. Write (γ1, ν1).
+2. Invoke i′ = copySubtrie(Z1, i + 1) and set i ←i′ + 1.
+3. Write ♦.
+(c) If Z2[j] = (γ2, ν2) and either Z1[i] = ♦or Z1[i] = (γ1, ν1) for some γ1 > γ2:
+1. Write (γ2, ν2).
+2. Invoke j′ = copySubtrie(Z2, j + 1) and set j ←j′ + 1.
+3. Write ♦.
+2. Return (i, j).
+Remark 3.13. The implementation of mergeTries described here is recursive to help simplify
+the proof of its correctness. It can, however, also be described in a non-recursive way and thus
+without the need of a call stack, although this doesn’t change its I/O complexity. A non-recursive
+version is included in Appendix A without proof that they are equivalent.
+Lemma 3.14 (Correctness). Let v1 be a node in T1 and v2 be a node in T2 such that π(v1) = π(v2).
+Let v1 be serialized to Z1[a1, b1) and v2 to Z2[a2, b2). Let further v be the node in T such that
+π(v) = π(v1) = π(v2). Then mergeTries(Z1, Z2, a1, a2) writes σ(v) and returns (b1, b2).
+Proof. We will show this by induction (b1 −a1) + (b2 −a2), which gives a measure of the
+combined sizes of the subtries rooted at respectively v1 and v2.
+(Base case.) Here, (b1 −a1) + (b2 −a2) = 0 implies that σ(v1) and σ(v2) are both the empty
+string, why both they and v must be leaves. Thus Z1[i] = Z1[b1] = ♦and Z2[j] = Z2[b2] = ♦,
+so (i, j) = (b1, b2) is returned. Nothing is thus written, which is correct, since σ(v) is the empty
+string.
+19
+==PAGE:20==
+(Induction step.) We let n = (b1 −a1) + (b2 −a2), and will assume that the claim holds for any
+pair of nodes v′
+1 and v′
+2 where the corresponding a′
+1, b′
+1, a′
+2, b′
+2 satisfy (b′
+1 −a′
+1) + (b′
+2 −a′
+2) < n.
+Now we will ﬁrst show, that at the end of an iteration, the node before Z1[i] is still v1, and the
+node before Z2[j] is still v2. We will do so by considering each case:
+• In case (a), since both Z1[i] and Z2[j] are pairs, the node after Z1[i] is a child u1 of
+v1, and the node after Z2[j] is a child u2 of v2. Thus, u1 is serialized to Z1[i + 1, b′
+1)
+and u2 is serialized to Z2[j + 1, b′
+2) for some b′
+1 < b1 and b′
+2 < b2. By the induc-
+tion hypothesis, since (b′
+1 −(i + 1)) + (b′
+2 −(j + 1)) < n, we then have that the
+recursive call mergeTries(Z1, Z2, i + 1, j + 1) must return (i′, j′) = (b′
+1, b′
+2). As thus
+Z1[i, i′+1) = (γ, ν1)σ(u1)♦, we have that the node before Z1[i′] is u1, and Z1[i′] = ♦, why
+the node before Z1[i′+1] is its parent, v1. Similarly, because Z2[j, j′+1) = (γ, ν2)σ(u2)♦,
+the node before Z2[j′ + 1] is v2.
+• In case (b), j is unchanged, why the claim for Z2 trivially holds. Like in case (a), the node
+after Z1[i] is a child u1 of v1, serialized to Z1[i + 1, b′
+1). By Lemma 3.12, i′ = b′
+1, why
+Z1[i, i′ + 1) = (γ1, ν1)σ(u1)♦, and by a similar argument to that in case (a), the node
+before Z1[i′ + 1] is v1.
+• Case (c) is symmetric to case (b).
+Furthermore, we can also see from this that for each iteration, either a child of v1 is copied to the
+output, a child of v2 is copied to the output, or a child of v1 and a child of v2 with the same preﬁx
+are merged and written to the output, which also implies that the loop eventually terminates.
+Now note that when a single child is processed in cases (c) and (d) (as opposed to a pair in case (a)),
+the preﬁx of the processed child must be strictly less than every preﬁx on a child in the opposite
+trie. Thus the children are processed in order and children with the same preﬁx are processed
+together (with a recursive call to mergeTries).
+In case (a), the leaf count ν1 + ν2 written is correct, since by A1 and A2 being disjoint, the leaves
+under v1 and v2 correspond bijectively to the leaves under v. Similarly, in cases (b) and (c),
+the edge counts ν1 and ν2 are correct, since the leaves under v1, respectively v2, correspond
+bijectively to the leaves under v.
+Thus mergeTries(Z1, Z2, a1, a2) correctly writes σ(v). Since after each iteration of the loop v1
+is the node before Z1[i] and v2 is the node before Z2[j], and since the loop terminates once
+Z1[i] = Z2[j] = ♦, we can conclude, that the loop terminates once i = b1 and j = b2, as
+this is the unique situation that satisﬁes both these criteria. Thus the claim holds for n and the
+induction is complete.
+Lemma 3.15 (Analysis). With the same setup as Lemma 3.14, executing mergeTries(Z1, Z2, a1, a2)
+uses O((b1 −a1)/B + (b2 −a2)/B) I/Os.
+Proof. The only memory accessed by the algorithm is Z1, Z2, the output array, and, since the
+algorithm is recursive, the implicit call stack.
+Since Z1 is only accessed as Z1[i], Z2 is only accessed as Z2[j], and i and j are only ever increased
+(including in the calls to copyTrie and recursive calls to mergeTries), each block of Z1 and Z2
+need only be loaded once. Since i runs from a1 to b1 and j runs from a2 to b2, these memory
+accesses can be serviced in O((b1 −a1)/B + (b2 −a2)/B) I/Os.
+20
+==PAGE:21==
+The output array is written sequentially, why it requires O(|σ(v)|/B) I/Os. Since |σ(v)| ≤
+|σ(v1)| + |σ(v2)| = (b1 −a1) + (b2 −a2), this also takes O((b1 −a1)/B + (b2 −a2)/B) I/Os.
+Finally, the call stack can be maintained in O(1/B) amortized I/Os per call. Since at most one
+call is made per node in the subtrie rooted at v1 and the subtrie rooted at v2, this also yields
+O((b1 −a1)/B + (b2 −a2)/B) I/Os.
+Theorem 3.16. Let A1 and A2 be disjoint preﬁx-free sets of nonempty strings over Σ, and T1 and
+T2 be their corresponding tries. Let Z1 = σ(T1) and Z2 = σ(T2). Let T be the trie over A1 ∪A2.
+Then we can produce σ(T) from Z1 and Z2 in O(|Z1|/B + |Z2|/B) I/Os.
+Proof. Let r1 be the root of T1 and r2 be the root of T2. Then r1 is serialized to Z1 = Z1[0, |Z1|),
+and r2 is serialized to Z2 = Z2[0, |Z2|). Thus, calling mergeTries(Z1, Z2, 0, 0) will by Lemma 3.14
+correctly output σ(T), and will by Lemma 3.15 do so in (|Z1|/B + |Z2|/B) I/Os.
+3.4.3
+Removing strings from tries
+In addition to being able to merge two tries together, we must also be able to eﬃciently remove
+strings from a trie. To do this, we will construct a trie over the strings to be removed, and then
+“subtract” this trie from the original one. Like with merging, we will ﬁrst need a subprocedure:
+skipSubtrie(Z, i):
+1. Set d ←0.
+2. Repeatedly:
+(a) If Z[i] = ♦and d = 0: Return i.
+(b) If Z[i] = ♦and d > 0: Set d ←d −1, and increment i.
+(c) If Z[i] ̸= ♦: Set d ←d + 1, and increment i.
+Lemma 3.17. Let A be a preﬁx-free set of nonempty strings over Σ, T its trie, and Z = σ(T) the
+serialization of T. Let p be a node in T with subtrie serialized to Z[a, b). Then skipSubtrie(Z, a)
+returns b.
+Proof. This follows directly from Lemma 3.12, as skipSubtrie(Z, i) is identical to copySubtrie(Z, i)
+but with the output suppressed.
+In the following, let A1 be a preﬁx-free set of nonempty strings over Σ, and let A2 ⊆A1. Let T1
+and T2 be the trie over respectively A1 and A2, and Z1 = σ(T1) and Z2 = σ(T2). Let T be the
+trie over A1 \ A2.
+subtractTrie(Z1, Z2, i, j):
+1. While Z1[i] ̸= ♦or Z2[j] ̸= ♦:
+(a1) If Z1[i] = (γ, ν) and Z2[j] = (γ, ν) for some γ ∈Σ and ν ∈Z:
+1. Invoke i′ = skipTrie(Z1, i + 1) and set i ←i′ + 1.
+2. Invoke j′ = skipTrie(Z2, j + 1) and set j ←j′ + 1.
+(a2) If Z1[i] = (γ, ν1) and Z2[j] = (γ, ν2) for some γ ∈Σ and ν1 ̸= ν2:
+1. Write (γ, ν1 −ν2).
+2. Invoke (i′, j′) = subtractTrie(Z1, Z2, i + 1, j + 1) and set i ←i′ + 1 and
+j ←j′ + 1.
+21
+==PAGE:22==
+3. Write ♦.
+(b) If Z1[i] = (γ1, ν1) and either Z2[j] = ♦or Z2[j] = (γ2, ν2) for some γ2 > γ1:
+1. Write (γ1, ν1).
+2. Invoke i′ = copySubtrie(Z1, i + 1) and set i ←i′ + 1.
+3. Write ♦.
+2. Return (i, j).
+Lemma 3.18 (Correctness). Let v1 be a node in T1, v2 be a node in T2, and v be a node T,
+such that π(v1) = π(v2) = π(v). Let v1 be serialized to Z1[a1, b1) and v2 to Z2[a2, b2). Then
+subtractTrie(Z1, Z2, a1, a2) writes σ(v) and returns (b1, b2).
+Proof. The general structure of subtractTrie is identical to that of mergeTries, except that case (a)
+has been split into two subcases, and case (c) has been removed, since A2 ⊆A1 implies that it
+is impossible for v2 to have a child without v1 having a matching child. We thus again have,
+by a very similar argument to that in Lemma 3.14, that at the start of each iteration, the node
+before Z1[i] is v1, and the node before Z2[j] is v2, and that either a child of v1 is processed, or a
+matching child of v1 and child of v2 are processed together. The nodes are thus again processed
+in order, and together where applicable, but the manner in which they are processed diﬀers:
+• If a child u1 of v1 and a child u2 of v2 have the same preﬁx and the same leaf count, then
+that means, that every leaf below v1 is to be removed. This corresponds to case (a1), in
+which both the subtrie rooted at u1 and the subtrie rooted at u2 are skipped over without
+being output.
+• If a child u1 of v1 and a child u2 of v2 have the same preﬁx, but diﬀerent leaf counts ν1 ̸= ν2,
+then, again by A2 ⊆A1, we must have ν1 > ν2. Thus exactly ν2 of the ν1 leaf nodes in v1
+are going to be deleted, why writing (γ, ν1 −ν2) in case (a2) is correct.
+• If a child u1 of v1 does not have the same preﬁx as a child of v2, then none of nodes below
+u1 are to be deleted. It is thus correct in case (b) to just copy the subtrie rooted at u1.
+Otherwise, the proof is entirely analogous to that of Lemma 3.14.
+Lemma 3.19 (Analysis). With the same setup as Lemma 3.19, executing subtractTrie(Z1, Z2, a1, a2)
+uses O((b1 −a1)/B) I/Os.
+Proof. The proof is entirely analogous to that of Lemma 3.15, except that we get to simplify the
+complexity expression a bit, by noting that A2 ⊆A1 implies b2 −a2 ≤b1 −a1.
+Theorem 3.20 (Subtract tries). Let A1 be a preﬁx-free set of nonempty strings over Σ, and let
+A2 ⊆A1. Let T1 and T2 be the trie over respectively A1 and A2, and Z1 = σ(T1) and Z2 = σ(T2).
+Let T be the trie over A1 \ A2. Then we can produce σ(T) from Z1 and Z2 in O(|Z1|/B) I/Os.
+Proof. Let r1 be the root of T1 and r2 be the root of T2. Then r1 is serialized to Z1 = Z1[0, |Z1|),
+and r2 is serialized to Z2 = Z2[0, |Z2|). Thus, calling subtractTrie(Z1, Z2, 0, 0) will by Lemma 3.18
+correctly output σ(T), and will by Lemma 3.19 do so in (|Z1|/B) I/Os.
+22
+==PAGE:23==
+3.4.4
+Using tries with the time-stretch ﬁlter
+Given we now know how to merge tries and remove strings from a trie, we can now extend the
+time-stretch ﬁlter to support preﬁx matching by storing each level as a serialized trie.
+To satisfy the preﬁx-freedom and uniqueness conditions, we can store each stream item (t, w),
+where t is the timestamp and w is the string, as w$t, where $t is a unique symbol.1 With each
+serialized leaf node, the used bit/value and weight for the corresponding stream item is also
+stored.
+In the ﬂush step, the levels C0, . . . , Ck−1, Ck are then ﬁrst merged as usual, but into a serialized trie
+R rather than a sorted array. Since merging two tries has the same asymptotic I/O-complexity
+as merging two sorted arrays, the proof Lemma 3.4 (for step 1) applies.
+Scanning through R to report events—and to mark stream items as (partially) used—is then some-
+what more involved. We still scan through R linearly, leveraging the Euler walk nature of the
+serialization. We then also maintain a stack for the current preﬁx P (by pushing symbols when
+going down the trie and popping them when going back up), as well as calculating τ(P) for each
+node. In order to avoid the evaluation of τ to aﬀect the overall I/O-complexity of the algorithm,
+it should either be evaluated using only main memory, or by maintaining some state based on
+the evaluation of τ in the parent node.
+In any case, we can then maintain the number of unused stream items with a given preﬁx, or,
+more accurately, the summed unused weight of the items, with a stack: When going down in the
+trie, a 0 is pushed to the stack, indicating that we have so far visited no leaf nodes under that
+node with unused weight. When visiting a leaf node, its unused weight is added to the top-most
+value on the stack. And ﬁnally, when going up in the trie, the top-most value is popped from the
+stack and added to the value beneath it, indicating that the sum of unused weights for the preﬁx
+of the node we just ﬁnished processing also counts towards the one symbol shorter preﬁx of the
+parent node we are now visiting.
+In order to mark stream items as used, a trie over the used amounts of weight can be output, and
+after ﬁnishing the ﬁrst scan of R, a parallel scan of it can mark the correct leaf nodes.
+Finally, creating the new tries, C′
+0, . . . , C′
+k−1, C′
+k can be done analogously to that in Section 3.2.1,
+but with two passes of each intermediary trie R′
+i+1 instead of one: ﬁrst one to separate out C′
+i,
+and then one through calling subtractTrie(R′
+i+1, C′
+i, 0, 0) to produce R′
+i.
+It should be noted, since we have not limited the maximum lengths of the strings in S, that an
+item may not ﬁt in C0 or in fact in C1, C2, etc. In this case, the same logic as with the ordinary
+time-stretch ﬁlter applies, and we ﬂush levels until the strings ﬁts into one. If a stream item
+(t, s, w) does not ﬁt in CL−1, then |s| > T, so (t, s, w) is wholly included in no substream of
+width T. It is therefore sound to ﬂush the time-stretch ﬁlter until it is cleared and then discard
+the stream item.
+We can thus conclude that the preﬁx matching versions of the problems can be solved in respec-
+tively O((1/α + 1) log(T/M)/B) and O((1/α + 1) log(N/M)/B) amortized I/Os per symbol
+in S. It should be noted, that this analysis uses that the strings are nonempty, but as previously
+stated, empty strings can easily be handled separately.
+1If allocating a unique symbol for each timestamp is problematic, the same eﬀect can be accomplished by reserving
+a single symbol $, and then encoding $t as $ followed by a preﬁx-free encoding of t.
+23
+==PAGE:24==
+4
+On-line union–ﬁnd
+In this section we will be considered a streaming version of the classical union–ﬁnd problem. In
+particular, I will present a new algorithm based loosely on a simple algorithm from [1] (speciﬁ-
+cally Algorithm 1) for solving a batched version of the same problem.
+A partition of a set V is a family S ⊆P(V ) of subsets of V such that each element in V is in
+exactly one set in S. For each u ∈V , denote this unique set by Su.
+The union–ﬁnd problem then consists of maintaining a partition S of V together with a map
+r : S →V mapping each set A ∈S to its representant r(A) such that r(A) ∈A. Initially, S is
+the partition into singleton sets S = {{u} | u ∈V }, and r is given by r({u}) = u. We must
+then support two operations:
+• union(a, b) for a, b ∈V . Replace the sets Sa and Sb in S by their union Sa ∪Sb and choose
+an element w ∈Sa ∪Sb to be its representant.
+• ﬁnd(c) for c ∈V . Return the representant r(Sc) of Sc.
+We can also formulate the union–ﬁnd problem in terms of undirected graphs. In this interpre-
+tation, we want to answer connectivity queries on an initially empty graph while adding edges.
+We maintain an undirected graph G = (V, E) and a representant function ρ : V →V mapping
+vertices to connected component representants. For each connected component C ⊆V in G,
+every vertex in C must map to the same representant, which must itself be in C. Because of this,
+ρ(u) = ρ(v) holds if and only if u and v are connected for u, v ∈V . Such a function always
+exists, because each an arbitrary element can just be selected for each connected component as
+its representant.
+The two operations then become:
+• union(u, v) for u, v ∈V . Add the edge {u, v} to E and augment ρ as necessary.
+• ﬁnd(u) for u ∈V . Return ρ(u).
+It is possible to support these operations storing only ρ.
+For I/O analyses, we will abuse notation slightly and denote the size of V simply by V .
+For a sequence S of union operations, let GS = (V, ES) be the graph resulting from exe-
+cuting S in the initial state. Consider then a sequence Σ of union operations. Now split Σ
+into subsequences A and B such that Σ = AB, and let ρ be a valid representant function for
+GA. Let then ρ(B) be the sequence produced by replacing each operation union(u, v) in B by
+union(ρ(u), ρ(v)). Then we have the following two lemmas:
+Lemma 4.1. Two vertices s, t ∈V are connected in GΣ if and only if ρ(s) and ρ(t) are connected
+in Gρ(B).
+Proof. Assume s and t are connected in GΣ. Then there exists a path π from s to t. Consider
+then the sequence of edges ρ(π) given by replacing each edge (u, v) on π with (ρ(u), ρ(v)) and
+removing loops (u, u). For each edge (u, v) on π that is in EA, u and v are trivially connected in
+GA, so ρ(u) = ρ(v), and the produced loop (ρ(u), ρ(v)) is thus removed. Every edge (ρ(u), ρ(v))
+on ρ(π) thus corresponds to an edge (u, v) not in EA and thus from an operation union(u, v) in
+B. But then ρ(B) contains the operation union(ρ(u), ρ(v)), so (ρ(u), ρ(v)) is in Eρ(B). Thus,
+ρ(π) is actually a path in Gρ(B) from ρ(s) to ρ(t), why ρ(s) and ρ(t) are connected in Gρ(B).
+24
+==PAGE:25==
+Assume ρ(s) and ρ(t) are connected in Gρ(B). Then there exists a path π in Gρ(B) from ρ(s)
+to ρ(t). Each edge (x, y) on π must then come from a union(u, v) operation in B with ρ(u) =
+x and ρ(v) = y. For each pair of neighboring edges (x, y), (y, z) on π, we must thus have
+(u1, v1), (u2, v2) ∈EΣ such that ρ(u1) = x, ρ(u2) = ρ(v1) = y, and ρ(v2) = z. But then u2 and
+v1 must belong to the same connected component in GΣ, why we can ﬁnd a path between them.
+We can thus construct a path π′ in GΣ from s to t, showing that s and t are connected.
+Lemma 4.2. Let σ be a valid representant function for Gρ(B). Then σ ◦ρ is a valid representant
+function for GΣ.
+Proof. Let C ⊆V be a connected component in GΣ. Then, by the above lemma, ρ(C) = {ρ(u) |
+u ∈C} is a connected component in Gρ(B). By σ being a representant function for Gρ(B), we
+thus have σ(u) = σ(v) for all u, v ∈ρ(C), hence σ(ρ(u)) = σ(ρ(v)) for all u, v ∈C. Further,
+since σ(u) ∈ρ(C) for u ∈ρ(C), we also have σ(ρ(u)) ∈C for u ∈C. Both conditions are thus
+satisﬁed.
+4.1
+External streaming algorithm
+We will now consider a union–ﬁnd algorithm in the external memory streaming model, where we
+will batch sequences of operations in order to sacriﬁce timeliness for a reduced number of I/Os.
+Batching k operations can be done by straightforwardly writing them to an array in O(scan(k))
+I/Os, so we will focus on what happens once the operations have been batched.
+Given a representant function ρ : V →V and a sequence B of k union and ﬁnd operations, we
+can perform the operations in B in the state of ρ with the following abstract steps:
+1. Apply ρ to B, replacing each union(u, v) operation with union(ρ(u), ρ(v)) and each ﬁnd(u)
+operation with ﬁnd(ρ(u)).
+2. Solve the union–ﬁnd problem for B to answer the ﬁnd operations and produce represen-
+tant function σ.
+3. Calculate new representant function ρ′ = σ ◦ρ.
+That this abstract approach is correct follows directly from Lemma 4.2.
+We will concretely represent ρ by the set R = {(u, ρ(u)) | u ∈V, ρ(u) ̸= u}, stored as a list
+sorted by the ﬁrst entry of each pair. Thus ρ(u) = v for u ̸= v if and only if (u, v) ∈R, while
+ρ(u) = u if and only if no pair in R has u as its ﬁrst entry. By construction, R is initially empty.
+Similarly, σ is represented by an analogous set S.
+4.1.1
+Step 1: Apply ρ to B
+Step 1 is handled with the following sub-steps:
+1a. Scan through the batched operations to produce a sequence A by handling each operation:
+• For a union(a, b) operation, output a then b.
+• For a ﬁnd(c) operation, output c.
+Store each element u of A as a tuple (i, u), where i is its index in A so we can restore the
+original order after sorting.
+25
+==PAGE:26==
+1b. Sort A by the elements (second entry of each pair), then scan through it and R in parallel,
+and replace each pair (i, u) in A by (i, ρ(u)) using that ρ(u) = w if (u, w) ∈R and
+ρ(u) = u otherwise.
+1c. Restore the original order of A by sorting it by the the indices (ﬁrst entry of each pair),
+then scan through it and the batched operations in parallel and updating each operation:
+• For a union(a, b) operation, let x and y be the next two elements in A, then replace
+the operation with union(x, y).
+• For a ﬁnd(c) operation, let z be the next element in A, then replace the operation
+with ﬁnd(z).
+Correctness.
+Since step 1c matches step 1a, the elements extracted from A in step 1c corre-
+spond exactly to those added in step 1a. Since step 1b replaces each element u by ρ(u), we thus
+have x = ρ(a), y = ρ(b), and z = ρ(c), why these steps correctly apply ρ to the operations as
+described.
+Analysis.
+Since A contains at most 2k elements, steps 1a and 1c use O(scan(k)) I/Os. Since
+R contains O(V ) pairs, step 1b uses O(sort(k) + scan(V )) I/Os. The total I/O-complexity of
+these steps is thus O(sort(k) + scan(V )).
+4.1.2
+Step 3: Combine ρ and σ
+Step 3 is handled with the following sub-steps:
+3a. Sort R by the second element of each pair. Scan through S and R in parallel, matching
+the second entries of R with the ﬁrst entries of S, and construct a new sequence R′ by for
+each v ∈V such that v is the ﬁrst entry of a pair in S or the second entry of a pair in R
+doing:
+• If (u, v) ∈R and (v, w) ∈S for some v, w ∈V , then output (u, w).
+• If (u, v) ∈R for some v ∈V and no pair in S matched, then output (u, v).
+• If (v, w) ∈S for some w ∈V and no pair in R matched, then output (v, w).
+3b. Sort R′ by the ﬁrst entry of each pair. It is now the new R.
+Correctness.
+In the ﬁrst case of step 3a, ρ(u) = v and σ(v) = w, so σ(ρ(u)) = w, and it is
+correct to output (u, w). In the second case, ρ(u) = v and σ(v) = v, so σ(ρ(u)) = v, and it is
+correct to output (u, v). In the third case, ρ(v) = v and σ(v) = w, so σ(ρ(v)) = w, and it is
+correct to output (v, w). For any other v ∈V , ρ(v) = v and σ(v) = v, so σ(ρ(v)) = v, and it is
+correct not to output anything. The sequence R′ thus correctly encodes ρ′ = σ ◦ρ.
+Analysis.
+Step 3a takes O(sort(V ) + scan(k)) I/Os, while step 3b takes O(sort(V )) I/Os.
+The total I/O complexity of step 3 is thus O(sort(V ) + scan(k)).
+4.1.3
+Results
+Step 1 takes O(sort(k)+scan(V )) I/Os. Step 2 can be done in O(sort(k)+mst(k)) I/Os, which
+is O(sort(k)) expected I/Os by a randomized algorithm [4] or in O(sort(k) log log B) worst-
+case I/Os by a deterministic algorithm [9]. Step 3 can be done in O(sort(V )+scan(k)) I/Os. The
+26
+==PAGE:27==
+overall algorithm thus takes O(sort(V )+sort(k)+mst(k)) I/Os, hence O(sort(V )+sort(k))
+expected I/Os or O(sort(V ) + sort(k) log log B) worst-case I/Os.
+By batching k operations in this way, we thus get an O
+  sort(V )+sort(k)+mst(k)
+k
+ amortized per-
+operation I/O cost. Since sort(k) = O(mst(k)), this is thus O(sort(V )+mst(k)
+k
+) I/Os per opera-
+tion. If we set k = Θ(V ), then we thus have O
+  mst(V )
+V
+ amortized I/Os per operation.
+We can thus solve the on-line union–ﬁnd/connectivity problem with delay maximum query
+delay k in amortized O(sort(V )+mst(k)
+k
+) I/Os per operation. It can thus be solved determinis-
+tically in amortized O( V
+kB logM/B(V
+B) + 1
+B logM/B( k
+B) log log B) I/Os per operation, or non-
+deterministically in amortized O( V
+kB logM/B(V
+B) + 1
+B logM/B( k
+B)) expected I/Os per operation.
+For k = Θ(V ), this is deterministically O( 1
+B logM/B(V
+B) log log B) I/Os, or non-deterministically
+expected O( 1
+B logM/B(V
+B)) I/Os. It is thus also interesting to note, that with a Θ(V ) delay, the
+on-line union–ﬁnd/connectivity problem is only as hard as the oﬀ-line/batched minimal span-
+ning tree problem.
+27
+==PAGE:28==
+5
+Conclusion
+We have now in this thesis examined the external streaming model, some of its challenges, as
+well as some of the techniques available. We have considered the potential and possibility of
+less-than-one amortized I/O per item for two diﬀerent kinds of problems. To do so, we have seen
+the role allowing delayed answering plays in making the batching of queries possible, as well as
+the importance the merging of data structure plays in the external streaming model.
+This thesis has examined two particular, relevant problems modelled in the external streaming
+model, and an approach for solving each. For the event detection problem, we have considered
+the time-stretch ﬁlter data structure, as well as several diﬀerent extensions that still achieve the
+same less-than-one amortized I/O per item possibility (for suﬃcient high block transfer sizes B).
+For the external streaming union–ﬁnd/connectivity problem, we have considered a particular
+ﬁxed-cadence solution, that for suﬃciently long delays also can achieve less-than-one amortized
+I/Os per item (but can also eschew this to instead beneﬁt from more timely query replies).
+We have in particular seen, that the maximally non-overlapping windowed and non-windowed
+time-stretch event detection problems (Problems 3.3 and 3.4) can be solved in amortized O((1/α+
+1) log(T/M)/B) and O((1/α + 1) log(N/M)/B) I/Os per stream item respectively, where α
+is the time-stretch factor and T is the window width. We have also seen, that the string-based
+preﬁx-match versions of the same problems can also achieve the same bounds, but with α, T,
+and N corresponding to the total size of the input (i.e., including the sizes of strings), rather than
+just the number of items.
+We have further seen, that the on-line union–ﬁnd/connectivity problem over a set of size V can
+be solved with query delay k in O( V
+kB logM/B(V
+B) + 1
+B logM/B( k
+B) log log B) (deterministic) or
+O( V
+kB logM/B(V
+B) + 1
+B logM/B( k
+B)) expected (randomized) amortized I/Os per operation. For
+the case k = Θ(V ), we see that the delayed on-line union–ﬁnd/connectivity problem can be
+solved in the same amortized asymptotic I/O-complexity as the oﬀ-line external memory mini-
+mum spanning tree problem.
+5.1
+Future work
+As the combination of the streaming and external memory model has little been explored so
+far, especially in the context of achieving write-like performance for queries by allowing reply
+delays, the directions for possible future work are many.
+In particular, many streaming problems and algorithms can likely be adapted to the external
+streaming model almost directly and possibly made eﬃcient by allowing delayed responses (es-
+pecially, if the algorithms can be reinterpreted as sequences of merges of data structures). Fur-
+ther, external memory dynamic (possibly as well as non-dynamic problems) can likely be made
+streaming in a similar way to the union–ﬁnd/connectivity algorithm presented in Section 4, i.e.,
+by batching suﬃciently many items/operations before applying them all at once. Furthermore,
+while many graph problems will likely tricky to solve in the external streaming model, due to
+matters such as non-global eﬀects of added edges, it would likely be both interesting and fruitful
+to look further into these.
+Additionally, the time-stretch ﬁlter in particular seems readily extensible, and its general tiered
+structure—with older/less relevant items further down in larger levels and newer/more relevant
+items available “closer” to main memory—is likely possible to adapt for other streaming problems.
+Finally, implementing and practically evaluating the algorithms and data structures described
+herein is an obvious and interesting path forward.
+28
+==PAGE:29==
+6
+References
+[1] Pankaj K. Agarwal, Lars Arge, and Ke Yi. I/O-eﬃcient batched union-ﬁnd and its applica-
+tions to terrain analysis. In Proceedings of the twenty-second annual symposium on Compu-
+tational geometry, pages 167–176, 2006.
+[2] Alok Aggarwal and Jeﬀrey S. Vitter. The input/output complexity of sorting and related
+problems. Communications of the ACM, 31(9):1116–1127, 1988.
+[3] Noga Alon, Yossi Matias, and Mario Szegedy. The space complexity of approximating the
+frequency moments. Journal of Computer and system sciences, 58(1):137–147, 1999.
+[4] Lars Arge, Gerth Stølting Brodal, and Laura Toma. On external-memory MST, SSSP and
+multi-way planar graph separation. Journal of Algorithms, 53(2):186–206, 2004.
+[5] Michael A. Bender, Jonathan W. Berry, Martin Farach-Colton, Rob Johnson, Thomas M.
+Kroeger, Prashant Pandey, Cynthia A. Phillips, and Shikha Singh.
+The Online Event-
+Detection Problem. arXiv preprint arXiv:1812.09824, 2018.
+[6] Michael A. Bender, Martin Farach-Colton, Jeremy T. Fineman, Yonatan R. Fogel, Bradley C.
+Kuszmaul, and Jelani Nelson. Cache-oblivious streaming B-trees. In Proceedings of the
+nineteenth annual ACM symposium on Parallel algorithms and architectures, pages 81–92,
+2007.
+[7] Michael A. Bender, Martin Farach-Colton, William Jannen, Rob Johnson, Bradley C. Kusz-
+maul, Donald E. Porter, Jun Yuan, and Yang Zhan. An Introduction to B-trees and Write-
+Optimization. login; magazine, 40(5), 2015.
+[8] Gerth Stølting Brodai and Rolf Fagerberg. Funnel heap-a cache oblivious priority queue. In
+International Symposium on Algorithms and Computation, pages 219–228. Springer, 2002.
+[9] Yi-Jen Chiang, Michael T. Goodrich, Edward F. Grove, Roberto Tamassia, Darren Erik Ven-
+groﬀ, and Jeﬀrey Scott Vitter. External-memory graph algorithms. In Proceedings of the
+sixth annual ACM-SIAM symposium on Discrete algorithms, pages 139–149, 1995.
+[10] Alex Conway, Martin Farach-Colton, and Philip Shilane. Optimal hashing in external mem-
+ory. arXiv preprint arXiv:1805.09423, 2018.
+29
+==PAGE:30==
+A
+Non-recursive trie merging
+This is a non-recursive version of the mergeTrie algorithm.
+mergeTries(Z1, Z2):
+1. Set i ←0 and j ←0.
+2. While i < |Z1| or j < |Z2|:
+(a) If Z1[i] = Z2[j] = ♦:
+Write ♦, and increment i and j.
+(b) If Z1[i] = (γ, ν1) and Z2[j] = (γ, ν2) for some γ ∈Σ:
+Write (γ, ν1 + ν2), and increment i and j.
+(c) If Z1[i] = (γ1, ν1) and either Z2[j] = ♦or Z2[j] = (γ2, ν2) for some γ2 > γ1:
+Write (γ1, ν1), invoke i ←copySubtrie(Z1, i + 1) + 1 and write ♦.
+(d) If Z2[j] = (γ2, ν2) and either Z1[i] = ♦or Z1[i] = (γ1, ν1) for some γ1 > γ2:
+Write (γ2, ν2), invoke j ←copySubtrie(Z2, j + 1) + 1 and write ♦.
+30

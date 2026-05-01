@@ -1,0 +1,1460 @@
+==PAGE:1==
+Master’s Thesis: Real-time linelight
+shading and shadowing
+Kristian Knudsen
+Supervisor
+Jeppe Revall Frisvad
+External supervisors
+Mikkel Gjøl - Playdead
+Jakob Gath - Playdead
+January 2024
+Abstract
+Shading and shadowing of linelights remains a challenge in real-time computer graphics. Mod-
+ern stochastic methods can leverage hardware ray tracing to provide excellent results in well-lit
+regions, but shadows are still noisy. Analytic shading methods are well developed, but analytic
+shadowing is costly. In this thesis I perform analytic computation of the visibility of the linelight
+on the GPU to facilitate real-time shading and shadowing of linelights. I show a method for com-
+puting the visibility of the linelight for a given point in the scene, then show how to implement this
+method as a fragment shader on the GPU. A modified triangle-triangle intersection algorithm is
+developed for the purpose of computing occlusion of the linelight. A primitive ray traced shader is
+implemented to verify correctness of the analytic solution, and compare performance to a similarly
+implemented stochastic solution. GPU-friendly acceleration structures are used to bring perfor-
+mance of both barely within the range of practical usability, but performance remains too slow
+and variable for most real-world applications. Finally, I explore the effects of scene complexity
+and placement of the linelight on performance.
+1
+==PAGE:2==
+Contents
+1
+Introduction
+3
+1.1
+Prior work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+2
+Theory
+4
+2.1
+Fundamental challenge of visibility computation . . . . . . . . . . . . . . . . . . . . . . .
+5
+2.2
+Shading . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+3
+Methodology
+5
+3.1
+Visible intervals . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+6
+3.2
+Occlusion interval of a triangle
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+7
+3.2.1
+Limitations . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+3.3
+Shading . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+3.4
+Acceleration . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+3.4.1
+Uniform grid . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+3.4.2
+Top/bottom grid . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+3.4.3
+Triangle-AABB intersection . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+3.5
+Stochastic sampling
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+12
+4
+Implementation
+13
+4.1
+Scenes . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+13
+4.2
+Visibility computation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+14
+4.3
+2D projection artifacts . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+4.4
+Interval Array . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+4.5
+Acceleration structures . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+19
+4.5.1
+Uniform grid . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+4.5.2
+Top/bottom grid . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+4.6
+Stochastic Shader . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+5
+Results
+21
+5.1
+Uniform grid resolution test . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+23
+5.2
+Varying triangle count . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+23
+5.3
+Scene complexity . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+25
+5.4
+Comparison to stochastic shader
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+28
+6
+Discussion
+28
+7
+Future work
+31
+8
+Conclusion
+31
+9
+Acknowledgements
+32
+A Linelight diffuse radiance
+33
+B Analytic shader top/bottom grid traversal
+33
+2
+==PAGE:3==
+1
+Introduction
+Realistic lighting of scenes is a persistent challenge in real-time computer graphics. In a real-time
+context such as games, the time permitted for rendering a frame is strictly budgeted, limiting the
+kinds of light that can easily be rendered. The point light is commonly used, many lights are well-
+approximated as a point source such as light bulbs or candles, and good methods exist for computing
+the light and shadow cast from these in real-time. In the real world fluorescent lights and neon tubes are
+common, but these are poorly represented by the zero-dimensional point source. The one-dimensional
+’linelight’ (usually ’linear light’ in literature) is a good model for these light sources, but presents a
+challenge in real time rendering. It is defined in 3D space as a line of finite length and zero width
+connecting endpoints l0 and l1,
+L : t ·⃗l + l0,
+⃗l = (l1 −l0),
+t ∈[0, 1].
+(1)
+While the above definition fixes the location in space, it does not characterize the light emitted. Several
+models are used for the linelight, in particular modeling the light as an infinite series of collinear point
+lights, or as an emissive cylinder with a radius taken to zero in the limit. In this work I choose to use
+the former for its mathematical simplicity, as well as restricting the shading of surfaces to the diffuse
+component of the light for simplicity. The methods I present are concerned with shadowing of the
+linelight, and so are not exclusive to this model of the linelight for the purposes of shading. Any model
+for which the emission profile is uniform along the length of the light will work for shading.
+The primary challenge of illuminating a scene with a linelight is the computation of the shadows cast
+by the light. Many approaches have been taken towards doing so efficiently, and it is the primary
+focus of this project. The basic principle involves constructing a triangle spanning the endpoints of
+the linelight and the shaded point, which I define the ”light-triangle”,
+Light-triangle: The triangle spanning the endpoints l0, l1 of the linelight and the shaded point P.
+If an object intersects this triangle, it casts a shadow on the point.
+In this work I apply simple
+methods for directly computing the visibility of the linelight in a GPU fragment shader, in an attempt
+to produce real-time analytic linelight shading and shadowing. Source code for the renderer can be
+found at https://github.com/WorstWizard/linelights.
+1.1
+Prior work
+Both the challenge of accurate shading as well as fast evaluation of the visibility of the linelight has
+been tackled many times in the past. Nishita et al. [NON85] computes analytic solutions for diffuse
+shading for linelights parallel and perpendicular to a surface, resolves specular shading by sampling
+the light as point sources. For efficient shadowing, they suggest the use of shadow volumes to compute
+penumbrae, restricting the amount of computation needed. Poulin et al. [PA91] develops an analytic
+model of the diffuse reflection, and approximates the specular reflection using Chebyshev polynomials.
+For shadowing, they use a 3D grid to voxelize the light-triangle and a linelight-oriented segmented
+buffer, partitioning the space wrt. to the linelight itself. This method was later expanded upon by
+Tanaka et al. [TT95]. Picott [Pic92] computes an exact expression for the diffuse component, and uses
+a most-representative-point approach to approximate specular the reflection, an approximation that’s
+still popular in real-time graphics [Ri˜n19]. Bao et al. [BP93] similarly develop analytic expressions for
+diffuse and specular reflection, and use a BSP tree for acceleration of shadowing.
+More recently, Billen et al. [BD16] use linelights as a tool to sample area lights for global illumination.
+They use a BVH accelerate shadowing.
+Heitz et al.
+[HH17] builds on their own prior work on
+linearly transformed cosines (LTC) for area-light rendering to produce cheap specular shading for
+linelights.
+Most recently, Christoph Peters [Pet21] develops techniques for solid-angle importance
+sampling of linelights. The result, Monte Carlo integrated shading with ray traced shadows, almost
+entirely converges in two samples per pixel, with almost no noise in well-lit areas, although noise
+3
+==PAGE:4==
+Umbra
+Penumbra
+Occluder
+Light
+Figure 2: Linelights cast shadows consisting of umbra and penumbra: The shape of the shadow cast
+by a linelight is given by the convex hull of the shadows cast by its endpoints.
+remains in penumbra. For specular shading, LTC was used, but these materials also suffer a minor
+amount of noise.
+2
+Theory
+Consider the problem of computing the shadows cast by a point light: A straightforward solution and
+the working principle of ray tracing, is to draw a ray from the light to each point in the scene that
+is to be shaded, testing whether the ray hits any geometry between the light and the shaded point.
+An analogue exists for the linelight: Substitute the point light for a linelight and the ray becomes
+a light-triangle. As in ray tracing, we can check whether the linelight is visible at a given point by
+testing if the light-triangle intersects any geometry.
+Light
+Camera
+a)
+Camera
+Light
+b)
+Figure 1: a) Ray tracing can determine visibility of a point light. b) ”Triangle tracing” can determine
+visibility of a linelight, note that the light-triangle is only partially obscured.
+Intersection with a triangle is more complex than a ray: Whereas the visibility of the point light is
+a binary quantity, either entirely visible or obscured, the linelight may be partially obscured.
+An
+occluder casts a shadow consisting of both umbra and penumbra, see figure 2.
+4
+==PAGE:5==
+2.1
+Fundamental challenge of visibility computation
+The problem of efficiently computing the intersection of the light-triangle with the scene is inherited
+from ray tracing. The addition of an extra dimension to the intersection makes the problem much
+more however. Suppose we wish to compute shadows of a point light using ray tracing. The brute force
+approach of testing for intersection against each triangle in the scene requires O(N) time, ⃗n being the
+number of triangles. Since only a single intersection is enough to rule out visibility, if we had perfect
+knowledge of which triangles were in the path of the ray, we would only need to visit the closest of
+these triangles to guarantee the outcome. Using an acceleration structure such as a kd-tree or BVH,
+one can reduce the number of operations from O(N) to O(log N).
+Now we try doing the same for a linelight, computing the intersection of the light-triangle with the
+scene: The brute force approach works much the same as for ray tracing, requiring a test with each
+triangle, yielding O(N) tests. Let’s once again assume perfect knowledge of which triangles of the
+scene can intersect the light-triangle: Since an intersection with the light-triangle does not necessarily
+entirely occlude the light, we actually need to visit every single candidate triangle to ensure that we
+compute the correct visibility. This is still on the order of O(N) time in the worst case. A realistic
+example is to compute visibility of a point occluded by a triangle-strip, where the resulting light-
+triangle intersects the entire strip. Each triangle requires a separate intersection test to ensure the
+visibility is correctly evaluated.
+2.2
+Shading
+As mentioned previously, I only consider diffuse shading for simplicity. Picott [Pic92] provides an
+analytic solution of the diffuse component of the radiance for the infinite-point-lights model of the
+linelight, restated here: The irradiance at point P from a point light is given by
+Idiffuse = Ipointkd
+r2
+⃗r
+r · ⃗n,
+(2)
+where ⃗n is the surface normal at P, Ipoint is the intensity of the point light, kd is the diffuse coefficient
+of the surface, ⃗r is the vector from P to the point light, and r is shorthand for the length of ⃗r. For
+simplicity, assume point P is at the origin. Then to compute the irradiance of the linelight, we replace
+vector ⃗r with the parametrization of the linelight L (eq. 1), and integrate over the length of the light,
+Idiffuse = Ipoint
+Z 1
+0
+⃗n · (t ·⃗l + l0)
+||t ·⃗l + l0||2+1 dt.
+(3)
+The solution of this integral can be found in [Pic92] or appendix A.
+Once the visibility of the light has been computed for the shaded point P, we are left with zero or more
+pieces of the linelight, each of which can be treated as separate unobstructed linelights for the purpose
+of shading, so long as the shading method assumes uniform brightness across the length of the light.
+Any such method for computing the shading of a linelight work at this stage. In particular, [HH17]
+uses linearly transformed cosines to efficiently approximate the specular component of the lighting for
+linelights, a method I would have attempted to implement given more time. It is worth noting that
+they use a cylinder model of the linelight with optional end caps. If the cylinder end caps are enabled
+on each effective linelight, additional ”virtual” emissive surfaces are created on the insides of the light,
+increasing the effective radiance of the light.
+3
+Methodology
+Analytic shadowing is achieved through direct per-pixel evaluation of the visibility of the light. If we
+can compute the intersection between the light-triangle and another object, then we can compute the
+5
+==PAGE:6==
+Figure 3: Caption
+occlusion of the light by that object. I here limit myself to triangles as a geometric primitive, but
+the method is at least theoretically applicable to any convex object for which an intersection with a
+triangle can be computed.
+The visibility of the linelight L, defined by its endpoints l0 and l1 at a given point P with surface
+normal ⃗n is computed as follows:
+1. Clip the linelight to the part visible above the horizon wrt. ⃗n.
+2. Construct the light-triangle TL between points l0, l1, P.
+3. For each occluder in the scene, compute the intersection between the occluder and the light-
+triangle TL. If an intersection exists, project it onto the light L through point P, the overlapped
+part of the linelight is then occluded.
+4. Any part of the light that was not occluded is visible at point P.
+This general method for occluding the light, sometimes called ’light clipping’ is the foundation of
+analytic linelight shadowing, and used universally [NON85; PA91; BP93; TT95; BD16]. The following
+sections describe a method for tracking the visible parts of the light, and an algorithm for computing
+the intersection and subsequent projection of occluding triangle.
+3.1
+Visible intervals
+Recall the parametrization of the linelight,
+L : t ·⃗l + l0,
+⃗l = (l1 −l0),
+t ∈[0, 1].
+Given this parametrization, the part of the light visible at a point P is conveniently represented as a
+set of subintervals on the unit interval [0, 1]. I denote this set of ”visible intervals” VL , which initially
+equals {[0, 1]}, entirely visible.
+After computing the intersection between an occluder and the light-triangle, the intersection is pro-
+jected onto the light. The overlap of the projection on the light can be described by an ”occluding
+interval” of t-values (t0, t1).
+Once the occluding interval is obtained, it is used to ”cut away” the visible parts of the light, summa-
+rized:
+6
+==PAGE:7==
+1
+2
+3
+4
+P
+1
+2
+3
+4
+P
+P
+a)
+b)
+c)
+Figure 4: a) Ideal case, the candidate polygons are tested in a contiguous order, so there is always
+one visible interval. b) Worst case, the candidate polygons are tested in an order that splits the light
+into a maximum of visible intervals before the remaining intervals are obscured. c) Both cases end up
+with a linelight that is entirely obscured, but required different amounts of memory to get there.
+Interval occlusion procedure
+Given an occluding interval: For each visible interval remaining in VL , one of four cases is true:
+1. The occluding and visible interval are disjoint: No change is made.
+2. One edge of the visible interval is occluded: The occluding part is cut by shrinking the interval.
+3. The visible interval is contained in the occluding interval: The visible interval is removed from
+VL .
+4. The occluding interval is contained in the visible interval: The occluding interval is ”cut” from
+the visible interval, resulting in two visible intervals, to the left and right of the occluding interval.
+Due to case 4 where a visible interval is split into two new intervals, in the worst case ⃗n occluders
+results in N + 1 visible intervals. As such, this procedure requires memory on the order O(N), per
+pixel. In practice, the highest number of visible intervals will be much less than ⃗n, unless the scene
+contains ”fence-like” geometry, that splits the light into many visible pieces. But without a guarantee
+on the order in which occluding triangles are visited even a contiguous piece of geometry may still
+result in many visible intervals temporarily, as illustrated by figure 4.
+3.2
+Occlusion interval of a triangle
+In this section a triangle-triangle intersection algorithm for computing the occlusion interval of tri-
+angles is described. The algorithm is derived from the work of [Ake97], modified for the purpose of
+more directly producing the occlusion interval. See also sec. 6 for a discussion on the merits of this
+modification.
+It is not only of interest whether or not the light-triangle and a potential occluding triangle intersect;
+if they do intersect, the intersection (a line segment) is projected onto the light to determine how
+much of the light is occluded by the triangle, as described in the previous section. Rather than finding
+7
+==PAGE:8==
+the exact intersection and then projecting it onto the linelight, the modified algorithm computes and
+returns an occluding interval as a pair of t-values. If the triangles do not intersect, an arbitrary pair
+of t-values that do not overlap the interval [0, 1] is returned, e.g. (∞, ∞).
+Intersection algorithm
+The signed distance D from point x to a plane passing through point x0 and with unit normal ⃗n is
+given by
+D = ⃗n · (x −x0) = ⃗n · x + d,
+d = −⃗n · x0
+(4)
+Compute the normal vector of both the light-triangle (⃗nL) and the occluding triangle (⃗nO) by the
+cross-product of their edges,
+⃗nL = (l1 −l0) × (P −l0),
+⃗nO = (v1 −v0) × (v2 −v0)
+Using equation 4, compute the signed distances from each vertex of the occluding triangle to the plane
+of the light-triangle. If all three distances have the same sign, then all vertices are on the same side of
+the plane, and there can be no intersection. Repeat for each vertex of the light-triangle, to the plane
+of the occluding triangle.
+The intersection of the occluding triangle with the light-triangle plane is computed: Given an edge
+⃗e = v1 −v0 , and the plane as before, the line-plane intersection x is given by
+x = ⃗n · (x0 −v0)
+⃗n · ⃗e
+⃗e + v0.
+(5)
+Using the signed distances from the triangle vertices to the light-triangle plane computed earlier,
+determine which edges cross the plane (opposite sign of the distances), then compute the intersection
+between the crossing edges and the light-triangle plane. The resulting two points define a line-segment
+in the plane of the light-triangle, name it C.
+The remainder of the problem is handled in the 2D plane of the triangle. For the sake of brevity I
+reuse notation, such that P may be understood as the 2D point resulting from projection of the 3D
+point P, and similar for other points.
+As shown on figure 5, denote the edges connecting the sampled point P to l0 and l1 the ”left” and
+”right” edge respectively. Also note the three regions of the 2D plane, separated by the parallel lines
+passing through the light and P, I: the region ”above” the light, II: the region ”between” the light and
+point P and III: the region ”below” point P.
+Intersection cases
+There are six possible different cases depending on the location of the intersection C relative to the
+light and point P, see figure 6 for reference. Other configurations are rejected by the previous test. A
+seventh case is possible, but isn’t handled by the method as described here, see sec. 3.2.1 below.
+1. C is entirely in region II: The intersection is projected onto the light, and the corresponding
+t-values (t0, t1) are returned.
+2. C is entirely in region I: There is no intersection with the light-triangle.
+3. C is entirely in region III: There is no intersection with the light-triangle.
+4. One endpoint of C is in region II, another in region I or III, and C does not intersect the left or
+right edge: There is no intersection with the light-triangle.
+5. One endpoint of C is in region II, another in region I or III, and C intersects both the left and
+right edges: The light is fully occluded, t-values (−∞, ∞) are returned.
+8
+==PAGE:9==
+Light
+P
+Left edge
+Right edge
+C
+0l
+1l
+I
+II
+III
+Figure 5: The light triangle in the plane. Parallel lines through point P and the linelight demarcate
+the regions I, II and III.
+6. One endpoint of C is in region II, another in region I or III, and C intersects one of the light-
+triangle edges: If the left edge is intersected (−∞, t) is returned, if the right edge, (t, ∞) is
+returned, where t is found by projecting the point in region II onto the light.
+Determining which case is true requires the ability to determine which region the points fall into, as
+well as which of the edges are crossed by the intersection.
+Let D(x, y) denote the signed distance (scaled by some constant), from a point (x, y) to the line defined
+by points (x1, y1), (x2, y2) [Pin88],
+D(x, y) = (x −x1)(y2 −y1) −(y −y1)(x2 −x1)
+(6)
+Assume that D(P) > 0 (if this is not the case, simply flip the sign of each distance). Then, the three
+regions are given by
+Region I :D(x, y) < 0
+Region II :0 ≤D(x, y) ≤D(P)
+Region III :D(P) < D(x, y)
+from which it can be determined where a point (x, y) is located. Whether or not the intersection crosses
+the left or right edges of the light-triangle is determined using the line segment intersection algorithm
+of Franklin Antonio [Ant92]: Given two line segments defined by the familiar line parametrization
+L1 := P1 + t · (P2 −P1),
+L2 := P3 + u · (P4 −P3),
+the algorithm determines whether they intersect by computing the parameters t and u at the intersec-
+tion of the lines, and testing if t, u ∈[0, 1]:
+A = P2 −P1,
+B = P3 −P4,
+C = P1 −P3
+t = ByCx −BxCy
+AyBx −AxBy
+u = AxCy −AyCx
+AyBx −AxBy
+(7)
+9
+==PAGE:10==
+P
+C
+C
+P
+P
+P
+P
+P
+C
+X
+X
+X
+1)
+2)
+3)
+4)
+5)
+6)
+Figure 6: Different cases for intersection between occluding triangle and light-triangle.
+10
+==PAGE:11==
+The same formula is also used to do the final projection of the intersection C onto the linelight, by
+computing just the value t.
+3.2.1
+Limitations
+The presented algorithm for the computation of the occluding interval of a triangle assumes that the
+linelight does not itself intersect any triangles in the scene. If this is not true, then one endpoint of C
+will fall in region I, the other in either regions II or III (figure 5). This causes errors in the shadowing
+computation, and thereby graphical artifacts. This can be handled with relative easy generally, but
+if the triangle to be shaded is the same triangle that is intersected by the linelight, then one of the
+endpoints of C will exactly coincide with the shaded point P, and it is not obvious which part of the
+linelight should be occluded. A solution is to use the normal of the triangle to resolve which part
+should be occluded.
+3.3
+Shading
+The result of computing the linelight visibility is a set VL of disjoint subintervals on the unit interval
+[0, 1]. Shading the pixel at this stage is straightforward: For each interval, given as a pair of t-values
+(t0,i, t1,i) ∈VL , we define an ’effective’ linelight, defined by its endpoints,
+Li :
+l0,i = t0,i · l + l0,
+l1,i = t1,i · l + l0,
+where
+l = (l1 −l0)
+The final irradiance at the point P is then given by the sum of the irradiance gathered by each effective
+light, I = P
+i f(Li). I compute this using the formula by Picott [Pic92], also summarized in appendix
+A.
+3.4
+Acceleration
+The described method for computing shadows suffer a familiar problem in common with ray tracing:
+The majority of the computation is spent calculating the intersections between the light-triangle and
+the scene. While there may be many thousands of triangles in a scene, usually only a very small
+subset of these are hit by the light-triangle. I test two simple acceleration structures for improving
+performance, a uniform 3D grid, and a similar double-layered 3D grid. More sophisticated acceleration
+structures such as bounding volume hierarchies (BVH) and binary space partitioning (BSP) trees are
+commonly used in ray tracing; a BSP tree was already used by Bao et al. [BP93] for linelight shadowing.
+The acceleration structures used for this project were chosen for their ease of implementation, especially
+in regards to a GPU-based implementation.
+3.4.1
+Uniform grid
+The entire scene is partitioned into a uniform grid of axis-aligned bounding boxes (AABB). Each voxel
+contains zero or more triangles. Intersection tests are performed on the bounding boxes first, and if an
+intersection is found, every triangle contained within the box. For simplicity, triangles on the borders
+of boxes are said to be contained in both. The physical extent or size of the grid Sgrid, is made just
+large enough to contain the scene. The resolution of the grid is the number of boxes along each axis,
+(Gx, Gy, Gz). For simplicity, I let the grid be cubic, that is G = Gx = Gy = Gz, and define G as the
+grid resolution. Then the total number of bounding boxes is G3.
+Suppose testing for intersection with a box has zero cost: Then ideally the grid should be so dense that
+each box contains only one triangle, so that only those triangles that can intersect the light-triangle are
+ever tested. Since checking intersection with a box does itself have a computational cost, at a certain
+density, the cost of box intersections will outweigh the cost of triangle intersections. An experiment
+was conducted to see measure this tradeoff, see figure 13. The more triangles in the scene, the more
+benefit there is to a denser grid, so the optimal density is ultimately dependent on the scene, also
+shown by figure 13 by the Sponza scene benefitting from higher density than the dragon scenes.
+11
+==PAGE:12==
+Top level grid
+Bottom level grid
+Figure 7: Top/bottom grid. Each voxel of the top-level grid subdividing the scene is itself subdivided
+into smaller voxels, the bottom-level grid.
+3.4.2
+Top/bottom grid
+The scene is first partitioned into a uniform grid of AABB’s, with a grid resolution GT . Let this be the
+”top-level” grid. Each bounding box of the top-level grid is then further subdivided into subgrids, with
+grid resolution GB, see figure 7. I call this the bottom-level grid. All these subgrids together cover
+the entire scene in a dense grid of resolution G = GT · GB, colloquially referred to as the bottom-level
+grid as well, but which I here call the dense grid for clarification.
+Intersection tests are performed on the top-level grid first. If the light-triangle intersects a box in the
+top level, then intersection tests are performed against every box in the contained bottom-level grid.
+As with the uniform grid, if there is an intersection with one of these boxes, then tests are run on each
+triangle contained within. Using two levels in this manner allows a denser bottom-level grid, effectively
+increasing the grid resolution while keeping the number of boxes to check low. It is convenient to use
+the same number of subdivisions for the top and bottom grids GT B = GT = GB. Then the total
+number of boxes in the dense grid is G3 = G6
+T B.
+3.4.3
+Triangle-AABB intersection
+The light-triangle is voxelized into the grid to quicker find candidate triangles for intersection. To do
+so I use the triangle-AABB intersection algorithm proposed by Schwartz et al. [SS10], which takes
+advantage of each box being identical by reusing a lot of the intermediary work that depends only on
+the triangle and the size of the box. A brief summary of the algorithm follows:
+First it is checked whether or not the triangle plane intersects the bounding box. This is done by
+identifying the two diagonally opposed points of the box most closely aligned with the normal of the
+plane, and checking whether these points are on opposite sides of the plane using equation 4. If the
+plane cuts through the box, then for each coordinate plane, it is checked whether the 2D projection of
+the box and the triangle into that plane overlap. This check is performed using edge functions[Pin88]
+to check whether the projected vertices of the box are contained within the projected triangle.
+3.5
+Stochastic sampling
+As a point of comparison and used to verify the correctness of the analytical method, a stochastic
+method for shading and shadowing the scene is desired. This shader will use the same acceleration
+structures as the analytic method to enable as close of a comparison as possible between them. Since
+the linelight model I use is that of an infinite series of point lights, the sampling method is superbly
+simple: A point along the linelight is picked uniformly at random, and the point is treated as a point
+light of intensity Ipoint. Then the irradiance at the sampled point is given by a simple summation over
+12
+==PAGE:13==
+the individual contributions, taking visibility into account; the Monte Carlo estimator,
+Idiffuse = Ipoint
+N
+N
+X
+i
+⃗n · ⃗ri
+r2+1
+i
+· V (⃗ri),
+where ⃗ri is the vector from the shaded point P to a randomly sampled point on the linelight, and
+V (⃗ri) is the visibility of that point on the light, either 1 or 0 for visible or occluded points. The
+visibility is naturally determined using ray tracing. I decided not to attempt implementing hardware
+ray tracing, as this would be both very time consuming for a smaller part of the project, and would
+provide the stochastic shader an unfair advantage over the analytic shader, which is restricted to a
+software implementation. For ray-triangle intersection, the M¨oller-Trumbore algorithm is used [MT97].
+For use in the acceleration structures, a ray-AABB intersection algorithm is required. Here I use the
+excellent implementation of the ’slab’ method by Tavian Barnes [Bar11].
+In order to speed up convergence, stratified sampling is used in place of random sampling: The linelight
+is partitioned into N strata, and a point within each is picked uniformly at random for the light sample.
+Ramamoorthi et al. [Ram+12] find that uniform jitter sampling works very well for linelights: Here a
+single random value is used to offset into all strata. I found that this worked well, but it caused what
+is best described as diffraction patterns in the grating test scene (sec. 5.3) due to the evenly spaced
+samples matching the spacing of the grating, yielding ”all visible” or ”all occluded” samples depending
+on the offset, with no intermediate values.
+4
+Implementation
+The renderer is implemented in the Rust programming language for reasons of preference and perfor-
+mance, using the Vulkan graphics API. Vulkan allows very direct access to the GPU, making it a good
+choice for experimental graphics programming, although its verbosity and low-level control likewise
+makes it difficult to work with. Shaders were written in GLSL for reasons of familiarity, but I would
+strongly consider HLSL if I were to do another similar project: The memory layout specifications of
+GLSL are not easily understood and it caused some problems that were very hard to track dowm.
+The lack of a 16-bit primitive also proved frustraing when trying to pass 16 bit vertex indices to the
+fragment shader, for which the solution was of course to switch to 32-bit indices, which turned out to
+be necessary regardless when I switched to the larger scenes.
+In the Rust language, third-party libraries/modules are called ’crates’. The renderer is built using many
+crates, of which the most important dependencies are: The ’ash’ crate for Rust language bindings for
+Vulkan, the ’winit’ crate for cross-platform window, event and input handling, the ’glam’ crate for
+vector and matrix types and operations, the ’shaderc’ crate for Rust bindings to the C library of the
+same name, for runtime compilation of shaders and the ’gltf’ crate for loading model files.
+The entirety of the shadowing and shading method described in the previous sections is implemented
+as a single fragment shader on the GPU, as a proof-of-concept.
+4.1
+Scenes
+3D models are loaded from glTF binary (.GLB) files. Only the vertex positions and vertex normals are
+used. The location of the linelight is included in the file as well, identified by any mesh with the name
+”Linelight”, where the first two vertex positions are used for the linelight endpoints. Once loaded, the
+vertex positions, vertex indices and the linelight endpoints are all stored in a ‘Scene‘ struct that the
+application references.
+The scenes were built in Blender 4.0. A loose edge is used to place the linelight, and the scene is then
+exported as a GLB file: It is necessary to enable export of loose edge in the export settings. Several
+versions of the scenes used for performance measurements were exported, in varying ”levels of detail”:
+13
+==PAGE:14==
+IntervalArray intersect_scene(vec3 pos, vec3 n, vec3 l0, vec3 l1) {
+IntervalArray int_arr;
+int_arr.size = 0;
+add_interval(int_arr, vec2(0.0,1.0));
+foreach tri in candidate_triangles {
+vec3 v0 = tri[0];
+vec3 v1 = tri[1];
+vec3 v2 = tri[2];
+vec2 interval;
+if (tri_tri_intersect(l0,l1,pos, v0,v1,v2, interval)) {
+occlude_intervals(int_arr, interval);
+}
+}
+return int_arr;
+}
+Listing 1: GLSL pseudocode of occlusion algorithm inner loop.
+The ’decimate’ operation with the default ’edge collapse’ strategy was applied to the mesh to reduce
+the amount of geometry without significantly changing the shape of the model. The level of decimation
+is chosen as a fraction of the original triangle count, of which 1
+1, 1
+2, 1
+4, 1
+8, 1
+16, 1
+32 and
+1
+64 were chosen.
+Choosing which model to load is done very primitively: The location of the model file relative to the
+executable is written into the code directly, and compiled into the executable. For a slight conve-
+nience, each scene was given a separate function for loading it. Models with varying levels of detail
+use a parameter to select the exact version to load. Changing the model to load therefore requires
+commenting/uncommenting the relevant line at the beginning of the program or changing the level of
+detail, followed by recompiling the program:
+let scene = Scene::dragon_small_light(4);
+// let scene = Scene::sponza(32);
+// let scene = Scene::edge_case_check();
+This approach is obviously not advisable for practical purposes, but recompiling after changing the
+scene takes a few seconds at most on my machine, so it was not a priority to implement a proper way
+to switch scenes.
+4.2
+Visibility computation
+Visibility of the linelight is computed in the fragment shader by the method descibed in sec. 3. The
+position of the linelight is given through a uniform buffer, the position and surface normal of the
+point P as outputs from the vertex shader/mesh. The visibility is tracked using an ’IntervalArray’
+struct, the implementation of which is described in sec. 4.4, initially containing just the unit interval
+[0, 1]. Without assumption of how the candidate triangles are obtained (as it depends on the choice of
+acceleration structure), the visibility is calculated by testing for intersection between the light-triangle
+and each candidate triangle, and if an intersection occurs, using the resulting occluding interval to
+obscure part of the light, see listing 1. For a full example of how triangles are acquired from the
+acceleration structures, the top/bottom grid traversal code for the analytic shader can be found in
+appendix B.
+The triangle-triangle intersection algorithm developed in sec. 3.2 is implemented in two functions for
+clarity, one calling the other:
+tri tri intersect:
+Returns true if an intersection occurred, false otherwise. If an intersection does
+occur, writes the occluding interval to the provided interval parameter.
+14
+==PAGE:15==
+Figure 8: Errors due to naive 2D projection. Left: Distant, Right: Closeup
+Performs the initial check of whether or not the planes of each triangle intersect the opposing triangle.
+If so, calls compute interval to compute the occluding interval (sec. 3.2). If the resulting interval is
+non-occluding, returns false.
+compute interval:
+Returns the occluding interval of the triangle wrt. the linelight if an intersection
+occurred, a non-occluding interval otherwise.
+The functions operate almost identically to the description in sec. 3.2. Using the signed distances to
+the light-triangle plane, computed in the tri tri intersect function (listing 2), the two edges of the
+triangle that cross the light-triangle plane are selected and intersection between them and the plane
+is computed, yielding (the intersection) line segment C. The rest of the problem is solved in a 2D
+projection: Rather than working in the plane of the light-triangle as originally described, I simply
+drop the y-coordinate to project the system into the xz-plane. This is much cheaper (free) than doing
+the correct projection, and is almost as good, see sec. 4.3. In the 2D coordinate frame, the signed
+distance from the sampled point P and the endpoints of C to the linelight is computed using equation
+6. Then we decide between the six cases of sec. 3.2 for the final output: Using just the distances, it is
+determined if one of cases 1, 2 or 3 is true. If none of these are true, I compute whether C crosses the
+left or right edge of the light-triangle using eq. 7, and depending on the answer decide between cases
+4, 5 and 6 (listing 3.
+4.3
+2D projection artifacts
+When calculating the occluding interval, I project the intersections and light-triangle into the xz-
+plane by dropping the y-coordinate. Doing the proper projection into the plane of the light-triangle
+would require a full coordinate transformation of each point the problem into the new point of view.
+Dropping one coordinate costs nothing, and is almost always good enough: The method only fails if
+the light-triangle is parallel to the y-axis. Per visual inspection, these errors are hardly noticeable. It
+wasn’t possible to find an example at all in the dragon scene when using the small linelight. Using the
+scene with the larger light, an example was found along the spine of the dragon, see figure 8.
+4.4
+Interval Array
+As described previously in sec. 3.1, we require a data structure to store the intervals of the linelight that
+are visible. Recall that the number of visible intervals may, in the worst case, equal N +1 where ⃗n is the
+number of triangles in the scene, not counting the triangle being shaded. In a CPU-based application,
+an obvious solution for tracking the visible intervals would be a dynamic array, or any similar structure
+15
+==PAGE:16==
+bool tri_tri_intersect(
+vec3 l0, vec3 l1, vec3 pos,
+vec3 v0, vec3 v1, vec3 v2,
+out vec2 interval
+) {
+// Plane equation for occluding triangle: dot(n, x) + d = 0
+vec3 e0 = v1 - v0;
+vec3 e1 = v2 - v0;
+vec3 n = cross(e0, e1);
+float d = -dot(n, v0);
+// Put light triangle into plane equation
+float d_l0 = dot(n, l0) + d;
+float d_l1 = dot(n, l1) + d;
+float d_pos = dot(n, pos) + d;
+// Same sign on all means they're on same side of plane
+if (d_l0*d_l1 > 0.0 && d_l0*d_pos > 0.0) return false;
+// Plane equation for light triangle: dot(n, x) + d = 0
+vec3 L = l1 - l0;
+e1 = pos - l0;
+n = cross(L, e1);
+d = -dot(n, l0);
+// Put triangle 1 into plane equation 2
+float dv0 = dot(n, v0) + d;
+float dv1 = dot(n, v1) + d;
+float dv2 = dot(n, v2) + d;
+float ddv1 = dv0*dv1;
+float ddv2 = dv0*dv2;
+if (ddv1 > 0.0 && ddv2 > 0.0) return false;
+interval = compute_interval(l0, l1, pos, v0, v1, v2, n, ddv1, ddv2);
+if (interval[0] > 1.0 || interval[1] < 0.0) {
+return false;
+}
+return true;
+}
+Listing 2: Triangle-triangle intersection algorithm.
+16
+==PAGE:17==
+vec2 compute_interval(
+vec3 l0, vec3 l1, vec3 pos,
+vec3 v0, vec3 v1, vec3 v2,
+vec3 n, // Normal vector for plane defined by l0,l1,pos
+float dd1, // Product of signed distances of v0 and v1 to triangle l0,l1,pos
+float dd2 // Product of signed distances of v0 and v2 to triangle l0,l1,pos
+) {
+const float INF = 1e10;
+// Compute intersection points between triangle and light-triangle plane
+vec3 isect0, isect1;
+if (dd1 < 0.0) { // Line v1-v0 crosses plane
+line_plane_intersect(n, pos, v1 - v0, v0, isect0);
+if (dd2 < 0.0) { // Line v2-v0 crosses plane
+line_plane_intersect(n, pos, v2 - v0, v0, isect1);
+} else {
+line_plane_intersect(n, pos, v2 - v1, v1, isect1);
+}
+} else { // Lines v1-v0 does not cross plane, the others do
+line_plane_intersect(n, pos, v2 - v0, v0, isect0);
+line_plane_intersect(n, pos, v2 - v1, v1, isect1);
+}
+// Checking cases 2 and 3
+float dp = dist_to_line_2d_unnormalized(l0.xz, l1.xz, pos.xz);
+float sign_of_dp = sign(dp);
+dp = abs(dp);
+float di0 = sign_of_dp * dist_to_line_2d_unnormalized(l0.xz, l1.xz, isect0.xz);
+float di1 = sign_of_dp * dist_to_line_2d_unnormalized(l0.xz, l1.xz, isect1.xz);
+if ((di0 < 0.0 && di1 < 0.0) || (di0 > dp && di1 > dp)) return vec2(INF, INF);
+// Project intersections onto line t*(l1-l0) + l0 by computation of t-values
+float t0, t1;
+t0 = line_line_intersect_2d(l0.xz,l1.xz,isect0.xz,pos.xz);
+t1 = line_line_intersect_2d(l0.xz,l1.xz,isect1.xz,pos.xz);
+// Case 1
+if (di0 < dp && di1 < dp) {
+sort(t0, t1);
+return vec2(t0, t1);
+}
+// Cases 4, 5, 6
+if (di1 >= dp) t1 = t0;
+bool intersects_left = linesegments_intersect(l0.xz,pos.xz,isect0.xz,isect1.xz);
+bool intersects_right = linesegments_intersect(l1.xz,pos.xz,isect0.xz,isect1.xz);
+if (intersects_left) {
+if (intersects_right) { // Both
+return vec2(-INF, INF);
+} else { // Only left
+return vec2(-INF, t1);
+}
+} else if (intersects_right) { // Only right
+return vec2(t1, INF);
+} else {
+return vec2(INF, INF);
+}
+}
+Listing 3: GLSL algorithm for computing the occlusion interval of a (possibly) intersecting triangle.
+17
+==PAGE:18==
+Figure 9: Heatmap of the highest reached number of visible intervals in the IntervalArray struct, per
+pixel. Each scene is at a 250000 triangles. Left: Dragon scene with small linelight. Right: Dragon
+scene with large linelight.
+const int ARR_MAX = 32;
+struct IntervalArray {
+int size;
+vec2[ARR_MAX] data;
+};
+that can grow when necessary. When running as a shader on the GPU, this is impossible as the shader
+program cannot dynamically allocate memory: Any data structure used must be of a fixed size1. The
+solution is to preallocate enough memory to meet expected demand. If the scene is unknown, then we
+can only guarantee a correct solution by allocating O(N) memory per fragment, which is obviously
+infeasible for all but the smallest scenes. Instead I observe that the number of visible intervals rarely
+exceed around 15 intervals in the test scenes, and set the maximum number of intervals tracked to 32
+for a safety margin. Figure 9 shows heatmaps of the max interval count for the dragon scenes with
+small and large linelights. If we ever attempt to add more, the next intervals are simply discarded.
+This inevitably causes inaccuracies in the computed visibility for complex scenes (or bad ordering of
+triangles).
+Here I define an ”IntervalArray” struct. It holds an array of intervals with a fixed maximum capacity
+to comply with the static size requirements, and a size variable to track the current number of intervals
+in the array.
+A few methods are defined for manipulating the struct:
+• add interval: Adds the specified interval to the end of the array, incrementing the size.
+• remove interval: Removes the i’th interval by swapping it with the last interval in the array,
+then decrementing the size.
+• occlude intervals: Using the provided occluding interval, iterates over each visible interval in
+the array and modifies the array, as detailed in sec. 3.1.
+The struct is initalized with a size of 1, and the first element of the array the unit interval [0, 1].
+The simple loop over the intervals in occlude intevals means that occlusion takes time on the order
+of the amount of intervals in the array.
+If the light is split into m visible intervals, then O(m2)
+operations are spent occluding the intervals. Billen et al. [BD16] use a binary tree to reduce that to
+1Shader storage buffers are accessible to shader programs, and can be dynamically sized without recompiling the
+shader, but as the memory is shared between threads and the size of the buffer can’t change while the shader is running,
+the point still stands.
+18
+==PAGE:19==
+void remove_interval(inout IntervalArray int_arr, int i) {
+vec2 last_interval = int_arr.data[int_arr.size - 1];
+int_arr.data[i] = last_interval;
+int_arr.size--;
+}
+void add_interval(inout IntervalArray int_arr, vec2 new_interval) {
+if (int_arr.size < ARR_MAX) { // Avoid overflow
+int_arr.data[int_arr.size] = new_interval;
+int_arr.size++;
+}
+}
+void occlude_intervals(inout IntervalArray int_arr, vec2 occ_int) {
+for (int i=0; i < int_arr.size; i++) {
+vec2 interval = int_arr.data[i];
+if (occ_int.x <= interval.x && occ_int.y >= interval.y) {
+// Interval is fully occluded, remove it but do not increment `i`
+// as the swapped-in element needs to be checked too
+remove_interval(int_arr, i);
+i--;
+} else if (occ_int.x > interval.x && occ_int.y < interval.y) {
+// Middle is occluded, shrink existing to the left and add new interval to the right
+add_interval(int_arr, vec2(occ_int.y, interval.y));
+int_arr.data[i].y = occ_int.x;
+} else if (occ_int.x > interval.x && occ_int.x < interval.y) {
+// Right side is occluded, shrink to fit
+int_arr.data[i].y = occ_int.x;
+} else if (occ_int.y > interval.x && occ_int.y < interval.y) {
+// Left side is occluded, shrink to fit
+int_arr.data[i].x = occ_int.y;
+}
+}
+}
+O(m log m) operations. Sec. 7 contains another idea for a possible optimization.
+4.5
+Acceleration structures
+After loading the scene, before rendering, an acceleration structure is built to speed up rendering.
+Both of the acceleration structures I implement work in fundamentally the same way, so a lot of
+the infrastructure is identical: The fragment shader is given the acceleration structure as a struct
+through in a uniform buffer, which contains information on the spatial partitioning of the mesh. The
+geometry itself is accessed directly from the vertex buffer, but the vertices are indexed from a separate
+”acceleration index” buffer. Like the regular index buffer, the acceleration index buffer contains indices
+into the vertex buffer for constructing triangles. The difference is in the ordering, having been built
+specifically for reference by the acceleration structure, and permitting duplicated triangles.
+BufferView
+The acceleration index buffer is accessed through a ”BufferView” struct that points to a slice of the
+buffer, via an offset from the beginning and the number of items:
+struct BufferView {
+int offset;
+int size;
+};
+19
+==PAGE:20==
+Acceleration Index Buffer
+BufferView 1
+...   BBOX_COUNT
+BufferView 2
+Grid
+i
+j
+k
+Figure 10: Uniform grid acceleration structure.
+4.5.1
+Uniform grid
+Note: The uniform grid is reused as the bottom-level grid of the top/bottom grid structure, sec. 4.5.2.
+Therefore, code listings in this section refer to the structure as BLAS, for ”bottom level acceleration
+structure”.
+The acceleration structure is implemented simply as an array of BBOX COUNT= G3 BufferViews, each
+pointing to a slice of the acceleration index buffer representing the triangles contained in one of the
+bounding boxes of the grid.
+Construction
+1. Initialize a dynamic array to hold the vertex indices; the acceleration index buffer.
+2. For each bounding box, create a new BufferView. The offset is set to the current size of the
+acceleration index buffer.
+3. For each triangle in the mesh, test for intersection with the bounding box. I reuse the triangle-
+aabb intersection algorithm detailed in sec. 3.4.3. If the triangle intersects, the vertex buffer
+index associated with each vertex is appended to the end of the acceleration index buffer.
+4. The size of the BufferView is set to the amount of indices added.
+The construction process can be optimized: The triangle-aabb intersection algorithm works fast when
+making several checks against the same triangle. Additionally, each triangle is read from memory once
+per bounding box. Swapping the iteration order solves both problems but introduces a new one: The
+indices would need to be written to a separate list for each bounding box, which then merge at the
+end. Since preprocessing only has to run once at the beginning, the simpler method described above
+was used.
+20
+==PAGE:21==
+fn build_blas(scene: &Scene, index_buffer: &mut Vec<u32>, origin: Vec3, size: Vec3) -> BLAS {
+let bbox_size = size/(GRID_SIZE as f32);
+let mut buffer_views = Vec::with_capacity(BBOX_COUNT);
+for i in 0..GRID_SIZE {
+for j in 0..GRID_SIZE {
+for k in 0..GRID_SIZE {
+let ijk = vec3(i as f32, j as f32, k as f32);
+let bbox_origin = origin + ijk * bbox_size;
+let length_before = index_buffer.len();
+for tri_indices in scene.indices.chunks_exact(3) {
+let v0 = scene.vertices[tri_indices[0] as usize].position;
+let v1 = scene.vertices[tri_indices[1] as usize].position;
+let v2 = scene.vertices[tri_indices[2] as usize].position;
+if tri_aabb_intersect(v0, v1, v2, bbox_origin, bbox_size) {
+index_buffer.extend(tri_indices);
+}
+}
+let length_after = index_buffer.len();
+buffer_views.push(
+BufferView { offset: length_before as i32, size: (length_after-length_before) as i32 }
+)
+}
+}
+}
+BLAS { buffer_views: buffer_views.try_into().unwrap() }
+}
+Listing 4: Rust code for constructing BLAS struct for use in top/bottom grid, as well as uniform grid.
+4.5.2
+Top/bottom grid
+The acceleration structure is implemented as an array of G3
+T B = 43 = 64 bottom-level acceleration
+structures, each of which contains an array of 64 BufferViews that finally point into the acceleration
+index buffer, see figure 11. The choice of resolution was motivated by the idea of using a 64-bit bitmask
+to indicate the presence/absence of geometry in the child boxes, a technique of adaptive voxel trees
+[ST15]. I did not end up using this technique after all, but kept the resolution for a secondary reason:
+It provided the best performance on the dragon test scene.
+Construction
+Construction of the top-bottom grid is very similar to that of the uniform grid, and uses the same
+function to build the BLAS’s as is given in listing 4. The same index buffer is simply passed to the
+function multiple times, and the finished BLAS’s are gathered in an array, see listing 5.
+4.6
+Stochastic Shader
+Of particular interest for stochastic sampling in a fragment shader is the source of the random samples.
+Random numbers are generated using a PCG PRNG recommended by [Ree21], listing 6.
+Due to
+deterministic results, the PRNG needs a random seed to get started, distinct from other fragments.
+The simple choice is fragment coordinates then, as these are unique at each point on the screen. A
+2D hash function, recommended by [JUO20] is used to get a pseudorandom seed from the fragment
+coordinates, listing 7.
+5
+Results
+The performance of the rendering method is measured with respect to two parameters of interest:
+Triangle count, larger scenes should perform worse, and scene complexity, a notion of how the geometry
+in the scene is arranged with respect to the light, especially how ”fence-like” it is. Additionally, the
+21
+==PAGE:22==
+TLAS
+BLAS 1
+Acceleration Index Buffer
+BufferView 1
+... 64
+BLAS 2
+BufferView 1
+... 64
+... 64
+Top level grid
+Bottom level grid
+TLAS
+BLAS
+Figure 11: Top/bottom grid acceleration structure.
+pub fn build_acceleration_structure(scene: &Scene) -> (TLAS, Vec<u32>) {
+let scene_aabb = { // The bounding box that fits the scene
+(...)
+};
+let size = scene_aabb.1 - scene_aabb.0;
+let origin = scene_aabb.0;
+let mut subgrids: Vec<BLAS> = Vec::with_capacity(BBOX_COUNT);
+let mut index_buffer = Vec::new();
+let blas_size = size/(GRID_SIZE as f32);
+for i in 0..GRID_SIZE {
+for j in 0..GRID_SIZE {
+for k in 0..GRID_SIZE {
+let ijk = vec3(i as f32, j as f32, k as f32);
+let blas_origin = origin + ijk * blas_size;
+subgrids.push(build_blas(&scene, &mut index_buffer, blas_origin, blas_size));
+}
+}
+}
+(TLAS { size, origin, subgrids: subgrids.try_into().unwrap() }, index_buffer)
+}
+Listing 5: Rust code for constructing top/bottom grid structure on CPU.
+22
+==PAGE:23==
+// PCG PRNG as per https://www.reedbeta.com/blog/hash-functions-for-gpu-rendering/
+uint rng_state;
+float rand_pcg() {
+uint state = rng_state;
+rng_state = rng_state * 747796405u + 2891336453u;
+uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+uint n = (word >> 22u) ^ word;
+return float(n) * (1.0/float(0xffffffffU));
+}
+Listing 6: PCG pseudorandom number generator.
+// 2D hash with good performance, as per https://www.shadertoy.com/view/4tXyWN,
+recommended/tested in [Jarzynski 2020]
+uint hash(uvec2 x) {
+uvec2 q = 1103515245U * ( (x>>1U) ^ (x.yx
+) );
+uint
+n = 1103515245U * ( (q.x
+) ^ (q.y>>3U) );
+return n;
+}
+Listing 7: 2D hash function, takes fragment coordinates as input to produce a pseudorandom output.
+analytic shader is compared to the stochastic shader, both using the top/bottom grid for acceleration.
+In order to determine an appropriate grid resolution G for the uniform grid, an initial experiment has
+been run on each scene at
+1
+32’th of the triangle count (chosen such that measurements on Sponza could
+be performed with low grid resolutions).
+All measurements are made on a desktop PC equipped with an Nvidia RTX 3080Ti graphics card, and
+an Intel i7 9700K CPU. Measurements were taken using the Tracy profiling tool [].
+Performance is measured on three different scenes, see figure 12.
+• Dragon with small light: The dragon model courtesy of XYZ RGB Inc., using a small linelight
+in a corner of the scene.
+• Dragon with large light: The same scene, but using a much longer linelight, place above and
+parallel to the dragon.
+The placement of the light is deliberately inconvenient, to test the
+difference in performance this makes compared to the same scene with the small light.
+• Sponza: The Sponza base scene, from the Intel GPU samples library.
+The model has been
+stripped of extra objects and materials, leaving just the base mesh. A long linelight runs down
+the center of the open space.
+5.1
+Uniform grid resolution test
+Figure 13 shows the expected result, that a higher grid resolution leads to better performance, at least
+initially. While hard to tell, performance begins to degrade at higher resolutions, especially for the
+dragon scenes, whose best performance is around G = 10. Performance on Sponza keeps improving a
+little longer, with best performance at G = 15. This is due to the much larger amount of geometry in
+the Sponza scene shifting the tradeoff towards more bounding boxes.
+Using the above results, a grid resolution of G = 10 was chosen for all other measurements.
+5.2
+Varying triangle count
+To set a baseline, the small dragon scene has been used to measure all three variants of the analytic
+shader; using no acceleration, the uniform grid and the top/bottom grid, see figure 14. Note that this
+figure uses log-log axes to fit all the data. The brute force approach is an order of magnitude worse
+than the other two, but all three scale linearly with the triangle count, as expected. It is in fact so
+23
+==PAGE:24==
+Figure 12: Performance test scenes, linelights not visualized. Top left: Dragon scene with small light.
+Top right: Dragon scene with large light. Bottom: Sponza scene with central light.
+Figure 13: Performance on each scene for different grid resolutions. The mean frame time has been
+normalized across each scene so that all three curves can be compared.
+24
+==PAGE:25==
+Figure 14: Performance of all three variants of the analytic shader on the dragon scene with a small
+light. Note the log-log axes. The brute force approach crashes on the highest triangle count, and is
+therefore missing.
+slow that it could not render the model at full scale (highest triangle count) without the application
+crashing due to a GPU timeout. As it would simply distort the scale of the figure, it has been left out
+of the remaining experiments.
+Figures 15, 16 and 17 show a linear plot of the frametimes for each scene. As was expected, the two
+dragon scenes have different performance curves. Less expected is the huge degree to which the larger
+light degrades performance: Across all triangle counts, franetunes are about a factor 3 higher, simply
+by changing the size and position of the light in the scene.
+Expectedly, Sponza performs by far the worst, only barely reaching real-time framerates at the very
+lowest triangle count, at which point the scene looks rather ugly. Of interest here, is the difference
+in performance between the uniform and the top/bottom grid variants. While the grid consistently
+performs worse, the difference is much greater on Sponza than the dragon scenes.
+5.3
+Scene complexity
+To further explore the effect of scene complexity on performance, an experiment is made to measure
+the impact of ”fence-like” geometry. The experimental setup is akin to the illustration of figure 18; a
+grating is placed between the linelight and a light catching plane. By varying the length of the light,
+we can choose how many disjoint segments of the linelight are visible to points on the light catcher.
+Changing the length of the light is permitted in all variants of the rendering method, as only the mesh
+must remain static. The camera is pointed at the light catching plane during rendering.
+The results of the experiment are shown on figure 19. While performance degradation was expected,
+the effect on the performance is a lot larger than one might perhaps expect, going from sub-10ms
+to around 200ms: Over a millisecond slower per segment. Do keep in mind that for the test scenes,
+the total number of visible intervals rarely reaches higher than 15 (see figure 9) and the final count
+is usually much lower still, whereas the test goes to 64 intervals.
+The reason for such significant
+performance degradation is two-fold: First, the IntervalArray struct is accessed and manipulated more
+often for each additional segment added, the interval occlusion procedure as implemented simply
+25
+==PAGE:26==
+Figure 15: Performance of uniform grid and top/bottom grid variants of the analytic shader on the
+dragon scene with a small light.
+Figure 16: Performance of uniform grid and top/bottom grid variants of the analytic shader on the
+dragon scene with a large light.
+26
+==PAGE:27==
+Figure 17: Performance of uniform grid and top/bottom grid variants of the analytic shader on the
+Sponza scene.
+Figure 18: Grating test setup.
+27
+==PAGE:28==
+Figure 19: Performance of the renderer as a function of the number of visible segments of the linelight.
+Triangle count
+3903
+7807
+15617
+31235
+62469
+124939
+249881
+Max sample count
+3
+3
+3
+5
+5
+3
+2
+Analytic mean frame time
+2.35
+3.24
+5.15
+9.02
+17.43
+33.61
+72.44
+Stochastic mean frame time
+2.35
+3.04
+4.1
+8.88
+17.23
+27.83
+55.88
+Table 1: Maximum possible number of samples, keeping the frame time less than the analytic shader.
+searches through the array in a linearly. Second, and likely the major contributor between the two, is
+that the shading computation is not inexpensive. For each additional segment, a new effective linelight
+is added, which is shaded separately. A way to mitigate this might be to compute the full shading,
+and simply approximate the loss in brightness due to occluded segments by scaling the final irradiance
+proportionally to the total visible length.
+5.4
+Comparison to stochastic shader
+I here compare a stochastic shader to the analytic shader. While better solutions exist for stochastic
+sampling of linelights, the aim here is to compare the two techniques on as even a footing as I could
+reasonably do, without advanced sampling techniques. See sec. 3.5 for a more detailed description of
+its implementation. To facilitate comparison, the dragon scene with a small light was used to measure
+performance of both shaders. The number of samples taken of the linelight is set as high as possible,
+for the best possible convergence, while keeping the time spent strictly below that of the analytic
+shader. Table 1 shows the results: The stochastic shader can manage about 3-5 raytraced samples in
+the same time that the analytic shader does a single pass. Figure 21 shows an example of the dragon
+scene taken at 4 samples: A this sample count the image remains noisy. Figure 20 shows the overall
+convergence given increasing sample counts, using the analytic image as reference. Visually, the image
+looks quite good at around 8 samples or above, but noise is still noticable (not pictured).
+6
+Discussion
+The performance of the renderer is good for small amounts of geometry and when using short lights.
+Unfortunately, even with a low triangle count, if the light is in an inconvenient position, performance
+is heavily affected. The ironic consequence is that performance is best when the linelight shrinks to a
+point light. As discussed in sec. 2.1, this dependence is fundamental to the problem of analytic linelight
+shadowing. This makes its application in games especially dangerous, as the consistency of framerate is
+28
+==PAGE:29==
+Figure 20: RMSE of stochastic shader for differing sample counts, as compared to analytic shader
+result.
+Figure 21: Close of dragon rendered with 4 stochastic samples.
+29
+==PAGE:30==
+important. If instead the light is static, then baking the lighting information is possible and preferable
+for static surfaces, and runtime calculation of static shadows is then unnecessary. Lighting of dynamic
+objects is still required in this case, but this is another limitation of the method used in this project:
+The chosen acceleration structures do not permit dynamic scenes, although the light source is able to
+move. As explained above, the reverse is usually desirable, dynamic shadowing with/without static
+lighting. A simple method for extending capabilities to allow dynamic shadows is to use the brute
+force method on objects that can move around in the scene, after checking for intersection with an
+associated bounding box.
+Another acceleration structure is a good option if the light is static, and given more time I would have
+liked to have tested it: A linelight-oriented segmented buffer, as used by [PA91] and further developed
+by [TT95]. The space is partitioned into wedge-shaped sections, such that any possible occluding
+triangle is contained in the same section as the shaded point. This makes lookup very straightforward
+compared to the voxelization required for the grid structures. The downside is a decreased resolution
+of the segmentation far away from the light, whereas the grid remains consistent throughout space.
+Triangle-triangle intersection
+Throughout development of the project, the triangle-triangle intersection algorithm was changed from
+the standard algorithm of [Ake97] to the current version as presented in sec. 3.2. The changes mere
+motivated by the idea of directly obtaining the occlusion interval without unnecessary intermediate
+computations, and the initial modifications seemed a definite improvement for the special purpose of
+computing the occlusion interval. At this stage many of the cases described in sec. 3.2 were not handled
+correctly however, due to these not occuring in the test scene used at the time. As each case has now
+been handled, the algorithm has changed to a state where I suspect using the regular algorithm to find
+the intersection (circumventing the need for handling each case separately) and projecting it in 2D
+would be equally as efficient or better. As of writing, I unfortunately do not have time to reimplement
+the standard algorithm and test the difference.
+Additional optimizations
+There are a few potential optimizations to the methods and algorithms which have not been included
+in the final version of the renderer:
+Shrinking the light: During shadowing, if at any point the set of visible intervals VL contains
+just one interval (t0, t1), then we can shrink the effective light to just the visible part for all future
+computations.
+As discussed in sec.
+2.1 and verified in sec.
+5, a smaller light-triangle results in
+fewer possible intersections, and thereby better performance. This optimization was implemented,
+but a cursory test showed performance was worse than just using the full light-triangle throughout.
+Implementing the optimization requires conditionally shrinking the linelight, as well as recomputing
+the intermediate values for the triangle-AABB intersection algorithm, as these depends on the shape
+of the triangle. In addition, time is only saved if the shrunken portion of the light would have been
+occluded by another triangle in the scene.
+Backface culling of occluders: If an occluding triangle faces away from the linelight, it cannot cast
+any shadow and can be skipped. Given the surface normal ⃗n of the triangle, the shaded point P and
+the linelight endpoints l0 and l1, this is easily tested,
+Cull if
+⃗n ·
+
+⃗l0 −⃗P
+
+< 0
+and
+⃗n ·
+
+⃗l1 −⃗P
+
+< 0.
+This optimization was implemented, but showed equal or ever so slightly worse performance. The
+same test can used to determine whether or not the shaded itself faces towards the light.
+If not,
+then the point is entirely in shadow, no need to compute visibility. Performing this test does improve
+performance.
+30
+==PAGE:31==
+7
+Future work
+Many opportunities remain for improvements, optimizations and changes to methodology.
+A few
+options were discussed above for small optimizations that I have attempted myself in limited capacity.
+The following are suggestions for more radical changes:
+First, it seems likely that some amount of the visibility computation could be precomputed in a compute
+pass, prior to shading. One possibility is to precompute the voxelization of every light-triangle, saving
+the result as a 2D array of 64-bit bitmask (assuming a grid resolution of 4), passed to the fragment
+shader. Doing these identical calculations at once should reduce branch divergence in the fragment
+stage, hopefully producing a speedup. Another avenue for speedup is in the interval array (sec. 4.4):
+Figure 19 shows that more visible intervals results in significant performance degradation, and while
+a large portion of that time loss is due to repeated calls to the shading function (eq. 3), a lot of
+time is spent manipulating the interval array. A possible method for optimization, credit of Mikkel
+Gjøl, is to simply approximate the visibility of the linelight with bitmasks marking whether or not a
+given part of the light is visible. The principle advantage of this approach is the ability to occlude the
+visible intervals by doing a few bitwise AND operations with an occluding interval, also represented by
+bitmasks. The downside is the loss of accuracy, swapping the continuous intervals for discrete bitmasks
+is roughly equivalent to swapping the linelight for a finite number of point lights, one per bit.
+For a final idea: It seems as though it should be possible to gather patches of a mesh, and treat these
+as single occluders. As a simple example: A perfectly flat piece of geometry, if subdivided, will cause
+a performance loss due to the increased number of triangles. If one could detect and assemble the
+subdivided geometry into a single polygon, then performance would improve. The patches do not need
+to be flat either: Imagine putting a light above a cone. The shadow cast by the cone would be a circle,
+and importantly, even if the cone is rotated to an extent, the shadow would remain elliptical. Looking
+only at the shadow then, the occluder that cast it could just as well have been a flat disk. One could
+imagine that a patch of a complex surface could be ”reduced” in this same way to a simpler shape for
+the purpose of occlusion. Mesh shaders may be useful for computation.
+8
+Conclusion
+In this project I have explored the viability of directly computing the visibility of linelights on the
+GPU, on a per-pixel level, for the purposes of real-time shading by linelights. The methods presented
+produce accurate analytic lighting at steady framerates for non-complex scenes of low triangle count.
+As the performance is tied proportionally to the amount of geometry in the scene, performance steadily
+degrades as the scene gets larger. Additionally, using the methods presented in this work, performance
+is adversely affected by geometry that splits the visible light, i.e. ”fence-like” geometry. I argue that
+this is an inherent challenge in computing shadowing of linelights, but this performance loss can be
+mitigated using approximations for both visibility and shading.
+The methods as presented do permit real-time usage, but in restrictive circumstances as outlined
+above. For the scene of a dragon with a small linelight containing about 30k triangles, frame times
+of less than 10ms are achieved.
+It seems for my hardware, around
+10-30k triangles is the limit
+for real-time performance with this method. More optimizations are certainly possible as well. A
+simple stochastic shader was built for comparison purposes, but this was limited to the same primitive
+acceleration schemes as the analytic linelight shader, inheriting the same performance issues, and so
+is easily beaten by the analytic approach in every scene. As of yet, the most practical solution is a
+hardware accelerated stochastic approach, such as the method provided by C. Peters [Pet21]. Their
+method still suffers noise in penumbra, but this could be mitigated using TAA or denoising.
+31
+==PAGE:32==
+9
+Acknowledgements
+I would like to thank all three of my supervisors for generously providing me their time and attention.
+Thank you to Jeppe for your prompt reponses to my myriad of questions, helping me organize my
+thoughts and my project and many good discussions. Thank you to Mikkel and Jakob for sharing your
+technical expertise and experience in graphics programming, for your ideas and valuable feedback.
+The Dragon model is provided originally by XYZ RGB Inc. and sourced from the Stanford 3D Scanning
+Repository, permission of its use granted for research purposes.
+The Sponza model is provided by Intel from their GPU Research Samples under the Academy Software
+Foundation licence.
+References
+[]
+Tracy Profiler. url: https://wolf.nereid.pl/projects/tracy-profiler/.
+[Ake97]
+Tomas Akenine-M¨oller. “A Fast Triangle-Triangle Intersection Test”. In: J. Graphics,
+GPU, & Game Tools 2 (1997), pp. 25–30. doi: 10.1080/10867651.1997.10487472.
+[Ant92]
+Franklin Antonio. “Faster line segment intersection”. In: Graphics Gems III. USA: Aca-
+demic Press Professional, Inc., 1992, pp. 199–202. isbn: 0124096719.
+[Bar11]
+Tavian Barnes. “Fast, Branchless Ray/Bounding Box Intersections”. In: (2011). url:
+https://tavianator.com/2011/ray_box.html.
+[BD16]
+Niels Billen and Philip Dutr´e. “Line Sampling for Direct Illumination”. In: Computer
+Graphics Forum 35.4 (2016), pp. 45–55. doi: https://doi.org/10.1111/cgf.12948.
+[BP93]
+Hujun Bao and Qunsheng Peng. “Shading models for linear and area light sources”. In:
+Computers & Graphics 17.2 (1993), pp. 137–145. issn: 0097-8493. doi: 10.1016/0097-
+8493(93)90097-S.
+[HH17]
+Eric Heitz and Stephen Hill. “Linear-Light Shading with Linearly Transformed Cosines”.
+In: GPU Zen Advanced Rendering Techniques, 2017.
+[JUO20]
+Mark Jarzynski, Umbc, and Marc Olano. “Hash Functions for GPU Rendering”. In: 2020.
+[MT97]
+Tomas M¨oller and Ben Trumbore. “Fast, Minimum Storage Ray-Triangle Intersection”. In:
+Journal of Graphics Tools 2.1 (1997), pp. 21–28. doi: 10.1080/10867651.1997.10487468.
+[NON85]
+Tomoyuki Nishita, Isao Okamura, and Eihachiro Nakamae. “Shading models for point and
+linear sources”. In: ACM Trans. Graph. 4.2 (Apr. 1985), pp. 124–146. issn: 0730-0301. doi:
+10.1145/282918.282938.
+[PA91]
+Pierre Poulin and John Amanatides. “Shading and shadowing with linear light sources”.
+In: Computers & Graphics 15.2 (1991), pp. 259–265. issn: 0097-8493. doi: 10.1016/0097-
+8493(91)90079-W.
+[Pet21]
+Christoph Peters. “BRDF Importance Sampling for Linear Lights”. In: Computer Graphics
+Forum 40.8 (2021), pp. 31–40. doi: 10.1111/cgf.14379.
+[Pic92]
+K.P. Picott. “Extensions of the linear and area lighting models”. In: IEEE Computer
+Graphics and Applications 12.2 (1992), pp. 31–38. doi: 10.1109/38.124286.
+[Pin88]
+Juan Pineda. “A parallel algorithm for polygon rasterization”. In: SIGGRAPH Comput.
+Graph. 22.4 (June 1988), pp. 17–20. issn: 0097-8930. doi: 10.1145/378456.378457.
+[Ram+12]
+Ravi Ramamoorthi et al. “A theory of monte carlo visibility sampling”. In: ACM Trans.
+Graph. 31.5 (Sept. 2012). issn: 0730-0301. doi: 10.1145/2231816.2231819.
+[Ree21]
+Nathan Reed. “Hash Functions for GPU Rendering”. In: (2021).
+32
+==PAGE:33==
+[Ri˜n19]
+Emilio L´opez Ri˜n´on. “Rendering Line Lights”. In: (2019). url: https://www.elopezr.
+com/rendering-line-lights/.
+[SS10]
+Michael Schwarz and Hans-Peter Seidel. “Fast parallel surface and solid voxelization on
+GPUs”. In: ACM Trans. Graph. 29.6 (Dec. 2010). issn: 0730-0301. doi: 10.1145/1882261.
+1866201.
+[ST15]
+Ari Silvennoinen and Ville Timonen. “Multi-Scale Global Illumination in Quantum Break”.
+In: SIGGRAPH Los Angeles. 2015. url: https://advances.realtimerendering.com/
+s2015/SIGGRAPH_2015_Remedy_Notes.pdf.
+[TT95]
+Toshimitsu Tanaka and Tokiichiro Takahashi. “Fast Shadowing Algorithm for Linear Light
+Sources”. In: Computer Graphics Forum 14.3 (1995), pp. 205–216. doi: 10.1111/j.1467-
+8659.1995.cgf143_0205.x.
+Appendix
+A
+Linelight diffuse radiance
+The following is the analytic expression for the diffuse radiance of a linelight (eq. 1), modeled as an
+infinite series of point lights, derived by [Pic92] and reproduced here for completeness:
+Idiffuse = Ipoint
+"
+2D
+√
+C(A −B) + 4AE
+√
+C + 4BC(
+√
+C + D + E −
+√
+C) −2AD
+√
+C + D + E
+√
+C + D + E(4C3/2E −D2√
+C)
+#
+(8)
+A = (l0 −P) · ⃗n,
+B = l · ⃗n,
+C = (l0 −P) · (l0 −P),
+2l · (l0 −P),
+E = l · l.
+B
+Analytic shader top/bottom grid traversal
+33
+==PAGE:34==
+IntervalArray intersect_scene_top_bottom(vec3 pos, vec3 n, vec3 l0, vec3 l1) {
+// Precompute AABB grid intermediate values for fast intersection
+vec3 blas_size = accel_struct.size / float(GRID_SIZE_TOP);
+vec3 bbox_size = blas_size / float(GRID_SIZE_BOT);
+PrecomputeVals blas_precompute = tri_aabb_precompute(l0_ubo.xyz, l1_ubo.xyz, inPos, blas_size);
+PrecomputeVals bbox_precompute = tri_aabb_precompute(l0_ubo.xyz, l1_ubo.xyz, inPos, bbox_size);
+// Initialize interval array
+IntervalArray int_arr;
+int_arr.size = 0;
+add_interval(int_arr, vec2(0.0,1.0));
+vec3 l0_dir = normalize(l0 - pos);
+vec3 l1_dir = normalize(l1 - pos);
+if (dot(n, l0_dir) < 0.0 && dot(n, l1_dir) < 0.0) {
+remove_interval(int_arr, 0);
+return int_arr;
+}
+// For each bounding box, test first if it intersects the light-triangle at all
+int blas_index = 0;
+for (int blas_i=0; blas_i<GRID_SIZE_TOP; blas_i++) {
+for (int blas_j=0; blas_j<GRID_SIZE_TOP; blas_j++) {
+for (int blas_k=0; blas_k<GRID_SIZE_TOP; blas_k++) {
+vec3 ijk = vec3(blas_i, blas_j, blas_k);
+vec3 blas_origin = accel_struct.origin + ijk * blas_size;
+if (tri_aabb_intersect(blas_precompute, blas_origin)) {
+int bbox_index = 0;
+for (int bbox_i=0; bbox_i<GRID_SIZE_BOT; bbox_i++) {
+for (int bbox_j=0; bbox_j<GRID_SIZE_BOT; bbox_j++) {
+for (int bbox_k=0; bbox_k<GRID_SIZE_BOT; bbox_k++) {
+vec3 ijk = vec3(bbox_i, bbox_j, bbox_k);
+vec3 bbox_origin = blas_origin + ijk * bbox_size;
+if (tri_aabb_intersect(bbox_precompute, bbox_origin)) {
+BufferView buffer_view = accel_struct.subgrids[blas_index].buffer_views[bbox_index];
+for (int i = buffer_view.offset; i < buffer_view.offset+buffer_view.size; i += 3) {
+vec3 v0 = to_world(verts[acceleration_indices[i]].pos);
+vec3 v1 = to_world(verts[acceleration_indices[i+1]].pos);
+vec3 v2 = to_world(verts[acceleration_indices[i+2]].pos);
+vec2 interval;
+if (tri_tri_intersect(l0,l1,pos, v0,v1,v2, interval)) {
+occlude_intervals(int_arr, interval);
+}
+}
+}
+bbox_index++;
+}}}
+}
+blas_index++;
+}}}
+return int_arr;
+}
+Listing 8: GLSL code for the traversal of the top/bottom grid by the analytic shader.
+34

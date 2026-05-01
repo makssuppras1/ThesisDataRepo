@@ -1,0 +1,3294 @@
+==PAGE:1==
+M.Sc. Thesis
+Master of Science in Engineering
+Instruction Scheduler for the Dual-Issue Pat-
+mos Pipeline
+Master thesis
+Emad Jacob Maroun (s123791)
+Kongens Lyngby 2019
+==PAGE:2==
+DTU Compute
+Department of Applied Mathematics and Computer Science
+Technical University of Denmark
+Matematiktorvet
+Building 303B
+2800 Kongens Lyngby, Denmark
+Phone +45 4525 3031
+compute@compute.dtu.dk
+www.compute.dtu.dk
+==PAGE:3==
+Summary
+Time-predictability is an essential property of software running on real-time systems.
+The single-path approach to code generation produces programs that have a single
+execution path which ensures execution-time is independent of input data.
+This
+greatly simplifies worst case execution-time analysis.
+The Patmos architecture is specifically designed for real-time systems. It is time-
+predictable, with a fully predicated instruction set and a dual-issue pipeline. Previous
+work has implemented single-path code generation for the Patmos compiler. However,
+the produced code does not make use of the second issue slot available in the Patmos
+pipeline.
+In this report we detail the steps taken to ready the compiler for future research
+into how to best make single-path code use the second issue slot. We first detail
+how single-path code can be tested automatically, then how refactoring can be used
+to get familiar with a new codebase—in this case, the Patmos compiler. We finish
+by describing how a bundling pass can be added to the single-path transformation,
+and how the compiler is updated to support this. A simple technique is designed
+and implemented that produces bundled instruction, showing how it can be done and
+that the compiler is ready for experimentation into different techniques.
+==PAGE:4==
+ii
+==PAGE:5==
+Preface
+This master thesis was prepared at the department of Applied Mathematics and
+Computer Science at the Technical University of Denmark in fulfillment of the re-
+quirements for acquiring a master degree in Computer Science and Engineering.
+Kongens Lyngby, July 31, 2019
+Emad Jacob Maroun (s123791)
+==PAGE:6==
+iv
+==PAGE:7==
+Acknowledgements
+First and foremost, I would like to thank my supervisor Martin Schoeberl for the
+many opportunities he has given me over the last two years and his great patience
+with me during this project. I would also like to thank the rest of the Embedded
+Systems Engineering section at DTU for their assistance in this and other projects
+and for fostering an environment of helpfulness. I would like to thank Professor Peter
+Puschner from the Technical University of Vienna and Daniel Wiltsche-Prokesch,
+formerly from the same university, for their valuable feedback in times of need. Lastly,
+I would like to thank my family and friends who have been subjected to alternating
+whining and celebration for months, valiantly withstanding everything I threw at
+them with a smile.
+==PAGE:8==
+vi
+==PAGE:9==
+Contents
+Summary
+i
+Preface
+iii
+Acknowledgements
+v
+Contents
+vii
+1
+Introduction
+1
+1.1
+Worst-Case Execution Time . . . . . . . . . . . . . . . . . . . . . . . .
+2
+1.2
+Patmos
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+5
+1.3
+Problem Statement . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+11
+2
+Single-Path
+15
+2.1
+Basic Idea . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+15
+2.2
+Formalized Transformation
+. . . . . . . . . . . . . . . . . . . . . . . .
+18
+2.3
+Algorithm . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+19
+2.4
+Compiler
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+23
+3
+Testing
+27
+3.1
+Requirements . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+27
+3.2
+Unit Tests . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+28
+3.3
+Regression Tests
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+31
+3.4
+Program Tests
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+35
+3.5
+Usage
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+36
+4
+Refactoring
+39
+4.1
+Organization
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+40
+4.2
+Coupling . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+41
+4.3
+Hidden Coupling . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+44
+4.4
+The Right Tool for the Job
+. . . . . . . . . . . . . . . . . . . . . . . .
+45
+4.5
+Fields
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+47
+5
+Bundling
+51
+5.1
+Bundling Support . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+52
+==PAGE:10==
+viii
+Contents
+5.2
+Proof of Concept . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+54
+6
+Evaluation & Discussion
+57
+6.1
+Setup
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+57
+6.2
+Testing . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+57
+6.3
+Refactoring . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+61
+6.4
+Bundling
+. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+63
+7
+Conclusion
+65
+A Complete Single-Path Transformation Rule Set
+67
+B A Regression Test
+69
+Bibliography
+71
+==PAGE:11==
+CHAPTER 1
+Introduction
+Real-time systems are used in domains where the running time of a device or appli-
+cation is of critical importance. A system is real-time if it:
+Controls an environment by receiving data, processing them, and returning
+the results sufficiently quickly to affect the environment at that time [1].
+(James Martin, #4 most influential person in comp. tech. (1992)[2])
+As such, the total correctness of a real-time system is not only dependent on the
+logical correctness of its response, but also on the timing of said response. The time,
+before which a response is expected, is called a deadline. We can classify real-time
+systems by the consequences of a response missing the deadline.
+A soft real-time system can handle missed deadlines without critically failing.
+Though the quality of the service provided may decrease, the system will be able to
+either recover from it or continue working regardless.
+Most people interact with such devices on a daily basis. An easy example would
+be any video or audio playback device like a television or laptop. In these cases each
+frame of a video must be displayed for a specific interval after which it is swapped
+for a new one. Ideally, the device will be able to load the frames and have them
+ready before they are needed.
+However, sometimes the device is unable to meet
+this periodic deadline of 1 frame every ~42 milliseconds (for a 24 frames-per-second
+viewing experience). E.g. this could be caused by sudden network issues prohibiting
+the device from downloading the frames quickly enough.
+Luckily, there are many ways to resolve such issues: Playback could be paused
+until the underlying issue resolves itself, after which it is automatically resumed; if a
+live event is being displayed, playback can resume at the most recent frame, ignoring
+any missed frames; or, in the worst case, playback could be abandoned completely
+and the user asked to resolve the network issue before trying again. Regardless of
+the underlying issue and how it’s handling of it, no severe or permanent damage has
+been done. The user will surely be frustrated with the quality of the video, but will
+either choose to wait it out or go do something else.
+Hard real-time systems cannot afford for a deadline to be missed, the result of
+which could be significant commercial losses and/or unacceptable bodily harm. Tra-
+ditionally, airplanes are used as an example for real-time systems. Many modern
+airplanes use a system called fly-by-wire, which replaces the physical cables between
+==PAGE:12==
+2
+1 Introduction
+the pilot’s flight controls and the plane’s control surfaces. Instead, the pilot’s input
+on the flight controls is sent to a computer, which determines how to move the control
+surfaces in response. It is easy to imagine that if the movement of the control sur-
+faces does not happen precisely and predictably in response to the pilots inputs, he
+might lose control of the plane. At worst, this could cause the deaths of passengers;
+a decidedly unacceptable type of bodily harm.
+Real-time systems are increasingly moving into our daily lives.
+This is easily
+noticeable in cars, where an increasing number of automated systems are taking over
+different driving tasks. These systems are often meant to increase safety, and must
+therefore be incredibly reliable. Take the Autonomous Emergency Braking system,
+which will trigger the brakes if it senses an obstacle in front of the car. A program must
+analyze the inputs from the sensors, identify any obstacle, and determine whether
+emergency breaking is required. This must be done quickly, with enough time to
+spare, such that the brakes are able to bring the car to a standstill—before hitting
+the obstacle. If the analysis is not done it time, the resulting crash could harm the
+passengers of the car and/or bystanders outside of it.
+In this project we focus on the software components of real-time systems. As with
+the examples given so far, the execution time of the software running on a system
+is of paramount importance to the overall system. We will also be focusing mainly
+on hard real-time systems, where we want to be able to guarantee that a program
+always meets its deadlines.
+1.1
+Worst-Case Execution Time
+The execution time of a program is usually dependent on two things:
+• Input: The data that the program needs to process and respond to.
+• Environment: The state of world surrounding the program.
+To see how the input data can affect the execution time, take the function fib
+in Listing 1.1. Given an integer n, it calculates the n’th number in the Fibonacci
+sequence.1
+The only input data given to this function is n.
+If it is 0 or 1, the
+function does nothing except returning that value. However, for any other number,
+the function will have to recursively call itself and sum the returned values of those
+calls.
+In Figure 1.1 we can see all the recursive calls that are made when we call fib
+with n = 4. To get the result, it has to call fib(3) and fib(2), both of which also
+recurse. In total, 8 additional calls are made. We can also see that, had we called
+fib with n = 3, only 4 additional calls would need to be made.
+Since the work
+done in each call is roughly equivalent, we can correlate the number of calls with the
+1The 0’th number in the Fibonacci sequence is 0. The 1’st is 1. Every subsequent number is
+equal to the sum of the previous two numbers. The sequence starts with: 0, 1, 1, 2, 3, 5, 8, ...
+==PAGE:13==
+1.1 Worst-Case Execution Time
+3
+1 int fib(int n) {
+2
+if (n <= 1) {
+3
+return n;
+4
+} else {
+5
+return fib(n - 1) + fib(n - 2);
+6
+}
+7 }
+Listing 1.1: A function calculating the n’th Fibonacci number
+execution time. Therefore, we can see that fib will have a longer execution time for
+a larger initial value of n.
+There are a multitude of ways the environment can affect the execution time of a
+program. We define the environment as anything that does not have an impact on the
+logical result of the program, but can still affect its execution time. For example, in a
+system that uses preemptive multitasking, a program might be stalled for some time
+to allow a different program to run. At a later point, the stalled program will get to
+run again and produce its result, which will be same whether or not the program was
+preempted. Preemptive multitasking allows us to run more programs simultaneously
+than the number of available processing units. However, it makes it difficult to predict
+the execution time of a program, as it might be stalled any number of times before
+finishing.
+Multi-level memory hierarchies can also have a significant impact on execution
+time. Caches store a subset of the main memory closer to the CPU, allowing for
+quicker access to the cached data. The lower-level a cache is, the smaller the subset of
+memory stored and the quicker the access. Caches will generally increase performance
+but make the latency of memory accesses more volatile. When a requested memory
+location is not stored in a cache—a cache miss—execution needs to be stalled until the
+cache can fetch the data from higher up the hierarchy (either a higher-level cache or
+main memory). Caches are therefore part of the environment surrounding a program,
+as the behavior of all processing units might influence which parts of the memory
+fib(1)
+fib(2)
+fib(0)
+fib(1)
+fib(0)
+fib(1)
+fib(3)
+fib(2)
+fib(4)
+Figure 1.1: Call graph for the fib function from Listing 1.1 where n = 4
+==PAGE:14==
+4
+1 Introduction
+space are cached at a given moment in times.
+Caching can also be affected by preemptive execution. Imagine we have a program
+running on a processing unit that has a private cache. If the program is preempted,
+the cache will map the parts of the memory needed for the new program. When the
+original program resumes execution, it will probably experience a number of cache
+misses as the other program’s memory is replaced. However, if the original program
+is never preempted, the cache will only map the memory used by it; experiencing
+fewer cache misses.
+1.1.1
+WCET analysis
+For real-time systems, we want to be able to make a guarantee about the execution
+time of a program. In particular, we are interested in the worst-case execution time
+(WCET), i.e. the maximum amount of time the program will need to finish executing.
+WCET analysis looks at a program and tries to produce an estimate of the WCET.
+To do that, it will have to take into account all possible inputs and environments and
+how they affect the execution time. It will then produce an estimate that puts an
+upper bound on the WCET, which we can use as our guarantee.
+Because of the high level of variability in inputs and environment, WCET analysis
+can be difficult to do accurately (i.e. having the estimated WCET be close to the
+actual WCET) and computationally hard to run.
+The first part of accurately estimating WCET is to analyze the program statically,
+i.e. without running it, and finding the longest running path through the code. Differ-
+ent analysis techniques are used, to increase the accuracy by minimizing the number
+of possible paths through the code. Thereby we hope to eliminate the longest paths
+and reduce the WCET. E.g, by analyzing the possible value of variables, the analysis
+might be able to determine that a given path can’t be taken.
+Accuracy is also achieved by modeling the environment in which the program will
+run. This includes modeling the memory hierarchy, caches, and other aspects of the
+hardware running the program. When caches are used, the default assumption the
+analysis must make is that any memory access will result in a cache miss. By modeling
+the cache and tracking what might be in it at a given point in the program, the
+analysis can sometimes deduce that a given memory access will not miss. Therefore,
+the estimate does not have to account for a cache miss, and the overall WCET estimate
+can be reduced [3].
+However, not all things can be modeled. E.g. unconstrained preemptive multi-
+tasking is nigh on impossible to predict, and therefore is often not taken into account
+when doing the analysis. Instead, specialized scheduling techniques are used, which
+might depend of the WCET. Earliest Deadline First (EDF) scheduling can be used
+to ensure that all programs finish before their deadline [4]. This is done by always
+scheduling the task that has the earliest deadline, using preemption to stop the exe-
+cution of tasks with later deadlines. Given enough computing power, this scheduling
+technique guarantees all tasks get to finish before their deadlines. This is possible by
+==PAGE:15==
+1.2 Patmos
+5
+using a WCET estimate that doesn’t account for preemption and theoretically check-
+ing that all deadlines can be met. If the check fails, the WCET of the tasks must
+be reduced; either by changing the code to be faster or by increasing the computing
+power to achieve the same.
+As program size and analysis accuracy increase the difficulty of running the anal-
+ysis increases exponentially. This is especially caused by the fact that the number
+of paths through the code increase exponentially with the number of control flow
+alternatives [5]. In practice, this means that running the WCET analysis might take
+hours or days for industry systems [6]. This make the usage of the analysis intractable
+and seldom used in industry [7][8].
+The topic of this report surround the Patmos instruction set architecture and
+single-path code. Patmos is specifically designed for use in real-time systems, with
+a design that makes it highly predictable to ensure WCET analysis is both easier
+and more accurate. Additionally, the architecture enables the use of single-path code,
+which eliminates input-data-dependent control flow, making running analyses much
+easier and even trivial in some situations.
+1.2
+Patmos
+Traditional hardware architectures, like x86 or ARM, are designed for general-purpose
+computing: Personal computers, servers, or other applications without real-time re-
+quirements. To maximize performance, these architectures try to minimize Average-
+Case Execution Time (ACET) such that, in general, performance is good. This works
+well for the intended purpose but makes these architectures difficult to use in real-time
+systems.
+Many of the techniques used to reduce ACET make the hardware less predictable,
+making WCET harder and less accurate. The Patmos Instruction Set Architecture
+(ISA) is specifically designed for real-time systems [9]. Therefore, the design tries
+to reduce the WCET instead of ACET and makes the processor as predictable as
+possible.
+Patmos has a 32-bit, Reduced Instruction Set Computer (RISC), statically sched-
+uled, Very Long Instruction-Word architecture with an exposed, dual-issue pipeline.
+It uses split caches and a fully predicated instruction set. We will go through each of
+these features and see how they make WCET analysis easier and more accurate.
+1.2.1
+RISC
+Contrary to Complex Instruction Set Computers (CISC), RISC architectures try to
+minimize the number of available instructions and makes them as simple as possible.
+Though not specifically intended for it, this makes such architectures perform well for
+real-time applications [10]. The simplicity makes WCET analysis easier since each
+instruction is simpler to predict, with fewer behaviors and interactions with the rest
+of the system.
+==PAGE:16==
+6
+1 Introduction
+As an example, take the instruction MOVSB from x86 ISA (a CISC architecture),
+which is intended to quickly move data from one location in memory to another.
+First, it loads from memory the source and destination addresses of the data byte to
+be moved. It then loads the data byte and saves it to the destination address. Lastly,
+depending on a flag, it either increments or decrements the source and destination
+addresses [11]. In a RISC architecture, such an instruction would not be available.
+Instead, a sequence of simple instructions would provide the same functionality. In
+Listing 1.2 we encode the MOVSB instructions semantics using Patmos’ ISA. We can
+see that it takes 11 instructions to encode the complexity MOVSB.
+1.2.2
+Statically scheduled, exposed pipeline
+Pipelining is a method of increasing the throughput of a processor by splitting the
+execution of each instruction into stages, each of which takes one cycle. Since less
+work is being done in each cycle, the clock frequency can be increased.
+In each cycle, instructions move to the next stage, and a new one is issued in the
+first stage. Therefore, the number of instructions being executed at the same time
+can be as high as the number of stages. The same number of instructions are issued,
+and finish executing, each cycle, so the increased throughput only comes from the
+higher clock frequency.
+The Patmos processor has a 5-stage pipeline:
+1. Fetch: Gets the next instruction(s) to be executed.
+2. Decode: Analyzes the instruction to figure out what the next stages need to
+do. Also reads the values of the registers that the instructions might need.
+3. Execute: Perform calculations. Includes arithmetic operations, like addition,
+but also calculations of effective addresses, e.g. for loading of values from mem-
+ory.
+1
+lwc
+$r3
+= [$r1]
+# Load source address
+2
+lwc
+$r4
+= [$r2]
+# Load destination address
+3
+lbc
+$r5
+= [$r3]
+# Load value from source address
+4
+nop
+# Wait for load of value
+5
+sbc [$r4] =
+$r5
+# Save value to destination address
+6 ( $p1) add
+$r3
+=
+$r3 , 1 # Increment source and destination
+7 ( $p1) add
+$r4
+=
+$r4 , 1 #
+addresses if the flag ($p1) is true
+8 (!$p1) sub
+$r3
+=
+$r3 , 1 # Decrement source and destination
+9 (!$p1) sub
+$r4
+=
+$r4 , 1 #
+addresses if the flag ($p1) is false
+10
+swc [$r1] =
+$r3
+# Store source address
+11
+swc [$r2] =
+$r4
+# Store destination address
+Listing 1.2: The MOVSB x86 instruction in Patmos assembly
+==PAGE:17==
+1.2 Patmos
+7
+4. Memory: Performs memory accesses to addresses calculated in the previous
+stage.
+5. Write Back: Writes the result of the instruction into the designated register.
+This setup isn’t uncommon for RISC architectures and doesn’t provide any real-
+time benefit in and of itself. However, Patmos exposes various delays caused by using
+such a pipeline, allowing WCET to accurately predict its behavior. These delays are
+the results of data- and control-hazards any pipeline must tackle to be efficient.
+Data-hazards materialize when one instruction needs the result of a previous in-
+struction for its execution. Say we have the instruction add $r3 = $r1, $r2 imme-
+diately followed by add $r5 = $r3, $r4. The result of the first add is calculated
+in the Execute stage and only written back to the $r3 register after the last stage.
+When the second add reaches the decode stage, where it reads the value of its two
+operand registers, the value of $r3 would not have been updated yet, as the first add
+is still in the Memory stage. The second add would therefore have the wrong value
+to sum up. The solution to this problem is easy enough: we send the results of the
+Execute stage back to the beginning of the same stage, such that the next instruction
+can use it if need be. This is called Pipeline Forwarding.
+Other data hazard aren’t as easy to solve. Say we have a load instead of the first
+add: lwc $r3 = [$r1]. The result of the load will only be ready after the Memory
+stage. However, at that point the add would have already finished its Execute stage
+without the loaded value. Pipeline forwarding cannot solve this problem. The only
+solution is to stall the add for one cycle, such that the result of the load can be
+forwarded from the Memory to the Execute stage.
+For traditional processors this can be optimized by only stalling an instruction if
+it actually needs the loaded value. However, since the worst case will stall, Patmos
+would not benefit from this. Instead, it exposes this pipeline problem in the ISA as
+an instruction delay. The ISA specifically states that the result of a load cannot be
+used in the instruction immediately following it. Instead, either a different instruction
+must be inserted (that doesn’t depend of the loaded value) or a no-operation (nop)
+must be used.
+Returning to the code in Listing 1.2, we can see how the store instruction on line 5
+depends on the result of the load on line 4. Therefore, a nop has been added between
+them, such that the delay is respected. Alternatively, we could have taken the add on
+line 6 and moved it up to the nop’s position to make better use of that cycle. We can
+do this because the add in not dependent on either of the previous two instructions.
+Control-hazards are similar to data-hazards, except that they are caused by control-
+flow-affecting instructions: The effective address for the instruction to execute after
+a branch is only ready after the Execute stage. Patmos’ solution is again to expose
+this as a delay. For a simple conditional branch, br, the delay is 2 cycles; meaning
+the two instruction following the br are also executed before the branch takes effect.
+The longer delay is caused by the address of the branch being needed in the Fetch
+stage, but is only ready two stages latter.
+==PAGE:18==
+8
+1 Introduction
+By using delays in the ISA, Patmos solves the hazards introduced by pipelining
+in a way that improves the accuracy of WCET analysis, without introducing much
+complexity. Traditional ISAs like x86 and ARM don’t do this, opting for solutions
+that decrease the number of stalls needed on average, but either don’t affect the worst
+case or make the analysis harder.
+An often-used technique for managing control-hazards is branch prediction. To
+avoid having to stall the pipeline, the address of the branch is predicted before it
+reaches the Execute stage. The prediction is then used to speculatively execute the
+next instruction based on the prediction. However, if it is ultimately proven wrong,
+the instructions that are in the pipeline are thrown out (flushed), and the correct
+ones executed instead.
+With a good predictor most branches are predicted correctly. For example, using
+a Branch Target Buffer, which remembers both the result and the target address of
+a branch instruction that has been executed before, more than 95% of all branches
+are predicted correctly [12]. However, it is very difficult to perform accurate model-
+ing of branch prediction. Therefore, WCET analysis would often have to assume a
+prediction is wrong, which makes the over-all estimated execution time much worse
+that the actual.
+Another heavily used technique for managing data-hazards is Out-of-Order Execu-
+tion, also called Dynamic Scheduling. Looking again at Listing 1.2, we have already
+established that the add on line 6 can safely be moved up to replace the nop on
+line 4. Modern processors, without exposed pipelines, can analyze the instructions
+before they are issued, and detect where there are data dependencies. They can then
+reorder the execution of the instructions to maximize the usage of the pipeline. E.g.
+they could automatically detect that the add is independent of the sbc on line 5 and
+execute it immediately after the lbc, thereby eliminating a stall in the pipeline.
+The complexity introduced by out-of-order execution greatly increases the diffi-
+culty of doing WCET analysis [13]. Instead, Patmos uses static scheduling: Instruc-
+tions are executed in the exact order they are issued by the compiler. The burden
+of identifying data dependencies, and reordering instructions optimally, is therefore
+put on the compiler instead of the hardware. However, this makes WCET analysis
+simple, since the order of execution is known and unchanging.
+1.2.3
+VLIW
+Regardless of how many pipeline stages are added, how well branch predication per-
+forms, or how perfectly instructions are scheduled (statically or dynamically), at most
+one instruction is issued and executed per cycle. This theoretical limit puts a ceiling
+on throughput that cannot be exceeded without specialized techniques.
+superscalar processors can issue multiple instructions each cycle from a sequen-
+tial instruction stream. Additional functional units are present, like the Arithmetic
+Logic Unit (ALU), such that multiple instructions can be executed simultaneously. A
+scheduler chooses which instruction get to use each functional unit in an optimal or-
+==PAGE:19==
+1.2 Patmos
+9
+der. While out-of-order superscalar processor are not useful for real-time applications,
+for the reasons stated before, in-order superscalars can be [14].
+Patmos takes a slightly different approach. Instead of issuing from a stream of
+single instructions, it issues from a stream of bundles, which can contain up to two
+instructions. This is caled a Very Long Instruction-Word (VLIW) architecture: A
+good way to achieve high performance as well as time-predictability [15].
+The dual-issue pipeline issues one bundle each cycle and executes both instructions
+simultaneously. Like superscalars, it has duplicate functional units to allow this. But
+unlike superscalars, it doesn’t need to schedule the instructions, since use of the
+functional units is decided by their position in the bundle, called slots. Conceptually,
+the compiler schedules which instructions run on which functional units.
+The two slots in a bundle are not equal, however. Only the first slot can issue
+memory or control-flow instructions. This means lwc and br cannot be scheduled
+by the compiler in the second slot. Otherwise, the most-used instructions can be
+scheduled in both slots.
+1.2.4
+Caches
+Caches complicate WCET analysis since ti can be difficult to predict what memory
+regions are stored in the cache at a given point in the program. Accesses to caches
+can also happen multiple times each cycle; once to fetch the next instruction and
+potentially another as part of a load or store instruction. As such, accurate modeling
+of the caches in a processor is critical to accurate WCET analysis.
+Traditional processors have two caches: an Instruction Cache (I-cache) and a
+Data cache (D-cache). Instructions are generally loaded sequentially from memory,
+which is good for a cache, since a single cache-miss will load a group of instructions
+simultaneously.
+This predictability in memory access can also enable prefetching,
+where the cache get instructions from main memory before they are actually needed.
+Some prefetching techniques can achieve an accuracy of 99.5%; meaning only around
+0.5% of instructions will miss in the I-cache [16]. Having a D-cache is essential for
+instruction prefetching accuracy, since the cache used for instructions is not tainted
+whenever some non-instruction data is accessed. Still, prefetching is difficult to model
+for WCET analysis, and may even be detrimental, since it could increase WCET in
+some cases [17].
+Splitting a processor’s cache into I-cache and D-cache improves performance, be-
+cause techniques can be used to reduce the miss-rate of each cache. Patmos takes this
+idea to the extreme. It specializes the I-cache into a Method Cache (M-cache), and
+splits the D-cache in two: a Stack Cache (S-cache) and D-cache for data that doesn’t
+reside on the program stack.
+Instead of a I-cache figuring out which instructions to fetch, a M-cache is meant
+to cache whole methods (or functions) at once. The compiler is then tasked with
+issuing instructions that prefetch each method before it is executed. E.g. the call
+instruction implicitly will make the M-cache load the called method in its entirety.
+==PAGE:20==
+10
+1 Introduction
+Of course, some methods are too large for the cache to contain. The compiler
+must then split the method into blocks, and add cache-fetching instructions between
+each block. The branch instruction brcf (branch with cache fill)can be used for this.
+It will fill the cache with the block at its destination before doing the actual branch.
+Using an M-cache therefore limits cache-misses to specific fetching instructions.
+All other instructions can’t miss in the M-cache.
+This simplifies WCET analysis
+greatly, as caching can be ignored for all instructions except a select few. And, as an
+added bonus, prefetching can be utilized in a way that doesn’t increase WCET [18].
+To ease the modeling of which data is in the D-cache, Patmos uses the S-cache to
+split data which resides on the program stack from all other data. Stack data is very
+predictable:
+• Liveliness: A method-local variable is only live when the method is called, and
+is no longer used when the method returns.
+• Location:
+All method-local the variables reside in the stack frame of the
+method.
+If the method is executing, then its stack frame is on top of the
+stack and directly accessible through the stack- and base-pointers.
+• Size: Local variables must have a known size at compile time. By extension,
+they will have the same size throughout a programs execution.
+Because of this, Patmos allows the compiler to directly control the S-cache. It
+can issue instructions to fill and spill the S-cache, such that a method’s stack frame
+is always in the cache.
+Access to the S-cache uses dedicated memory access instructions. The lws load
+instruction is equivalent to the lwc instruction, except that it loads its value through
+the S-cache (lwc always loads through the D-cache). Similarly to the M-cache, WCET
+can be trivialized: All loads through the S-cache can be assumed to hit. The S-cache
+therfore only misses when executing S-cache-control instructions like sens, which
+ensures a stack frame is in the cache (potentially fetching it if not).
+1.2.5
+Predicated Instruction Set
+All instruction in the Pamtos ISA are predicated. Each instruction’s execution depends
+on the boolean value of a predicate register.
+If the value in the register is true,
+the instruction will execute normally, i.e.
+is it enabled.
+If the value is false, the
+instruction is disabled and will do nothing; no arithmetic operation, no loads or stores,
+no branching, etc.
+Using predication, control dependent execution can be converted to data depen-
+dent execution [19]. In Listing 1.3 we have a program that compares two registers: If
+they are equal, their values are incremented; otherwise, they are decremented. The
+traditional way to write the program can be seen in (a), where we use a branch to
+skip the adds if the registers aren’t equal. If they are equal, we execute the adds, but
+==PAGE:21==
+1.3 Problem Statement
+11
+must then branch to skip the subs.2 In (b), we use the result of the comparison to
+predicate the adds and subs. The guard ( $p1) ensures that the two adds are only
+enabled if the comparison was true, i.e. the registers were equal. The guard (!$p1)
+only enables its subs if the comparison was false. Since only one of the guards can
+be true at any one time, we guarantee that only one of the two execution paths is
+actually has an effect.
+Using data dependent execution makes WCET analysis easier, since there are
+fewer branches to account for. It can also simply reduce WCET in some cases. In
+Listing 1.3, the control dependent version can take upwards of 7 cycles (ignoring the
+pipeline latency) because the non-delayed branch on line 2 stalls the processor for two
+cycles. In contrast, the data dependent version always takes 5 cycles. However, this
+is not always achievable. Had the two execution paths been longer, e.g. 4 instructions
+each, the WCET would be reduced by using predication.
+A major reason for Patmos’ use of predicated instructions is to allow for the use
+of single-path code—which can only be used if predicated instructions are available.
+This techniques uses conversion of control to data dependence to the extreme: All
+conditional execution uses predicates, allowing only loops and function calls to use
+branching. This technique greatly simplifies WCET. We will go into further details
+about single-path code in Chapter 2.
+1.3
+Problem Statement
+The performance gained by using VLIW architectures is limited by how many instruc-
+tions can be run in parallel, i.e. instruction-level parallelism (ILP). There are three
+2Recall that br has two delay slots, meaning the two adds on line 4 and 5 are executed before the
+branch on line 3. brnd is equivalent to br, except that it has no delay slots—it stalls the processor
+instead.
+1
+cmpeq
+$p1
+=
+$r1 ,
+$r2
+2 (!$p1)
+brnd
+.else
+3
+br
+.end
+4
+add
+$r1
+=
+$r1 ,
+1
+5
+add
+$r2
+=
+$r2 ,
+1
+6 .else :
+7
+sub
+$r1
+=
+$r1 ,
+1
+8
+sub
+$r2
+=
+$r2 ,
+1
+9 .end
+:
+a) Branching is use to skip instructions.
+1
+cmpeq
+$p1
+=
+$r1 ,
+$r2
+2 ( $p1)
+add
+$r1
+=
+$r1 ,
+1
+3 ( $p1)
+add
+$r2
+=
+$r2 ,
+1
+4 (!$p1)
+sub
+$r1
+=
+$r1 ,
+1
+5 (!$p1)
+sub
+$r2
+=
+$r2 ,
+1
+b) Predicated instructions are executed
+conditionally based on a predicate reg-
+ister. By using disjoint predicates only
+one execution path is enabled at a time.
+Listing 1.3: Control dependent exection can be converted into data dependent
+execution
+==PAGE:22==
+12
+1 Introduction
+types of dependencies between instructions that disallow them to be run in parallel
+[20]:
+• Name: When two instructions output their result to the same destination (be
+it a register or memory location) they have a name dependency.
+Since the
+destination cannot hold both result values, the instructions cannot be run in
+parallel.
+• Control: Branching instructions cause control dependencies. The processor
+cannot issue new instructions to the pipeline before resolving which path it mus
+take.
+• Data: One instruction is data dependent on another, previous instruction if it
+requires the latter’s result to execute.
+In Listing 1.4 we can see the effects of data dependencies on parallelism (the num-
+ber of instructions that can be run simultaneously). In (a), no instruction depends
+on the result of a previous one. Theoretically, all four instructions can be executed si-
+multaneously without affecting the rest of the program. Therefore, we say parallelism
+is 4. In (b), every instruction’s result is used by the next.3 Since we can’t run one
+instruction before the previous finishes executing, we say parallelism is 1 (implying
+no ILP is present). Generally, the parallelism available in a program doesn’t exceeds
+7, with 5 being more likely [21].
+Single-path code’s use of predication converts most of the control dependencies in
+a program into data dependencies; the execution of each alternative depends on the
+value of a predicate instead of a branch. With that, single-path code introduces a
+lot of parallelism. Two alternative execution paths can be executed at the same time
+because only one of them will be enabled.
+In Listing 1.5 we have a program that compares two registers: if they are equal,
+their values are summed and then incremented; otherwise, their difference is taken
+and decremented. Using branching, as can be seen in (a), this code has no parallelism.
+On the other hand, using predication the two alternatives can be run in parallel. In
+(b) we see the instructions on the true path are bundled with those in the false branch.
+This is done using brackets ({}), where two instructions between a pair of brackets
+constitutes a bundle.
+The Patmos compiler has already been implemented to output single-path code
+[22]. However, the generated code only makes use of the first instruction slot in each
+bundle. The VLIW properties of the Patmos ISA are not utilized and neither does
+it exploit single-path code’s inherently high ILP. The goal of this thesis project is to
+make the compiler output single-path code that makes use of the second instruction-
+slot. It should do that by exploiting the parallelism between alternative execution
+paths.
+3We ignore the nop, which is just there to fill lwc’s delay slot.
+==PAGE:23==
+1.3 Problem Statement
+13
+1
+lwc
+$r1
+= [$r2]
+2
+li
+$r3
+=
+17
+3
+swc [$r4] =
+$r5
+4
+add
+$r2
+=
+$r2 , 1
+a) Parallelism = 4
+1
+lwc
+$r1
+= [$r2]
+2
+nop
+3
+add
+$r2
+=
+$r1 , 26
+4
+swc [$r3] =
+$r2
+b) Parallelism = 1
+Listing 1.4: Data dependencies reduce ILP.
+1
+cmpeq
+$p1
+=
+$r1 ,
+$r2
+2 (!$p1)
+brnd
+.else
+3
+br
+.end
+4
+add
+$r3
+=
+$r1 ,
+$r2
+5
+add
+$r3
+=
+$r3 ,
+1
+6 .else :
+7
+sub
+$r3
+=
+$r1 ,
+$r2
+8
+sub
+$r3
+=
+$r3 ,
+1
+9 .end
+:
+a) Parallelism = 1
+1
+cmpeq
+$p1
+=
+$r1 ,
+$r2
+2 {( $p1)
+add
+$r3
+=
+$r1 ,
+$r2
+3
+(!$p1)
+sub
+$r3
+=
+$r1 ,
+$r2 }
+4 {( $p1)
+add
+$r3
+=
+$r3 ,
+1
+5
+(!$p1)
+sub
+$r3
+=
+$r3 ,
+1
+}
+b) We can exploit parallelism between
+the two execution paths and bundle in-
+structions using brackets ({}).
+Parallelism ≈2
+Listing 1.5: Converting from control to data dependence unlocks parallelism
+between execution paths.
+1.3.1
+Approach and Plan
+To reach the overall goal, we are going to have to update the compiler implementation.
+This poses our first problem: None of the original developers are available, which
+makes learning how the code works difficult. Therefore, we split the update of the
+compiler into two phases:
+1. Refactor the relevant parts of the code without changing functionality.
+2. Update the code to enable instruction bundling.
+It is important that we don’t make any functional changes to the code in the first
+phase. By being able to change the code, and see how it affects the compiler, we learn
+how the code works.
+This introduces another problem: there is no automated testing setup for the
+single-path portion of the compiler. This makes it difficult for us to ensure that we
+don’t make unintended changes in functionality while refactoring. Therefore, we must
+design and implement a testing setup that has the following properties:
+First, it must be able to test that the compiler produces correct programs and
+that they use single-path code.
+Second, it must assist the developer by improve
+==PAGE:24==
+14
+1 Introduction
+productivity.
+Lastly, the tests must be fully automated and give a complete and
+useful report on which tests failed and why. Running the tests should be equivalent
+to pushing a button and waiting for the answer, with minimal or no input from the
+developer. This ensures that he doesn’t miss a failed test because he didn’t run it
+correctly.
+With the addition of refactoring and testing to the project, we will have to con-
+strain the final goal. Therefore, will target a proof-of-concept implementation. We
+will develop an implementation that can emit bundled instructions, but is not neces-
+sarily efficient or makes good use of the ILP unlocked by the single-path approach.
+Instead, the it will ready the compiler for future work, where a good algorithm for
+bundling can be developed and implemented. The implementation must therefore
+make it easier to develop new algorithms with minimal effort.
+The rest of report is organized as follows: Chapter 2 will describe single-path
+code generation in detail and cover how the compiler implemented it before this
+project’s beginning. Chapter 3 covers the design and implementation of an automated
+testing setup for the sinlge-path code parts of the compiler.
+Chapter 4 describes
+our refactoring efforts.
+Chapter 5 will present how the compiler was updated to
+support bundling and the updates to the single-path implementation that were needed.
+Chapter 6 will evaluate the impact of all our efforts on the various parts of the
+compiler.
+We will discuss how well the testing setup achieves its goals and how
+the refactoring has impacted compile times and overall performance. We will also
+measure the impact of a simple strategy, implemented to bundle instructions, on the
+performance of a set of benchmark programs. Chapter 7 concludes the report and
+describes the future work needed to make single-path code generation a valid and
+useful technique for real-time systems.
+==PAGE:25==
+CHAPTER 2
+Single-Path
+As we have already covered in Chapter 1, as programs become larger, the WCET anal-
+ysis becomes exponentially harder to run. The single-path code generation technique
+is specifically designed to counter this [23]. It avoids complex control-flow structure
+and produces code that allows for simple and accurate WCET analysis. This is done
+by generating code whose behavior is independent of the input data by always follow-
+ing the same—and only—execution path.
+Having programs always follow a single execution paths greatly simplifies WCET
+analysis since it doesn’t have to do path analysis—the program always takes the same
+path. This means complex analysis of the possible control flow can be omitted. In
+some cases, WCET analysis can be as trivial as simply measuring the execution time
+of the program with any arbitrary input. This also means complex modeling of the
+hardware can be omitted. Only with the use of caches is measurement-based analysis
+not sufficient as the caches need to be modeled.
+In this chapter we will present te single-path approach to code generation. We will
+cover how a WCET analyzable program can be converted to use single-path code and
+how an automatic conversion can be used. We will then present an algorithm that
+can do the conversion and how it is implemented for Patmos’ compiler. All of this
+will ignore Patmos’ second issue slot, since that is how the compiler was implemented
+before this project started. In Chapter 5 we will then describe how the algorithms
+and implementations can be updated to use the second issue slot.
+2.1
+Basic Idea
+To achieve a single execution path throughout the program, the single-path approach
+needs to remove any variability to execution time. There are three structural elements
+that cause this variability and we will go through each of them and show how they
+can be transformed to no longer be variable.
+2.1.1
+Conditionals
+As we have already covered in Chapter 1, if/else statements introduce variable ex-
+ecution times because each path can have a different length.
+The solution is, as
+covered before, using predication to conditionally run both paths. This also called
+==PAGE:26==
+16
+2 Single-Path
+if-conversion. We will also need to handle switch statements; where execution flows
+to one of many choices. This is done converting any switch-statement into a sequence
+of if-statements and then if-converting them all.
+2.1.2
+Loops
+Loops of any kind may vary in the number of iterations they execute. The variation
+is input data dependent and must be eliminated when converting to single-path code.
+We mentioned before that only WCET analyzable code can be converted to single-
+path. To be WCET analyzable, a program must have an upper bound on each loop,
+that specifies the maximum number of times the loop will iterate. This requirement
+is needed, because otherwise the analysis cannot always determine an upper iteration
+bound. In turn, an upper bound for its execution time cannot be achieved. This is
+a theoretically impossible problem to solve, as it would require the analysis to solve
+the halting problem [23]. It states that it’s impossible to determine, for any arbitrary
+program and input, whether that program ever finishes executing (i.e. halts) [24].
+The halting problem also makes recursive functions intractable in real-time systems.
+In essence, recursion can be thought of as equivalent to looping and therefore can’t
+always be shown to terminate. As such, the single-path conversion cannot deal with
+recursion.1
+To remove the variation in iteration count between different runs of the same loop,
+we make the loops always iterate the maximum number of times. On its own, this
+would change the behavior of the program. So, we also predicate all the instruction
+in the body of the loop. By having the predicate hold the value of the condition of
+the loop, any superfluous iterations will make the instructions in the body have a
+false predicate—and therefore have no effect.
+In Listing 2.1 we can see the effect of converting a traditional loop into single-path.
+In (a) we see a loop that iterates according to the value of $r1. The loop begins by
+incrementing the loop counter $r2 and then evaluating whether it has become greater
+than $r1. If so, the required number of iterations of the body (replaced here by ”...”)
+has been achieved and the loop is exited using a branch. If additional iterations are
+needed, the branch isn’t taken, and at the end of the loop we simply start over. This
+loop will iterate the exact number of times needed by any given run of the program.
+In (b) we see the same loop, except that it uses the single-path approach. The
+maximum possible iteration count is given in $r3 and is 10. Initially, the loop starts
+out equivalent to the traditional approach. However, instead of using a branch to
+skip the body of the loop, the instructions are predicated with the condition. If $r2
+isn’t greater than $r1, then the loop body is execution, otherwise predication ensures
+it does nothing. At the end, we compare $r2 to $r3. If they are equal, the maximum
+number of iterations has been reached and the loop is exited (by skipping the branch).
+Otherwise, we still need more iterations and we branch to the beginning. Therefore,
+1Theoretically, recursion could be used if bounds were also set on its depth. This hasn’t been
+done for the single-path approach, so we will not address it.
+==PAGE:27==
+2.1 Basic Idea
+17
+regardless of how many iterations are needed on a given run, the loop will always
+iterate exactly 10 times.
+The effect of the conversion is similar for other types of loops (e.g. while-loops).
+The only difference would be how to track the maximum iteration count and how the
+condition is calculated.
+2.1.3
+Calls
+Function calls are different from the previous two code constructs we have covered
+because their variability isn’t intuitive. One would think that as long as we converted
+all conditionals and loops in a function to single-path then it wouldn’t have variable
+execution. While this is correct for some functions, the number of times they are
+called must also be taken into account.
+Say we have a conditional where the true path calls a functions while the false
+path doesn’t (and we are using single-path code). Since we have already established
+that each path’s instructions are predicated, when the predicate is false, the call
+in the true path will be disabled and the function won’t be called. However, if the
+predicate is true, then the call is enabled and the function will execute. This means the
+execution time of the conditional is variable—even though we have used if-conversion
+and regardless of whether the function’s execution time is variable. The same behavior
+can be observed for loops, where the function isn’t called in the superfluous iterations.
+To remove the variable number of calls to a functions, all function calls must be
+enabled. However, to ensure that the program’s behavior is preserved, the body of
+the function must be predicated, such that it is only enabled if the calling code is
+also enabled. Therefore, any function that is called from single-path code must take
+an addition true/false argument specifying whether the function’s instruction should
+be enabled.
+1
+li
+$r2
+=
+0
+2 .loop :
+3
+add
+$r2
+=
+$r2 ,
+1
+4
+cmpgt
+$p1
+=
+$r2 ,
+$r1
+5
+( $p1) brnd
+.end
+6
+...
+7
+...
+8
+brnd
+.loop
+9 .end :
+a) Traditional for-loop iterates accord-
+ing to $r1, which is variable.
+1
+li
+$r2
+=
+0
+2
+li
+$r3
+=
+10
+3 .loop :
+4
+add
+$r2
+=
+$r2 ,
+1
+5
+(!$p1) cmpgt
+$p1
+=
+$r2 ,
+$r1
+6
+(!$p1) ...
+7
+(!$p1) ...
+8
+cmpeq $p2 = $r2, $r3
+9
+(!$p2) brnd .loop
+b) Single-path for-loop iterates accord-
+ing to $r3, which is constant.
+Listing 2.1: A for-loop can be converted into single-path by having it always
+execute the maximum number of iterations.
+==PAGE:28==
+18
+2 Single-Path
+2.2
+Formalized Transformation
+We can define a set of rules that formally describe the transformation to single-path
+code [25]. We give these rules using a high-level language containing: single or se-
+quences of statements, conditionals, loops, and function definition and calls. In Ta-
+ble 2.1 we see the rules; each row has a language construct on the left and how it
+should be transformed on the right. For each transformation, the variable σ defines
+the precondition under which the resulting single-path code should be enabled. δ is
+a variable that enables the transformation to create unique identifiers and is a simple
+counter.
+It is easiest to start with function definitions. Whenever the original code has
+defines a function (f), we need to create a single-path version of the function. To do
+so we define a new function (fsp) with an additional argument (cond) which specifies
+whether the function should be enabled or not when called. We then transform its
+body to be predicated on that argument.2
+For every conditional we start by inserting code that calculates the condition and
+puts the result in a guard (guardδ). We then transform each alternative path such
+that they are predicated on the guard (or its negation) and on whether the scope
+enclosing the conditional was enabled.3
+This ensures that if it is disabled—as a
+whole—then so are both alternatives.
+We transform all types of loops (here given as a while-loops) into for-loops that
+iterate the maximum number of times (N). The body is then transformed such that
+it is predicated on the condition of the loop and on whether the loop is enable or not.
+Notice that the resulting loop is not predicated at all. This ensured that it always
+iterates N times. If scope enclosing the loop was disabled, then only the loops body
+is disabled, not the iteration.
+For the simpler constructions, a simple statement and a sequence of statements
+are simply predicated on whether their enclosing scope is enabled. For function calls,
+the call itself is not predicated, but the called function is passed whether the calling
+scope is enabled, and will enable or disable its body accordingly.
+2.2.1
+Addendum
+We have greatly simplified the transformation rules from how they are presented in
+[25]. It is beneficial to note that not all code in a program needs to be transformed
+to the single-path approach. E.g. the main function is a program probably shouldn’t
+be single-path itself, only call single-path functions.
+Additionally, functions that are not called from single-path functions—called SP-
+root functions—can have their transformation simplified since their whole body has
+to be enabled all the time. Additionally, in practice, we won’t replace the original
+2We set δ to 0 because identifiers inside the function can’t be mistaken for those in other functions.
+3We increment δ for each alternative, such that their identifiers don’t conflict with the rest of
+the function’s.
+==PAGE:29==
+2.3 Algorithm
+19
+Construct S
+Translated Construct SPJSKσδ
+def func f (args)
+do S
+def func fsp (cond, args)
+do SPJSK⟨cond⟩⟨0⟩
+if cond
+then
+S1
+else
+S2
+guardδ := cond;
+SPJS1K⟨σ ∧guardδ⟩⟨δ + 1⟩;
+SPJS2K⟨σ ∧¬guardδ⟩⟨δ + 1⟩
+while cond
+max N times
+do S
+for countδ := 1 to N do
+SPJif cond then SKσ⟨δ + 1⟩
+end
+S
+(σ) S
+call func f (args)
+call func fsp (σ, args)
+S1; S2
+SPJS1Kσδ; SPJS2Kσδ
+Table 2.1: Single-path transformation rules
+function with its single-path counterpart, but have them both present in the final
+code. This ensures the same function can be called from on-single-path code without
+having to update the call.
+Lastly, the transformation of conditionals and loops can be simplified if we know
+that their conditions aren’t dependent on input data. Input-data-independent con-
+ditionals will always take the same path and similarly loops will always iterate the
+same number of times. Therefore, such conditionals and loops can be kept as-is, and
+only their bodies converted to single-path.
+For clarity, we have neglected these details in Table 2.1. The complete rule set
+can be seen in Appendix A.
+2.3
+Algorithm
+To implement the single-path transformation, we need an algorithm that applies
+the rules on a control-flow graph (CFG), which is often the data structure used to
+represent programs within a compiler. The algorithm is given by [5]. However, we
+will describe it informally as done in [22].
+2.3.1
+Definitions
+Basic Block (BB): A straight-line sequence of instructions, where execution always
+start with the first instruction and only branches on the last.
+==PAGE:30==
+20
+2 Single-Path
+CFG: A directed graph where the nodes are BBs and the edges model how the
+control flows from one block to the next. A BB that ends with a branch will
+have multiple out-edges in the CFG; one for each possible target.4
+Entry Node: The single—and only—node in a (sub-) CFG where execution starts.
+Exit Node: The single—and only—node in a (sub-) CFG where execution ends.5
+Dominates: Node x dominates node y if all paths to y from the entry node go
+through x.
+Postdominates: Node x postdominates node y if all paths from y to the exit node
+go through x.
+Loop: A strongly connected set of nodes (every node in the loop is reachable from
+every other node in the loop).6
+Header: Every loop has a header, which is its entry node.7
+We also associate a
+header with every node. A node’s header (header(x)) is the header of the in-
+nermost loop the node is contained in. We also treat a whole function as a
+pseudo-loop with its own pseudo-header, which is the function’s entry. There-
+fore, all nodes in a function have a header, except the function’s entry node.
+Back Edge: A edge who’s source node is in the loop and destination node is the
+loop’s header.
+Exit Edge: Has a source node in the loop but destination node outside it. I.e. the
+edge exits the loop.
+Dual Edge: Given a node with two outgoing edges, the dual edge of one of the edges
+is the other edge.
+Latch: The source node of a back edge.
+Natural Loop: Has a header and a single back edge. The natural loop of a back
+edge (l, h) is h (the header) plus all the nodes that can reach l (the latch)
+without first going through h. If two natural loops have the same header, we
+treat them as one loop that is identified by the header node.
+If they don’t
+share a header, they are either disjoint (don’t have any common nodes) or one
+is nested in the other.
+4We require that all BB have a maximum of two out-edges. More out-edges per block imply the
+code contains switch-statements, which can be converted to a sequence of if statements to adhere to
+our requirement.
+5Technically, CFGs can have multiple entry and exit nodes, but we specify that they only have
+one of each.
+6A loop is also a CFG and can therefore be said to have entry and exit nodes.
+7Since a loop is strongly connected, the header node must dominate all other nodes in the loop.
+==PAGE:31==
+2.3 Algorithm
+21
+Reducible CFG: A CFG is reducible if all its cycles have a back edge that is asso-
+ciated with natural loop.
+Forward CFG (FCFG): An acyclic CFG that is the result of removing all back
+edges from a reducible CFG.
+Control Dependent: In a CFG, given the nodes x, y, and z, x is control dependent
+on y if x postdominates z but not y. I.e. from y control branches: One path goes
+first to z and then x, while the other branch can reach the exit node without
+going through either. We also say that x is control dependent on the edge (y,z).
+The set of all the edges x is control dependent on is CD(x).
+Equivalence Class: Two nodes are in the same equivalence class if they are control
+dependent on the same set of edges. All BBs in the same equivalence class will
+have the same predicate condition and therefore can share a predicate register.
+This is because even if there are branches between two nodes in the same class,
+control is guaranteed to merge back at a node in the same equivalence class.
+2.3.2
+Transformation
+We start by analyzing the whole CFG and identifying all the loops in it to construct
+a loop tree, which shows which nodes are part of which loops. The root of the tree is
+always the entry node of the function. The root’s children are either the headers of
+any loops in the function, or nodes that aren’t in any loop. Likewise, for each loop in
+the function, its header has children which are either the headers of nested loops, or
+nodes that are not part of another loop. A loop header and its children are a scope.
+The root node and its children are the root scope.
+An example loop tree can be seen in Figure 2.2, which is generated from the CFG
+in Figure 2.1. We have three scopes: The root scope containing the pseudo-loop of
+the function with a (root, header), b, f, g, and h; the subscope for the loop b (header),
+c, d, and e; and the subscope containing f which loops on itself. As we can see from
+the loop tree, if a loop is nested within another, it is considered as one node and
+represented by its header.
+For each loop sub-CFG in the function, we construct a FCFG. We then create two
+new nodes s and t, connect s to the loop header and to t, and then for each back or
+exit edge in the loop connect its source node to t (if a node has both a back and exit
+edge, it will have two edges to t in the FCFG).
+We can see two such FCFG in Figure 2.3 and Figure 2.4. The first is for the
+function pseudo-loop, where we can see how nested loops are only represented by
+their headers (b and f). The second is for the loop with header b, where we can see
+that e has both a back and exit edge since it has two edges to t. In contrast, c only
+has a back edge, while d only has an exit edge.
+We use the FCFGs to partition the graph into equivalence classes, assigning each
+class a unique predicate that will become the guard for its blocks. For each edge in
+the FCFG that has a an equivalence class depend on it, we insert predicate definitions
+==PAGE:32==
+22
+2 Single-Path
+a
+b
+c
+d
+e
+g
+f
+h
+Figure 2.1: A control-flow graph.
+a
+f
+b
+g
+h
+d
+c
+e
+Figure 2.2:
+Loop tree with every loop
+header in grey.
+s
+a
+b
+f
+g
+h
+t
+Figure 2.3: FCFG of the loop a.
+s
+b
+c
+d
+e
+t
+Figure 2.4: FCFG of the loop b.
+at its source node. The definition assigns the class’s predicate to the condition that
+leads to the edge being taken. All predicates, except the header’s, are assigned to
+false in the header. We predicate all definitions by the guard of the node their in,
+such that their edges are only taken of the source node is enabled.
+Before inserting definitions, we have to ensure the header node is disabled when-
+ever an exit edge is taken, such that superfluous iterations disable the whole loop
+body. To do this, we add the dual edge of any exit edge as a control dependence edge
+of the header. This ensures that whenever an exit edge should have been taken, its
+dual edge will assign the header’s predicate to false, disabling the loop body for all
+subsequent iterations.8
+8If the header node’s predicate ever becomes false, the body can no longer have any effect on it,
+==PAGE:33==
+2.4 Compiler
+23
+After inserting the predicate definitions, all the BBs in the loop are put into a
+sequence using topological order, excluding s and t that are no longer needed. Each
+block will have an edge to the next block in the sequence, eliminating all conditional
+control flow. Then a branch is inserted from the last node to the header (which is
+always the first node in a topological order). This edge is made conditional on the
+number of times it has been taken: After it is taken N-1 times (N being the maximum
+number of iterations for the loop) the condition becomes false and the loop is exited.
+This ensures the loop is always run the maximum number of iterations.
+In outer loops we can only see the headers of nested loops. Instead of their headers
+being connected to the following node, their own FCFG’s final node is connected to
+it. This can be seen in Figure 2.5, which is the final single-path CFG of the example
+CFG given in Figure 2.1. The loop with the header b has its final node—e—connect
+to the following node in the outer pseudo-loop—f.
+2.4
+Compiler
+Patmos has a version of the clang compiler [26] that can produce Patmos machine
+code. clang is an open-source C/C++ compiler that is part of the LLVM project
+[27], which provides tools for program analysis, optimization, and compilation. The
+Patmos compiler is a fork of LLVM code, which has been updated with support for
+the Patmos ISA and can be used to produce single-path Patmos code.
+2.4.1
+LLVM-IR
+The LLVM Intermediate Representation (LLVM-IR) is the heart and soul of the
+LLVM project.
+It can be see as a language that tries to be as close to assembly
+as possible, without being specific to any one ISA. High-level language implemen-
+tations can produce LLVM-IR instead of assembly code and have the LLVM static
+compiler—llc—produce the assembly from it. This is what clang does; it takes C
+code, transforms it to LLVM-IR, and then calls llc to produce the final binary. In
+this setup we call clang a frontend and llc a backend.
+Using llc, any language that can compile to LLVM-IR can be further compiled
+to all ISAs supported by llc.
+This makes it much easier to implement high-level
+guaranteeing it never becomes true again. Even definitions in the header can’t change it, since they
+are predicated on the same predicate—and therefore disabled if its false.
+a
+b
+c
+d
+e
+f
+g
+h
+Figure 2.5: The single-path CFG transformed from the one in Figure 2.1.
+==PAGE:34==
+24
+2 Single-Path
+languages, since each compiler doesn’t have to implement assembly code generation
+itself. Likewise, it also makes it easier to make many languages support a new ISA
+(like Patmos), since updating llc to produce code for it results in many high-level
+languages automatically getting the feature too.
+To implement support for the Patmos ISA, the compiler implementation actually
+focuses of llc—enabling it to produce Patmos assembly from LLVM-IR. When we
+then compile with clang, it will be using the updated llc that supports Patmos, which
+means we can compile a C program to a Patmos binary executable.
+In Listing 2.2 we can see an LLVM-IR function which is roughly equivalent to the
+Patmos assembly seen in Listing 1.5a. The function takes two integer arguments and
+returns a single integer. Its body is comprise of a set of BBs that branch to each
+other for control flow. We can see that it is very similar to assembly, but is still a
+CFG and perfect for to do transformation on.
+Sadly, LLVM-IR doesn’t support predication or instruction bundling. Therefore,
+we cannot do the single-path transformation directly on it, nor the bundling described
+later. However, when before llc produces the finished machine code, it transforms the
+LLVM-IR into a representation that is a hybrid of the LLVM-IR and the machine
+assembly. This machine specific IR (MSIR) looks a lot like LLVM-IR, having the same
+rules and structure, but all instructions are from the target ISA and, in Patmos’ case,
+support predication and bundling. Therefore, the actual single-path transformation
+is done on MSIR and not the LLVM-IR directly. For simplicity—and because there
+is no official syntax for MSIR—when showing examples about Patmos’ MSIR we will
+use either LLVM-IR or Patmos assembly instead.
+LLVM-IR has many nice properties that we have not been covered here. However,
+these are not specifically tailored to Patmos, nor relevant to the specific problem state-
+1 define i32 @func(i32 %r1, i32 %r2){
+2 Start:
+3
+%c= icmp eq i32 %r1, %r2
+4
+br i1 %c, label %IfEqual, label %IfUnequal
+5
+6 IfEqual:
+7
+%temp1 = add i32 %r1, %r2
+8
+%r3 = add i32 %temp1, 1
+9
+br label %end
+10
+11 IfUnequal:
+12
+%temp1 = sub i32 %r1, %r2
+13
+%r3 = sub i32 %temp1, 1
+14
+br label %end
+15 End:
+16
+%x = phi i32 [ %r3, %IfEqual], [ %r3, %IfUnequal ]
+17
+ret i32 %x
+18 }
+Listing 2.2: Example LLVM-IR function
+==PAGE:35==
+2.4 Compiler
+25
+ment of this report. Therefore, we will not go into further detail with the properties
+of LLVM-IR, except to note that they are important for easy and efficient compilation
+for Patmos and in general.
+2.4.2
+Single-Path Passes
+Facilitating the generation of single-path code is done as a set of passes over the
+LLVM-IR and MSIR. The actual single-path transformation is done as the last pass
+on the MSIR. All previous passes prepare the code for the transformation, ensuring
+that all needed properties are enforced.
+The first set of passes are done on the LLVM-IR, where we ensure that our re-
+quirements for its CFG are met: that there are only a single entry and exit node and
+that all switch-statement are converted to conditionals. LLVM has built in passes
+that can tranform the LLVM-IR to adhere to those requirements.
+Next comes the two passes SPClone and SPMark. Together, these passes ensure
+that every function that needs a single-path version are cloned such that the final
+binary will have a single-path and a non-single-path version of the function. SPClone
+works on the LLVM-IR where it looks for all functions that might be called from a
+single-path context and clones them. SPMark then works on the MSIR, taking all
+the clones and updating all their function calls such that they call each other instead
+of the non-single-path versions.
+The heavy lifting for the single-path transformation happens in the SPReduce pass.
+Here the CFG is analyzed, loop trees and FCFG are created, equivalence classes are
+define and allocated to the Patmos predicated registers (using a specialized predicate
+register allocation), and the final transformation is done.
+At this point the single-path code has been created, but the Patmos-specific laten-
+cies for each instruction are have not been accounted for. Therefore, a scheduling pass
+is run, which reorders instructions and adds nops where needed such that the code,
+e.g., doesn’t use a loaded value in the bundle immediately following the load.9 Note
+that the scheduling pass is not unique to the single-path approach, but a standard
+pass used in all compilers. The specific pass used here is implemented for producing
+traditional code for Patmos and reused for the single-path approach.
+9Recall that lwc has one delay slot, meaning the loaded value cannot be used in the bundle
+immediately following it.
+==PAGE:36==
+26
+==PAGE:37==
+CHAPTER 3
+Testing
+For any sufficiently complex program, significant effort must be put in ensuring that
+it works as intended.
+Compilers in general quickly become complex, and testing
+must therefore be part of any non-trivial development effort. Having the tests being
+automated is also a must, as the sheer number of tests required make manually
+running them impractical.
+As stated before Patmos’ compiler is built on the LLVM compiler, and has an
+automated testing setup for the generation of traditional code. However, there is
+no automated setup for testing of single-path code. Therefore, before initiating any
+development effort towards bundling instructions, we design and implement a testing
+setup, such that we can ensure that the existing features aren’t lost, and that the
+new features we want to implement work as expected.
+In this chapter we will describe the testing setup that was designed and imple-
+mented for the single-path code generation of the compiler. We first describe the
+requirements the setup must adhere to and then present the three types of tests that
+will be used. The setup is inspired by LLVM’s own setup for testing code generation
+for other architectures [28] and uses its existing infrastructure where possible.
+3.1
+Requirements
+We first specify three functional requirements, which are features different tests must
+have to enable us to efficiently develop on and verify the implementation of the
+compiler:
+Correctness: We need to be able to validate that correct programs are successfully
+compiled and, when executed, produce the correct result. This is the goal of
+any compiler and ours is no different. If a compiled program doesn’t behave as
+the semantics of the programming language it was written in specify, nothing
+else matters, as the program becomes useless. Therefore, our testing setup must
+be able to verify that, for a given correct program, the compiler can compile
+it, and that running the resulting binary produces a result equivalent to some
+reference value.
+Unlike other compilers, our compiler also needs to produce single-path code.
+Not all the code in the binary should be single-path, only the functions that are
+==PAGE:38==
+28
+3 Testing
+declared as single-path and any others they call. Therefore, our testing setup
+must be able to distinguish between binaries with traditional and single-path
+code, and verify that single-path code is correctly used in the needed places.
+Maintenance: As users exercise the compiler, they are sure to uncover bugs that
+have not been caught by the testing setup. Alternatively, a developer might
+also uncover problematic cases that he thinks should be added to the testing
+setup—even though they are not currently manifesting a bug. Therefore, the
+setup should enable targeted tests that isolate a given bug or feature as much
+as possible, such that finding errors is as easy as possible and bugs aren’t rein-
+troduced by accident.
+Productivity: We want our testing setup to be a development tool and aide in the
+implementation of correct functionality. Be it test-driven development or other
+techniques, we want to the setup to be a boon to the developer and make him
+more productive for both maintenance and the implementation of new features.
+Additionally, finding the cause of errors should also be as easy as possible and
+aided by the test setup.
+We also have two general requirements for the setup that the design will strive
+towards, but can ignore where necessary:
+Low Coupling: The setup should be as decoupled from the implementation of the
+compiler as possible.
+This will minimize the need for revising tests as the
+compiler is updated, which could compromise the tests by deviating from their
+original intent.
+Usability: Running the tests and interpreting the result should be as easy as possible
+and preferably foolproof. We want to ensure that failing tests aren’t overlooked
+either because the tests weren’t run correctly or the test report was misinter-
+preted as a success.
+Guided by these requirements, we have designed a testing setup that divides tests
+into three categories: Unit Tests, Regression Tests, and Program Tests. Each category
+of tests has its own features and addresses a subset of our requirements. They are
+also designed to integrate easily into the existing LLVM testing setup, which they are
+heavily inspired by—we even use the same names for the categories as LLVM does
+[28].
+3.2
+Unit Tests
+The first type of tests we will use as the development aid.
+These are tests that
+help make the developer more productive, but do not validate the compilers behavior
+directly. They should be able to test isolated parts of the compiler’s internals, and
+==PAGE:39==
+3.2 Unit Tests
+29
+should be very easy to add and remove. Additionally, they should run very quickly,
+such that they can allow a short edit-compile-test cycle. All of these qualities will
+ensure that the developer can quickly implement features and have some confidence
+in his code, before running the next two test categories.
+To enable unit testing, we use the Google Test C++ testing framework [29]. It
+allows us to easily create test cases in C++ that can directly interact with the com-
+pilers internal implementation. The tests are then compiled into an executable, that
+when run executes the tests and produces a highly detailed report of successes and
+errors.
+In Listing 3.1 we see an example of a test case. The framework manages tests
+through the TEST macro, which is given two names (test suite and case name) and a
+code block to run. Inside the block the test is setup and assertion macros are used
+to ensure some properties hold. In our example, we first create a PredicatedBlock
+instance, which represents a single-path basic block, and assign it a predicate number.
+We then use the EXPECT_THAT macro to ensure the block has correctly been assigned
+the predicate.1
+When a test fails, the testing framework will automatically issue a message detail-
+ing exactly which assertion failed and why. In Listing 3.2 we see the relevant parts
+of the test report. We can see that both assertions failed: First that the number
+of predicates assigned to the block is 0 where we expected 1, and second that no
+predicate with the correct identifier was found (since there is none).
+Using this testing framework allows us to quickly create unit tests for the compiler
+internals in a sophisticated manner. It includes the ability to mock classes for testing.
+This allows us to simulate the behavior of some classes, without having to instantiate
+real objects of the class.
+This is especially useful when working with LLVM, be-
+1A PredicatedBlock can be assigned multiple predicates. We test that the list of predicates it
+has been assigned has a length of 1 and that the predicate has the correct identifier (2).
+1 TEST(PredicatedBlockTest , SinglePredicateTest){
+2
+/*
+3
+* We test that if a block is only predicated by one predicate,
+4
+* 'getBlockPredicates()' only returns that single predicate
+5
+*/
+6
+MockMBB mockMBB(5);
+7
+PredicatedBlock b(&mockMBB);
+8
+9
+b.setPredicate(2);
+10
+11
+auto preds = b.getBlockPredicates();
+12
+EXPECT_THAT(preds, SizeIs(1));
+13
+EXPECT_THAT(preds, Contains(2));
+14 }
+Listing 3.1: A unit test for the setPredicate() method of the PredicatedBlock
+class
+==PAGE:40==
+30
+3 Testing
+1 [ RUN
+] PredicatedBlockTest.SinglePredicateTest
+2 llvm/unittests/Patmos/SinglePath/PredicatedBlockTest.cpp:114: Failure
+3 Value of: preds
+4 Expected: size is equal to 1
+5 Actual: {}, whose size 0 doesn't match
+6 llvm/unittests/Patmos/SinglePath/PredicatedBlockTest.cpp:115: Failure
+7 Value of: preds
+8 Expected: contains at least one element that is equal to 2
+9 Actual: {}
+10 [
+FAILED
+] PredicatedBlockTest.SinglePredicateTest (0 ms)
+Listing 3.2: A failed test report for the unit test in Listing 3.1
+cause many classes are enormously difficult to instantiate manually. E.g. the classes
+that represent a function and its parts: MachineFunction, MachineBasicBlock, and
+MachineInstr, cannot easily be instantiated because LLVM was designed to have full
+control over them. Instead, we can mock these classes when testing our own classes
+that interact with them. This is exactly what was done to test PredicatedBlock,
+which wraps the MachineBasicBlock class. We can see in Listing 3.1 that the first
+thing the test does is create a MockMBB object—which simulates a MachineBasicBlock
+(MBB) object with 5 five instructions—and passes it to the PredicatedBlock. Doing
+this without mocking would have required us to delve into the inner working of LLVM,
+set up a program environment, create a function, then a basic block, and lastly some
+instructions that are added to the block. All of that would have likely required more
+lines of code than this whole test.
+Using the mocking facilities requires us to design the compiler for testability.
+PredicatedBlock, as an example, is a class template to accommodate the tests.
+This is because the LLVM classes have not been designed for testing, and cannot
+therefore be mocked directly. The testing framework can mock any class that has
+virtual methods, such that it overrides the methods and injects its own code into
+them. But, it cannot do it if the methods aren’t virtual. To circumvent this, we
+make PredicatedBlock a template, and manually mock LLVM’s classes by created
+mock version of them, with methods that have the same name. In the tests, we make
+PredicatedBlock use the test classes, but in the compiler, we make it use LLVM’s
+classes. The mocking is effective, because we implement the mocking classes such
+that they behave as we would expect LLVM’s classes to behave. If we don’t do this
+correctly, the tests can give false positive or negatives. However, there is no other
+way around this.
+Since Unit tests aren’t meant to validate the functionality of the compiler, nor
+uncover the presence of bugs, the developer can freely create or delete tests as best
+suits him. This is contrasted to the other two tiers, where we must be careful when
+making changes to any test and especially when removing tests.
+Therefore, even
+though unit tests are highly coupled with the implementation of the compiler, we
+offset it by allowing them to be edited freely.
+==PAGE:41==
+3.3 Regression Tests
+31
+Unit tests mainly cover the productivity requirement.
+They cannot, on their
+own, validate the correctness of the compiler; they can only validate whether the
+implementation matches the developers mental model of the design. Whether the
+design is correct must be validated by the other two test categories. Unit tests also
+can’t be used to ensure bugs aren’t reintroduced as they can be ephemeral.
+As for the general requirements, unit test are very highly coupled with the imple-
+mentation of the compiler. This cannot be avoided, which is why we allow the tests
+to be edited freely and don’t use them for final validation. By allowing them to be
+changed or removed, we allow flexibility for changing the compiler implementation
+without having to worry too much about the unit tests. As for usability, the Google
+Test framework makes it trivial to run the tests and provides error reports that show
+both where the problem is and why it happened.
+It should therefore be nigh on
+impossible to either run the test incorrectly or misinterpret the results.
+3.3
+Regression Tests
+The second category of tests in our setup consists of small programs that are custom-
+made to exercise a specific feature or bug.
+When running these tests, the setup
+ensures the programs compile, run, and use single-path code.
+To ensure we can minimize any variables that aren’t relevant to each test case,
+we will need to simplify the tests as much as possible. We do this by writing each
+regression test in LLVM-IR instead of C. We then use llc directly to compile the
+program, eliminating the use of clang, which allows us to better control how the code
+looks right before llc begins its work. If we had used clang, we wouldn’t be able to
+control how it converts a C program to LLVM-IR, which could make it very difficult
+for us to create tests that are specific to how the LLVM-IR is structured.
+After a successful compilation, we use the pasim simulator—which simulates how
+an executable will run on the Patmos processor—to ensure that running the program
+produces the expected result. For each test cases, we provide a set of input/output
+pairs: We then simply test that for a given input, its expected output is returned
+when the program is run through pasim.
+3.3.1
+Testing for single-path
+It can be difficult to tell whether a program is using single-path code. Simply running
+it and inspecting its output doesn’t say anything about how the code is working. We
+therefore need a way to ensure that the program is using single-path code. But how
+do we do this?
+A naive approach would be to simply inspect the program’s assembly code, and
+ensure its single-path by comparing it to some assembly we create by hand (and
+therefore know is single-path). While this could work, it is not very flexible. First,
+this is highly implementation dependent, as we are forcing the compiler to produce
+==PAGE:42==
+32
+3 Testing
+code that exactly matches ours. We would like to give the compiler some leeway, e.g.
+by giving it freedom to choose which registers should be use for a given instruction
+sequence. This is useful if we, for example, want to optimize the produced code. This
+assembly inspection, we would need to update the test to reflect this optimization.
+What we do instead is test for what makes single-path code unique: it always
+runs the same sequence of instructions, regardless of input. An ideal solution would
+be for pasim to provide us with the instruction sequence of the program it runs. We
+could then run the program with the different inputs, and ensure that all instruction
+sequences are identical.
+Sadly, pasim cannot produce such an instruction sequence. Instead, it can provide
+us with the number of cycles the program used, a table of how many times each
+instruction type was executed, and the number of times each function is called. We
+use these as a surrogate for the instruction sequence; We validate that each run of
+the programs uses the same number of cycles, instructions, and function calls. Since
+pasim accurately models caches. However, we configure it to use an ideal data cache,
+which never misses. This eliminates variance in cycle count caused by cache-misses
+for different input data.
+This solution isn’t ideal. We cannot guarantee that no non-single-path program
+fails this validation. It could be possible that such a program uses the same cycles and
+instructions for the all the specific inputs. However, it should be extremely unlikely
+that a non-single-path program uses the same number of cycles, instructions, and
+functions calls when given different inputs. In exchange for the uncertainty, we get a
+setup that is flexible. It allows the compiler to produce any single-path code it wants
+with only a negligible chance of false positive test results.
+3.3.2
+Example
+In Listing 3.3 we have an example of a regression test. It tests conditional execution,
+where the function init_func takes an integer argument and execution branches on
+whether it is 0 or not. A variable, x, is given the value 2 if the condition was 0 and 1
+otherwise, after which it is returned as the program’s result.
+We use LLVM’s lit tool to manage the execution of each test case [30]. It uses the
+first line in our test as a configuration. There are only two pieces of information in the
+line that are unique to each tests. First, the name of the function to be tested—in this
+case init_func. llc will be ordered to compile the function using single-path code
+and when counting cycles and instructions, pasim will only do so for this function.
+The second piece of information is a list of input/output pairs for testing the program
+results. These pairs are always at the end of the line, with the input first followed by
+an equality sign and then the expected output. In this example the pairs are 0=-2
+and 1=1, which means the program is expected to return -2 if given 0 as input, and
+1 if given 1 as input.
+The rest of the test case will be the LLVM-IR code of the program to test. List-
+ing 3.3 is only shows the relevant parts of the test case. For the complete version, see
+==PAGE:43==
+3.3 Regression Tests
+33
+1
+; RUN: %p/../assert_singlepath.sh llc -O2 %s init_func %DEBUG_TYPE 0=-2
+1=1
+2
+3
+define i32 @init_func(i32 %cond)
+{
+4
+entry:
+5
+%tobool = icmp eq i32 %cond, 0
+6
+br i1 %tobool, label %if.else, label %if.then
+7
+8
+if.then:
+9
+%0 = load volatile i32* @_1
+10
+br label %if.end
+11
+12
+if.else:
+13
+%1 = load volatile i32* @_2
+14
+%sub = sub nsw i32 0, %1
+15
+br label %if.end
+16
+17
+if.end:
+18
+%x = phi i32 [ %0, %if.then ], [ %sub, %if.else ]
+19
+ret i32 %x
+20
+}
+Listing 3.3: A regression test for simple branching
+Appendix B.
+When the compiler has an error that results in a regression test’s failure, it can
+manifest in multiple ways: compilation failure, running failure—either by returning
+the incorrect result, causing a trap in the processor, or looping infinitely—or the
+single-path validation could fail. In Listing 3.4 we can see that error report for our
+branching test case. It reports that running of the program gave an incorrect result
+when given 0 as input. It expected -2, but the result was -3. In Listing 3.5 we see
+another error report for the same test case. Here the program doesn’t use single-
+path code. It has detected this by comparing the pasim statistics when running the
+program with the two different inputs. It shows how different types of instructions
+have been executed a different number of time, e.g. the subi instruction is called
+once for one run but no times for the other while the addl instruction is called twice
+1
+The execution of 'llvm/test/Patmos/singlepath/single_source/branch/branch
+' for input argument '0' gave the wrong output through stdout.
+2
+-------------------- Expected --------------------
+3
+-2
+4
+--------------------- Actual ---------------------
+5
+-3
+6
+--------------------------------------------------
+Listing 3.4: A failed test report for the regression test in Listing 3.3 (returned
+incorrect result)
+==PAGE:44==
+34
+3 Testing
+1
+--
+2
+2c2
+3
+< subi: 1
+4
+---
+5
+> subi: 0
+6
+9c9
+7
+< addl: 2
+8
+---
+9
+> addl: 1
+10
+21c21
+11
+< sub: 1
+12
+---
+13
+> sub: 0
+14
+99c99
+15
+< ret: 2
+16
+---
+17
+> ret: 1
+18
+108c108
+19
+< Cycles: 116
+20
+---
+21
+> Cycles: 91
+22
+The execution of 'llvm/test/Patmos/singlepath/single_source/branch/branch
+' for execution arguments '0=-2' and '1=1' weren't equivalent.
+Listing 3.5: A failed test report for the regression test in Listing 3.3 (didn’t use
+single-path code)
+for one run and only once for the other. It also shows how the number of cycles used
+for the two inputs are different; 116 compared 91.
+The test report clearly highlights the consequences of the compiler error. However,
+it doesn’t provide much help in narrowing down which parts of the compiler is faulty.
+We will have to rely on the debugging for that, and the test setup helps with this.
+3.3.3
+Debugging
+The traditional meaning of debugging covers the general act of resolving errors and
+bugs in programs. When we use it, we more specifically talk about the act of in-
+specting the internal workings of a program—our compiler—while it is working. We
+could be looking at the contents of an internal or following the execution path to see
+whether there are any deviations from our expectation.
+One way to do debugging is through execution-time inspection by using a debugger
+tool. The debugger will insert itself into a program, and manage its execution. The
+developer can then step through the program’s execution, and can inspect the internal
+memory of it at each relevant point. This can be very powerful for investigating errors,
+as it allows us to see exactly what the compiler is doing, as it is doing it.
+However, a bit deficiency of debuggers, is their lack of support for non-standard
+data structures.
+This means we cannot have a fine-grained look at many part of
+==PAGE:45==
+3.4 Program Tests
+35
+the compiler. As an example, LLVM’s classes that comprise the LLVM-IR can’t be
+inspected to see how exactly the code evolves within the compiler.
+As different method we can used is print debugging. Instead of inspecting the
+compiler as it runs, we add debugging statements into the compiler’s code, such that
+it prints any relevant information we want to a file. When execution ends, the file
+will contain all the output of the debugging statements, which can then be analyzed
+to find errors.
+This type of debugging can be a better alternative to using debuggers, as it al-
+lows us full control of what information to output and how it should look. E.g. to
+inspect the LLVM-IR, we simply create a debug statement at the relevant point in
+the compiler that prints the IR in a human-readable format.
+Our test setup supports print debugging for regression tests. By default, when the
+tests are run, debugging output is automatically saved in a file that can be inspected
+immediately. This should make it seamless for the developer to run the tests, see
+the error report, and inspect the corresponding debug file for the failure source. Of
+course, the debug file will only include information that has been specifically output
+by a debug statement. If additional information is needed, the developer will need to
+add a debug statement to the compiler and run the tests again.
+The regression tests focus on our maintenance requirement, allowing us to create
+fine-grained tests that ensure any fixed bug will not be reintroduced and isolated
+features can be tested directly. Being fully automated, the tests increase developer’s
+productivity, by providing clear and plentiful information on errors. They are almost
+trivial to run, practically impossible to run incorrectly, and clearly highlight failures.
+Being written in LLVM-IR and don’t inspect assembly directly, they are also fully
+decoupled from the compiler implementation.
+Lastly, the nature of the tests also means they validate correctness; any regression
+test failure must means there is an error in the compiler. However, since each test
+should be as minimal as possible, they don’t validate that each feature works well
+when used in conjunction with others. They also don’t provide confidence in the
+compiler being able to compile real-world programs, as they all are doctored for the
+specific feature or bug they test. Therefore, we need the last test category to validate
+that the compiler can correctly compile real-world programs.
+3.4
+Program Tests
+Similar in idea to the regression tests, this category of tests validate the correctness
+of compiler. However, to ensure real-world conditions, the tests should compile self-
+contained programs that solve some real task. Additionally, the programs should be
+written in a high-level language supported by clang, like C or C++. Otherwise, the
+validation process should be similar to the regression tests: compile, run, and ensure
+correct output and use of single-path code is used. A broad set of test programs will
+ensure that the compiler is exercised in a way similar to the real-world and thereby
+giving us the confidence that it works as intended.
+==PAGE:46==
+36
+3 Testing
+This type of tests are usually called a test suite and is a staple of any mature
+compiler. LLVM is no exception, with its test suite contained in a different code
+base [31]. The Patmos project also has a test suite for when the compiler produces
+traditional code but doesn’t test single-path code generation. Because of time con-
+straints, implementation of an automated setup for single-path code generation is left
+as future work. The existing infrastructure of either LLVM’s test suite or Patmos’
+own suite can be leveraged in the future, with reuse of the setup for the regression
+tests also possible.
+3.5
+Usage
+Together, the three categories of tests cover all our requirement. However, adherence
+to a few rules will ensure the most efficient use of developer time and confidence in
+the testing.
+Whenever a change to the compiler is implemented, we want to be confident that
+no bugs are reintroduced and all features still work. To this end, the regression and
+program tests should be our source of truth. If all their test cases pass, then we can
+be confident everything still works as it did before.
+When a a bug is found, tests should be added that catch the error and ensures
+we don’t reintroduce it moving forward. Ideally, we would be able to add a program
+test that does this but it might not always be possible. E.g. the bug could be found
+by a user that isn’t being able to provide a real-world program that suffers from it.
+Regardless of whether we have a program test or not, we should also have a regression
+test for it, since their simplicity makes it easier to find the source of errors. We should
+also be careful not to only use unit tests when fixing bugs, as they may be deleted or
+modified substantially in the future.
+Preferably, we should introduce tests in the reverse category order. First we a
+program tests is added for a feature or bug. We can run this tests before beginning
+the implementation work and it should fail.
+Using the failed program test, a set
+of regression tests should be made that cover all the isolated reason for the failure.
+Lastly, as part of the implementation work, unit tests are added where needed. This
+should ensure we make it easy for ourselves to maintain the compiler moving forward.
+Of course we can be flexible, switching between the categories as needed or omitting
+program tests where required.
+The division of tests into three categories is meant to make efficient use of the
+developers’ time. The program tests give us the greatest confidence in the correctness
+of the compiler, followed by the regression and then unit tests.
+With the higher
+confidence come an increase in the running time needed for the executing the tests.
+In the day to day work, having long-running tests can severely reduce productivity,
+which is not optimal.
+With proper test management, we can create a setup where if a program test
+fails, a regression test should also fail. Likewise, for every regression test, some unit
+test should also fail. We can achieve this if we create tests as described above. If
+==PAGE:47==
+3.5 Usage
+37
+successful, developers can save time by strategically running the different categories.
+While working, they can rely mostly on the unit tests as they are quick to run. When
+they are confident in an implementation, and the unit tests succeed, they can run the
+regression tests and fix any error they find there (introducing more unit tests along
+the way). Only in the end are program tests run, as a final proof that everything
+works as expected. This usage of the different categories should minimizes the total
+time spent on running tests. As a whole, we therefore make efficient use of developer
+time, but still ensure that the compiler behaves as we expect.
+==PAGE:48==
+38
+==PAGE:49==
+CHAPTER 4
+Refactoring
+To implement support for bundling single-path code, we will have to be familiar
+enough with the code to be able to change it correctly. Sadly, the original developers
+are not available to help, so we had to learn how the code works without outside help.
+Reading the code is the primary method of getting familiar with it. However, it
+can be difficult to understand how it works by simply reading it. Ideally, we would
+have small tasks that we could use to slowly learn how everything works. Having
+something concrete to do can help the learning, since being able to make changes and
+see how they affect the program will show whether we have the correct or incorrect
+understanding of the code. Our task of supporting bundling is too complex to under-
+take without a minimal level of familiarity with the code. Therefore, we will need a
+different method to help us learn.
+Refactoring is the act of changing code without affecting what it does. Ideally,
+refactoring will make the code better and more easily understood. We can use refac-
+toring to learn the Patmos compiler’s code in the same way we would have used small
+tasks. This will help the learning, as being able to make changes while maintaining
+functionality must mean we have understood that part of the code correctly. Using
+our new testing setup, we can ensure we maintain the existing single-path function-
+ality as we make the changes.
+Being a research compiler, most of the developers who will be working on it will
+be students. They will not have worked in the compiler before, and would have a
+short time to learn the code and implement whatever functionality they need for their
+project. Our goal with the refactoring will be to make it easier for others to learn the
+code in the future. We will even accept a reduction is performance, if it makes the
+code easier to understand.
+In this chapter, we will give a high-level overview of the types of refactorings we
+made before having the confidence to implement support for bundling. The purpose
+of these descriptions are two-fold: First, they are meant as a kind of guide to which
+refactorings are most conducive to learning. Finding patterns that resemble those
+described in this chapter, and being able to change them to better alternatives, will
+exercise one’s understanding of the code and build our confidence in that our under-
+standing is correct. Second, they are meant as a set of patterns of code that should
+be avoided, and what to use instead.
+This can be used by newcomers to the code as a list of patterns to search for
+in the code while learning it, and making changes to understand the code. Existing
+==PAGE:50==
+40
+4 Refactoring
+developers of the compiler can also use these description to better avoid code patterns
+that are unnecessarily difficult for newcomers to understand.
+4.1
+Organization
+Before reading a single line of code, we must be able to get a course-grained un-
+derstanding of how the code is organized. The LLVM codebase, which contains the
+existing single-path implementation, has 1910 source code files in 111 folders. Even
+the folder which contains all Patmos-specific code contains 84 files in 6 sub-folders.
+Easy navigation through such a complicated codebase requires encapsulation, where
+similar files are grouped together in folders.
+At the outset of this thesis, only six files were relevant for single-path code. They
+were found in the root Patmos folder with 47 other files folders. While not necessarily
+difficult to find, it was definitely a nuisance to figure out which files were relevant
+and which weren’t. Therefore, we moved all the files into their own folder, which we
+named SinglePath. This made it trivial to get a good overview. By the end of the
+project, there were 14 single-path files, which would have been a real pain to manage
+with the 47 others. Originally, single-path files were given names that included either
+’SinglePath’ or ’SP’, to help distinguish them. This is no longer needed, as their
+folder’s name does this. We can then simply call the register allocation file ’RAInfo’
+instead of ’SPRAInfo’ or ’SinglePathRAInfo’.
+For similar reasons to grouping files in folder, we should also divide code into
+different files. As an exercise, the following is a complete list of files containing the
+original single-path implementation:
+• PatmosSinglePathInfo.cpp
+• PatmosSinglePathInfo.h
+• PatmosSPClone.cpp
+• PatmosSPMark.cpp
+• PatmosSPPrepare.cpp
+• PatmosSPReduce.cpp
+Which one of them contains the code which manages predicate register allocation?
+We know the correct class is called RAInfo, so it would have been easier to find it if
+it had its own file. Say we find the correct file,1 which lines are relevant? This is not
+trivial, the following line numbers are of interest:2
+1Hint: It’s PatmosSPReduce.
+2The list has been made on a best-effort basis and could be incomplete.
+==PAGE:51==
+4.2 Coupling
+41
+• Lines 80-83 contain definitions for variables used to manage register allocation
+statistics.
+• Lines 334-615 define two classes, one of which is RAInfo and the second is a
+utility class used exclusively by RAInfo.
+• Lines 1005-1067 manage the execution of the register allocation algorithm. They
+consist of two methods that are not part of the RAInfo class.
+• Lines 1825-2025 implement of some of RAInfo’s methods.
+As we can see, the relevant code is scattered throughout the file, which has 2318
+lines of code in total. It is not trivial to find the relevant code in this case. Therefore,
+a better solution would be to extract RAInfo into its own file. This makes it trivial
+to find all its code, and we can focus on any changes we need to do. In fact, the
+PatmosSPReduce.cpp is so complex, we divided it into four files:3
+• PatmosSPReduce.cpp: Manages the different steps of the single-path transformation—
+using the other files—and performs the final basic block reordering and insertion
+of instructions were needed.
+• SPScope.cpp: A tree structure that represents each loop scope. Performs the
+various CFG analyses, e.g. creates FCFGs for all loops.
+• RAInfo.cpp: Performs predicate register allocation.
+• PredicatedBlock.h: Wraps the MachineBasicBlock class (which represents a
+block of Patmos instructions) and stores relevant data about each, e.g. which
+predicates its has been assigned.
+This division is much easier to manage, allowing us a better overview of how the
+different classes interact, which is useful as we try to reduce coupling.
+4.2
+Coupling
+As classes depend on a larger number of other classes, and as they need to know more
+about each other to interact correctly, we say their coupling increases.
+High coupling can have multiple detrimental effects. First, understanding the code
+becomes more difficult, as analyzing one class requires knowledge about other classes
+first. Second, it make the code less flexible. As coupling increases, it become more
+difficult to update one class without having to also update others to accommodate
+the changes. In their book concerning good programming practice, Hunt and Thomas
+simply state:
+3If we count header files too, it becomes 7 files.
+==PAGE:52==
+42
+4 Refactoring
+Systems with many unnecessary dependencies are very hard (and expen-
+sive) to maintain, and tend to be highly unstable.
+(The Pragmatic Programmer [32])
+One straightforward way of decoupling is to go through the different classes, and
+try to minimize all public members; fields, methods, and nested structs or classes. For
+each member, we trace where they are used in other classes and see if the interaction
+can be minimized.
+A trick we can use here, is see of there are whole blocks of code that can be moved
+from one class to another. We have already encountered a good candid for this: The
+lines 334-615 in PatmosSPReduce described before are two methods which initialize
+RAInfo so that register allocation can be performed. All this logic is exclusive to
+register allocation, and by moving it into RAInfo, PatmosSPReduce is no longer needs
+to know exactly how predicate register allocation is done. Now, it simply has RAInfo
+do everything, and only needs to worry about the result.
+4.2.1
+PIMPL Idiom
+Since we are using C++, we must have any private class members declared in the
+header file. We would like to work around this, such that the header only contains
+public declarations of each class. This will give us a single point to look at when
+analyzing class interactions.
+The Pointer to Implementation (PIMPL) idiom is a technique for hiding the
+private members of a class behind a pointer to an implementation class. The main
+benefit of using this idiom is reduced compilation times, as less code resides in header
+files that are compiled multiple times [33]. However, in our refactoring effort we will
+use this idiom for an additional benefit: It allows us to separate the implementation
+of classes from their public interface, which gives us a better overview of how classes
+interact and how to reduce their coupling.
+Take the class SPScope. It contains many member functions and, as can be seen
+in Listing 4.1, many member objects. Each scope tracks various data, e.g.: All scopes
+have a parent (except the root), a set of basic blocks, and a set of subscopes. After the
+scopes have been initialized through their constructors, they are queried for various
+information, like finding the header blocks of scopes or the topological order of its
+blocks. Therefore, the SPScope objects don’t change after initialization, and their
+internal representation is of no importance to other classes. However, as can be seen
+in the listing, all private members of the class are present in the header file and, if
+changed, require a recompilation of all .cpp files that depend of that header.
+Using the PIMPL idiom, we can move all private member of the SPScope class into
+an implementation class—SPScope::Impl—that will only reside in the SPScope.cpp
+file, as seen in Listing 4.3. The original will then have a pointer to its implementation
+class as its only private member, as can be seen in Listing 4.2. Access to the original
+private members is then always done through SPScope::Impl.
+==PAGE:53==
+4.2 Coupling
+43
+1 class SPScope {
+2 public:
+3
+...
+4
+bool isHeader(const MachineBasicBlock *MBB) const;
+5
+...
+6 private:
+7
+...
+8
+SPScope *Parent;
+9
+10
+std::vector<MachineBasicBlock*> Blocks;
+11
+12
+std::vector<SPScope*> Subscopes;
+13
+...
+14 }
+Listing 4.1: SPScope.h before the use of PIMPL
+1 class SPScope {
+2 public:
+3
+...
+4
+bool isHeader(const MachineBasicBlock *MBB) const;
+5
+...
+6 private:
+7
+// We declare the type of implementation class here,
+8
+// while we only implement it in the .cpp file.
+9
+class Impl;
+10
+// We use the PIMPL idiom to implement private members.
+11
+Impl *Priv;
+12 }
+Listing 4.2: SPScope.h after the use of PIMPL
+1 // The implementation class contains all private members of the original
+class
+2 class SPScope::Impl
+{
+3
+...
+4
+SPScope *Parent;
+5
+6
+std::vector<MachineBasicBlock*> Blocks;
+7
+8
+std::vector<SPScope*> Subscopes;
+9
+...
+10 }
+Listing 4.3: SPScope.cpp after the use of PIMPL
+==PAGE:54==
+44
+4 Refactoring
+This will not work as shown. For one, we will need to handle the dynamic alloca-
+tion and deallocation of the implementation class and create various constructors and
+destructors. Additionally as noted by Meyers in his book on modern C++ [33], this
+implementation of the PIMPL idiom does not use newer features of C++, like the var-
+ious smart pointers. To circumvent these limitations of self-implemented PIMPL, we
+will use the spimpl.h header presented by Upadyshev [34]. This header implements
+the idiom through its spimpl::unique_impl_ptr, which handles all the intricacies
+of PIMPL for us and replaces our raw pointer.
+With the help of this idiom, we can refactor classes to get a better overview of how
+they work and how they interact with the rest of our classes. The improved overview
+provided by the separation of the header and implementation details can then uncover
+additional refactoring opportunities, e.g. by highlighting public members that are not
+used by other classes.
+Since we are moving implementation details out of a header, the PIMPL idiom
+is inherently incompatible with templates, which we use to enable mocking some of
+LLVM’s classes. As we have shown before, the PredicatedBlock class is templated
+for this purpose, which prevents us from extracting the implementation into a .cpp
+file. By having this in mind, and decoupling as many classes as possible from LLVM’s
+code, we can make optimal use of the PIMPL idiom.
+4.3
+Hidden Coupling
+A particularly troublesome type of coupling arises when a class is dependent on the
+private implementation of another class. Any change to that dependency is difficult
+to spot, and if errors arise, it is enormously time-consuming to find the source and
+resolution.
+One such example was found between SPScope and RAInfo. As part of predicate
+register allocation, RAInfo uses SPScope to get the topological ordering of a FCFG.
+For any directed acyclic graph (as the FCFG is,) there may exist multiple differ-
+ent topological orderings; all of which should be interchangeable. Logically, RAInfo
+should be content with any ordering and shouldn’t mind if the one provided changes.
+As part of the refactoring of SPScope, a change in data structure caused the topo-
+logical ordering provided to RAInfo to change.
+This caused RAInfo to fail while
+performing register allocation.
+It took three days to figure out that the change in ordering was the problem.
+Since, logically, it shouldn’t have been, the investigation had to rule out everything
+else first.
+Because of time constraints, we couldn’t find a fix for the problem in
+RAInfo. Instead, we added code to SPScope who’s only purpose was to ensure that
+the topological ordering was the exact one RAInfo needed. In the end, a comment in
+the private implementation of SPScope highlights the hidden coupling with a warning:
+Changing this code might cause predicate register allocation failure. Proceed at your
+==PAGE:55==
+4.4 The Right Tool for the Job
+45
+own peril.4
+4.4
+The Right Tool for the Job
+There are almost always multiple ways of implementing the same functionality. E.g.
+different data structures can be used for the same purpose, like std::vector can
+be used as a container for non-repeating integers, while std::set can do the same.
+Choosing one implementation option instead of another might better reflect the in-
+tent of the code. std::vector doesn’t convey to the reader that it only contains
+unique integers, std::set does. By using the later, we automatically give additional
+information to the next reader, without having to change the design or write explain
+anything in comments.
+Using the construct that most precisely encapsulates the intent of the code can also
+minimize developer errors. It is impossible for an ignorant or attentive developer to
+add two identical integers to a std::set; it is very much possible with std::vector.
+When refactoring, changing the code to use more strict constructs can help you
+the code. If you can exchange the use of std::vector for a std::vector, it must
+mean there are no duplicate values, which can be very useful to know.
+The following is a list of additional constructs that were used in the compiler, but
+could be exchanged for better alternatives:
+Integer values to distinguish categories of values: When RAInfo has performed
+register allocation, at each point in the program the value of a predicate could
+be in one of two location: in a predicate register or spilled to a stack slot. The
+original distinction between these two location was encoded in an integer: If
+it was in a predicate register, the value was between 0 and 6, signifying the
+registers $p1 to $p7; and if it was above 6, it signified the predicate value being
+spilled to the stack, at the stack slot (n −6).
+A better alternative would be to use an enumeration, where define predicates
+and stack slots. We then use an unsigned integer to specify which register or
+slot, without a need for value conversion. When both the location and the value
+is need simultaneously (which is the case for RAInfo), std::pair can be used
+to return them from methods together.
+Negative integers to signify the lack of values: This is very similar to the pre-
+vious example, but is prominent enough that we will risk repeating ourselves.
+RAInfo tracks, for each predicate, whether it should be loaded from stack be-
+fore a given blocks is executed and whether it should be spilled again afterwards.
+Originally, it did so by using two signed integers, one for the loading and one
+4This is dramatized.
+A more faithful paraphrasing would be: RAInfo depends on this exact
+variable. Changing it, or how it’s used, might cause predicate register allocation to fail.
+==PAGE:56==
+46
+4 Refactoring
+for the spilling. If an integer was -1, the corresponding load or spill was un-
+necessary. If it wasn’t negative, the value specified where to load from or spill
+to.
+This pattern of a value either being there or not is so common that C++17
+provides the std::optional class to manage it. It can either contain a value
+or not, and can be queried about it. Since we only use C++14—which doesn’t
+have it built in—we can instead rely on the boost framework’s boost::optional
+class, which is equivalent to std::optional.
+Custom implementation of existing, functionality: There is nothing stopping
+us from implementing everything ourselves, and never using the standard li-
+brary or other, well known frameworks. However, reading code that uses fa-
+miliar classes is easier than first having to figure out what a custom class does.
+SPScope::PredDefInfo was such a class, providing the exact same function-
+ality as std::vector in exchange for removing the need to specify template
+arguments when the class is used. As can be seen inListing 4.4, the class could
+be replaced by a single line containing a type definition, which also negates the
+need to specify template arguments.
+Manual looping: The standard C for-loop is all-powerful: It allows you to initialize
+the looping, set the condition for whether looping should continue, and specify
+how to step from iteration to the next. This allows us to implement any kind
+of loop we want.
+However, we often simply want to iterate over all elements in a container. C++
+provides the for-each looping construct for this exact purpose. We simply give it
+the name of the container to iterate over, and a variable name for each element.
+Not need to configure where to start, how to stop, and how to continue; the for-
+each does it for us. Besides reducing the probability of us configuring the loop
+incorrectly, it is easier for the next developer to see that it’s a simple iteration
+over all element, with no magic in the configuration.
+The standard library also provides a multitude of functions that manage it-
+eration for us. An example could be the std::any_of function, which looks
+through a container to see if any of its elements match a given condition. Be-
+sides being more concise than manual looping, the name of the function high-
+lights exactly what we are looking for; something that would need a complete
+analysis of the loop configuration and body otherwise.
+There are a multitude of ways to avoid manually looping. It would be impossible
+to cover everything here. Essentially, we want to minimize the use of the raw
+for-loop anywhere we can, also while refactoring.
+==PAGE:57==
+4.5 Fields
+47
+1 // This class is equivalent to an std::vector
+2 class PredDefInfo {
+3 private:
+4
+typedef std::vector<std::pair<unsigned, Edge> > PredEdgeList;
+5
+PredEdgeList Defs;
+6 public:
+7
+typedef PredEdgeList::const_iterator iterator;
+8
+void define(unsigned pred, const Edge e) {
+9
+Defs.push_back(std::make_pair(pred, e));
+10
+}
+11
+iterator begin() const { return Defs.begin(); }
+12
+iterator end() const { return Defs.end(); }
+13 };
+14 // It can be replaced by the following typedef
+15 typedef std::vector<std::pair<unsigned, Edge> > PredDefInfo;
+Listing 4.4: The right tool for the job is a typedef
+4.5
+Fields
+Excessive use of fields, private as well as public, can complicate a class. Since they are
+accessible from any class method, they are a type of internal dependency of one part
+of the class on another. Similarly to decoupling classes from each other, we also want
+to minimize the use of fields to the absolute minimum, to decouple a class’ methods
+from each other—as much as possible.
+We will highlight three types of fields that should be avoided and removed when
+refactoring. Fields can exhibit the properties of more than one of these types:
+Transient Fields: Fields live as long as the object their in. Therefore, they must
+be used of we want to have data that lives as long as the class instance is alive.
+Transient fields contain objects that are not needed for the whole lifetime of
+the class instance. They are instantiated when a certain method is called, and
+live for the lifetime of that called, potentially being used by multiple additional
+methods. When the original call terminates, the field is not used again. These
+fields can often be eliminated completely and using method-local variables in
+their stead.
+RAInfo had a transient field called FreeLocs which was used by the register
+allocation algorithm. It tracked the set of predicate registers and spill slots
+that were free at that point in register allocation.
+Register allocation is only done once, after which the result is stored in other
+fields. FreeLocs could therefore be demoted to being a local variable of the
+main register allocation method and completely ignore by any part of the class
+that doesn’t involve the algorithm.
+Cache fields Unlike transient fields, cache fields can be used by multiple methods
+and can be useful for the whole life of the class instance. However, they contain
+==PAGE:58==
+48
+4 Refactoring
+data that is an aggregate of other field’s data and can be obtained through
+other means.
+An example of this is the field PatmosSinglePathInfo::MBBScopeMap. The
+class has another field—Root—which is a pointer to an SPScope. MBBScopeMap
+is a map of which basic blocks are contained in which SPScope instance. This
+information can also be obtained directly from Root. E.g. SPScope provides
+the method isMember() which does exactly what we need.
+Cache fields can make the class’ logic more difficult to understand, since it’s not
+always trivial to figure out exactly how the data in the field was calculated. It
+also makes the class less flexible, as any change to the fields the cache is based
+on necessitates an update of the cache.
+We prefer to eliminate cache fields and resort to recalculating its data whenever
+needed.
+This makes the data’s origin explicit and does not need any cache
+updating infrastructure if the source data is changing.
+Complex Fields As the name suggests, embedding too much complexity in a field
+can make it hard to figure out all the things is does and how it interacts with
+the rest of the class.
+SPScope has a field called Blocks. Here is a list of its properties:
+• Contains all the scope’s basic blocks.
+• Contains all the scope’s subscope’s header blocks.
+• The first block is the header of the scope.
+• The blocks are ordered in a topologically.
+This complexity is extremely difficult to figure out, especially if it’s undocu-
+mented.5
+A better alternative is to split a complex field into multiple simple fields. It
+results in a larger number of fields, but each one is easier to manage. In this
+case, we can extract the second and fourth property of Blocks into their own
+fields (which become transient and can be eliminated entirely). What we have
+left would simply be the set of blocks in the scope, with the first block being
+the header.
+Of course, what constitutes too much complexity can be subjective, so we will
+refrain from it setting firm rules.
+No codebase is perfect and, as a newcomer, it is easy to criticize other developers’
+code. It is not, however, easy to write good code in the first place. Therefore, this
+chapter should not be taken as a critique of previous developers’ skills, but merely a
+highlight of observations that are easier for an outsider to make.
+5Which was the case in the original code.
+==PAGE:59==
+4.5 Fields
+49
+The key takeaway of this chapter should be how refactoring can aid newcomers in
+learning a new codebase on their own and how to go about it. In that regards, one
+can posit that the code patterns highlighted here could be strategically added to a
+codebase, by experienced developers, such that newcomers can use them when getting
+acquainted with the code. An interesting idea, but we will not explore it further in
+this project.
+==PAGE:60==
+50
+==PAGE:61==
+CHAPTER 5
+Bundling
+Now that we are familiar with the implementation of the compiler, and have a test
+setup that can guide our work, we can begin introducing support for bundled single-
+path code.
+There exists many ways to capitalize on ILP for traditional code. One method is
+to group basic blocks into what is called hyperblocks [35]. By grouping the right basic
+blocks into a hyperblock, analysis and optimizations can be applied such that their
+instructions can be bundled across basic block boundaries.
+We want to leverage our knowledge of single-path code to find pairs of basic blocks
+to merge. By merging, we mean schedule one block’s instructions in the first issue slot,
+and the other’s in the second issue slot. For each block pair, we want to be certain
+that—under all circumstances—at most one of them is enabled, and the merging will
+not change the semantics of the program. To do this, four properties must hold for a
+given block pair to be mergeable:
+Non-equivalence: They must be in different equivalence classes. Otherwise, they
+would always be enabled simultaneously.
+Non-domination: Neither block can dominate or postdominate the other. If either
+does, execution requires one block to finish before the other starts, which means
+they can’t be executed simultaneously or merged.
+Scoping: They must be in the same loop scope. This is to maintain the program’s
+semantics and the blocks are iterated over the correct number of times.
+There is a workaround to this property: if we can merge two loops into one
+shared loop with both bodies of the original loops in it, we can now merge
+blocks across loops. For two loops to be mergeable, similar properties must
+hold for them as for blocks.
+Ordering: There must exist a topological ordering of the CFG where the two blocks
+immediately follow each other. The effect of merging two blocks is that they will
+occupy the same place in the new ordering, which can be thought of as equivalent
+to following each other in the old. If they can’t be ordered in sequence before
+the merge, then merging them will result in a non-topological ordering which is
+not compatible with the single-path transformation.
+==PAGE:62==
+52
+5 Bundling
+We can use the FCFGs in Figure 2.3 and Figure 2.4 as examples. The former
+doesn’t have any block pairs that can be merged.
+E.g.
+nodes g and h defy non-
+domination and non-equivalence while f and g defy non-domination and scoping.
+However, looking at the loop b FCFG, we can see that nodes c and d can be merged.
+They have different equivalence classes, since their execution paths diverge at b, non-
+domination holds, they are both part of the loop b, and a valid ordering could be [b,
+c, d, e]. In Figure 5.2 we can see how the CFG would look after the merge, while
+Figure 5.1 shows the FCFG of the loop b. Notice how the merged block—c;d—has
+c’s back edge to b and d’s exit edge to f. This results in two edges to t in the FCFG.
+Next we need to decide where in the single-path transformation we want to perform
+the merging of blocks. To be able to identify potential block pairs, we need access
+to information about the CFG and the equivalence classes. Bundling must therefore
+happen after the initial CFG analysis done by SPScope. On the other hand, we need
+to do the bundling before we calculate predicate register allocation. Since the merging
+of two block necessarily results in a reordering of the CFG, it might invalidate any
+register allocation performed before the merge. Therefore, to avoid having to manage
+predicates post-allocation, we must merge blocks before.
+5.1
+Bundling Support
+Before we can implement the merging of blocks, we need to update the existing
+compiler passes to support it. The main issue with the original implementation is
+that it assumed each block was only predicated by a single predicate. When we merge
+two blocks, we end up with a single blocks, who’s instruction are predicated by either
+of the two block’s predicates. So we need to remove the single-predicate assumption
+from the code. The second assumption the existing implementation makes, is that
+the CFG is not changed except by the last reordering step of the transformation. Our
+s
+b
+c;d
+e
+t
+Figure 5.1: FCFG of the loop b after the
+merge of nodes c and d.
+a
+b
+c;d
+e
+g
+f
+h
+Figure 5.2: The updated CFG.
+==PAGE:63==
+5.1 Bundling Support
+53
+merging of blocks will change the CFG, which means we need to update the code to
+allow for that.
+The act of merging two blocks involves more than bundling their instructions. To
+allow the single-path transformation to finish post-merge, we need to preserve the
+semantics of the CFG. This means all edges must also be preserved such that control
+flow remains the same. If one block has an exit edge, then the merge block must also
+have an exit edge to the same target node.
+5.1.1
+SPScope
+SPScope originally managed all data related to the CFG, and would have needed to be
+updated to implement the merging correctly. This meant going through all its relevant
+fields and updating them accordingly.
+This would not have been easy, since the
+data was spread across the different subscopes in scope tree. Instead, we introduced
+PredicatedBlock. Besides wrapping a block, it also manages all information that is
+related to the block; its predicates, edges to other blocks, etc. We then implement
+all the merging logic inside that class. This is much easier, as we only need to merge
+the information from the two original blocks in the new block. As the information is
+readily available in each PredicatedBlock, the merging of predicates, edges and so
+on, becomes almost trivial.
+5.1.2
+RAInfo & PatmosSPReduce
+Register allocation must also be updated to support blocks with multiple predicated.
+Luckily, the algorithm used is well suited for this and only required minor tweaks.
+It walks the CFG in the final topological ordering and assigns each predicate
+it encounters to a free predicate register. When no register is available, it spills a
+register-occupying predicate, choosing the one that is furthest from being used again.
+It can then assign the freed register to the required predicate. Additionally, when a
+loop is encountered, all active predicate are spilled, such that the loop has all seven
+registers available when it begins.
+The algorithm doesn’t need a design change to support bundled blocks. We simply
+update the implementation to be able to assign multiple predicates to registers at the
+same time, and spill more than one register at the same time.
+Likewise, the final SPReduce pass—that performs the reordering of blocks and
+insertion of predicate definition, load, or spill instructions—needs only tweaks such
+that multiple definitions, loads, or spills can be performed for a given point in the
+CFG.
+5.1.3
+Scheduling
+As described in , after the single-path transformation is performed a scheduling pass
+does a final tweaking of the code to make it adhere to Patmos’ latency requirements.
+==PAGE:64==
+54
+5 Bundling
+The existing scheduler that performs this pass was designed to traditional code
+generation, which also doesn’t use bundled code. This means the scheduler doesn’t
+work for single-path code that has been bundled.
+It main issue is that it does not have enough information about the code to be
+able to do its work. As an example, when it encounters a merged block, it does not
+know that its two predicates are disjoint and might therefore reorder the instruction
+incorrectly.
+As a result, we had to introduce a custom scheduler that is only used for single-
+path code. Because of time constraints, we had to use the minimal viable implemen-
+tation we could. It therefore only performs nop-insertions, and does so whenever it
+encounters a latent instruction, regardless of whether a delay is actually required in
+the given situation.
+5.2
+Proof of Concept
+So far we have only talked about what is needed for supporting merging of block,
+but haven’t touched on how to find blocks to merge. The design presented is meant
+to be general purpose and support different merging strategies. This will allow the
+experimentation, without having to redesign the rest of the single-path transformation
+and implementation.
+To show how a strategy could be implemented, we design and implement a very
+simple merging strategy: For each loop scope, we go through all the basic blocks,
+looking for one that has exactly two immediate successors. If we find one, we ensure
+the following about its successors:
+• The successor edges are neither back nor exit edges.
+• Neither of them is a header of a nested loop.
+• Neither of them postdominates the other.
+We repeat until we cannot find a block with successors to merge. We do this for
+all scopes, starting at the root and following a depth-first traversal.
+We show that any pair found with this strategy is mergeable:
+Non-equivalence: If the block who’s successors we are merging—the parent block—
+isn’t itself a merged block, then its trivial to see that the successors must be in
+two different equivalence classes. If the parent is a merged block, each of the
+block’s to merge is the successor of one parent block. We know that the two
+parent blocks are of different equivalence classes, which means their successors
+can’t be of the same equivalence class.
+Non-domination: Since execution branches at a shared parent block, the two blocks
+can’t dominate each other, and since we also disregard pairs that postdominate
+==PAGE:65==
+5.2 Proof of Concept
+55
+each other, the non-domination requirements must hold for all pairs that are
+chosen.
+Scoping: Since we disallow block pairs that have exit edges from the parent, we
+know they can’t be in a superscope of the parent block’s scope. Since we also
+disallow them being a header of a subscope, the only possibility left is that they
+are both part of the parent block’s scope.
+Ordering: Since the two blocks being merged are successors the same parent block,
+it is trivial to see that there must exist a topological ordering where the two
+blocks follow each other.
+Using this strategy on the CFG in Figure 2.1 will result in a merger of the blocks
+c and d as we have discussed in Figure 5.2.
+This strategy is not meant to produce efficiently bundled code. We will simply use
+to show that it is possible to implement a strategy that produces bundled instruction.
+Being very restricted in which block pairs it considers for merging, we expect this
+strategy to merge only a few blocks in a function. As such, a program that is compiled
+using this bundling strategy would probably not run faster in any practical sense,
+however, we should be able to measure the difference in cycle count when run with
+pasim with caching disabled.
+==PAGE:66==
+56
+==PAGE:67==
+CHAPTER 6
+Evaluation &
+Discussion
+The goal of this project was to enable the compiler to support bundled single-path
+code, such that future work can focus on developing an efficient bundling technique.
+In this chapter, we will evaluate and discuss how well the work addresses the different
+requirements we have set.
+6.1
+Setup
+To properly evaluate this project, we will measure different aspects of the work. The
+setup for most of the measurements is as follows:
+Any measurement of real-world running time will be conducted on a laptop ma-
+chine that is representative of what a student can be expected to have. It has an
+Intel Core i7-7500U CPU with 2.90 GHz base clock frequency and 16 GB of RAM. It
+runs Windows 10, using the Windows Subsystem For Linux to virtualize an Ubuntu
+operating system.1
+When a measurement is taken, the machine is put into the highest performance
+mode with no other programs running, besides the terminal taking the measurement.
+6.2
+Testing
+The main goal of testing is to ensure we maintain the functionality of the compiler as
+we update it. It is therefore import to highlight that an automated setup for program
+tests has not been implemented. This is crucial when we want to ensure that the
+correctness of the compiler, and without it, there is a fair degree of uncertainty as to
+whether correctness is maintained. Manually trying to compile programs showed that
+many correct programs could not be compiled, even though all regression tests passed.
+It is therefore important that an automated setup for program tests is developed in
+the future and fixes are implemented where needed.
+1LLVM only compiles on Linux or MacOS.
+==PAGE:68==
+58
+6 Evaluation & Discussion
+6.2.1
+Unit tests
+A secondary goal for the testing setup was to increase productivity. The unit tests
+were added to the setup for this sole reason, so it is important it does its job well. To
+that end, it would be optimal that the time it takes to run the unit tests is significantly
+lower that the regression tests, such they can be run frequently without wasting the
+developer time.
+For both unit and regression tests, the first thing that must happen is for the
+compiler to be built, after which the tests can be run. For regression tests, we need
+the llc tool to be built entirely, such that it can compile our test cases. On the other
+hand, for unit tests we only need to compile the classes that are used in the tests. It
+should therefore be faster to compile the unit tests than llc.
+After compilation, the tests can be run. Here we can also expect unit tests to
+be much faster. The setup compiles the tests into an independent binary and runs
+it to executes all the unit tests. Unlike the regression tests, unit tests don’t need to
+compile any programs, and every test case is very simple. We can therefore expect
+unit tests to finish much quicker than regression tests.
+To see whether our expectations hold, we measure the average time it takes to
+compile and run unit and regression tests. To do this, we use the linux touch com-
+mand on the SPScope.cpp file, such that the build setup thinks it has been changed,
+and then measure the compilation time for the unit and regression tests separately.
+We then measure the time it takes to run the tests.
+In Figure 6.1 we can see that it takes ~9 seconds to compile the unit tests and
+~18 second for the regression tests. As for running the tests, it takes ~1.5 seconds for
+unit tests and as much as 100 second for the regression tests.
+It is therefore clear that the unit tests are much quicker to use than regression
+tests. While it can take less than 10 seconds to see if a code edit passes all unit
+tests, it takes up to 2 minutes to do the same for regression tests. It is therefore
+much preferred to run unit tests often, increasing productivity by enabling a quick
+edit-compile-test cycle that can be executed often. This is not conceivable for the
+regression tests, as the multi-minute wait time will make developers conserve the
+number of times they run them. In our setup, regression tests—and program tests,
+when they are added—can be saved for when all unit tests pass and the developer is
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+100
+Unit
+Regression
+Time in seconds
+Run
+Compile
+Figure 6.1: The time it takes to compile or run unit/regression tests after a change
+has been made to SPScope.cpp.
+==PAGE:69==
+6.2 Testing
+59
+more confident in the correctness of the implementation.
+6.2.2
+Regression Tests
+Besides program tests, regression tests are primarily meant to ensure we maintain
+correctness. To that end, they have proven effective; the existing suite of tests has
+caught many errors throughout the course of this project. However, when manually
+trying to compile program, it is apparent that the regression tests suite simply isn’t
+comprehensive enough. Even when all the tests pass, multiple programs have been
+shown to be compiled erroneously, or simply fail to compile. This is not a flaw in
+the design of the regression tests, but a consequence of its immaturity and should
+be remedied by adding more test cases. Luckily, adding a new test case is simple,
+requiring only that a program is written and expected output supplied.
+A point where regression tests have excelled is in their decoupling from the com-
+piler implementation. An earlier design of the test setup would verify correctness by
+analyzing the produced assembly code. This yielded issues multiple times, as small
+changes in the compiler would result in a change in the produced assembly and there-
+fore a test failure. The final setup described in this report is much more flexible,
+allowing for major changes to the compiler without having to update the tests. We
+were able to implement bundling support and a merging strategy without having to
+edit any existing test case.
+In the name of increased productivity, we configured the regression tests to output
+debug information to a file by default. It is therefore interesting to see how much this
+increases the time it takes to run the regression tests. Therefore, we measured the
+time it takes to run the tests with debugging disabled. In Figure 6.2 we compare the
+regression test running time with and without debugging.2 We can see that debugging
+has quite a large impact, since the running time is reduced to ~60 seconds from ~100
+when debugging is disabled. It is therefore debatable whether having debug output
+enabled by default is the correct choice, as it means an almost doubling of the time
+it takes to run the tests. This is wasted developer time whenever the output is not
+needed.3
+The impact of debug output on running time is useful for the future setup of
+program tests. Since we know they are likely to be longer running than regression
+tests, and have a smaller likelihood of failing (because the regression tests should be
+run first, catching most errors), debug output should disabled by default to reduce
+the running time.
+2The value for regression test with debugging is the same as seen in Figure 6.1.
+3Just to be clear, developers can easily turn off debug output on a run-by-run basis should they
+want the reduced running time.
+==PAGE:70==
+60
+6 Evaluation & Discussion
+0
+10
+20
+30
+40
+50
+60
+70
+80
+90
+100
+110
+Without Debug
+With Debug
+Time in seconds
+Figure 6.2: The time it takes to run regression test with or without debugging output.
+6.2.3
+Usability
+One of the general requirements we set for testing was the ease of running the tests and
+interpreting the result. To achieve this, we have leveraged LLVM’s existing testing
+setup.
+To compile and run both unit and regression the following command can be used
+from inside the build subfolder:
+> make UnitTests llc && ./bin/llvm-lit ../test --filter=Patmos -v
+The first part—make UnitTests llc—compiles the binary targets needed for run-
+ning the tests; UnitTests for unit tests and llc for regression tests. Afterwards, the
+rest of the command will call LLVM’s lit tool to run the tests. The ../test references
+the folder containing all tests and is always the same. The --filter=Patmos flag
+tells lit to only run our tests and not those for other targets than Patmos. The last
+flag—-v—makes lit provide detailed messages if errors occur.
+This command is long which makes it less than ideal. LLVM does provide a short
+command, that can be said to be foolproof: make checkall. However, this will also
+run non-Patmos tests, which can take a very long time. Alternatively, LLVM’s setup
+should make it possible to create custom commands that mimic the function of the
+above command, however we have not had time to look into this.
+Lastly, we have already seen that lit provides good error messages, so we should
+also note that successes are also easy to spot. In Listing 6.1 we can see that for each
+test, a line is printed indicating the test succeeded. Had any test failed, an additional
+line would have been added to the end of the report, showing the number of tests
+that failed, compared to the number expected to succeed. Since this line is not in
+Listing 6.1, we know all tests succeeded.
+6.2.4
+Non-Functional Requirements
+The testing setup implemented addresses the immediate needs of this project. How-
+ever, there are additional non-functional requirements usually put on a compiler. A
+prominent example would be the performance of the compiled programs, where users
+expect the compiler to produce efficient code when given optimization flags.
+==PAGE:71==
+6.3 Refactoring
+61
+1 -- Testing: 12 of 8450 tests, 4 threads --
+2 PASS: LLVM-Unit :: Patmos/SinglePath/SinglePathTests/PredicatedBlockTest.
+AddDefinitionTest (1 of 12)
+3 ...
+4 ...
+5 PASS: LLVM-Unit :: Patmos/SinglePath/SinglePathTests/PredicatedBlockTest.
+SinglePredicateTest (12 of 12)
+6 Testing Time: 0.29s
+7 Expected Passes
+: 12
+Listing 6.1: ”LLVM lit report on successful test. Only the first and last test report
+are shown.”
+Our testing setup doesn’t take any non-functional requirement into account. How-
+ever, this should probably be remedied, such that we can maintain come kind of
+guarantee on the various non-functional requirement users could put on a compiler.
+This could be done by introducing additional test categories, e.g. a category that
+measures the performance of all program tests and publishes it to a central database
+where previous compiler version’s binary performance was also available. It would
+then be possible to track how performance evolves and notice if a given update affects
+it too much.
+6.3
+Refactoring
+The primary goal of refactoring the existing implementation was to get familiarized
+with the code. To that end, refactoring was successful. Initially, we tried simply
+analyzing the code, to try and figure out how it work. However, after some time,
+it became apparent that it wasn’t enough. Refactoring greatly increased the rate of
+learning, and even uncovered knowledge that would have been almost impossible gain
+had a given peace of code not been altered.
+6.3.1
+PIMPL
+The second of refactoring was to try and make the code more readable for newcomers.
+To this end, we used the PIMPL idiom to isolate public class interface from their
+private implementation to give a better overview of how classes interact.
+An additional benefit of the idiom should be lower compile times for when a
+private implementation is edited. To test this assertion, we measure how long it takes
+to recompile after an edit to a header—SPScope.h specifically—file and compare it
+to our previous measurement for compilation after a private implementation edit.
+In Figure 6.3 we see how the compile time has changed after our updates to the
+compiler, which include adopting the use of PIMPL. We measure the compile time
+of llc after a change to either the SPScope class’s header file or its implementation
+==PAGE:72==
+62
+6 Evaluation & Discussion
+file. We can see that making an edit to the implementation is ~10% quicker with the
+updated set (~18 second instead of ~20), while making an edit to a header file is ~8%
+slower.
+It is therefore clear that using the PIMPL idiom affects compile times. Using
+the PIMPL idiom results in a larger number of implementation files, which increases
+compile times when a header is a dependency of by many other files. However, since
+changes to implementations of classes are more frequent than to the interfaces, PIMPL
+makes the common case faster. Therefore, we can say PIMPL changes compile times
+for the better, though not by much in our case. Had more file than our two adopted
+PIMPL, the difference could be bigger.
+6.3.2
+Compiler Performance
+Many changes undertaken in the refactoring affects the performance of the compiler,
+i.e. how fast can it compile programs. The PIMPL idiom introduces indirection as
+part of its design which could mean worse performance caused by dynamic dispatch.
+We cannot be certain of this, since it is possible the indirection is optimized away.
+Additionally, we made a point out of removing as many cache fields as possible, which
+could mean more work needs to be done.
+To test whether the performance of the compiler has changed, we measure the
+time it takes to compile a subset of TACLE benchmark [36]. The programs chosen
+to be measured are simply those that we can successfully compile and run. There
+are three different reasons for why programs don’t compile: Either they don’t comply
+with the requirement single-path code has, e.g. many have recursion; many simply
+fail to compile because of an error in the compiler; and some successfully compile but
+give an incorrect result when run.
+For the programs that are left, Figure 6.4 shows the compile times for both the
+original version of the compiler and the updated. The different is negligible for all
+programs, so our changes haven’t affected the compiler’s performance in these cases.
+We must, however, take these results with a grain of salt, as we have only managed
+to test a subset of the benchmark, and can’t say they are necessarily representative
+of real-world programs. Additionally, non of these programs can be classified as large.
+0
+5
+10
+15
+20
+25
+30
+35
+40
+Header
+Implementation
+Time in seconds
+Original
+Updated
+Figure 6.3: The time it takes to compile after an edit to a header file compared to an
+implementation file using the original compiler and the updated version of it.
+==PAGE:73==
+6.4 Bundling
+63
+Therefore, it is difficult to say whether a difference in compile time is present for
+larger programs, and especially whether it’s for the better or worse.
+6.4
+Bundling
+The primary objective of this project is to enable support for bundled single-path
+code, such that future work can easily experiment with different techniques for the
+bundling, without having to update the rest of the compiler. To that end, we have
+reached this goal and showed how it is possible to implement a simple merging strategy.
+The design of the bundling support allowed us to implement the strategy, without
+having to update any other part of the compiler to fit the particular strategy.
+To ensure our strategy work and impacts binary performance, we measure the
+number of cycles the TACLE benchmarks use with and without the bundling strategy
+enabled. As expected, the strategy is not very efficient. First of all, only four out
+of the 10 programs actually get bundled instructions from the strategy, the others
+simply don’t have any block pairs that match its strict requirements.
+Table 6.1 shows the number of cycles each program spends when run on the
+pasim simulator using an ideal cache.4 We can see that bundling does in fact increase
+performance, though, as we expected, not by much. For most of the programs the
+increase is negligible, except for the countnegative which exceeds expectation at a
+3.8% performance increase. This is especially impressive when we note that only two
+bundling are actually added to that program by our simple merging strategy.
+Lastly, we should touch upon the four properties any block pair should uphold
+before being merged. The last property—Ordering—ensures merging is possible be-
+cause the resulting block will occupy the original blocks’ position in the topological
+4Since the programs use single-path code, the execution time is always static when using an ideal
+cache.
+bsort
+countnegative
+insertsort
+jfdctint
+matrix1
+md5
+prime
+adpcm_dec
+petrinet
+test3
+1
+1.5
+2
+Time in seconds
+Original
+Updated
+Figure 6.4: The time it takes to compile different programs from the TACLE bench-
+mark with the original compiler version and the updated version.
+==PAGE:74==
+64
+6 Evaluation & Discussion
+ordering. However, we suspect that this property always hold if the second property—
+Non-domination—holds. However, because we lack a proof for this, and lack the time
+to create one, we opted to keep the fourth property.
+bsort
+countnegative
+prime
+adpcm_dec
+Without bundling
+217 893
+24 295
+24 725
+7 167 191
+With bundling
+217 693
+23 413
+24 676
+7 167 185
+Table 6.1: Exection time (in cycles) for different TACLE benchmark programs with
+or without bundling enabled.
+==PAGE:75==
+CHAPTER 7
+Conclusion
+In this project, we have successfully readied the Patmos compiler for future research
+into efficient bundling of single-path code.
+We first designed and implemented an automated test setup that ensures we can
+update the compiler while maintaining functionality. The setup also increases pro-
+ductivity, by having a dedicated category of tests—unit tests—that are easy to create
+and fast to run. Two other test categories then ensure we maintain the compiler’s
+correctness, of which only regression tests were implemented.
+Before adding support for bundled code, we used refactoring to get familiar with
+the compiler and make it easier for newcomers to work with it. Different techniques
+that are optimal for learning a new codebase were presented, and also techniques to
+make code more readable. Even though our refactorings had potential to reduce the
+compiler’s performance, measurements showed they had little effect in that regard.
+Lastly, we updated the compiler with infrastructure that allows for the implemen-
+tation of block merging strategies without the need to update the compiler further.
+We showed how such a strategy could be implemented and that it improved the
+performance of a subset of the TACLE benchmark—slightly.
+Additional Work
+Because of time constraints, not all aspects of this project’s work can be regarded as
+finished.
+First of all, even though the testing setup works as intended, it is woefully in-
+adequate in its number of test cases. Attention should be given to increasing the
+coverage of regression tests, and possibly unit tests, such that they better cover the
+needed functionality.
+Second, the refactoring work performed as part of this project should not be seen
+as either the minimum amount needed nor the maximum. The initiatives described
+were simply the ones undertaken as part of this project and could easily be continued
+in the rest of the codebase when required.
+Lastly, the updates to the compiler have likely introduced flaws into the single-
+path code generation. This is apparent in that only 10 of the TACLE benchmarks
+manage to compile and run. Therefore, some work needs to be put into fixing errors,
+such that the compiler can handle most programs given to it.
+==PAGE:76==
+66
+7 Conclusion
+Future Work
+To begin with, future work should focus on implementing an automated setup for pro-
+gram tests. Our experiences in this project have shown that, without real programs,
+it can be difficult to asses how correct the compiler is. Afterwards, we should contem-
+plate whether additional testing categories can be introduced to cover non-functional
+requirements.
+Our experiences have also given us insight into the quality of the single-path code
+generated. Even though the code follows the single-path transformation rules, there
+are many small details that make the code inefficient. As an example, when predicates
+are spilled, a general purpose register is used to store its value until it is needed again.
+However, that register is immediately spilled to the stack whenever a predicate is
+saved in it. This is usually not needed, since the general purpose register can hold up
+to 32 predicates at one time. Therefore, some effort can also be put into improving
+the single-path code generated by the compiler. This is crucial if we want to show
+that single-path code can be used in real-world scenarios.
+Lastly, research into efficient block merging strategies is the main avenue for future
+work. The magnitude of that work was one of the reasons why this project did not
+undertake it seriously—the others being the lack of a testing setup and unfamiliarity
+with the code. This project has hopefully made it much easier to experiment with
+different strategies with minimal implementation work needed.
+==PAGE:77==
+APPENDIX A
+Complete Single-Path
+Transformation Rule
+Set
+The following table contains the complete rule set for the single-path transformation.
+This is taken directly from [25].
+==PAGE:78==
+68
+==PAGE:79==
+APPENDIX B
+A Regression Test
+The following is a complete example of a regression test:
+1 ; RUN: %p/../assert_singlepath.sh llc -O2 %s init_func %DEBUG_TYPE 0=-2 1=1
+2
+3 @_1 = global i32 1
+4 @_2 = global i32 2
+5 @.str = private unnamed_addr constant [3 x i8] c"%d\00"
+6 @.str1 = private unnamed_addr constant [4 x i8] c"%d\0A\00"
+7
+8 define i32 @init_func(i32 %cond)
+{
+9 entry:
+10
+%tobool = icmp eq i32 %cond, 0
+11
+br i1 %tobool, label %if.else, label %if.then
+12
+13 if.then:
+14
+%0 = load volatile i32* @_1
+15
+br label %if.end
+16
+17 if.else:
+18
+%1 = load volatile i32* @_2
+19
+%sub = sub nsw i32 0, %1
+20
+br label %if.end
+21
+22 if.end:
+23
+%x = phi i32 [ %0, %if.then ], [ %sub, %if.else ]
+24
+ret i32 %x
+25 }
+26
+27 define i32 @main()
+{
+28 entry:
+29
+%x = alloca i32
+30
+%call = call i32 (i8*, ...)* @scanf(i8* getelementptr inbounds ([3 x i8
+]* @.str, i32 0, i32 0), i32* %x)
+31
+%0 = load i32* %x
+32
+%call1 = call i32 @init_func(i32 %0)
+33
+%call2 = call i32 (i8*, ...)* @printf(i8* getelementptr inbounds ([4 x
+i8]* @.str1, i32 0, i32 0), i32 %call1)
+34
+ret i32 0
+35 }
+36 declare i32 @scanf(i8*, ...)
+37 declare i32 @printf(i8*, ...)
+==PAGE:80==
+70
+==PAGE:81==
+Bibliography
+[1]
+J. Martin, Programming Real-Time Computer Systems, ser. Prentice-Hall series
+in automatic computation. Prentice-Hall, 1965.
+[2]
+P. Keefe, “James Martin: The Guru,” COMPUTERWORLD; 25th Anniversary
+edition, p. 4, Jun. 1992.
+[3]
+T. Harmos and M. Schoeberl, “Fast, Interactive Worst-Case Execution Time
+Analysis With Back-Annotation,” IEEE Transactions on Industrial Informatics,
+vol. 8, no. 2, pp. 366–377, May 2012.
+[4]
+G. C. Buttazzor, Hard Real-Time Computing Systems, Predictable Scheduling
+Algorithms and Applications, 3rd ed., ser. Real-Time Systems Series. Springer,
+2011.
+[5]
+D. Prokesch, B. Huber, and P. Puschner, “Towards Automated Generation of
+Time-Predictable Code,” in 14th International Workshop on Worst-Case Exe-
+cution Time Analysis, ser. OpenAccess Series in Informatics (OASIcs), vol. 39,
+Schloss Dagstuhl–Leibniz-Zentrum fuer Informatik, 2014, pp. 103–112.
+[6]
+R. Wilhelm, J. Engblom, A. Ermedahl, N. Holsti, S. Thesing, D. Whalley,
+G. Bernat, C. Ferdinand, R. Heckmann, T. Mitra, et al., “The Worst-Case
+Execution-Time Problem—Overview of Methods and Survey of Tools,” ACM
+Transactions on Embedded Computing Systems, vol. 7, no. 3, p. 36, 2008.
+[7]
+S. Byhlin, A. Ermedahl, J. Gustafsson, and B. Lisper, “Applying Static WCET
+Analysis to Automotive Communication Software,” in 17th Euromicro Confer-
+ence on Real-Time Systems (ECRTS’05), IEEE, 2005, pp. 249–258.
+[8]
+J. Gustafsson and A. Ermedahl, “Experiences from Applying WCET Analysis
+in Industrial Settings,” in 10th IEEE International Symposium on Object and
+Component-Oriented Real-Time Distributed Computing, IEEE, 2007, pp. 382–
+392.
+[9]
+M. Schoeberl, W. Puffitsch, S. Hepp, B. Huber, and D. Prokesch, “Patmos: A
+Time-Predictable Microprocessor,” Real-Time Systems, vol. 54, no. 2, pp. 389–
+423, 2018.
+[10]
+J. Fiddler, E. Stromberg, and D. N. Wilner, “Software Considerations for Real-
+Time RISC,” in The SPARC Technical Papers, Springer, 1991, pp. 305–312.
+==PAGE:82==
+72
+Bibliography
+[11]
+Intel ® 64 and IA-32 Architectures Software Developer’s Manual, Volume 2A:
+Instruction Set Reference, A-M, 2019. [Online]. Available: https://software.
+intel.com/en-us/articles/intel-sdm.
+[12]
+C. H. Perleberg and A. J. Smith, “Branch Target Buffer Design and Optimiza-
+tion,” IEEE Transactions on Computers, vol. 42, no. 4, pp. 396–412, 1993.
+[13]
+R. Heckmann, M. Langenbach, S. Thesing, and R. Wilhelm, “The Influence
+of Processor Architecture on the Design and the Results of WCET Tools,”
+Proceedings of the IEEE, vol. 91, no. 7, pp. 1038–1054, 2003.
+[14]
+J. Mische, I. Guliashvili, S. Uhrig, and T. Ungerer, “How to Enhance a Super-
+scalar Processor to Provide Hard Real-Time Capable In-Order SMT,” in In-
+ternational Conference on Architecture of Computing Systems, Springer, 2010,
+pp. 2–14.
+[15]
+J. Yan and W. Zhang, “A Time-Predictable VLIW Processor and Its Compiler
+Support,” Real-Time Systems, vol. 38, no. 1, pp. 67–84, 2008.
+[16]
+M. Ferdman, C. Kaynak, and B. Falsafi, “Proactive Instruction Fetch,” in Pro-
+ceedings of the 44th Annual IEEE/ACM International Symposium on Microar-
+chitecture, ACM, 2011, pp. 152–162.
+[17]
+J. Yan and W. Zhang, “WCET Analysis of Instruction Caches with Prefetch-
+ing,” in ACM SIGPLAN Notices, ACM, vol. 42, 2007, pp. 175–184.
+[18]
+B. Cilku, W. Puffitsch, D. Prokesch, M. Schoeberl, and P. Puschner, “Improving
+performance of single-path code through a time-predictable memory hierarchy,”
+in 2017 IEEE 20th International Symposium on Real-Time Distributed Com-
+puting (ISORC), IEEE, 2017, pp. 76–83.
+[19]
+J. R. Allen, K. Kennedy, C. Porterfield, and J. Warren, “Conversion of control
+dependence to data dependence,” in Proceedings of the 10th ACM SIGACT-
+SIGPLAN symposium on Principles of programming languages, ACM, 1983,
+pp. 177–189.
+[20]
+J. L. Hennessy and D. A. Patterson, Computer Architecture, A Quantitative
+Approach, 4th ed. Elsevier, 2011.
+[21]
+D. W. Wall, Limits of Instruction-Level Parallelism, 2. ACM, 1991, vol. 19.
+[22]
+D. Prokesch, S. Hepp, and P. Puschner, “A generator for time-predictable code,”
+in 2015 IEEE 18th International Symposium on Real-Time Distributed Com-
+puting, IEEE, 2015, pp. 27–34.
+[23]
+P. Puschner, “The Single-Path Approach Towards WCET-Analysable Software,”
+in IEEE International Conference on Industrial Technology, 2003, IEEE, vol. 2,
+2003, pp. 699–704.
+[24]
+A. M. Turing, “On Computable Numbers, with an Application to the Entschei-
+dungsproblem,” Proceedings of the London Mathematical Society, vol. 2, no. 1,
+pp. 230–265, 1937.
+==PAGE:83==
+Bibliography
+73
+[25]
+P. Puschner, R. Kirner, B. Huber, and D. Prokesch, “Compiling for Time Pre-
+dictability,” in International Conference on Computer Safety, Reliability, and
+Security, Springer, 2012, pp. 382–391.
+[26]
+(Jul. 2019). Clang: a C language family frontend for LLVM, [Online]. Available:
+https://clang.llvm.org/.
+[27]
+C. Lattner and V. Adve, “LLVM: A compilation framework for lifelong program
+analysis & transformation,” in Proceedings of the international symposium on
+Code generation and optimization: feedback-directed and runtime optimization,
+IEEE Computer Society, 2004, p. 75.
+[28]
+(Jul. 2019). LLVM Testing Infrastructure Guide, [Online]. Available: https:
+//llvm.org/docs/TestingGuide.html.
+[29]
+(Jul. 2019). Google Test, [Online]. Available: https://github.com/google/
+googletest.
+[30]
+(Jul. 2019). LLVM Integrated Tester, [Online]. Available: https://llvm.org/
+docs/CommandGuide/lit.html.
+[31]
+(Jul. 2019). test-suite Guide, [Online]. Available: https://llvm.org/docs/
+TestSuiteGuide.html.
+[32]
+A. Hunt and D. Thomas, The Pragmatic Programmer, 1st ed. Addison Wesley,
+1999.
+[33]
+S. Meyers, Effective modern C++, 42 Specific Ways to Improve Your Use of
+C++ 11 and C++ 14, 1st ed. O’Reilly Media, Inc., 2014.
+[34]
+(Jul. 2019). PIMPL, Rule of Zero and Scott Meyers, [Online]. Available: http:
+//oliora.github.io/2015/12/29/pimpl-and-rule-of-zero.html.
+[35]
+S. A. Mahlke, D. C. Lin, W. Y. Chen, R. E. Hank, and R. A. Bringmann,
+“Effective Compiler Support for Predicated Execution Using the Hyperblock,”
+in Proceedings of the 25th annual international symposium on Microarchitecture,
+vol. 23, IEEE Computer Society, 1992, pp. 45–54.
+[36]
+H. Falk, S. Altmeyer, P. Hellinckx, B. Lisper, W. Puffitsch, C. Rochange, M.
+Schoeberl, R. B. Sørensen, P. Wägemann, and S. Wegener, “TACLeBench: A
+Benchmark Collection to Support Worst-Case Execution Time Research,” in
+16th International Workshop on Worst-Case Execution Time Analysis (WCET
+2016), M. Schoeberl, Ed., ser. OpenAccess Series in Informatics (OASIcs), vol. 55,
+Dagstuhl, Germany: Schloss Dagstuhl–Leibniz-Zentrum für Informatik, 2016,
+2:1–2:10.
+==PAGE:84==
